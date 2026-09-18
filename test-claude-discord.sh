@@ -77,6 +77,27 @@ echo "ok: setup .. --reset refused, project .claude intact"
 git -C "$P" check-ignore -q .claude/discord-agents/alpha/.env
 echo "ok: state is under the project .claude and git ignores every file in it"
 
+# --resume takes a full id, a short id, or a session NAME resolved from this
+# project's transcripts; an unknown value is passed through for claude to judge.
+PROJ="$HOME/.claude/projects/$(printf '%s' "$P" | tr './' '--')"
+mkdir -p "$PROJ"
+printf '{"type":"custom-title","customTitle":"old-name"}\n{"type":"custom-title","customTitle":"my-session"}\n' > "$PROJ/11111111-2222-3333-4444-555555555555.jsonl"
+printf '{"type":"custom-title","customTitle":"other"}\n' > "$PROJ/99999999-8888-7777-6666-555555555555.jsonl"
+out=$(bash "$S" alpha --resume my-session 2>&1)
+grep -q -- "--resume 11111111-2222-3333-4444-555555555555" <<<"$out" || { echo "FAIL: name was not resolved to a session id"; exit 1; }
+out=$(bash "$S" alpha --resume=11111111 2>&1)
+grep -q -- "--resume=11111111-2222-3333-4444-555555555555" <<<"$out" || { echo "FAIL: short id was not expanded"; exit 1; }
+out=$(bash "$S" alpha --resume 99999999-8888-7777-6666-555555555555 2>&1)
+grep -q -- "--resume 99999999-8888-7777-6666-555555555555" <<<"$out" || { echo "FAIL: a full id must pass through untouched"; exit 1; }
+out=$(bash "$S" alpha --resume no-such-name 2>&1)
+grep -q -- "--resume no-such-name" <<<"$out" || { echo "FAIL: an unknown name must pass through"; exit 1; }
+grep -q "old-name" <<<"$out" && { echo "FAIL: matched a stale title"; exit 1; }
+echo "ok: --resume accepts a session name, a short id, and passes ids and unknown names through"
+
+out=$(env -u CLAUDE_DISCORD_LAUNCHER CLAUDE_CODE_PROCESS_WRAPPER="$HOME/bin/claude-launcher" bash "$S" alpha 2>&1)
+grep -q "^LAUNCHER " <<<"$out" || { echo "FAIL: CLAUDE_CODE_PROCESS_WRAPPER was ignored"; exit 1; }
+echo "ok: CLAUDE_CODE_PROCESS_WRAPPER is used when CLAUDE_DISCORD_LAUNCHER is unset"
+
 mkdir -p "$HOME/nobin"
 cp "$HOME/bin/claude-launcher" "$HOME/nobin/claude-launcher"
 out=$(PATH="$HOME/nobin:/usr/bin:/bin" CLAUDE_DISCORD_LAUNCHER=claude-launcher bash "$S" alpha 2>&1) && { echo "FAIL: should refuse without claude on PATH"; exit 1; }

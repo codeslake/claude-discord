@@ -16,8 +16,9 @@
 #   CLAUDE_DISCORD_LAUNCHER   optional. An environment that wraps `claude` in a
 #                             process wrapper (proxy chain, version pin) names
 #                             it here and the session is started as
-#                             `$CLAUDE_DISCORD_LAUNCHER <claude-bin> <args>`;
-#                             unset, plain `claude` on PATH is used.
+#                             `$CLAUDE_DISCORD_LAUNCHER <claude-bin> <args>`.
+#                             Unset, Claude Code's own CLAUDE_CODE_PROCESS_WRAPPER
+#                             is used; unset too, plain `claude` on PATH.
 #   ~/.claude-discord/discord-proxy.ts
 #                             optional. bun's WebSocket ignores HTTPS_PROXY,
 #                             so behind a corporate proxy the Discord gateway
@@ -122,13 +123,51 @@ Other bots in the channel can hear you. When you answer a bot, never @mention it
 # DISCORD_STATE_DIR, its plugin server found no token and died silently);
 # --settings is one of the flags the daemon carries over.
 export DISCORD_STATE_DIR=$dir
+# `claude --resume` takes a full session id; a NAME only works through the
+# interactive picker, which cannot appear under --bg and is a detour otherwise.
+# So resolve a name, or a short id as `claude agents` prints it, against this
+# project's transcripts. Anything already a full id, or not found, is passed
+# through untouched and claude decides.
+args=("$@")
+res_i=-1 res_pre=""
+for i in "${!args[@]}"; do
+  case ${args[i]} in
+    --resume|-r)  res_i=$((i+1)); res_pre="";;
+    --resume=*)   res_i=$i;       res_pre="--resume=";;
+    -r=*)         res_i=$i;       res_pre="-r=";;
+  esac
+done
+want=""
+[ "$res_i" -ge 0 ] && want=${args[res_i]:-} && want=${want#"$res_pre"}
+if [ -n "$want" ] && ! printf '%s' "$want" | grep -qE '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'; then
+  proj=$HOME/.claude/projects/$(printf '%s' "$PWD" | tr './' '--')
+  found=""
+  if printf '%s' "$want" | grep -qE '^[0-9a-f]{8}$'; then
+    found=$(cd "$proj" 2>/dev/null && ls -t "$want"*.jsonl 2>/dev/null | head -1) || :
+  else
+    # The name is the session's own title (claude-discord -n, or /rename), which
+    # is rewritten on every change, so only the LAST record of a file counts.
+    found=$(cd "$proj" 2>/dev/null && for f in $(ls -t ./*.jsonl 2>/dev/null); do
+      t=$(tail -c 262144 "$f" | grep -o '"customTitle":"[^"]*"' | tail -1)
+      [ "$t" = "\"customTitle\":\"$want\"" ] && { echo "${f#./}"; break; }
+    done) || :   # no match is not an error: `set -e` would abort on the loop's last test
+  fi
+  if [ -n "$found" ]; then
+    args[res_i]="$res_pre${found%.jsonl}"
+    echo "claude-discord: --resume $want -> ${found%.jsonl}" >&2
+  fi
+fi
+
 # `claude` here is whatever bash finds on PATH, never a shell function: a setup
-# that wraps claude in a process wrapper must name it in CLAUDE_DISCORD_LAUNCHER
-# or that wrapping is skipped (measured 2026-09-18 with a launcher that wires a
-# proxy chain: the bare binary bypassed it).
+# that wraps claude in a process wrapper must name it, or that wrapping is
+# skipped (measured 2026-09-18 with a launcher that wires a proxy chain: the
+# bare binary bypassed it). CLAUDE_CODE_PROCESS_WRAPPER is Claude Code's own
+# name for that wrapper and is exported into every session, so honouring it
+# means an environment that already has one needs no extra setting.
 bin=$(command -v claude) || { echo "claude-discord: claude is not on PATH" >&2; exit 127; }
+launcher=${CLAUDE_DISCORD_LAUNCHER:-${CLAUDE_CODE_PROCESS_WRAPPER:-}}
 run=("$bin")
-[ -n "${CLAUDE_DISCORD_LAUNCHER:-}" ] && run=("$CLAUDE_DISCORD_LAUNCHER" "$bin")
+[ -n "$launcher" ] && run=("$launcher" "$bin")
 exec "${run[@]}" --channels "plugin:$plugin" \
   --settings "{\"enabledPlugins\": {\"$plugin\": true}, \"env\": {\"DISCORD_STATE_DIR\": \"$dir\"}}" \
-  -n "$name" --append-system-prompt "$prompt" "$@"
+  -n "$name" --append-system-prompt "$prompt" ${args[@]+"${args[@]}"}

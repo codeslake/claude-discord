@@ -69,6 +69,7 @@ claude-discord setup alpha            # channel ID, your user ID, allowed IDs, a
 claude-discord setup beta             # only beta's token and mention policy: the IDs are shared
 claude-discord alpha                  # start the session; the bot is online while it runs
 claude-discord alpha --resume         # any claude argument passes through
+claude-discord alpha --resume my-bot  # a session NAME or a short id also works, see below
 claude-discord setup alpha --reset    # forget alpha's token and policy AND the shared IDs; ask everything again
 ```
 
@@ -86,6 +87,15 @@ Everything lives under `./.claude/discord-agents/` in the project, mode 0700.
 Setup writes a `*` `.gitignore` inside that directory, so the token can never
 be staged even with `git add -A`; your project's own `.gitignore` is untouched.
 A second project gets its own setup and its own bots.
+
+## Resuming by name
+
+`claude --resume` takes a full session id; a name only reaches its interactive
+picker, which cannot appear under `--bg`. So the wrapper resolves the value
+first, against the transcripts of the project you are in: a session name (what
+`-n` set, or `/rename`) or a short id as `claude agents` prints it becomes the
+full id, and it says so on stderr. A full id, or a name it cannot find, is
+passed through and claude decides.
 
 ## Expected behaviour
 
@@ -148,9 +158,11 @@ CDN domains carry real certificates and can stay direct.
 
 `claude-discord` is bash: it runs the `claude` binary on `PATH`, never a shell
 function or alias. If your shell wraps `claude` in a process wrapper (a proxy
-chain, a version pin) set `CLAUDE_DISCORD_LAUNCHER` to it and the session is
-started as `$CLAUDE_DISCORD_LAUNCHER <claude-bin> <args>`, the same way your
-shell would.
+chain, a version pin), the session is started as
+`<wrapper> <claude-bin> <args>`, the same way your shell would. The wrapper is
+`CLAUDE_DISCORD_LAUNCHER` if you set it, otherwise Claude Code's own
+`CLAUDE_CODE_PROCESS_WRAPPER` (which Claude Code exports into every session, so
+starting `claude-discord` from inside a session needs no extra setting).
 
 ## Troubleshooting
 
