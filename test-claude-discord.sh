@@ -4,7 +4,7 @@
 set -euo pipefail
 S=${1:?script path}
 bash -n "$S"
-export HOME=$(mktemp -d); trap 'rm -rf "$HOME"' EXIT
+export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'rm -rf /tmp/claude-discord-test-$$' EXIT
 mkdir -p "$HOME/.claude/plugins" "$HOME/fakeplugin" "$HOME/bin"
 echo '{"plugins":{"discord@claude-plugins-official":[{"installPath":"'"$HOME"'/fakeplugin"}]}}' > "$HOME/.claude/plugins/installed_plugins.json"
 printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(msg)\n})\n' "'messageCreate'" > "$HOME/fakeplugin/server.ts"
@@ -66,4 +66,12 @@ printf 'x\n' > "$HOME/.claude/channels/marker"
 bash "$S" setup .. --reset </dev/null >/dev/null 2>&1 && { echo "FAIL: .. accepted"; exit 1; }
 [ -f "$HOME/.claude/channels/marker" ]
 echo "ok: setup .. --reset refused, channels dir intact"
+
+mkdir -p "$HOME/nobin"
+cp "$HOME/bin/claude-launcher" "$HOME/nobin/claude-launcher"
+out=$(PATH="$HOME/nobin:/usr/bin:/bin" CLAUDE_DISCORD_LAUNCHER=claude-launcher bash "$S" alpha 2>&1) && { echo "FAIL: should refuse without claude on PATH"; exit 1; }
+rc=$?
+[ "$rc" -eq 127 ] || { echo "FAIL: expected exit 127, got $rc"; exit 1; }
+grep -q "claude is not on PATH" <<<"$out"
+echo "ok: CLAUDE_DISCORD_LAUNCHER set, no claude on PATH -> exit 127, error on stderr"
 echo "ALL PASS"

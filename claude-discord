@@ -108,8 +108,9 @@ export DISCORD_STATE_DIR=$dir
 # that wraps claude in a process wrapper must name it in CLAUDE_DISCORD_LAUNCHER
 # or that wrapping is skipped (measured 2026-09-18 with a launcher that wires a
 # proxy chain: the bare binary bypassed it).
-run=(claude)
-[ -n "${CLAUDE_DISCORD_LAUNCHER:-}" ] && run=("$CLAUDE_DISCORD_LAUNCHER" "$(command -v claude)")
+bin=$(command -v claude) || { echo "claude-discord: claude is not on PATH" >&2; exit 127; }
+run=("$bin")
+[ -n "${CLAUDE_DISCORD_LAUNCHER:-}" ] && run=("$CLAUDE_DISCORD_LAUNCHER" "$bin")
 exec "${run[@]}" --channels "plugin:$plugin" \
   --settings "{\"enabledPlugins\": {\"$plugin\": true}}" \
   -n "$name" --append-system-prompt "$prompt" "$@"
