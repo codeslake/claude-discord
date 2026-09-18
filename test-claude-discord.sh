@@ -98,6 +98,17 @@ out=$(env -u CLAUDE_DISCORD_LAUNCHER CLAUDE_CODE_PROCESS_WRAPPER="$HOME/bin/clau
 grep -q "^LAUNCHER " <<<"$out" || { echo "FAIL: CLAUDE_CODE_PROCESS_WRAPPER was ignored"; exit 1; }
 echo "ok: CLAUDE_CODE_PROCESS_WRAPPER is used when CLAUDE_DISCORD_LAUNCHER is unset"
 
+echo '{"env":{"CLAUDE_CODE_PROCESS_WRAPPER":"'"$HOME"'/bin/claude-launcher"}}' > "$HOME/.claude/settings.json"
+out=$(env -u CLAUDE_DISCORD_LAUNCHER -u CLAUDE_CODE_PROCESS_WRAPPER bash "$S" alpha 2>&1)
+grep -q -- "^LAUNCHER $HOME/bin/claude --channels" <<<"$out" || { echo "FAIL: settings.json's env.CLAUDE_CODE_PROCESS_WRAPPER was not used"; exit 1; }
+echo "ok: settings.json's env.CLAUDE_CODE_PROCESS_WRAPPER runs the wrapper with the claude bin path as \$1 when nothing else is set"
+
+echo '{"env":{}}' > "$HOME/.claude/settings.json"
+out=$(env -u CLAUDE_DISCORD_LAUNCHER -u CLAUDE_CODE_PROCESS_WRAPPER bash "$S" alpha 2>&1)
+grep -q "^PLAIN " <<<"$out" || { echo "FAIL: a settings.json without the key should fall through to plain claude"; exit 1; }
+echo "ok: settings.json present without the key still runs plain claude"
+rm -f "$HOME/.claude/settings.json"
+
 mkdir -p "$HOME/nobin"
 cp "$HOME/bin/claude-launcher" "$HOME/nobin/claude-launcher"
 out=$(PATH="$HOME/nobin:/usr/bin:/bin" CLAUDE_DISCORD_LAUNCHER=claude-launcher bash "$S" alpha 2>&1) && { echo "FAIL: should refuse without claude on PATH"; exit 1; }

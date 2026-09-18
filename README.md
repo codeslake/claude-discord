@@ -161,8 +161,12 @@ function or alias. If your shell wraps `claude` in a process wrapper (a proxy
 chain, a version pin), the session is started as
 `<wrapper> <claude-bin> <args>`, the same way your shell would. The wrapper is
 `CLAUDE_DISCORD_LAUNCHER` if you set it, otherwise Claude Code's own
-`CLAUDE_CODE_PROCESS_WRAPPER` (which Claude Code exports into every session, so
-starting `claude-discord` from inside a session needs no extra setting).
+`CLAUDE_CODE_PROCESS_WRAPPER`, read from the environment or, failing that, from
+`.env.CLAUDE_CODE_PROCESS_WRAPPER` in `~/.claude/settings.json` (the same file
+Claude Code itself reads it from). Between the two, most setups already have
+`CLAUDE_CODE_PROCESS_WRAPPER` set one way or the other, so `CLAUDE_DISCORD_LAUNCHER`
+is only needed when `claude-discord` should use a different wrapper than the
+rest of Claude Code.
 
 ## Troubleshooting
 

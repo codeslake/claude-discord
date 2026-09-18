@@ -18,7 +18,10 @@
 #                             it here and the session is started as
 #                             `$CLAUDE_DISCORD_LAUNCHER <claude-bin> <args>`.
 #                             Unset, Claude Code's own CLAUDE_CODE_PROCESS_WRAPPER
-#                             is used; unset too, plain `claude` on PATH.
+#                             is used, from the environment or, failing that,
+#                             from `.env.CLAUDE_CODE_PROCESS_WRAPPER` in
+#                             ~/.claude/settings.json; unset too, plain `claude`
+#                             on PATH.
 #   ~/.claude-discord/discord-proxy.ts
 #                             optional. bun's WebSocket ignores HTTPS_PROXY,
 #                             so behind a corporate proxy the Discord gateway
@@ -163,9 +166,14 @@ fi
 # skipped (measured 2026-09-18 with a launcher that wires a proxy chain: the
 # bare binary bypassed it). CLAUDE_CODE_PROCESS_WRAPPER is Claude Code's own
 # name for that wrapper and is exported into every session, so honouring it
-# means an environment that already has one needs no extra setting.
+# means an environment that already has one needs no extra setting. Not every
+# session gets it in the environment though (settings.json's `env` block is
+# merged into the session, not necessarily into the shell that starts it), so
+# a session-scoped wrapper falls back to reading it from the same file Claude
+# Code itself reads it from: ~/.claude/settings.json.
 bin=$(command -v claude) || { echo "claude-discord: claude is not on PATH" >&2; exit 127; }
 launcher=${CLAUDE_DISCORD_LAUNCHER:-${CLAUDE_CODE_PROCESS_WRAPPER:-}}
+[ -n "$launcher" ] || launcher=$(jq -r '.env.CLAUDE_CODE_PROCESS_WRAPPER // empty' "$HOME/.claude/settings.json" 2>/dev/null) || :
 run=("$bin")
 [ -n "$launcher" ] && run=("$launcher" "$bin")
 exec "${run[@]}" --channels "plugin:$plugin" \
