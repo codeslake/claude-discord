@@ -12,7 +12,10 @@
 #                                          name may come before or after the
 #                                          claude args, and may be left out when
 #                                          the project has exactly one bot
-# Both run from the project directory: state is ./.claude/discord-agents/<name>/.
+#   claude-discord refresh <name> [--force] [claude args]
+#                                        replace the running session with a fresh
+#                                        one that starts from its handoff
+# All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
 # https://github.com/codeslake/claude-discord. Portable on purpose: nothing
@@ -309,6 +312,89 @@ takes_value() {
     *) return 1;;
   esac
 }
+
+# A long-running session answers worse as its context fills, and the automatic
+# compaction near the limit summarises at the point the model is least able to
+# judge what matters. `refresh` replaces the session on purpose while it can
+# still choose well: the session writes handoff.md (the hook tells it how), then
+# runs this. A session cannot replace itself, so the work is handed to a
+# detached child that outlives the session's own shell:
+#   1. refuse unless handoff.md is there (--force skips that, for a wedged session)
+#   2. stop the running session(s) registered under this bot's name
+#   3. start a fresh one in the background; the launch path below folds
+#      handoff.md into its system prompt and moves it aside
+# Stop before start, never the reverse: two sessions on one token both answer.
+# The gap between them loses whatever arrives in it; the fresh session is told
+# to catch up from the channel history.
+if [ "${1:-}" = refresh ]; then
+  shift
+  force=no; fresh=()
+  for a in "$@"; do case $a in --force) force=yes;; *) fresh+=("$a");; esac; done
+  name="" skip=0
+  for a in ${fresh[@]+"${fresh[@]}"}; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case $a in -*) takes_value "$a" && skip=1 || :;; *) name=$a; break;; esac
+  done
+  # The session runs this from its own Bash, whose cwd has usually wandered
+  # off the project by now. Its environment still says where the state is
+  # (DISCORD_STATE_DIR is set at launch), so go back to that project; a shell
+  # outside any session gives the directory the usual way, by standing in it.
+  if [ -n "${DISCORD_STATE_DIR:-}" ]; then
+    [ -n "$name" ] || name=$(basename "$DISCORD_STATE_DIR")
+    cd "$(dirname "$(dirname "$(dirname "$DISCORD_STATE_DIR")")")"
+    root=$PWD/.claude/discord-agents
+  fi
+  [ -n "$name" ] || { echo "usage: claude-discord refresh <name> [--force] [claude args]" >&2; exit 2; }
+  case $name in ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;; esac
+  dir=$root/$name
+  [ -f "$dir/.env" ] || { echo "claude-discord: no bot '$name' under $root" >&2; exit 1; }
+  if [ "$force" = no ] && [ ! -s "$dir/handoff.md" ]; then
+    echo "claude-discord: $dir/handoff.md is missing or empty; write it first, or pass --force to replace the session without one" >&2
+    exit 1
+  fi
+  if [ "${CLAUDE_DISCORD_REFRESH_CHILD:-}" != 1 ]; then
+    # Re-run this same command detached: `claude stop` below kills the session
+    # that is very likely running us, and its whole process group with it.
+    export CLAUDE_DISCORD_REFRESH_CHILD=1
+    setsid nohup "$0" refresh "$@" > "$dir/refresh.log" 2>&1 < /dev/null &
+    echo "claude-discord: refreshing $name in the background; progress in $dir/refresh.log"
+    exit 0
+  fi
+  # Sessions are registered under the name the wrapper gave them (-n) and the
+  # directory they were started in; another project's bot of the same name is
+  # not ours. Only live ones have a pid; finished ones stay listed. A
+  # background session has an id for `claude stop`; a foreground one has only
+  # a pid, and SIGTERM is what closing its terminal would send.
+  live=$(claude agents --json 2>/dev/null |
+    jq -r --arg n "$name" --arg cwd "$PWD" \
+      '.[] | select(.name == $n and .cwd == $cwd and .pid != null) | "\(.id // "-") \(.pid)"') || live=""
+  if [ -z "$live" ]; then
+    # Nothing to stop means either the bot is down or it is running somewhere
+    # this cannot see (started under another name, or from another directory).
+    # Starting a second session in the latter case puts two on one token, so
+    # refuse unless told otherwise.
+    if [ "$force" = no ]; then
+      echo "claude-discord: no running session named $name started in $PWD; it may be down, or running under another name. 'claude agents' lists them; pass --force to start a fresh one anyway" >&2
+      exit 1
+    fi
+    echo "claude-discord: no running session named $name found; starting a fresh one (--force)"
+  fi
+  while read -r id pid; do
+    [ -n "$pid" ] || continue
+    echo "claude-discord: stopping $name ($id, pid $pid)"
+    if [ "$id" != - ]; then
+      claude stop "$id" || echo "claude-discord: stop $id failed (already gone?)" >&2
+    else
+      kill -TERM "$pid" 2>/dev/null || :
+    fi
+  done <<<"$live"
+  # The stopped session's channel server needs a moment to release the token;
+  # a fresh gateway login while the old one is still up gets both dropped.
+  [ -n "$live" ] && sleep 3
+  echo "claude-discord: starting $name"
+  exec "$0" --bg ${fresh[@]+"${fresh[@]}"}
+fi
+
 args=() name="" skip=0
 for a in "$@"; do
   if [ "$skip" = 1 ]; then args+=("$a"); skip=0; continue; fi
@@ -366,7 +452,29 @@ The human reaches you there by @mentioning or replying to your bot; answer with 
 Another bot receives your messages only when you @mention it and it allowlists your bot. \
 Sessions on this machine can also be reached with ListAgents and SendMessage, addressing them by session name; mirror every such message you send or receive into that channel as one line ('-> name: ...' or '<- name: ...') so the human can follow and step in. \
 The human's instructions override any agent's. \
-Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply."
+Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. \
+When someone asks you to refresh, write your handoff to $dir/handoff.md first, then run 'claude-discord refresh $name'; a fresh session replaces you and starts from that file."
+
+# A fresh session after a refresh must arrive already holding the handoff.
+# Consumed once: leaving it would make every later restart resume a
+# conversation that has moved on. The gap between the old session's stop and
+# this one's gateway login loses whatever arrived in it, so catch up first;
+# the hooks record the id of the last message the old session was given.
+if [ -s "$dir/handoff.md" ]; then
+  handoff=$(cat "$dir/handoff.md")
+  mv "$dir/handoff.md" "$dir/handoff.prev.md"
+  last=$(cat "$dir/last-message-id" 2>/dev/null || :)
+  catchup="fetch the channel's recent messages first"
+  [ -n "$last" ] && catchup="fetch the channel's messages first; the last one your predecessor saw was $last, so everything after it is new to you"
+  prompt="$prompt \
+A previous session of yours was replaced and left you this handoff. Treat it as \
+what it says it is: claims marked [assumed] are unverified, so check them \
+before repeating them to anyone. Messages that arrived while you were being \
+replaced were not delivered: $catchup, and answer anything addressed to you. \
+Then pick up from the Next section.
+
+$handoff"
+fi
 
 # The state dir goes in BOTH the environment and --settings env. /bg (and
 # `claude --bg`) respawn the session under the daemon from its CLI flags alone,

@@ -33,7 +33,7 @@ bash -n "$D/hooks/peers/mention-guard"
 bash -n "$D/hooks/peers/checkin"
 bash -n "$D/hooks/peers/edit-gate"
 [ "$(grep -c "if (msg.author.bot) return" "$S")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in the wrapper"; exit 1; }
-
+unset DISCORD_STATE_DIR   # a session running this test would otherwise point refresh at its own bot
 export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'rm -rf /tmp/claude-discord-test-$$' EXIT
 mkdir -p "$HOME/.claude/plugins" "$HOME/fakeplugin" "$HOME/bin"
 echo '{"plugins":{"discord@claude-plugins-official":[{"installPath":"'"$HOME"'/fakeplugin"}]}}' > "$HOME/.claude/plugins/installed_plugins.json"
@@ -676,5 +676,70 @@ printf '\nn\nautoresearchclaw\n' | bash "$S" setup mgr >/dev/null
 ! grep -q 'hooks/peers/' "$SL" "$SJ" || { echo "FAIL: autoresearchclaw must register no peers hook"; exit 1; }
 has_hooks "$SJ" || { echo "FAIL: the turn hooks must survive"; exit 1; }
 echo "ok: autoresearchclaw drops nothing"
+
+cd "$P"   # back to the project whose alpha bot the refresh tests drive
+# --- refresh ---------------------------------------------------------------
+# A stub `claude` that records what it was asked to do: `agents --json` lists
+# one live session under alpha's name and one finished, `stop` logs the id, and
+# a launch logs its flags. The refresh child runs detached, so wait on its log.
+cat > "$HOME/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  agents) echo '[{"id":"live1111","pid":42,"name":"alpha","cwd":"'"$PWD"'"},{"id":"dead2222","name":"alpha","cwd":"'"$PWD"'"},{"id":"other333","pid":43,"name":"beta","cwd":"'"$PWD"'"},{"id":"else4444","pid":44,"name":"alpha","cwd":"/elsewhere"}]';;
+  stop)   echo "STOP $2" >> "$HOME/claude.calls";;
+  *)      printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;   # one line: the prompt holds newlines
+esac
+STUB
+chmod +x "$HOME/bin/claude"
+rm -f "$HOME/claude.calls" "$R/alpha/handoff.md" "$R/alpha/handoff.prev.md"
+
+out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha 2>&1) && { echo "FAIL: refresh without a handoff should refuse"; exit 1; }
+grep -q "handoff.md is missing" <<<"$out" || { echo "FAIL: wrong error without handoff: $out"; exit 1; }
+[ ! -f "$HOME/claude.calls" ] || { echo "FAIL: refused refresh must not touch claude"; exit 1; }
+echo "ok: refresh refuses without handoff.md and stops nothing"
+
+printf '# handoff\n## Next\nHANDOFF_BODY\n' > "$R/alpha/handoff.md"
+echo 1550600000000000000 > "$R/alpha/last-message-id"
+# Run from elsewhere with the state dir in the environment, as a session's Bash would.
+(cd / && DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh --model x >/dev/null)
+for _ in $(seq 40); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.25; done
+grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: refresh never started a session; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+[ "$(grep -c '^STOP ' "$HOME/claude.calls")" = 1 ] || { echo "FAIL: expected exactly one stop: $(cat "$HOME/claude.calls")"; exit 1; }
+grep -q '^STOP live1111$' "$HOME/claude.calls" || { echo "FAIL: stopped the wrong session"; exit 1; }
+[ "$(head -1 "$HOME/claude.calls")" = "STOP live1111" ] || { echo "FAIL: stop must come before start"; exit 1; }
+launch=$(grep '^PLAIN' "$HOME/claude.calls")
+grep -qE -- ' --bg( |$)' <<<"$launch" || { echo "FAIL: fresh session must be backgrounded: $launch"; exit 1; }
+grep -q -- ' --model x' <<<"$launch" || { echo "FAIL: claude args not passed through: $launch"; exit 1; }
+grep -q -- '-n alpha' <<<"$launch" || { echo "FAIL: fresh session not named: $launch"; exit 1; }
+grep -q 'HANDOFF_BODY' <<<"$launch" || { echo "FAIL: handoff not folded into the system prompt"; exit 1; }
+grep -q 'last one your predecessor saw was 1550600000000000000' <<<"$launch" || { echo "FAIL: catch-up must name the last message id"; exit 1; }
+[ ! -f "$R/alpha/handoff.md" ] && [ -f "$R/alpha/handoff.prev.md" ] || { echo "FAIL: handoff.md must be consumed into handoff.prev.md"; exit 1; }
+echo "ok: refresh from any cwd stops only alpha's live session in this project, then starts a fresh --bg one holding the handoff and the last message id; the file is consumed once"
+
+# No live session under the name: refuse (it may be running unseen), unless forced.
+cat > "$HOME/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  agents) echo '[{"id":"dead2222","name":"alpha","cwd":"'"$PWD"'"}]';;
+  stop)   echo "STOP $2" >> "$HOME/claude.calls";;
+  *)      printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
+esac
+STUB
+rm -f "$HOME/claude.calls"
+printf 'x\n' > "$R/alpha/handoff.md"
+env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null
+for _ in $(seq 12); do grep -q "no running session" "$R/alpha/refresh.log" 2>/dev/null && break; sleep 0.25; done
+grep -q "no running session" "$R/alpha/refresh.log" || { echo "FAIL: should refuse when no live session is found; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+[ ! -f "$HOME/claude.calls" ] || { echo "FAIL: refused refresh must start nothing"; exit 1; }
+[ -f "$R/alpha/handoff.md" ] || { echo "FAIL: a refused refresh must leave the handoff for the next try"; exit 1; }
+echo "ok: refresh refuses when no live session of that name is found in this project"
+
+rm -f "$HOME/claude.calls" "$R/alpha/handoff.md"
+env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force >/dev/null
+for _ in $(seq 40); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.25; done
+grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: --force refresh never started a session; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+grep -q 'HANDOFF_BODY' "$HOME/claude.calls" && { echo "FAIL: --force must not resurrect the consumed handoff"; exit 1; }
+grep -q -- '--force' "$HOME/claude.calls" && { echo "FAIL: --force leaked into claude args"; exit 1; }
+echo "ok: refresh --force starts a fresh session with no handoff and no live session to stop"
 
 echo "ALL PASS"
