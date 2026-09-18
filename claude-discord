@@ -18,7 +18,8 @@
 #                             it here and the session is started as
 #                             `$CLAUDE_DISCORD_LAUNCHER <claude-bin> <args>`;
 #                             unset, plain `claude` on PATH is used.
-#   ~/.claude/discord-proxy.ts optional. bun's WebSocket ignores HTTPS_PROXY,
+#   ~/.claude-discord/discord-proxy.ts
+#                             optional. bun's WebSocket ignores HTTPS_PROXY,
 #                             so behind a corporate proxy the Discord gateway
 #                             dies on TLS interception; this preload pins it to
 #                             HTTPS_PROXY. Only wired in when the file exists.
@@ -31,6 +32,7 @@ set -euo pipefail
 # directory: nothing under it is ever staged, and the project's own .gitignore
 # is left alone.
 root=$PWD/.claude/discord-agents
+helpers=$HOME/.claude-discord
 plugin=discord@claude-plugins-official
 
 # access.json is written at setup time, so every answer lives in the file the
@@ -90,8 +92,8 @@ fi
 # A plugin update replaces its directory, so put the proxy preload back every
 # time; a machine without the preload gets no bunfig and bun's defaults.
 install=$(jq -r --arg p "$plugin" '.plugins[$p][0].installPath' "$HOME/.claude/plugins/installed_plugins.json")
-if [ -f "$HOME/.claude/discord-proxy.ts" ]; then
-  printf 'preload = ["%s"]\n' "$HOME/.claude/discord-proxy.ts" > "$install/bunfig.toml"
+if [ -f "$helpers/discord-proxy.ts" ]; then
+  printf 'preload = ["%s"]\n' "$helpers/discord-proxy.ts" > "$install/bunfig.toml"
 else
   rm -f "$install/bunfig.toml"
 fi
@@ -102,6 +104,10 @@ fi
 # reasoning as bunfig.toml; idempotent because the pattern is gone once patched.
 grep -q 'if (msg.author.bot) return' "$install/server.ts" &&
   perl -pi -e 's/^(\s*)if \(msg\.author\.bot\) return$/$1if (msg.author.id === client.user?.id) return/' "$install/server.ts"
+# discord.js counts @everyone/@here as a mention of every bot, so one broadcast
+# wakes every session in the channel. A session is addressed by its own bot only.
+grep -q 'msg.mentions.has(client.user))' "$install/server.ts" &&
+  perl -pi -e 's/msg\.mentions\.has\(client\.user\)\)/msg.mentions.has(client.user, { ignoreEveryone: true }))/' "$install/server.ts"
 
 prompt="You are \"$name\", one of several Claude Code sessions sharing the Discord channel $DISCORD_CHANNEL_ID, each through its own bot. \
 The human reaches you there by @mentioning or replying to your bot; answer with the discord reply tool. \
@@ -110,6 +116,11 @@ Mirror every message you send to or receive from another agent into that channel
 The human's instructions override any agent's. \
 Other bots in the channel can hear you. When you answer a bot, never @mention it: a mention makes it answer again and the two of you loop until a human steps in."
 
+# The state dir goes in BOTH the environment and --settings env. /bg (and
+# `claude --bg`) respawn the session under the daemon from its CLI flags alone,
+# dropping the shell environment (measured 2026-09-18: the fork had no
+# DISCORD_STATE_DIR, its plugin server found no token and died silently);
+# --settings is one of the flags the daemon carries over.
 export DISCORD_STATE_DIR=$dir
 # `claude` here is whatever bash finds on PATH, never a shell function: a setup
 # that wraps claude in a process wrapper must name it in CLAUDE_DISCORD_LAUNCHER
@@ -119,5 +130,5 @@ bin=$(command -v claude) || { echo "claude-discord: claude is not on PATH" >&2; 
 run=("$bin")
 [ -n "${CLAUDE_DISCORD_LAUNCHER:-}" ] && run=("$CLAUDE_DISCORD_LAUNCHER" "$bin")
 exec "${run[@]}" --channels "plugin:$plugin" \
-  --settings "{\"enabledPlugins\": {\"$plugin\": true}}" \
+  --settings "{\"enabledPlugins\": {\"$plugin\": true}, \"env\": {\"DISCORD_STATE_DIR\": \"$dir\"}}" \
   -n "$name" --append-system-prompt "$prompt" "$@"

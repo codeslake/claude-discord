@@ -8,12 +8,12 @@ bash -n "$S"
 export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'rm -rf /tmp/claude-discord-test-$$' EXIT
 mkdir -p "$HOME/.claude/plugins" "$HOME/fakeplugin" "$HOME/bin"
 echo '{"plugins":{"discord@claude-plugins-official":[{"installPath":"'"$HOME"'/fakeplugin"}]}}' > "$HOME/.claude/plugins/installed_plugins.json"
-printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(msg)\n})\n' "'messageCreate'" > "$HOME/fakeplugin/server.ts"
+printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(msg)\n})\nfunction isAddressed(msg) {\n  if (client.user && msg.mentions.has(client.user)) return true\n}\n' "'messageCreate'" > "$HOME/fakeplugin/server.ts"
 printf '#!/bin/bash\necho "LAUNCHER $*"\n' > "$HOME/bin/claude-launcher"; chmod +x "$HOME/bin/claude-launcher"
 printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
 export PATH="$HOME/bin:$PATH"
 export CLAUDE_DISCORD_LAUNCHER=claude-launcher
-mkdir -p "$HOME/.claude"; : > "$HOME/.claude/discord-proxy.ts"
+mkdir -p "$HOME/.claude-discord"; : > "$HOME/.claude-discord/discord-proxy.ts"
 P="$HOME/project"; mkdir -p "$P"; cd "$P"; git init -q .
 R="$P/.claude/discord-agents"
 
@@ -48,18 +48,21 @@ grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out
 grep -q "never @mention it" <<<"$out"
 grep -q "if (msg.author.id === client.user?.id) return" "$HOME/fakeplugin/server.ts"
 ! grep -q "if (msg.author.bot) return" "$HOME/fakeplugin/server.ts"
-grep -q "discord-proxy.ts" "$HOME/fakeplugin/bunfig.toml"
-echo "ok: run goes through claude-launcher, patches server.ts, writes bunfig, loop guard in prompt"
+grep -q "msg.mentions.has(client.user, { ignoreEveryone: true }))" "$HOME/fakeplugin/server.ts"
+grep -q "$HOME/.claude-discord/discord-proxy.ts" "$HOME/fakeplugin/bunfig.toml"
+grep -q -- "--settings {\"enabledPlugins\": {\"discord@claude-plugins-official\": true}, \"env\": {\"DISCORD_STATE_DIR\": \"$R/alpha\"}}" <<<"$out"
+echo "ok: run goes through claude-launcher, patches server.ts (bot + @everyone), preload from ~/.claude-discord, state dir in --settings env, loop guard in prompt"
 
 bash "$S" alpha >/dev/null 2>&1
 [ "$(grep -c 'client.user?.id) return' "$HOME/fakeplugin/server.ts")" = 1 ]
-echo "ok: patch is idempotent"
+[ "$(grep -c 'ignoreEveryone' "$HOME/fakeplugin/server.ts")" = 1 ]
+echo "ok: both patches are idempotent"
 
 out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" alpha 2>&1)
 grep -q "^PLAIN --channels plugin:discord@claude-plugins-official" <<<"$out"
 echo "ok: without CLAUDE_DISCORD_LAUNCHER the plain claude on PATH is used"
 
-rm -f "$HOME/.claude/discord-proxy.ts"
+rm -f "$HOME/.claude-discord/discord-proxy.ts"
 bash "$S" alpha >/dev/null 2>&1
 [ ! -f "$HOME/fakeplugin/bunfig.toml" ]
 echo "ok: no preload file -> no bunfig.toml (bun defaults)"

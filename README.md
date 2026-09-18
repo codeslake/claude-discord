@@ -53,9 +53,11 @@ enables it per session with `--settings`.
 ## Install
 
 ```
-install -m 755 claude-discord ~/.local/bin/
-install -m 644 discord-proxy.ts ~/.claude/     # only behind a corporate proxy, see below
+./install.sh
 ```
+
+puts `claude-discord` in `~/.local/bin/` and the helpers (today only
+`discord-proxy.ts`) in `~/.claude-discord/`. Re-run it after a pull.
 
 ## Usage
 
@@ -111,15 +113,36 @@ The system prompt tells the session never to @mention a bot when answering
 one, because a mention would make it answer again and the two would loop until
 a human steps in.
 
+A second one-line patch, applied the same way, stops `@everyone` and `@here`
+from counting as a mention of every bot (discord.js's default), so one
+broadcast in the channel does not wake every session.
+
+## Background sessions
+
+`/bg` inside the session, or `claude-discord alpha --bg` from the start, moves
+the session under Claude's background daemon; the bot stays online and
+@mentions keep arriving. The daemon restarts a session from its command-line
+flags alone and drops the shell environment, so the wrapper passes the state
+directory (where the token lives) inside `--settings` as well as in the
+environment; measured 2026-09-18, a fork made by `/bg` had no
+`DISCORD_STATE_DIR` and its plugin server died silently. Two things to know:
+
+- The `/bg` fork does not carry `--append-system-prompt`, so the identity
+  paragraph (name, channel, the "never @mention a bot" rule) is gone after
+  `/bg`. The transcript still holds everything said so far.
+- One token, one session. After `/bg` the foreground REPL exits; do not start
+  `claude-discord alpha` again while the background copy runs, or both answer
+  every mention.
+
 ## Behind a corporate proxy
 
 bun's `fetch` honours `HTTPS_PROXY`; bun's `WebSocket` does not, so the Discord
 gateway connection alone goes direct and dies on TLS interception.
-`discord-proxy.ts` is a bun preload that pins both to `HTTPS_PROXY`. It does
-nothing when the variable is unset, so it is safe everywhere; the wrapper only
-wires it in (via the plugin's `bunfig.toml`) when the file exists. Your proxy
-must forward `discord.com` and `discord.gg`; the CDN domains carry real
-certificates and can stay direct.
+`~/.claude-discord/discord-proxy.ts` is a bun preload that pins both to
+`HTTPS_PROXY`. It does nothing when the variable is unset, so it is safe
+everywhere; the wrapper only wires it in (via the plugin's `bunfig.toml`) when
+the file exists. Your proxy must forward `discord.com` and `discord.gg`; the
+CDN domains carry real certificates and can stay direct.
 
 ## If your `claude` is wrapped
 
@@ -135,7 +158,9 @@ shell would.
 |---|---|
 | Bot online but silent when a teammate @mentions it | their user ID is not in the group `allowFrom`; add it at setup or in `access.json` |
 | Bot cannot read message text | Message Content Intent is off in the Developer Portal |
-| Gateway connection fails behind a proxy | `discord-proxy.ts` missing from `~/.claude/`, or `HTTPS_PROXY` unset in the shell that ran `claude-discord` |
+| Gateway connection fails behind a proxy | `discord-proxy.ts` missing from `~/.claude-discord/`, or `HTTPS_PROXY` unset in the shell that ran `claude-discord` |
+| Bot answers in the foreground, silent after `/bg` | wrapper older than 2026-09-18 (state dir not in `--settings`); reinstall |
+| Every bot in the channel answers one message | someone wrote `@everyone`/`@here` with a wrapper older than 2026-09-18, or the mention policy is off on all of them |
 | `no bot '<name>' under ./.claude/discord-agents` | no setup in THIS directory; `cd` to the project you set it up in, or run setup here |
 | `bot name must be a plain directory name` | the name contained `/`, or was `.`/`..` |
 | Two bots answer each other forever | the mention policy is off on both; turn it back on for at least one |
