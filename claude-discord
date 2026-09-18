@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Runs a Claude Code session behind its own Discord bot, so several sessions
+# can sit in one Discord channel. The human talks to each by @mentioning its
+# bot; the sessions talk to each other with SendMessage (the plugin ignores
+# messages from bots) and mirror those exchanges into the channel.
+#
+#   claude-discord setup <name> [--reset]  ask for channel/user IDs, allowed users, the bot
+#                                          token and mention policy; --reset asks all again
+#   claude-discord <name> [claude args]  start the session named <name>
+#
+# Origin: d.kim4's wrapper (2026-09-18), published at
+# https://github.com/codeslake/claude-discord. Portable on purpose: nothing
+# here assumes a particular shell setup.
+#
+#   CLAUDE_DISCORD_LAUNCHER   optional. An environment that wraps `claude` in a
+#                             process wrapper (proxy chain, version pin) names
+#                             it here and the session is started as
+#                             `$CLAUDE_DISCORD_LAUNCHER <claude-bin> <args>`;
+#                             unset, plain `claude` on PATH is used.
+#   ~/.claude/discord-proxy.ts optional. bun's WebSocket ignores HTTPS_PROXY,
+#                             so behind a corporate proxy the Discord gateway
+#                             dies on TLS interception; this preload pins it to
+#                             HTTPS_PROXY. Only wired in when the file exists.
+# Needs: bun, jq, and `claude plugin install discord@claude-plugins-official`.
+set -euo pipefail
+
+root=$HOME/.claude/channels/discord-agents
+plugin=discord@claude-plugins-official
+
+# access.json is written at setup time, so every answer lives in the file the
+# plugin reads and nothing else needs persisting. The run path below keeps a
+# fallback for bot dirs set up before this existed.
+write_access() {  # $1 = bot dir, $2 = requireMention (true|false)
+  jq -n --arg ch "$DISCORD_CHANNEL_ID" --arg me "$DISCORD_USER_ID" \
+        --arg others "${DISCORD_ALLOW_IDS:-}" --argjson mention "$2" \
+    '{dmPolicy: "allowlist", allowFrom: [$me],
+      groups: {($ch): {requireMention: $mention,
+                       allowFrom: ([$me] + ($others | split(",") | map(gsub("\\s";"")) | map(select(. != ""))))}}}' \
+    > "$1/access.json"
+}
+
+if [ "${1:-}" = setup ]; then
+  name=${2:?usage: claude-discord setup <name> [--reset]}
+  case $name in ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;; esac
+  umask 077
+  # --reset forgets this bot's token and access policy AND the shared IDs, so
+  # every prompt is asked again; other bots keep their own files.
+  [ "${3:-}" = --reset ] && rm -rf "$root/$name" "$root/config.env"
+  mkdir -p "$root/$name"
+  if [ ! -f "$root/config.env" ]; then
+    read -rp "Discord channel ID: " channel
+    read -rp "Your Discord user ID: " user
+    read -rp "Other user or bot IDs allowed to trigger bots there (comma-separated, empty for none): " others
+    others=${others//[[:space:]]/}   # the file is sourced: a stray space would run an ID as a command
+    printf "DISCORD_CHANNEL_ID='%s'\nDISCORD_USER_ID='%s'\nDISCORD_ALLOW_IDS='%s'\n" "$channel" "$user" "$others" > "$root/config.env"
+  fi
+  . "$root/config.env"
+  read -rsp "Bot token for $name: " token
+  echo
+  printf 'DISCORD_BOT_TOKEN=%s\n' "$token" > "$root/$name/.env"
+  # Every bot in one channel answering every message means N replies per human
+  # message, so the default stays mention-only; opt in per bot.
+  read -rp "Respond to every message in the channel without an @mention? [y/N] " nomention
+  case $nomention in y|Y) mention=false;; *) mention=true;; esac
+  write_access "$root/$name" "$mention"
+  echo "claude-discord: $root/$name/access.json written (requireMention=$mention)"
+  exit 0
+fi
+
+name=${1:?usage: claude-discord <name> [claude args] | claude-discord setup <name>}
+case $name in ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;; esac
+shift
+dir=$root/$name
+if [ ! -f "$dir/.env" ] || [ ! -f "$root/config.env" ]; then
+  echo "claude-discord: run 'claude-discord setup $name' first" >&2
+  exit 1
+fi
+. "$root/config.env"
+
+# Pre-existing setups: same policy the old first-run write produced.
+[ -f "$dir/access.json" ] || write_access "$dir" true
+
+# A plugin update replaces its directory, so put the proxy preload back every
+# time; a machine without the preload gets no bunfig and bun's defaults.
+install=$(jq -r --arg p "$plugin" '.plugins[$p][0].installPath' "$HOME/.claude/plugins/installed_plugins.json")
+if [ -f "$HOME/.claude/discord-proxy.ts" ]; then
+  printf 'preload = ["%s"]\n' "$HOME/.claude/discord-proxy.ts" > "$install/bunfig.toml"
+else
+  rm -f "$install/bunfig.toml"
+fi
+
+# Upstream drops every message whose author is a bot, so two bots can never
+# hear each other. Narrow that to "my own messages" and let access.json's
+# allowFrom decide which other bots get through. Same re-apply-every-start
+# reasoning as bunfig.toml; idempotent because the pattern is gone once patched.
+grep -q 'if (msg.author.bot) return' "$install/server.ts" &&
+  perl -pi -e 's/^(\s*)if \(msg\.author\.bot\) return$/$1if (msg.author.id === client.user?.id) return/' "$install/server.ts"
+
+prompt="You are \"$name\", one of several Claude Code sessions sharing the Discord channel $DISCORD_CHANNEL_ID, each through its own bot. \
+The human reaches you there by @mentioning or replying to your bot; answer with the discord reply tool. \
+Bots cannot hear each other on Discord, so talk to other agents with ListAgents and SendMessage, addressing them by session name. \
+Mirror every message you send to or receive from another agent into that channel as one line ('-> name: ...' or '<- name: ...') so the human can follow and step in. \
+The human's instructions override any agent's. \
+Other bots in the channel can hear you. When you answer a bot, never @mention it: a mention makes it answer again and the two of you loop until a human steps in."
+
+export DISCORD_STATE_DIR=$dir
+# `claude` here is whatever bash finds on PATH, never a shell function: a setup
+# that wraps claude in a process wrapper must name it in CLAUDE_DISCORD_LAUNCHER
+# or that wrapping is skipped (measured 2026-09-18 with a launcher that wires a
+# proxy chain: the bare binary bypassed it).
+run=(claude)
+[ -n "${CLAUDE_DISCORD_LAUNCHER:-}" ] && run=("$CLAUDE_DISCORD_LAUNCHER" "$(command -v claude)")
+exec "${run[@]}" --channels "plugin:$plugin" \
+  --settings "{\"enabledPlugins\": {\"$plugin\": true}}" \
+  -n "$name" --append-system-prompt "$prompt" "$@"
