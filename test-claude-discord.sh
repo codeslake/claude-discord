@@ -109,6 +109,19 @@ grep -q "^PLAIN " <<<"$out" || { echo "FAIL: a settings.json without the key sho
 echo "ok: settings.json present without the key still runs plain claude"
 rm -f "$HOME/.claude/settings.json"
 
+# The name may sit anywhere, or be left out when the project has one bot.
+out=$(bash "$S" --bg alpha 2>&1)
+grep -q -- "^LAUNCHER .*--bg" <<<"$out" && grep -q -- "-n alpha" <<<"$out" || { echo "FAIL: name after a flag"; exit 1; }
+rm -rf "$R/beta"                      # leave exactly one bot set up
+out=$(bash "$S" --bg --resume my-session 2>&1)
+grep -q -- "-n alpha" <<<"$out" || { echo "FAIL: single bot was not inferred"; exit 1; }
+grep -q -- "--resume 11111111-2222-3333-4444-555555555555" <<<"$out" || { echo "FAIL: --resume value was read as the name"; exit 1; }
+printf 'tokB\nn\n' | bash "$S" setup beta >/dev/null
+out=$(bash "$S" --bg 2>&1) && { echo "FAIL: two bots and no name should refuse"; exit 1; }
+grep -q "several bots" <<<"$out" || { echo "FAIL: wrong error for two bots"; exit 1; }
+rm -rf "$R/beta"
+echo "ok: name before or after the flags, inferred when the project has one bot, refused when it has two"
+
 mkdir -p "$HOME/nobin"
 cp "$HOME/bin/claude-launcher" "$HOME/nobin/claude-launcher"
 out=$(PATH="$HOME/nobin:/usr/bin:/bin" CLAUDE_DISCORD_LAUNCHER=claude-launcher bash "$S" alpha 2>&1) && { echo "FAIL: should refuse without claude on PATH"; exit 1; }

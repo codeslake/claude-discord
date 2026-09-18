@@ -6,7 +6,10 @@
 #
 #   claude-discord setup <name> [--reset]  ask for channel/user IDs, allowed users, the bot
 #                                          token and mention policy; --reset asks all again
-#   claude-discord <name> [claude args]  start the session named <name>
+#   claude-discord [name] [claude args]  start the session named <name>; the
+#                                          name may come before or after the
+#                                          claude args, and may be left out when
+#                                          the project has exactly one bot
 # Both run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
@@ -80,9 +83,37 @@ if [ "${1:-}" = setup ]; then
   exit 0
 fi
 
-name=${1:?usage: claude-discord <name> [claude args] | claude-discord setup <name>}
+# The bot name is the first bare word, wherever it sits: `claude-discord x --bg`
+# and `claude-discord --bg x` are the same command. A word that follows a flag
+# taking a value is that value, so `--resume x` never reads as the name, and
+# with no bare word at all the project's single bot is meant.
+takes_value() {
+  case $1 in
+    -r|--resume|--model|--effort|--settings|--agent|--permission-mode|--mcp-config|--add-dir| \
+    --session-id|--fallback-model|--max-turns|--output-format|--input-format|--debug-file| \
+    --append-system-prompt|--system-prompt|--allowed-tools|--disallowed-tools|--setting-sources| \
+    --channels|-n|--name) return 0;;
+    *) return 1;;
+  esac
+}
+args=() name="" skip=0
+for a in "$@"; do
+  if [ "$skip" = 1 ]; then args+=("$a"); skip=0; continue; fi
+  case $a in
+    -*) args+=("$a"); takes_value "$a" && skip=1 || :;;
+    *)  if [ -z "$name" ]; then name=$a; else args+=("$a"); fi;;
+  esac
+done
+if [ -z "$name" ]; then
+  bots=()
+  for d in "$root"/*/; do [ -f "$d/.env" ] && bots+=("$(basename "$d")"); done
+  case ${#bots[@]} in
+    1) name=${bots[0]};;
+    0) echo "claude-discord: no bot set up in $root; run 'claude-discord setup <name>' in this directory first" >&2; exit 1;;
+    *) echo "claude-discord: this directory has several bots (${bots[*]}); name the one to start" >&2; exit 2;;
+  esac
+fi
 case $name in ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;; esac
-shift
 dir=$root/$name
 if [ ! -f "$dir/.env" ] || [ ! -f "$root/config.env" ]; then
   echo "claude-discord: no bot '$name' under $root; run 'claude-discord setup $name' in this directory first" >&2
@@ -131,7 +162,6 @@ export DISCORD_STATE_DIR=$dir
 # So resolve a name, or a short id as `claude agents` prints it, against this
 # project's transcripts. Anything already a full id, or not found, is passed
 # through untouched and claude decides.
-args=("$@")
 res_i=-1 res_pre=""
 for i in "${!args[@]}"; do
   case ${args[i]} in

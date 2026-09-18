@@ -33,7 +33,8 @@ enables it per session with `--settings`.
 - **access.json**: the plugin's allowlist. Written at setup time; the plugin
   re-reads it on every inbound message, so hand edits apply without a restart.
 - **project**: the directory you run `claude-discord` from. All state lives in
-  `./.claude/discord-agents/` there, so a bot belongs to a project.
+  `./.claude/discord-agents/` there, so a bot belongs to a project. With exactly
+  one bot set up, naming it is optional; with several, the name is required.
 
 ## Discord side, once
 
@@ -69,6 +70,8 @@ claude-discord setup alpha            # channel ID, your user ID, allowed IDs, a
 claude-discord setup beta             # only beta's token and mention policy: the IDs are shared
 claude-discord alpha                  # start the session; the bot is online while it runs
 claude-discord alpha --resume         # any claude argument passes through
+claude-discord --bg alpha             # the name may sit before the flags too
+claude-discord --bg --resume my-bot   # with one bot in the project, its name may be left out
 claude-discord alpha --resume my-bot  # a session NAME or a short id also works, see below
 claude-discord setup alpha --reset    # forget alpha's token and policy AND the shared IDs; ask everything again
 ```
