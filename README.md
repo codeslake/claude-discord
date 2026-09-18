@@ -32,6 +32,8 @@ enables it per session with `--settings`.
   ID is asked once and reused.
 - **access.json**: the plugin's allowlist. Written at setup time; the plugin
   re-reads it on every inbound message, so hand edits apply without a restart.
+- **project**: the directory you run `claude-discord` from. All state lives in
+  `./.claude/discord-agents/` there, so a bot belongs to a project.
 
 ## Discord side, once
 
@@ -57,7 +59,10 @@ install -m 644 discord-proxy.ts ~/.claude/     # only behind a corporate proxy, 
 
 ## Usage
 
+Run everything from the project directory; that is where the state goes.
+
 ```
+cd ~/work/my-project
 claude-discord setup alpha            # channel ID, your user ID, allowed IDs, alpha's token, mention policy
 claude-discord setup beta             # only beta's token and mention policy: the IDs are shared
 claude-discord alpha                  # start the session; the bot is online while it runs
@@ -75,8 +80,10 @@ The setup prompts:
 | Bot token | `<name>/.env` | input is hidden, like a password |
 | Respond without an @mention? | `<name>/access.json` | default N. With Y the bot answers every channel message |
 
-Everything lives under `~/.claude/channels/discord-agents/`, mode 0700, outside
-any git tree. Nothing goes in your project.
+Everything lives under `./.claude/discord-agents/` in the project, mode 0700.
+Setup writes a `*` `.gitignore` inside that directory, so the token can never
+be staged even with `git add -A`; your project's own `.gitignore` is untouched.
+A second project gets its own setup and its own bots.
 
 ## Expected behaviour
 
@@ -129,7 +136,7 @@ shell would.
 | Bot online but silent when a teammate @mentions it | their user ID is not in the group `allowFrom`; add it at setup or in `access.json` |
 | Bot cannot read message text | Message Content Intent is off in the Developer Portal |
 | Gateway connection fails behind a proxy | `discord-proxy.ts` missing from `~/.claude/`, or `HTTPS_PROXY` unset in the shell that ran `claude-discord` |
-| `run 'claude-discord setup <name>' first` | no token stored for that name |
+| `no bot '<name>' under ./.claude/discord-agents` | no setup in THIS directory; `cd` to the project you set it up in, or run setup here |
 | `bot name must be a plain directory name` | the name contained `/`, or was `.`/`..` |
 | Two bots answer each other forever | the mention policy is off on both; turn it back on for at least one |
 

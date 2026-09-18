@@ -2,7 +2,7 @@
 # Acceptance test for dotfiles/scripts/claude-discord. Runs entirely in a
 # throwaway HOME; touches nothing real. Usage: test-claude-discord.sh <script>
 set -euo pipefail
-S=${1:?script path}
+S=${1:?script path}; S=$(cd "$(dirname "$S")" && pwd)/$(basename "$S")   # absolute: the test cd-s into a throwaway project
 bash -n "$S"
 [ "$(grep -c "if (msg.author.bot) return" "$S")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in the wrapper"; exit 1; }
 export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'rm -rf /tmp/claude-discord-test-$$' EXIT
@@ -14,7 +14,8 @@ printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bi
 export PATH="$HOME/bin:$PATH"
 export CLAUDE_DISCORD_LAUNCHER=claude-launcher
 mkdir -p "$HOME/.claude"; : > "$HOME/.claude/discord-proxy.ts"
-R="$HOME/.claude/channels/discord-agents"
+P="$HOME/project"; mkdir -p "$P"; cd "$P"; git init -q .
+R="$P/.claude/discord-agents"
 
 printf '1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alpha >/dev/null
 [ "$(jq -r '.groups["1550575144320110662"].requireMention' "$R/alpha/access.json")" = false ]
@@ -34,10 +35,10 @@ grep -q "^DISCORD_BOT_TOKEN=tokA2$" "$R/alpha/.env"
 [ -f "$R/beta/.env" ] && [ -f "$R/beta/access.json" ]
 echo "ok: --reset re-asks everything, other bots untouched"
 
-echo marker > "$HOME/.claude/channels/MARKER"
+echo marker > "$P/.claude/MARKER"
 printf '' | bash "$S" setup .. --reset >/dev/null 2>&1 && { echo "FAIL: setup .. --reset should refuse"; exit 1; }
-[ -f "$HOME/.claude/channels/MARKER" ] || { echo "FAIL: '..' as bot name escaped root and wiped channels dir"; exit 1; }
-echo "ok: setup rejects '..' as bot name, channels dir untouched"
+[ -f "$P/.claude/MARKER" ] || { echo "FAIL: '..' as bot name escaped root and wiped the project .claude"; exit 1; }
+echo "ok: setup rejects '..' as bot name, project .claude untouched"
 
 bash "$S" gamma >/dev/null 2>&1 && { echo "FAIL: run without setup should refuse"; exit 1; }
 echo "ok: run refuses without setup"
@@ -63,10 +64,15 @@ bash "$S" alpha >/dev/null 2>&1
 [ ! -f "$HOME/fakeplugin/bunfig.toml" ]
 echo "ok: no preload file -> no bunfig.toml (bun defaults)"
 
-printf 'x\n' > "$HOME/.claude/channels/marker"
+printf 'x\n' > "$P/.claude/marker"
 bash "$S" setup .. --reset </dev/null >/dev/null 2>&1 && { echo "FAIL: .. accepted"; exit 1; }
-[ -f "$HOME/.claude/channels/marker" ]
-echo "ok: setup .. --reset refused, channels dir intact"
+[ -f "$P/.claude/marker" ]
+echo "ok: setup .. --reset refused, project .claude intact"
+
+[ "$(cat "$R/.gitignore")" = "*" ]
+[ -z "$(git -C "$P" status --porcelain --ignored=no -- .claude/discord-agents)" ]
+git -C "$P" check-ignore -q .claude/discord-agents/alpha/.env
+echo "ok: state is under the project .claude and git ignores every file in it"
 
 mkdir -p "$HOME/nobin"
 cp "$HOME/bin/claude-launcher" "$HOME/nobin/claude-launcher"

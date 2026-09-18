@@ -7,6 +7,7 @@
 #   claude-discord setup <name> [--reset]  ask for channel/user IDs, allowed users, the bot
 #                                          token and mention policy; --reset asks all again
 #   claude-discord <name> [claude args]  start the session named <name>
+# Both run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
 # https://github.com/codeslake/claude-discord. Portable on purpose: nothing
@@ -24,7 +25,12 @@
 # Needs: bun, jq, and `claude plugin install discord@claude-plugins-official`.
 set -euo pipefail
 
-root=$HOME/.claude/channels/discord-agents
+# State lives in the PROJECT, next to its other .claude/ files, so a bot belongs
+# to the directory you start it from and `setup` is run there. The token is a
+# plaintext secret inside a git tree, so setup drops a `*` .gitignore into the
+# directory: nothing under it is ever staged, and the project's own .gitignore
+# is left alone.
+root=$PWD/.claude/discord-agents
 plugin=discord@claude-plugins-official
 
 # access.json is written at setup time, so every answer lives in the file the
@@ -47,6 +53,7 @@ if [ "${1:-}" = setup ]; then
   # every prompt is asked again; other bots keep their own files.
   [ "${3:-}" = --reset ] && rm -rf "$root/$name" "$root/config.env"
   mkdir -p "$root/$name"
+  printf '*\n' > "$root/.gitignore"
   if [ ! -f "$root/config.env" ]; then
     read -rp "Discord channel ID: " channel
     read -rp "Your Discord user ID: " user
@@ -72,7 +79,7 @@ case $name in ''|.|..|*/*) echo "claude-discord: bot name must be a plain direct
 shift
 dir=$root/$name
 if [ ! -f "$dir/.env" ] || [ ! -f "$root/config.env" ]; then
-  echo "claude-discord: run 'claude-discord setup $name' first" >&2
+  echo "claude-discord: no bot '$name' under $root; run 'claude-discord setup $name' in this directory first" >&2
   exit 1
 fi
 . "$root/config.env"
