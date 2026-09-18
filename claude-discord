@@ -72,16 +72,26 @@ register_hook() {
       return 0
     fi
     base=$(cat "$settings")
+    [ -n "$base" ] || base='{}'   # a 0-byte file passes `jq empty`; treat it as {}
   fi
   if printf '%s' "$base" | jq -e --arg cmd "$cmd" \
       '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | index($cmd) != null' >/dev/null 2>&1; then
     return 0
   fi
-  mkdir -p "$PWD/.claude"
-  printf '%s' "$base" | jq --arg cmd "$cmd" \
-    '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{hooks: [{type: "command", command: $cmd}]}])' \
-    > "$settings.tmp.$$"
-  cat "$settings.tmp.$$" > "$settings"
+  # From here a failure (unwritable dir, a read-only settings file, JSON that
+  # jq can't merge into, e.g. UserPromptSubmit already holding a non-array)
+  # must warn and move on, never abort the setup or the start it runs inside.
+  if ! mkdir -p "$PWD/.claude" 2>/dev/null; then
+    echo "claude-discord: could not register the hook in $settings, skipping" >&2
+    return 0
+  fi
+  if printf '%s' "$base" | jq --arg cmd "$cmd" \
+      '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{hooks: [{type: "command", command: $cmd}]}])' \
+      > "$settings.tmp.$$" 2>/dev/null && cat "$settings.tmp.$$" > "$settings" 2>/dev/null; then
+    :
+  else
+    echo "claude-discord: could not register the hook in $settings, skipping" >&2
+  fi
   rm -f "$settings.tmp.$$"
 }
 

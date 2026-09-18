@@ -191,4 +191,39 @@ grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out
 rm -f "$P2/stderr.log"
 echo "ok: invalid-JSON settings.json is left untouched, warned on stderr naming the file, and the start still execs claude"
 
+# e. a read-only settings.json without the entry: a failed write must never
+# abort the start, must leave the file as it was, and must not leave a temp
+# file behind.
+echo '{}' > "$P2/.claude/settings.json"; chmod 444 "$P2/.claude/settings.json"
+cp "$P2/.claude/settings.json" "$P2/.claude/settings.json.before"
+out=$(bash "$S" gamma 2>"$P2/stderr.log")
+chmod 644 "$P2/.claude/settings.json"
+cmp -s "$P2/.claude/settings.json" "$P2/.claude/settings.json.before" || { echo "FAIL: a read-only settings.json must be left untouched"; exit 1; }
+rm -f "$P2/.claude/settings.json.before"
+grep -qF "$P2/.claude/settings.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the unwritable settings file"; exit 1; }
+grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec when settings.json is read-only"; exit 1; }
+[ -z "$(find "$P2/.claude" -maxdepth 1 -name 'settings.json.tmp.*')" ] || { echo "FAIL: a temp file was left behind"; exit 1; }
+rm -f "$P2/stderr.log"
+echo "ok: a read-only settings.json is left untouched, no temp file is left, and the start still execs claude"
+
+# f. valid JSON that is not an object: jq can't merge into it; same guarantees.
+echo '[]' > "$P2/.claude/settings.json"
+cp "$P2/.claude/settings.json" "$P2/.claude/settings.json.before"
+out=$(bash "$S" gamma 2>"$P2/stderr.log")
+cmp -s "$P2/.claude/settings.json" "$P2/.claude/settings.json.before" || { echo "FAIL: settings.json holding [] must be left untouched"; exit 1; }
+rm -f "$P2/.claude/settings.json.before"
+grep -qF "$P2/.claude/settings.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the file when settings.json holds []"; exit 1; }
+grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec when settings.json holds []"; exit 1; }
+[ -z "$(find "$P2/.claude" -maxdepth 1 -name 'settings.json.tmp.*')" ] || { echo "FAIL: a temp file was left behind"; exit 1; }
+rm -f "$P2/stderr.log"
+echo "ok: settings.json holding [] is left untouched, no temp file is left, and the start still execs claude"
+
+# g. a 0-byte settings.json passes `jq empty`; it must still get the entry,
+# not be silently skipped.
+: > "$P2/.claude/settings.json"
+bash "$S" gamma >/dev/null 2>&1
+has_hook "$P2/.claude/settings.json"
+[ "$(jq -c 'keys' "$P2/.claude/settings.json")" = '["hooks"]' ]
+echo "ok: a 0-byte settings.json is treated as {} and still gets the hook entry"
+
 echo "ALL PASS"
