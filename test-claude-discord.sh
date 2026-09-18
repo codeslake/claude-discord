@@ -3,8 +3,24 @@
 # throwaway HOME; touches nothing real. Usage: test-claude-discord.sh <script>
 set -euo pipefail
 S=${1:?script path}; S=$(cd "$(dirname "$S")" && pwd)/$(basename "$S")   # absolute: the test cd-s into a throwaway project
+H=$(dirname "$S")/discord-turn-hook
+CMD='f="$HOME/.claude-discord/discord-turn-hook"; [ ! -x "$f" ] || "$f"'
+has_hook() { jq -e --arg cmd "$CMD" '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | index($cmd) != null' "$1" >/dev/null 2>&1; }
 bash -n "$S"
+bash -n "$H"
 [ "$(grep -c "if (msg.author.bot) return" "$S")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in the wrapper"; exit 1; }
+
+# discord-turn-hook: reads the UserPromptSubmit hook JSON on stdin.
+if out=$(printf '%s' '{"prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\">hi"}' | bash "$H"); then rc=0; else rc=$?; fi
+[ "$rc" -eq 0 ] && [ "$out" = '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Discord turn: answer only with the discord reply tool; write no CLI text."}}' ] || { echo "FAIL: hook must print the exact context line for a discord-channel prompt"; exit 1; }
+if out=$(printf '%s' '{"prompt":"hello from the CLI"}' | bash "$H"); then rc=0; else rc=$?; fi
+[ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: hook must be silent for a plain prompt"; exit 1; }
+if out=$(printf '%s' 'not json' | bash "$H" 2>/dev/null); then rc=0; else rc=$?; fi
+[ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: hook must exit 0 with no output on invalid JSON"; exit 1; }
+if out=$(printf '' | bash "$H"); then rc=0; else rc=$?; fi
+[ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: hook must exit 0 with no output on empty stdin"; exit 1; }
+echo "ok: discord-turn-hook emits the context line for a discord prompt and is silent otherwise"
+
 export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'rm -rf /tmp/claude-discord-test-$$' EXIT
 mkdir -p "$HOME/.claude/plugins" "$HOME/fakeplugin" "$HOME/bin"
 echo '{"plugins":{"discord@claude-plugins-official":[{"installPath":"'"$HOME"'/fakeplugin"}]}}' > "$HOME/.claude/plugins/installed_plugins.json"
@@ -24,6 +40,9 @@ printf '1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alpha
 grep -q "^DISCORD_ALLOW_IDS='222,333,'$" "$R/config.env"
 grep -q "^DISCORD_BOT_TOKEN=tokA$" "$R/alpha/.env"
 echo "ok: setup writes config.env, .env, access.json; others normalised; no-mention honoured"
+
+has_hook "$P/.claude/settings.json"
+echo "ok: setup also registers the discord-turn hook (after access.json is written)"
 
 printf 'tokB\nn\n' | bash "$S" setup beta >/dev/null
 [ "$(jq -r '.groups["1550575144320110662"].requireMention' "$R/beta/access.json")" = true ]
@@ -129,4 +148,47 @@ rc=$?
 [ "$rc" -eq 127 ] || { echo "FAIL: expected exit 127, got $rc"; exit 1; }
 grep -q "claude is not on PATH" <<<"$out"
 echo "ok: CLAUDE_DISCORD_LAUNCHER set, no claude on PATH -> exit 127, error on stderr"
+
+# Hook registration on the START path: a separate project, with a bot set up
+# by hand (as if by a version before this feature existed: access.json and
+# config.env present, no settings.json), so the assertions below are about
+# the start path only, not entangled with setup's own registration above.
+P2="$HOME/project2"; mkdir -p "$P2/.claude/discord-agents/gamma"; cd "$P2"
+printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$P2/.claude/discord-agents/config.env"
+printf 'DISCORD_BOT_TOKEN=tokG\n' > "$P2/.claude/discord-agents/gamma/.env"
+jq -n '{dmPolicy:"allowlist", allowFrom:["2"], groups:{"1":{requireMention:true, allowFrom:["2"]}}}' > "$P2/.claude/discord-agents/gamma/access.json"
+
+# b. no project settings.json yet -> start creates it with exactly one entry.
+[ ! -f "$P2/.claude/settings.json" ]
+bash "$S" gamma >/dev/null 2>&1
+has_hook "$P2/.claude/settings.json"
+[ "$(jq -c 'keys' "$P2/.claude/settings.json")" = '["hooks"]' ]
+[ "$(jq '.hooks.UserPromptSubmit | length' "$P2/.claude/settings.json")" = 1 ]
+[ "$(jq '.hooks.UserPromptSubmit[0].hooks | length' "$P2/.claude/settings.json")" = 1 ]
+echo "ok: start creates settings.json holding exactly one hook entry when the file was missing"
+
+# c. an existing settings.json keeps its other keys; a second start is a no-op.
+echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"
+bash "$S" gamma >/dev/null 2>&1
+[ "$(jq -r '.enabledPlugins.x' "$P2/.claude/settings.json")" = true ]
+has_hook "$P2/.claude/settings.json"
+[ "$(jq '.hooks.UserPromptSubmit | length' "$P2/.claude/settings.json")" = 1 ]
+cp "$P2/.claude/settings.json" "$P2/.claude/settings.json.before"
+bash "$S" gamma >/dev/null 2>&1
+cmp -s "$P2/.claude/settings.json" "$P2/.claude/settings.json.before" || { echo "FAIL: a second start must leave settings.json byte-identical"; exit 1; }
+rm -f "$P2/.claude/settings.json.before"
+echo "ok: start keeps other keys, adds exactly one hook entry, and a second start is byte-identical"
+
+# d. invalid JSON is left untouched; the start still reaches the exec; stderr
+# names the file.
+printf 'not json' > "$P2/.claude/settings.json"
+cp "$P2/.claude/settings.json" "$P2/.claude/settings.json.before"
+out=$(bash "$S" gamma 2>"$P2/stderr.log")
+cmp -s "$P2/.claude/settings.json" "$P2/.claude/settings.json.before" || { echo "FAIL: invalid-JSON settings.json must be left untouched"; exit 1; }
+rm -f "$P2/.claude/settings.json.before"
+grep -qF "$P2/.claude/settings.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the invalid settings file"; exit 1; }
+grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec when settings.json is invalid JSON"; exit 1; }
+rm -f "$P2/stderr.log"
+echo "ok: invalid-JSON settings.json is left untouched, warned on stderr naming the file, and the start still execs claude"
+
 echo "ALL PASS"

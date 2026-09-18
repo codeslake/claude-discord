@@ -57,8 +57,8 @@ enables it per session with `--settings`.
 ./install.sh
 ```
 
-puts `claude-discord` in `~/.local/bin/` and the helpers (today only
-`discord-proxy.ts`) in `~/.claude-discord/`. Re-run it after a pull.
+puts `claude-discord` in `~/.local/bin/` and the helpers (`discord-proxy.ts`,
+`discord-turn-hook`) in `~/.claude-discord/`. Re-run it after a pull.
 
 ## Usage
 
@@ -110,6 +110,22 @@ passed through and claude decides.
 - With several bots in one channel, keep the default mention policy: with
   "respond without mention" on every bot, one human message gets one reply
   per bot.
+
+## Keeping Discord turns out of the CLI
+
+A message that arrives over Discord should be answered through the discord
+reply tool only, not also typed into the CLI (that would waste a reply on a
+channel nobody types into). `discord-turn-hook` is a `UserPromptSubmit` hook
+that recognises a Discord-origin prompt and adds a short instruction to that
+effect; it never blocks or fails a turn.
+
+Both `setup` and the start path register it in the project's own
+`.claude/settings.json`, under `.hooks.UserPromptSubmit`, so a bot set up
+before this existed gets it on its next start too. Registration is
+idempotent and leaves every other key in the file alone; a session already
+running picks up a hook added to its settings file without a restart. To
+remove it, delete its entry from `.hooks.UserPromptSubmit` in
+`.claude/settings.json`.
 
 ## Bots hearing each other
 

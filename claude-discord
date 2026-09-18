@@ -54,6 +54,37 @@ write_access() {  # $1 = bot dir, $2 = requireMention (true|false)
     > "$1/access.json"
 }
 
+# Registers the Discord-turn hook in the project's own settings.json, so a
+# turn that arrived over Discord is answered through the discord reply tool
+# only, never also typed into the CLI. The command string is portable: it
+# guards on [ -x ], so the settings file can be committed and shared, and a
+# machine without the helper installed simply runs nothing. Idempotent: a
+# missing file gets exactly this entry, an entry already present means no
+# write, and invalid JSON is warned about and left alone -- registration must
+# never fail the setup or the start it runs inside.
+register_hook() {
+  local settings=$PWD/.claude/settings.json
+  local cmd='f="$HOME/.claude-discord/discord-turn-hook"; [ ! -x "$f" ] || "$f"'
+  local base='{}'
+  if [ -f "$settings" ]; then
+    if ! jq empty "$settings" 2>/dev/null; then
+      echo "claude-discord: $settings is not valid JSON, skipping hook registration" >&2
+      return 0
+    fi
+    base=$(cat "$settings")
+  fi
+  if printf '%s' "$base" | jq -e --arg cmd "$cmd" \
+      '[.hooks.UserPromptSubmit[]?.hooks[]?.command] | index($cmd) != null' >/dev/null 2>&1; then
+    return 0
+  fi
+  mkdir -p "$PWD/.claude"
+  printf '%s' "$base" | jq --arg cmd "$cmd" \
+    '.hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{hooks: [{type: "command", command: $cmd}]}])' \
+    > "$settings.tmp.$$"
+  cat "$settings.tmp.$$" > "$settings"
+  rm -f "$settings.tmp.$$"
+}
+
 if [ "${1:-}" = setup ]; then
   name=${2:?usage: claude-discord setup <name> [--reset]}
   case $name in ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;; esac
@@ -79,6 +110,7 @@ if [ "${1:-}" = setup ]; then
   read -rp "Respond to every message in the channel without an @mention? [y/N] " nomention
   case $nomention in y|Y) mention=false;; *) mention=true;; esac
   write_access "$root/$name" "$mention"
+  register_hook
   echo "claude-discord: $root/$name/access.json written (requireMention=$mention)"
   exit 0
 fi
@@ -206,6 +238,7 @@ launcher=${CLAUDE_DISCORD_LAUNCHER:-${CLAUDE_CODE_PROCESS_WRAPPER:-}}
 [ -n "$launcher" ] || launcher=$(jq -r '.env.CLAUDE_CODE_PROCESS_WRAPPER // empty' "$HOME/.claude/settings.json" 2>/dev/null) || :
 run=("$bin")
 [ -n "$launcher" ] && run=("$launcher" "$bin")
+register_hook
 exec "${run[@]}" --channels "plugin:$plugin" \
   --settings "{\"enabledPlugins\": {\"$plugin\": true}, \"env\": {\"DISCORD_STATE_DIR\": \"$dir\"}}" \
   -n "$name" --append-system-prompt "$prompt" ${args[@]+"${args[@]}"}
