@@ -347,7 +347,9 @@ if [ "${1:-}" = refresh ]; then
   # environment: with two bots in the project the launcher cannot guess.
   force=no; fresh=() name="" skip=0
   for a in "$@"; do
-    if [ "$skip" = 1 ]; then fresh+=("$a"); skip=0; continue; fi
+    # A flag's value never starts with "-": after one whose value is optional
+    # (--debug, --worktree) the next word may be the next flag.
+    if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) fresh+=("$a"); continue;; esac; fi
     case $a in
       --force) force=yes;;
       -*) fresh+=("$a"); takes_value "$a" && skip=1 || :;;
@@ -443,7 +445,7 @@ if [ "${1:-}" = refresh ]; then
   kickoff=("Catch up on the channel and continue from your handoff.")
   skip=0
   for a in ${fresh[@]+"${fresh[@]}"}; do
-    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) continue;; esac; fi
     case $a in -*) takes_value "$a" && skip=1 || :;; *) kickoff=();; esac
   done
   exec "$self" --bg "$name" ${fresh[@]+"${fresh[@]}"} ${kickoff[@]+"${kickoff[@]}"}
@@ -451,7 +453,7 @@ fi
 
 args=() name="" skip=0
 for a in "$@"; do
-  if [ "$skip" = 1 ]; then args+=("$a"); skip=0; continue; fi
+  if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) args+=("$a"); continue;; esac; fi   # a value never starts with "-" (see refresh)
   case $a in
     -*) args+=("$a"); takes_value "$a" && skip=1 || :;;
     *)  if [ -z "$name" ]; then name=$a; else args+=("$a"); fi;;

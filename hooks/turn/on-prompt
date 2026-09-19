@@ -20,13 +20,16 @@ prompt=$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null) || exit 0
 # like an attribute (a path-traversal payload disguised as a message_id) can
 # all be forged; measured, every delivery, a mid-turn arrival included (each
 # is its own prompt), carried exactly one tag. Digits only; react() also
-# refuses a non-numeric id.
+# refuses a non-numeric id. The tag is the prompt's first line (measured: a
+# newline follows its '>'), not "up to the first >": the display name in
+# user="" comes before user_id and may hold `">`, but no newline, so the
+# tag's own user_id is the line's last one.
 tag='^[[:space:]]*<channel source="plugin:discord:discord" chat_id="([0-9]+)" message_id="([0-9]+)"'
-head=${prompt%%>*}
-[ "$head" != "$prompt" ] && [[ $head =~ $tag ]] || exit 0
+head=${prompt%%$'\n'*}
+[[ $head =~ $tag ]] || exit 0
 chat_id=${BASH_REMATCH[1]} message_id=${BASH_REMATCH[2]}
 [ -n "$bot_name" ] || exit 0
-user_id=$(printf '%s' "$head" | grep -oE ' user_id="[0-9]+"' | tail -1 | tr -dc 0-9)   # the last: user="" (a display name) comes before it
+user_id=$(printf '%s' "$head" | grep -oE ' user_id="[0-9]+"' | tail -1 | tr -dc 0-9)
 
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
 

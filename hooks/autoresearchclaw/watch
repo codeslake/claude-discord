@@ -59,8 +59,11 @@ poll() {  # $1 = 1: record, post nothing
   # A run dir with nothing modified since the previous poll's start (arc-stamp)
   # is not read again: old runs cost one find, not a jq per stage file. A
   # file's mtime changes when it is written, a directory's when an entry comes
-  # or goes (waiting.json). The first pass reads everything.
-  : 2>/dev/null > "$stamp.new"
+  # or goes (waiting.json). The first pass reads everything. -newer is
+  # strict, so a write in the stamp's own mtime tick after the poll read its
+  # run would never count as newer; the stamp is set 2 s back, and arc-posted
+  # keeps the overlap from posting twice.
+  : 2>/dev/null > "$stamp.new" && perl -e '$t = time - 2; utime $t, $t, @ARGV' "$stamp.new" 2>/dev/null
   for run in "$project"/artifacts/rc-*/; do
     [ -d "$run" ] || continue
     [ "$1" = 1 ] || [ ! -e "$stamp" ] || [ -n "$(find "$run" -newer "$stamp" -print -quit 2>/dev/null)" ] || continue
