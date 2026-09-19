@@ -56,21 +56,22 @@ cat > "$HOME/bin/curl" <<'EOF'
 # (-H @-), never in argv, and logs a JSON body argument (a posted message)
 # to CURL_BODY_LOG, one line each.
 printf '%s\n' "$*" >> "$CURL_LOG"
-for a; do case $a in '{'*) printf '%s\n' "$a" >> "$CURL_BODY_LOG";; esac; done
+for a; do case $a in '{'*) printf '%s\n' "$a" >> "$CURL_BODY_LOG"; perl -MTime::HiRes=time -e 'printf "%.2f\n", time' >> "$CURL_BODY_LOG.time";; esac; done
 cat >> "$CURL_STDIN_LOG" 2>/dev/null
 EOF
 chmod +x "$HOME/bin/curl"
 # The autoresearchclaw watcher's 60 s poll interval, under the test's
-# control: `sleep 60` waits (5 s at most) for $TICK_DIR/<the watcher's pid>,
-# which tick() creates to release one poll; any other sleep is the real one.
+# control: `sleep 60` waits for $TICK_DIR/<the watcher's pid>, which tick()
+# creates to release one poll, and never releases on its own (so a slow
+# machine cannot split one poll's events), only when the watcher is gone or
+# the test's HOME is (no stub outlives the test); any other sleep is real.
 TICK_DIR="$HOME/ticks"; mkdir -p "$TICK_DIR"
 cat > "$HOME/bin/sleep" <<'EOF'
 #!/bin/bash
 [ "$*" = 60 ] || exec /bin/sleep "$@"
 t=$TICK_DIR/$PPID
 : > "$t.waiting"
-n=0
-while [ ! -e "$t" ] && [ "$n" -lt 100 ]; do /bin/sleep 0.05; n=$((n+1)); done
+while [ ! -e "$t" ] && [ -d "$TICK_DIR" ] && kill -0 "$PPID" 2>/dev/null; do /bin/sleep 0.05; done
 rm -f "$t.waiting" "$t"
 EOF
 chmod +x "$HOME/bin/sleep"
@@ -774,13 +775,13 @@ start_worker() {  # $1 = DISCORD_STATE_DIR (empty: unset), the rest = hook comma
 }
 asleep() {  # $1 = watcher pid: wait until it sleeps between polls
   local n=0
-  while [ ! -e "$TICK_DIR/$1.waiting" ] && [ "$n" -lt 60 ]; do sleep 0.05; n=$((n+1)); done
+  while [ ! -e "$TICK_DIR/$1.waiting" ] && [ "$n" -lt 400 ]; do sleep 0.05; n=$((n+1)); done
   [ -e "$TICK_DIR/$1.waiting" ] || { echo "FAIL: watcher $1 never finished its first pass"; exit 1; }
 }
 tick() {  # $1 = watcher pid: release one poll; returns once it is asleep again (or gone) and its post has landed
   local n=0
   : > "$TICK_DIR/$1"
-  while { [ -e "$TICK_DIR/$1" ] || [ ! -e "$TICK_DIR/$1.waiting" ]; } && kill -0 "$1" 2>/dev/null && [ "$n" -lt 100 ]; do sleep 0.05; n=$((n+1)); done
+  while { [ -e "$TICK_DIR/$1" ] || [ ! -e "$TICK_DIR/$1.waiting" ]; } && kill -0 "$1" 2>/dev/null && [ "$n" -lt 400 ]; do sleep 0.05; n=$((n+1)); done
   sleep 0.3   # post's curl is detached
 }
 posts() { wc -l < "$CURL_BODY_LOG" | tr -d ' '; }
@@ -797,21 +798,30 @@ health 01 01-topic_init done 2026-09-19T00:00:06+00:00
 decide 1 TOPIC_INIT approve 2026-09-19T00:01:00+00:00
 : > "$RUN/checkpoint.json"; : > "$RUN/stage-01/decision.json"
 : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_BODY_LOG"
-start_worker "$R4/mgr" "$CMD_ARC" "$CMD_ARC"
+# NESTED: what a `claude -p` run from the session's Bash looks like: a second
+# worker under a shell under this one, with the same DISCORD_STATE_DIR,
+# running on-start too. The shell waits for it, as the Bash tool does.
+export CMD_ARC
+NESTED='WORKER_OUT="$HOME/nested.out" fake-worker "$CMD_ARC" </dev/null >/dev/null 2>&1 & echo $! > "$HOME/nested.pid"; n=0; while [ ! -e "$HOME/nested.out.done" ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n+1)); done'
+start_worker "$R4/mgr" "$CMD_ARC" "$CMD_ARC" "$NESTED"
 W1=$W
+KILL_AT_EXIT="$KILL_AT_EXIT $(cat "$HOME/nested.pid")"
 read -r WP1 FOR1 < "$R4/mgr/arc-watch.pid"
 KILL_AT_EXIT="$KILL_AT_EXIT $WP1"
-[ "$FOR1" = "$W1" ] || { echo "FAIL: arc-watch.pid must name the session's worker (the hook's sh -c parent's parent), got $FOR1, want $W1"; exit 1; }
-[ "$(watchers)" = "$WP1" ] || { echo "FAIL: on-start twice must leave exactly one live watcher, the pidfile's: $(watchers | tr '\n' ' ')"; exit 1; }
+[ -e "$HOME/nested.out.done" ] && [ ! -s "$HOME/nested.out" ] || { echo "FAIL: the nested session's on-start must have run, silently"; exit 1; }
+[ "$FOR1" = "$W1" ] || { echo "FAIL: arc-watch.pid must name the session's worker (the hook's sh -c parent's parent), not a nested session's: got $FOR1, want $W1"; exit 1; }
+[ "$(watchers)" = "$WP1" ] || { echo "FAIL: on-start twice, then from a nested session, must leave exactly one live watcher, the pidfile's: $(watchers | tr '\n' ' ')"; exit 1; }
+kill "$(cat "$HOME/nested.pid")"
 asleep "$WP1"
 [ "$(posts)" = 0 ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: the first pass must post nothing: $(cat "$CURL_LOG")"; exit 1; }
 [ "$(wc -l < "$R4/mgr/arc-posted" | tr -d ' ')" = 2 ] || { echo "FAIL: the first pass must record the run's existing events as posted: $(cat "$R4/mgr/arc-posted")"; exit 1; }
-echo "ok: on-start run twice under one session leaves exactly one watcher, recorded in arc-watch.pid against the session's worker; its first pass records the existing history and posts nothing"
+echo "ok: on-start run twice under one session, and once from a nested session under it, leaves exactly one watcher, recorded in arc-watch.pid against the session's worker; the very first pass records the existing history and posts nothing"
 
 health 02 02-problem_decompose done 2026-09-19T00:19:05+00:00
 decide 2 PROBLEM_DECOMPOSE approve 2026-09-19T00:19:36+00:00
 health 03 03-search_strategy failed 2026-09-19T00:21:10+00:00 "$SECRET"
 health 04 04 done 2026-09-19T00:28:00+00:00
+health 06 06-knowledge_extract gpu-node-7.cluster.internal 2026-09-19T00:30:00+00:00
 waiting 5 LITERATURE_SCREEN 2026-09-19T00:53:58+00:00
 tick "$WP1"
 [ "$(posts)" = 1 ] || { echo "FAIL: one poll, one run: exactly one message, got $(posts)"; exit 1; }
@@ -820,6 +830,7 @@ tick "$WP1"
   '[arc] gate: approve stage 02 PROBLEM_DECOMPOSE' \
   '[arc] stage 03 SEARCH_STRATEGY failed (see run)' \
   '[arc] stage 04 done (134 s)' \
+  '[arc] stage 06 KNOWLEDGE_EXTRACT ? (134 s)' \
   '[arc] gate waiting: stage 05 LITERATURE_SCREEN (gate_approval)')" ] || { echo "FAIL: message wrong:"; last_post; exit 1; }
 grep -qE -- '-m 10 -X POST .*https://discord.com/api/v10/channels/42/messages$' "$CURL_LOG" || { echo "FAIL: post must POST to the channel's messages with -m 10: $(cat "$CURL_LOG")"; exit 1; }
 [ "$(tail -1 "$CURL_BODY_LOG" | jq -c .allowed_mentions)" = '{"parse":[]}' ] || { echo "FAIL: a post must not be able to ping anyone"; exit 1; }
@@ -827,7 +838,7 @@ grep -qE -- '-m 10 -X POST .*https://discord.com/api/v10/channels/42/messages$' 
 ! grep -qE 'SECRET|/home/someone|cluster\.internal|Traceback' "$CURL_LOG" "$CURL_BODY_LOG" || { echo "FAIL: error text, summaries, messages or paths were posted"; exit 1; }
 tick "$WP1"
 [ "$(posts)" = 1 ] || { echo "FAIL: nothing new, nothing posted on the next poll"; exit 1; }
-echo "ok: a poll batches a run's new stages (name optional; a failure without its error), gate decisions and a waiting gate (stage, name, reason only) into one message, in time order, token on stdin, mentions off; the next poll reposts nothing"
+echo "ok: a poll batches a run's new stages (name optional; a failure without its error; a status that is not a plain word, a hostname, as ?), gate decisions and a waiting gate (stage, name, reason only) into one message, in time order, token on stdin, mentions off; the next poll reposts nothing"
 
 health 02 02-problem_decompose done 2026-09-19T01:10:00+00:00
 tick "$WP1"
@@ -841,6 +852,7 @@ RUN2="$P4/artifacts/rc-20260919-010000-aaaaaa"; mkdir -p "$RUN2/stage-01"
 jq -n '{stage_id: "01-topic_init", run_id: "rc-20260919-010000-aaaaaa", duration_sec: 5, status: "done", artifacts_count: 1, error: null, timestamp: "2026-09-19T01:30:00+00:00"}' > "$RUN2/stage-01/stage_health.json"
 tick "$WP1"
 [ "$(posts)" = 4 ] || { echo "FAIL: two runs with news, two messages: got $(posts)"; exit 1; }
+tail -2 "$CURL_BODY_LOG.time" | awk 'NR == 1 { a = $1 } NR == 2 { exit !($1 - a >= 0.9) }' || { echo "FAIL: two posts in one poll must be a second apart (Discord's 5 per 5 s): $(tail -2 "$CURL_BODY_LOG.time" | tr '\n' ' ')"; exit 1; }
 [ "$(jq -r 'select(.content | contains("stage 23")) | .content' "$CURL_BODY_LOG")" = "$(printf '%s\n' \
   '[arc] gate: approve stage 05 LITERATURE_SCREEN' \
   '[arc] stage 23 CITATION_VERIFY done (134 s)' \
@@ -853,7 +865,7 @@ chmod 644 "$R4/mgr/arc-posted"
 tick "$WP1"
 [ "$(posts)" = 5 ] && [ "$(last_post)" = '[arc] gate waiting: stage 08 HYPOTHESIS_GEN (gate_approval)' ] || { echo "FAIL: the unrecorded wait must post once recording works again: $(last_post)"; exit 1; }
 ! grep -qE 'SECRET|/home/someone|cluster\.internal|Traceback' "$CURL_LOG" "$CURL_BODY_LOG" || { echo "FAIL: error text, summaries, messages or paths were posted"; exit 1; }
-echo "ok: a rewritten stage posts again, the same wait does not, the run's end is posted at stage 23, each run gets its own message, and nothing is posted that could not be recorded"
+echo "ok: a rewritten stage posts again, the same wait does not, the run's end is posted at stage 23, each run gets its own message a second after the last, and nothing is posted that could not be recorded"
 
 # A resumed session is a new worker: on-start gives it its own watcher even
 # while the previous one lives, and the previous one exits at its next wake.
@@ -870,8 +882,20 @@ tick "$WP1"
 kill "$W2"
 tick "$WP2"
 ! kill -0 "$WP2" 2>/dev/null && [ -z "$(watchers)" ] || { echo "FAIL: the watcher must exit once its worker is gone"; exit 1; }
+# What happened while no watcher ran is posted by the next one's first
+# pass; the wait posted before (still in waiting.json) is not repeated.
+health 09 09-experiment_design done 2026-09-19T02:20:00+00:00
+start_worker "$R4/mgr" "$CMD_ARC"
+read -r WP3 _ < "$R4/mgr/arc-watch.pid"
+KILL_AT_EXIT="$KILL_AT_EXIT $WP3"
+asleep "$WP3"; sleep 0.3
+[ "$(posts)" = 6 ] && [ "$(last_post)" = '[arc] stage 09 EXPERIMENT_DESIGN done (134 s)' ] || { echo "FAIL: a later start must post exactly the gap, once: $(posts) posts, last: $(last_post)"; exit 1; }
+echo none > "$R4/mgr/mode"
+tick "$WP3"
+! kill -0 "$WP3" 2>/dev/null && [ -z "$(watchers)" ] || { echo "FAIL: the watcher must exit once the bot is no longer in autoresearchclaw mode"; exit 1; }
+echo autoresearchclaw > "$R4/mgr/mode"
 kill $KILL_AT_EXIT 2>/dev/null || :
-echo "ok: a resumed session's worker gets its own watcher and the old one exits; a watcher exits once its worker is gone; none is left running"
+echo "ok: a resumed session's worker gets its own watcher and the old one exits; a watcher exits once its worker is gone or its bot leaves the mode; a later start posts the gap; none is left running"
 
 # No bot is autoresearchclaw any more: on-start goes from both files (an
 # earlier copy planted in settings.json too).

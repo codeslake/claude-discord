@@ -135,10 +135,11 @@ line, which `on-prompt` adds for a dev-manager bot only.
 An `autoresearchclaw` bot makes the runs of the AutoResearchClaw pipeline in
 its project visible in the channel, one way: nothing in the channel steers
 a run. At every session start (and resume) `on-start` starts a watcher,
-`hooks/autoresearchclaw/watch`, detached from the session; it lives exactly
-as long as the session's process and writes nothing to the terminal. Once a
-minute it reads every `artifacts/rc-*/` run directory and posts what is new,
-one message per run, one line per event:
+`hooks/autoresearchclaw/watch`, detached from the session; it lives as long
+as the session's process and the bot's `autoresearchclaw` mode, and writes
+nothing to the terminal. Once a minute it reads every `artifacts/rc-*/` run
+directory and posts what is new, one message per run (a second apart:
+Discord takes 5 messages per 5 s in a channel), one line per event:
 
 | Source | Line |
 |---|---|
@@ -149,18 +150,22 @@ one message per run, one line per event:
 
 Only ids, numbers and enum words are posted. Error text, `context_summary`
 (it quotes paper text and paths), a human's gate message, paths and
-hostnames never are; a value that is not a plain word shows as `?`, and a
-post cannot mention anyone. Gates are answered in the run's terminal, not in
+hostnames never are; a value that is not a plain word (letters, digits, `_`,
+`-`: a dotted hostname is not one) shows as `?`, and a post cannot mention
+anyone. Gates are answered in the run's terminal, not in
 Discord.
 
 What was posted is recorded in `.claude/discord-agents/<bot>/arc-posted`,
 keyed by run, event and the event's own timestamp (`since` for a wait), so a
 run relaunched with `--from-stage` into the same directory posts its
-rewritten stages again. The watcher's first pass only records: starting on a
-run that already has history posts none of it. `<bot>/arc-watch.pid` holds
-`<watcher pid> <session pid>`; a second start of the same session leaves the
-running watcher alone, a resumed session gets its own and the old one exits
-at its next wake.
+rewritten stages again. The bot's very first watcher (no `arc-posted` yet)
+only records on its first pass: a run that already has history posts none of
+it. Every later start (a resume, a refresh) posts what happened while no
+watcher ran. `<bot>/arc-watch.pid` holds `<watcher pid> <session pid>`; a
+second start of the same session leaves the running watcher alone, and so
+does a session started under it (a `claude -p` from its Bash inherits the
+bot's state directory and runs `on-start` too). A resumed session gets its
+own watcher and the old one exits at its next wake.
 
 The same mode also gives the session, once per session, the format for a
 cross-machine digest (hypothesis ids, config commit hash, a metrics table,

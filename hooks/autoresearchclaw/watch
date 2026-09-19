@@ -11,10 +11,12 @@
 # never posted: every posted field is an id, a number or an enum word.
 # What was posted is keyed in $DISCORD_STATE_DIR/arc-posted by run, event and
 # its timestamp or since, since a --from-stage relaunch rewrites a stage in
-# the same run dir. The first pass only records, so a start on a run with
-# history posts none of it. Exits when the session's worker ($1) is gone, or
-# when arc-watch.pid names another watcher (on-start started one for a new
-# session).
+# the same run dir. The very first pass (no arc-posted yet) only records,
+# so a bot's first start on a run with history posts none of it; a later
+# start (a resume, a refresh) posts what happened while no watcher ran.
+# Exits when the session's worker ($1) is gone, when arc-watch.pid names
+# another watcher (on-start started one for a new session), or when the bot
+# is no longer in autoresearchclaw mode.
 set -u
 . "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
 worker=${1:-}
@@ -25,30 +27,33 @@ posted=$DISCORD_STATE_DIR/arc-posted
 pidfile=$DISCORD_STATE_DIR/arc-watch.pid
 tab=$(printf '\t')
 
-# Each event is one "<timestamp> TAB <key> TAB <line>" record. A value that
-# is not a plain word becomes "?", so no free text can reach a post.
-defs='def word: tostring | if test("^[A-Za-z0-9_.:+-]+$") then . else "?" end;
+# Each event is one "<timestamp> TAB <key> TAB <line>" record. A posted value
+# that is not a plain word (letters, digits, _ and -: no dot, so no hostname)
+# becomes "?", so no free text can reach a post; `key` also lets through the
+# . : + of timestamps, for the dedup keys and the sort field, never posted.
+defs='def word: tostring | if test("^[A-Za-z0-9_-]+$") then . else "?" end;
+def key: tostring | if test("^[A-Za-z0-9_.:+-]+$") then . else "?" end;
 def stage($n; $name): "stage " + ($n | tostring | if test("^[0-9]$") then "0" + . else word end)
   + ($name // "" | tostring | if test("^[A-Za-z0-9_]+$") then " " + ascii_upcase else "" end);
-def rec($ts; $key; $line): [($ts // "" | word), $run + " " + $key, "[arc] " + $line] | join("\t");'
+def rec($ts; $k; $line): [($ts // "" | key), $run + " " + $k, "[arc] " + $line] | join("\t");'
 health=$defs'
 (.stage_id | tostring | capture("^(?<n>[0-9]+)(-(?<name>.*))?$")) as $id
 | (.status // "" | word) as $st
-| rec(.timestamp; "stage \($id.n) \(.timestamp // "" | word)";
+| rec(.timestamp; "stage \($id.n) \(.timestamp // "" | key)";
     stage($id.n; $id.name) + " "
     + if $st == "failed" then "failed (see run)"
       elif (.duration_sec | type) == "number" then "\($st) (\(.duration_sec | round) s)"
       else $st end),
-  (select(($id.n | tonumber) == 23 and $st == "done") | rec(.timestamp; "end \(.timestamp // "" | word)"; "run \($run | word) finished"))'
+  (select(($id.n | tonumber) == 23 and $st == "done") | rec(.timestamp; "end \(.timestamp // "" | key)"; "run \($run | word) finished"))'
 gate=$defs'
 fromjson? | objects
-| rec(.timestamp; "gate \(.stage | word) \(.timestamp // "" | word) \(.id // "" | word)";
+| rec(.timestamp; "gate \(.stage | key) \(.timestamp // "" | key) \(.id // "" | key)";
     "gate: \((.human_input | objects | .action) // .type // "" | word) " + stage(.stage; .stage_name))'
 waiting=$defs'
-rec(.since; "wait \(.stage | word) \(.since // "" | word)"; "gate waiting: " + stage(.stage; .stage_name) + " (\(.reason // "" | word))")'
+rec(.since; "wait \(.stage | key) \(.since // "" | key)"; "gate waiting: " + stage(.stage; .stage_name) + " (\(.reason // "" | word))")'
 
-poll() {  # $1 = 1 on the first pass: record, post nothing
-  local run name new f
+poll() {  # $1 = 1: record, post nothing
+  local run name new f sent=0
   [ -e "$posted" ] || : 2>/dev/null > "$posted"
   for run in "$project"/artifacts/rc-*/; do
     [ -d "$run" ] || continue
@@ -67,12 +72,18 @@ poll() {  # $1 = 1 on the first pass: record, post nothing
     # Recorded before posting: an event that cannot be recorded would be
     # posted again every minute.
     printf '%s\n' "$new" | cut -f2 2>/dev/null >> "$posted" || continue
-    [ "$1" = 1 ] || post "$bot_channel" "$(printf '%s\n' "$new" | cut -f3)"
+    [ "$1" = 1 ] && continue
+    # Discord allows 5 messages per 5 s in a channel, and a rejected post is lost.
+    [ "$sent" = 0 ] || sleep 1
+    post "$bot_channel" "$(printf '%s\n' "$new" | cut -f3)"
+    sent=1
   done
 }
 
-poll 1
+[ -e "$posted" ] && first=0 || first=1
+poll "$first"
 while sleep 60; do
-  kill -0 "$worker" 2>/dev/null && [ "$(cat "$pidfile" 2>/dev/null)" = "$$ $worker" ] || exit 0
+  kill -0 "$worker" 2>/dev/null && [ "$(cat "$pidfile" 2>/dev/null)" = "$$ $worker" ] &&
+    [ "$(cat "$DISCORD_STATE_DIR/mode" 2>/dev/null)" = autoresearchclaw ] || exit 0
   poll 0
 done

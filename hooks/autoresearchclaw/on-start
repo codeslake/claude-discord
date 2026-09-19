@@ -2,10 +2,13 @@
 # SessionStart hook (matcher: startup|resume), registered while some bot in
 # the project is in autoresearchclaw mode. For such a bot, starts
 # autoresearchclaw/watch detached for this session and writes
-# $DISCORD_STATE_DIR/arc-watch.pid as "<watcher pid> <worker pid>"; a live
-# watcher of this same session is left alone. A resumed session is a new
-# worker, so it gets its own watcher, and the old one exits at its next wake
-# because the pidfile no longer names it. Prints nothing; never fails.
+# $DISCORD_STATE_DIR/arc-watch.pid as "<watcher pid> <worker pid>". A live
+# watcher of this session, or of one of its ancestors, is left alone: a
+# `claude -p` run from the session's own Bash inherits DISCORD_STATE_DIR and
+# loads the same settings, and must not take the watcher over (it would die
+# with that short-lived child). A resumed session is a new worker, not a
+# descendant, so it gets its own watcher, and the old one exits at its next
+# wake because the pidfile no longer names it. Prints nothing; never fails.
 set -u
 . "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
 [ "$bot_mode" = autoresearchclaw ] || exit 0
@@ -26,7 +29,13 @@ done
 pidfile=$DISCORD_STATE_DIR/arc-watch.pid
 pid="" for_worker=""
 { read -r pid for_worker < "$pidfile"; } 2>/dev/null || :
-[ "$for_worker" = "$worker" ] && kill -0 "$pid" 2>/dev/null && exit 0
+if kill -0 "$pid" 2>/dev/null; then
+  p=$worker
+  while [ "${p:-0}" -gt 1 ] 2>/dev/null; do
+    [ "$p" != "$for_worker" ] || exit 0
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  done
+fi
 # perl's setsid rather than setsid(1): macOS ships perl but no setsid. Every
 # stream is redirected, or the watcher would hold the hook's output open.
 perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- "$(dirname "$0")/watch" "$worker" </dev/null >/dev/null 2>&1 &
