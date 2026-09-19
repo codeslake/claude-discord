@@ -365,8 +365,17 @@ for src in compact clear; do
   pin dddd0004 "$src"
   [ "$(cat "$PINS")" = "$(cli_pins 11110001)" ] && [ "$(cat "$DSD/pinned-job")" = bbbb0002 ] || { echo "FAIL: a $src must pin nothing: $(cat "$PINS")"; exit 1; }
 done
+# A pins.json that holds nothing (0 bytes, or only whitespace) is filled
+# exactly like a missing one -- jq -rs slurps either to a length-0 array,
+# which must not be read as "not an array of strings" and left alone.
+: > "$PINS"; rm -f "$DSD/pinned-job"
+pin aaaa0001
+[ "$(cat "$PINS"; echo .)" = "$(cli_pins aaaa0001)." ] && [ "$(cat "$DSD/pinned-job")" = aaaa0001 ] || { echo "FAIL: a 0-byte pins.json must be filled like a missing one: $(cat "$PINS" 2>&1)"; exit 1; }
+printf '\n' > "$PINS"; rm -f "$DSD/pinned-job"
+pin bbbb0002
+[ "$(cat "$PINS"; echo .)" = "$(cli_pins bbbb0002)." ] && [ "$(cat "$DSD/pinned-job")" = bbbb0002 ] || { echo "FAIL: a pins.json holding only a newline must be filled like a missing one: $(cat "$PINS" 2>&1)"; exit 1; }
 rm -rf "$J" "$DSD/pinned-job"
-echo "ok: a background start pins its job id (created, appended, deduplicated, its previous id replaced, every other entry kept in order), under the CLI's lock; someone else's pin is kept and never recorded as this bot's; a pinned-job that is not a job id removes nothing; a non-array file, a held lock, no job id, another session's job dir, and a compact or clear write nothing"
+echo "ok: a background start pins its job id (created, appended, deduplicated, its previous id replaced, every other entry kept in order), under the CLI's lock; someone else's pin is kept and never recorded as this bot's; a pinned-job that is not a job id removes nothing; a non-array file, a held lock, no job id, another session's job dir, and a compact or clear write nothing; a 0-byte or whitespace-only pins.json is filled like a missing one"
 
 rm -rf "$DSD/turns/s2"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s2","prompt":"hello from cli"}')

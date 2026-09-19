@@ -21,7 +21,10 @@
 # last time (recorded in <state dir>/pinned-job) when that differs. No other
 # entry is ever touched -- an id already in the file is another pinner's, so
 # it is left both in the file and out of pinned-job -- and a pins.json that is
-# not a JSON array of strings is left as it is. The id is CLAUDE_JOB_DIR's basename: measured 2026-09-19,
+# not a JSON array of strings is left as it is. One holding nothing (0 bytes,
+# or only whitespace) is filled exactly like a missing file, since jq -rs
+# slurps it to a length-0 array either way and the "not an array of strings"
+# rule must not swallow it. The id is CLAUDE_JOB_DIR's basename: measured 2026-09-19,
 # a hook sees the job's own dir even in a worker started from a pre-warmed
 # spare whose process environment names another job's. Anything but
 # exactly 8 lowercase hex characters pins nothing, and so does a job whose
@@ -69,7 +72,7 @@ done
 trap 'rmdir "$pins.lock" 2>/dev/null' EXIT
 # jq prints "added" or "kept" (raw, -r) on the first line and the new array
 # on the rest: only an id this start really added is recorded as this bot's.
-if [ -e "$pins" ]; then
+if [ -e "$pins" ] && grep -q '[^[:space:]]' "$pins" 2>/dev/null; then
   new=$(jq -rs --arg id "$id" --arg old "$old" '
     if length == 1 and (.[0] | type == "array" and all(.[]; type == "string")) then .[0]
       | if $old != "" and $old != $id then map(select(. != $old)) else . end
