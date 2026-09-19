@@ -679,11 +679,19 @@ prune_dead_sessions() {
   command -v jq >/dev/null 2>&1 || return 0
   if command -v timeout >/dev/null 2>&1; then t=(timeout 5); fi
   list=$(${t[@]+"${t[@]}"} "$bin" agents --json --all 2>/dev/null) || return 0
+  # jq's regex engine (Oniguruma) treats `$` as matching before a single
+  # trailing newline, so test("^[0-9a-fA-F]{8}$") alone lets an `.id` of
+  # "8705916e\n" through: measured, jq -n '"8705916e\n"|test("^[0-9a-fA-F]{8}$")'
+  # is true. Such a row would then take a cap slot from a real one, and its
+  # raw (-r) output, split on that same embedded newline in the shell loop
+  # below, would hand "8705916e" to `rm` for real. The length check closes
+  # that: "8705916e\n" is 9 characters, so length==8 rejects it before either
+  # of those happens.
   ids=$(printf '%s' "${list:-null}" | jq -r --arg n "$name" --arg cwd "$(pwd -P)" --arg keep "${resume_id:-}" '
     if type != "array" then empty else
       [ .[] | select(.name == $n and .cwd == $cwd
                      and (.state == "stopped" or .state == "done")
-                     and (.id|type) == "string" and (.id|test("^[0-9a-fA-F]{8}$"))
+                     and (.id|type) == "string" and (.id|length) == 8 and (.id|test("^[0-9a-fA-F]{8}$"))
                      and .sessionId != $keep and .id != ($keep | .[0:8])) ]
       | sort_by(.startedAt) | .[0:20][] | .id end' 2>/dev/null) || return 0
   [ -n "$ids" ] || return 0

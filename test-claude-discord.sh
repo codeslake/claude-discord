@@ -714,6 +714,23 @@ grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: a start with a newli
 [ "$(wc -l < "$HOME/rm.log")" -eq 20 ] || { echo "FAIL: a newline-joined id must never take a cap slot from a real row: got $(wc -l < "$HOME/rm.log") removed"; exit 1; }
 grep -qx face3019 "$HOME/rm.log" || { echo "FAIL: the newest real row must not be pushed out by the implausible phantom: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
 echo "ok: an id holding a newline never reaches rm and never takes a cap slot, filtered by shape before the cap"
+
+# jq's regex engine treats `$` as matching before a single trailing newline,
+# so an `.id` of exactly 8 hex characters plus one trailing newline (no
+# second half) would otherwise pass test("^[0-9a-fA-F]{8}$") alone, take a
+# cap slot, and split via -r into a bare "8705916e" line that DOES pass the
+# shell guard too, so it would really reach rm. A length check closes that.
+jq -n --arg cwd "$PDP" '[range(20) | (4000 + .) as $n
+   | {id:("feed" + ($n | tostring)), sessionId:("tn-cap-session-" + ($n | tostring)), kind:"background", name:"dead", cwd:$cwd,
+      state:"done", startedAt:(1758280000000 + . * 60000)}]
+  + [{id:"8705916e\n", sessionId:"tn-oldest-0000-4000-8000-00000000000c", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1}]' \
+  > "$HOME/agents.json"
+: > "$HOME/rm.log"
+start_dead
+grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: a start with a trailing-newline id row must still reach the exec: $out"; exit 1; }
+! grep -qF "8705916e" "$HOME/rm.log" || { echo "FAIL: an id of 8 hex characters plus a trailing newline must never reach rm: $(cat "$HOME/rm.log")"; exit 1; }
+grep -qx feed4019 "$HOME/rm.log" || { echo "FAIL: the newest real row must not be pushed out by the trailing-newline phantom: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+echo "ok: an id of 8 hex characters plus a trailing newline never reaches rm and never takes a cap slot"
 cp "$HOME/agents.full.json" "$HOME/agents.json"
 
 # The session the start is RESUMING is dead by the daemon's reckoning and in
