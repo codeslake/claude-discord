@@ -54,15 +54,17 @@ write_access() {  # $1 = bot dir, $2 = requireMention (true|false)
     > "$1/access.json"
 }
 
-# Registers this project's three Discord-turn hooks (identity/refresh on
-# every prompt, the reply flag, the checkmark reaction) in the project's own
-# settings.json, so a turn that arrived over Discord is answered through the
-# discord reply tool only, never also typed into the CLI. Each command
-# guards on [ -x ], so the settings file can be committed and shared, and a
-# machine without the hooks installed simply runs nothing. Idempotent per
-# entry: a missing file gets exactly the missing entries, an entry already
-# present means no write for it, and invalid JSON is warned about and left
-# alone -- registration must never fail the setup or the start it runs inside.
+# Registers this project's four Discord-turn hooks (identity/refresh, primed
+# once per session; the reply flag; the checkmark reaction; re-priming after
+# a compact/clear) in the project's own settings.json, so a turn that arrived
+# over Discord is answered through the discord reply tool only, never also
+# typed into the CLI. Each command guards on [ -x ], so the settings file can
+# be committed and shared, and a machine without the hooks installed simply
+# runs nothing. Idempotent per entry: a missing file gets exactly the missing
+# entries, an entry already present means no write for it, and invalid JSON
+# is warned about and left alone -- registration must never fail the setup or
+# the start it runs inside. Parallel arrays, not a packed "event|matcher|
+# script" string, because a matcher itself can contain "|" (compact|clear).
 register_hooks() {
   local settings=$PWD/.claude/settings.json
   local base='{}'
@@ -74,13 +76,12 @@ register_hooks() {
     base=$(cat "$settings")
     [ -n "$base" ] || base='{}'   # a 0-byte file passes `jq empty`; treat it as {}
   fi
-  local changed=0 entry event matcher script cmd merged
-  for entry in \
-    "UserPromptSubmit||turn/on-prompt" \
-    "PostToolUse|mcp__plugin_discord_discord__reply|turn/on-reply" \
-    "Stop||turn/on-stop"
-  do
-    IFS='|' read -r event matcher script <<<"$entry"
+  local events=(UserPromptSubmit PostToolUse Stop SessionStart)
+  local matchers=("" "mcp__plugin_discord_discord__reply" "" "compact|clear")
+  local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-compact)
+  local changed=0 i event matcher script cmd merged
+  for i in "${!events[@]}"; do
+    event=${events[i]}; matcher=${matchers[i]}; script=${scripts[i]}
     cmd="h=\"\$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/$script\"; [ ! -x \"\$h\" ] || \"\$h\""
     if printf '%s' "$base" | jq -e --arg ev "$event" --arg cmd "$cmd" \
         '[.hooks[$ev][]?.hooks[]?.command] | index($cmd) != null' >/dev/null 2>&1; then
@@ -109,7 +110,7 @@ register_hooks() {
     echo "claude-discord: could not register hooks in $settings, skipping" >&2
     return 0
   fi
-  if printf '%s' "$base" > "$settings.tmp.$$" 2>/dev/null && cat "$settings.tmp.$$" > "$settings" 2>/dev/null; then
+  if printf '%s\n' "$base" > "$settings.tmp.$$" 2>/dev/null && cat "$settings.tmp.$$" > "$settings" 2>/dev/null; then
     :
   else
     echo "claude-discord: could not register hooks in $settings, skipping" >&2
@@ -135,7 +136,7 @@ ensure_ack_reaction() {  # $1 = bot dir
     return 0
   fi
   merged=$(printf '%s' "$base" | jq '. + {ackReaction: "👀"}' 2>/dev/null) || merged=""
-  if [ -n "$merged" ] && printf '%s' "$merged" > "$f.tmp.$$" 2>/dev/null && cat "$f.tmp.$$" > "$f" 2>/dev/null; then
+  if [ -n "$merged" ] && printf '%s\n' "$merged" > "$f.tmp.$$" 2>/dev/null && cat "$f.tmp.$$" > "$f" 2>/dev/null; then
     :
   else
     echo "claude-discord: could not add ackReaction to $f, skipping" >&2
@@ -159,7 +160,10 @@ ensure_hooks_symlink() {
 
 if [ "${1:-}" = setup ]; then
   name=${2:?usage: claude-discord setup <name> [--reset]}
-  case $name in ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;; esac
+  case $name in
+    ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
+    hooks) echo "claude-discord: bot name 'hooks' is reserved for the hooks directory" >&2; exit 2;;
+  esac
   umask 077
   # --reset forgets this bot's token and access policy AND the shared IDs, so
   # every prompt is asked again; other bots keep their own files.
@@ -218,7 +222,10 @@ if [ -z "$name" ]; then
     *) echo "claude-discord: this directory has several bots (${bots[*]}); name the one to start" >&2; exit 2;;
   esac
 fi
-case $name in ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;; esac
+case $name in
+  ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
+  hooks) echo "claude-discord: bot name 'hooks' is reserved for the hooks directory" >&2; exit 2;;
+esac
 dir=$root/$name
 if [ ! -f "$dir/.env" ] || [ ! -f "$root/config.env" ]; then
   echo "claude-discord: no bot '$name' under $root; run 'claude-discord setup $name' in this directory first" >&2
@@ -255,7 +262,7 @@ The human reaches you there by @mentioning or replying to your bot; answer with 
 Bots cannot hear each other on Discord, so talk to other agents with ListAgents and SendMessage, addressing them by session name. \
 Mirror every message you send to or receive from another agent into that channel as one line ('-> name: ...' or '<- name: ...') so the human can follow and step in. \
 The human's instructions override any agent's. \
-Other bots in the channel can hear you."
+Other bots in the channel can hear you. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply."
 
 # The state dir goes in BOTH the environment and --settings env. /bg (and
 # `claude --bg`) respawn the session under the daemon from its CLI flags alone,
@@ -314,6 +321,13 @@ run=("$bin")
 [ -n "$launcher" ] && run=("$launcher" "$bin")
 ensure_hooks_symlink
 register_hooks
+# worktree.bgIsolation "none" turns off Claude Code's background-isolation
+# guard for this session: measured on two machines, a session started with
+# --bg is refused Edit/Write in the checkout by that guard while a session
+# moved to the background with /bg from the foreground is not. A bot editing
+# its own project should behave like the /bg case either way it got there,
+# and this needs no change to the project's own settings.json. Inert for a
+# foreground start.
 exec "${run[@]}" --channels "plugin:$plugin" \
-  --settings "{\"enabledPlugins\": {\"$plugin\": true}, \"env\": {\"DISCORD_STATE_DIR\": \"$dir\"}}" \
+  --settings "{\"enabledPlugins\": {\"$plugin\": true}, \"env\": {\"DISCORD_STATE_DIR\": \"$dir\"}, \"worktree\": {\"bgIsolation\": \"none\"}}" \
   -n "$name" --append-system-prompt "$prompt" ${args[@]+"${args[@]}"}

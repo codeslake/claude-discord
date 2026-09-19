@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# SessionStart hook (matcher: compact|clear): after a context compaction or
+# /clear, the identity/rules context on-prompt injected once per session is
+# gone from the transcript, so let the next Discord turn inject it again.
+# Must never block or fail a turn: any failure is silent success.
+set -u
+. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+
+session_id=$(jq -r '.session_id // empty' 2>/dev/null) || exit 0
+[ -n "$session_id" ] && [ -n "$bot_name" ] || exit 0
+rm -f "$DISCORD_STATE_DIR/turns/$session_id.primed" 2>/dev/null
+exit 0

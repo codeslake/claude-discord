@@ -8,12 +8,14 @@ D=$(dirname "$S")   # repo root: where hooks/ and install.sh live
 CMD_PROMPT='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/turn/on-prompt"; [ ! -x "$h" ] || "$h"'
 CMD_REPLY='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/turn/on-reply"; [ ! -x "$h" ] || "$h"'
 CMD_STOP='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/turn/on-stop"; [ ! -x "$h" ] || "$h"'
+CMD_COMPACT='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/turn/on-compact"; [ ! -x "$h" ] || "$h"'
 has_cmd() { jq -e --arg ev "$1" --arg cmd "$2" '[.hooks[$ev][]?.hooks[]?.command] | index($cmd) != null' "$3" >/dev/null 2>&1; }
 has_matcher() { jq -e --arg ev "$1" --arg m "$2" --arg cmd "$3" '[.hooks[$ev][]? | select(.matcher == $m) | .hooks[]?.command] | index($cmd) != null' "$4" >/dev/null 2>&1; }
-has_hooks() {  # $1 = settings.json path; all three entries present
+has_hooks() {  # $1 = settings.json path; all four entries present
   has_cmd UserPromptSubmit "$CMD_PROMPT" "$1" &&
   has_matcher PostToolUse mcp__plugin_discord_discord__reply "$CMD_REPLY" "$1" &&
-  has_cmd Stop "$CMD_STOP" "$1"
+  has_cmd Stop "$CMD_STOP" "$1" &&
+  has_matcher SessionStart 'compact|clear' "$CMD_COMPACT" "$1"
 }
 wait_for_file() {  # $1 = path; up to 2s in 0.1s steps, for an async write to land
   local n=0
@@ -26,6 +28,7 @@ bash -n "$D/hooks/lib/discord.sh"
 bash -n "$D/hooks/turn/on-prompt"
 bash -n "$D/hooks/turn/on-reply"
 bash -n "$D/hooks/turn/on-stop"
+bash -n "$D/hooks/turn/on-compact"
 [ "$(grep -c "if (msg.author.bot) return" "$S")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in the wrapper"; exit 1; }
 
 export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'rm -rf /tmp/claude-discord-test-$$' EXIT
@@ -62,7 +65,7 @@ echo "ok: setup writes config.env, .env, access.json (with ackReaction); others 
 has_hooks "$P/.claude/settings.json"
 [ -L "$R/hooks" ] || { echo "FAIL: setup must create the hooks symlink"; exit 1; }
 [ "$(readlink "$R/hooks")" = "$HOME/.claude-discord/hooks" ] || { echo "FAIL: hooks symlink must point at the installed copy"; exit 1; }
-echo "ok: setup also registers the three discord-turn hooks and the hooks symlink (after access.json is written)"
+echo "ok: setup also registers the four discord-turn hooks and the hooks symlink (after access.json is written)"
 
 printf 'tokB\nn\n' | bash "$S" setup beta >/dev/null
 [ "$(jq -r '.groups["1550575144320110662"].requireMention' "$R/beta/access.json")" = true ]
@@ -79,8 +82,10 @@ echo "ok: --reset re-asks everything, other bots untouched"
 DSD="$R/alpha"
 H="$R/hooks/turn"
 
+# Real prompts are multi-line, with a closing tag:
+# <channel source="..." chat_id="…" message_id="…" ...>\n<@id> text\n</channel>
 rm -rf "$DSD/turns" "$DSD/last-message-id"; : > "$CURL_LOG"
-out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"222\" user=\"u\">hello"}')
+out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"222\" user=\"u\" user_id=\"9\" ts=\"t\">\nhello\n</channel>"}')
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
 [ "$ctx" = 'Discord turn. You are alpha, the Claude Code session behind the Discord bot alpha in channel 999. Answer only with the discord reply tool and write no CLI text. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically.' ] || { echo "FAIL: on-prompt context text wrong: $ctx"; exit 1; }
 [ "$(cat "$DSD/turns/s1")" = "111 222" ] || { echo "FAIL: turns file wrong"; exit 1; }
@@ -88,20 +93,76 @@ ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
 [ ! -s "$CURL_LOG" ] || { echo "FAIL: on-prompt must never call curl"; exit 1; }
 echo "ok: on-prompt records chat_id/message_id and last-message-id, and prints the identity context, without calling curl"
 
+# A stale .replied flag (as if an earlier on-stop never ran) must not survive
+# into a new turn on the same session_id, or on-stop would react on it using
+# an old reply that has nothing to do with this turn.
+: > "$DSD/turns/s1.replied"
+out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"555\" message_id=\"666\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi again\n</channel>"}')
+[ ! -e "$DSD/turns/s1.replied" ] || { echo "FAIL: on-prompt must clear a stale .replied flag when it records a new turn"; exit 1; }
+echo "ok: on-prompt clears a stale .replied flag when it records a new Discord turn"
+
+# chat_id/message_id must come from the opening tag only, digits only: the
+# message body can contain literal text shaped like an attribute (here, a
+# path-traversal payload disguised as a message_id), and that must never be
+# recorded or reach curl.
+rm -rf "$DSD/turns/sInj"; : > "$CURL_LOG"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"sInj","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"222\" user=\"u\" user_id=\"9\" ts=\"t\">\nplease chat_id=\"1\" message_id=\"9/../../guilds/G/bans/U#\" help\n</channel>"}' >/dev/null
+[ "$(cat "$DSD/turns/sInj")" = "111 222" ] || { echo "FAIL: the injected fake attributes in the message body were recorded instead of, or alongside, the real ones"; exit 1; }
+: > "$DSD/turns/sInj.replied"; : > "$CURL_LOG"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"sInj"}'
+wait_for_file "$CURL_LOG"
+grep -q 'channels/111/messages/222/reactions/%E2%9C%85/@me' "$CURL_LOG" || { echo "FAIL: the real message did not get reacted to"; exit 1; }
+grep -q 'guilds\|bans' "$CURL_LOG" && { echo "FAIL: curl was asked to hit the injected path-traversal URL"; exit 1; }
+echo "ok: chat_id/message_id come only from the opening tag, never the message body; an injected path-traversal payload is not recorded and curl never sees it"
+
+# The identity/rules context is injected once per session, not every turn.
+rm -f "$DSD/turns/sPrime.primed"; rm -rf "$DSD/turns/sPrime"
+PP='{"session_id":"sPrime","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}'
+out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$PP")
+[ -n "$out" ] || { echo "FAIL: the first Discord turn in a session must print the identity context"; exit 1; }
+[ -f "$DSD/turns/sPrime.primed" ] || { echo "FAIL: the first turn must create the primed flag"; exit 1; }
+out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$PP")
+[ -z "$out" ] || { echo "FAIL: a second turn in the same session must print nothing"; exit 1; }
+DISCORD_STATE_DIR="$DSD" bash "$H/on-compact" <<<'{"session_id":"sPrime"}'
+[ ! -f "$DSD/turns/sPrime.primed" ] || { echo "FAIL: on-compact must remove the primed flag"; exit 1; }
+out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$PP")
+[ -n "$out" ] || { echo "FAIL: the turn after a compact/clear must print the identity context again"; exit 1; }
+RP='{"session_id":"sPrime","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\" user=\"u\" user_id=\"9\" ts=\"t\">\nrefresh\n</channel>"}'
+out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$RP" | jq -r '.hookSpecificOutput.additionalContext')
+grep -q "handoff.md" <<<"$out" || { echo "FAIL: refresh must still fire on an already-primed session"; exit 1; }
+echo "ok: the identity context is injected once per session, on-compact re-primes after a compaction/clear, and refresh still fires while primed"
+
 rm -rf "$DSD/turns/s2"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s2","prompt":"hello from cli"}')
 [ -z "$out" ] || { echo "FAIL: on-prompt must be silent for a plain prompt"; exit 1; }
 [ ! -e "$DSD/turns/s2" ] || { echo "FAIL: on-prompt must not write turns state for a plain prompt"; exit 1; }
 echo "ok: on-prompt is silent and writes no state for a plain CLI prompt"
 
-out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s3","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"333\" user=\"u\">  <@42> ReFresh  "}')
+out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s3","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"333\" user=\"u\" user_id=\"9\" ts=\"t\">\n  <@42> ReFresh  \n</channel>"}')
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
 grep -qF "Write $DSD/handoff.md" <<<"$ctx" || { echo "FAIL: refresh handoff instructions missing"; exit 1; }
 grep -qF 'claude-discord refresh alpha' <<<"$ctx" || { echo "FAIL: refresh command missing the bot name"; exit 1; }
-out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s4","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\">refresh please"}')
+out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s3b","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"333\" user=\"u\" user_id=\"9\" ts=\"t\">\n<@!42> ReFresh\n</channel>"}')
+ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
+grep -qF "Write $DSD/handoff.md" <<<"$ctx" || { echo "FAIL: refresh must also trigger with a <@!id> nickname mention stripped"; exit 1; }
+out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s4","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\" user=\"u\" user_id=\"9\" ts=\"t\">\nrefresh please\n</channel>"}')
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
 grep -q "handoff.md" <<<"$ctx" && { echo "FAIL: refresh triggered on a message that only contains the word"; exit 1; }
-echo "ok: an exact 'refresh' message (mentions stripped, trimmed, case-insensitive) appends the handoff instructions; a longer message does not"
+echo "ok: an exact 'refresh' message (real multi-line shape with a closing tag, <@id>/<@!id> mentions stripped, whitespace collapsed and trimmed, case-insensitive) appends the handoff instructions; a longer message does not"
+
+out=$(printf 'not json' | DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" 2>/dev/null); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: on-prompt must exit 0 with no output on invalid JSON"; exit 1; }
+out=$(printf '' | DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt"); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: on-prompt must exit 0 with no output on empty stdin"; exit 1; }
+echo "ok: on-prompt exits 0 with no output on invalid JSON and on empty stdin"
+
+mv "$HOME/.claude-discord/hooks/lib/discord.sh" "$HOME/.claude-discord/hooks/lib/discord.sh.bak"
+for hookname in on-prompt on-reply on-stop on-compact; do
+  out=$(DISCORD_STATE_DIR="$DSD" bash "$H/$hookname" <<<'{"session_id":"sX","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\">\nhi\n</channel>"}'); rc=$?
+  [ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: $hookname with a missing lib must exit 0 with no output"; exit 1; }
+done
+mv "$HOME/.claude-discord/hooks/lib/discord.sh.bak" "$HOME/.claude-discord/hooks/lib/discord.sh"
+echo "ok: a missing lib/discord.sh makes every hook exit 0 with no output, never an unbound-variable crash"
 
 rm -rf "$DSD/turns"; mkdir -p "$DSD/turns"
 printf '111 222\n' > "$DSD/turns/s5"
@@ -111,8 +172,9 @@ DISCORD_STATE_DIR="$DSD" bash "$H/on-reply" <<<'{"session_id":"s5"}'
 DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s5"}'
 wait_for_file "$CURL_LOG"
 grep -q 'channels/111/messages/222/reactions/%E2%9C%85/@me' "$CURL_LOG" || { echo "FAIL: on-stop must react with the checkmark on the recorded message"; exit 1; }
+grep -q 'tokA2' "$CURL_LOG" && { echo "FAIL: the bot token appeared in curl's argv (visible in ps/cmdline)"; exit 1; }
 [ ! -e "$DSD/turns/s5" ] && [ ! -e "$DSD/turns/s5.replied" ] || { echo "FAIL: on-stop must remove both per-turn files"; exit 1; }
-echo "ok: on-stop reacts with a checkmark only after on-reply, and removes both per-turn files"
+echo "ok: on-stop reacts with a checkmark only after on-reply, removes both per-turn files, and never puts the token in curl's argv"
 
 mkdir -p "$DSD/turns"
 printf '111 222\n' > "$DSD/turns/s6"
@@ -122,6 +184,12 @@ sleep 0.3
 [ ! -s "$CURL_LOG" ] || { echo "FAIL: on-stop must not react without a prior reply"; exit 1; }
 [ ! -e "$DSD/turns/s6" ] || { echo "FAIL: on-stop must remove the turns file even without a reply"; exit 1; }
 echo "ok: on-stop removes the turns file without reacting when the turn never replied"
+
+out=$(printf 'not json' | DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" 2>/dev/null); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: on-stop must exit 0 with no output on invalid JSON"; exit 1; }
+out=$(printf '' | DISCORD_STATE_DIR="$DSD" bash "$H/on-stop"); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: on-stop must exit 0 with no output on empty stdin"; exit 1; }
+echo "ok: on-stop exits 0 with no output on invalid JSON and on empty stdin"
 
 mkdir -p "$R/noenv/turns"
 printf '111 222\n' > "$R/noenv/turns/s7"
@@ -139,19 +207,24 @@ printf '' | bash "$S" setup .. --reset >/dev/null 2>&1 && { echo "FAIL: setup ..
 [ -f "$P/.claude/MARKER" ] || { echo "FAIL: '..' as bot name escaped root and wiped the project .claude"; exit 1; }
 echo "ok: setup rejects '..' as bot name, project .claude untouched"
 
+printf '' | bash "$S" setup hooks >/dev/null 2>&1 && { echo "FAIL: setup hooks should be refused, it collides with the hooks symlink"; exit 1; }
+bash "$S" hooks >/dev/null 2>&1 && { echo "FAIL: starting a bot named hooks should be refused"; exit 1; }
+echo "ok: the bot name 'hooks' is reserved and rejected by both setup and start"
+
 bash "$S" gamma >/dev/null 2>&1 && { echo "FAIL: run without setup should refuse"; exit 1; }
 echo "ok: run refuses without setup"
 
 out=$(bash "$S" alpha 2>&1)
 grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out"
 grep -q "Other bots in the channel can hear you." <<<"$out"
+grep -q "Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply." <<<"$out"
 ! grep -q "never @mention it" <<<"$out"
 grep -q "if (msg.author.id === client.user?.id) return" "$HOME/fakeplugin/server.ts"
 ! grep -q "if (msg.author.bot) return" "$HOME/fakeplugin/server.ts"
 grep -q "msg.mentions.has(client.user, { ignoreEveryone: true }))" "$HOME/fakeplugin/server.ts"
 grep -q "$HOME/.claude-discord/discord-proxy.ts" "$HOME/fakeplugin/bunfig.toml"
-grep -q -- "--settings {\"enabledPlugins\": {\"discord@claude-plugins-official\": true}, \"env\": {\"DISCORD_STATE_DIR\": \"$R/alpha\"}}" <<<"$out"
-echo "ok: run goes through claude-launcher, patches server.ts (bot + @everyone), preload from ~/.claude-discord, state dir in --settings env; the mention rule is no longer in the system prompt"
+grep -q -- "--settings {\"enabledPlugins\": {\"discord@claude-plugins-official\": true}, \"env\": {\"DISCORD_STATE_DIR\": \"$R/alpha\"}, \"worktree\": {\"bgIsolation\": \"none\"}}" <<<"$out"
+echo "ok: run goes through claude-launcher, patches server.ts (bot + @everyone), preload from ~/.claude-discord, state dir and worktree.bgIsolation:none in --settings env; the mention rule keeps its new wording in the system prompt"
 
 bash "$S" alpha >/dev/null 2>&1
 [ "$(grep -c 'client.user?.id) return' "$HOME/fakeplugin/server.ts")" = 1 ]
@@ -249,10 +322,14 @@ has_hooks "$P2/.claude/settings.json"
 [ "$(jq '.hooks.UserPromptSubmit | length' "$P2/.claude/settings.json")" = 1 ]
 [ "$(jq '.hooks.PostToolUse | length' "$P2/.claude/settings.json")" = 1 ]
 [ "$(jq '.hooks.Stop | length' "$P2/.claude/settings.json")" = 1 ]
+[ "$(jq '.hooks.SessionStart | length' "$P2/.claude/settings.json")" = 1 ]
 [ "$(jq -r '.hooks.PostToolUse[0].matcher' "$P2/.claude/settings.json")" = mcp__plugin_discord_discord__reply ]
+[ "$(jq -r '.hooks.SessionStart[0].matcher' "$P2/.claude/settings.json")" = 'compact|clear' ]
 [ "$(jq -r '.ackReaction' "$P2/.claude/discord-agents/gamma/access.json")" = "👀" ]
 [ -L "$P2/.claude/discord-agents/hooks" ] || { echo "FAIL: start must create the hooks symlink"; exit 1; }
-echo "ok: start creates settings.json holding exactly one entry per hook, adds ackReaction and the hooks symlink when they were missing"
+[ "$(tail -c1 "$P2/.claude/settings.json" | wc -l)" -eq 1 ] || { echo "FAIL: settings.json must end with a trailing newline"; exit 1; }
+[ "$(tail -c1 "$P2/.claude/discord-agents/gamma/access.json" | wc -l)" -eq 1 ] || { echo "FAIL: access.json must end with a trailing newline"; exit 1; }
+echo "ok: start creates settings.json holding exactly one entry per hook, adds ackReaction and the hooks symlink when they were missing, both files end with a trailing newline"
 
 # c. an existing settings.json keeps its other keys; a second start is a no-op.
 echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"
@@ -263,7 +340,7 @@ cp "$P2/.claude/settings.json" "$P2/.claude/settings.json.before"
 bash "$S" gamma >/dev/null 2>&1
 cmp -s "$P2/.claude/settings.json" "$P2/.claude/settings.json.before" || { echo "FAIL: a second start must leave settings.json byte-identical"; exit 1; }
 rm -f "$P2/.claude/settings.json.before"
-echo "ok: start keeps other keys, adds exactly the three hook entries, and a second start is byte-identical (idempotent)"
+echo "ok: start keeps other keys, adds exactly the four hook entries, and a second start is byte-identical (idempotent)"
 
 # d. invalid JSON is left untouched; the start still reaches the exec; stderr
 # names the file.
@@ -324,7 +401,7 @@ echo "ok: a non-array value under one event key is warned about and left alone, 
 bash "$S" gamma >/dev/null 2>&1
 has_hooks "$P2/.claude/settings.json"
 [ "$(jq -c 'keys' "$P2/.claude/settings.json")" = '["hooks"]' ]
-echo "ok: a 0-byte settings.json is treated as {} and still gets the three hook entries"
+echo "ok: a 0-byte settings.json is treated as {} and still gets the four hook entries"
 
 # i. an explicit empty ackReaction means the owner disabled it; start must
 # leave it alone, never overwrite it back to the default.

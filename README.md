@@ -116,26 +116,34 @@ passed through and claude decides.
 
 A message that arrives over Discord should be answered through the discord
 reply tool only, not also typed into the CLI (that would waste a reply on a
-channel nobody types into). Three hooks handle that, plus identity, a
+channel nobody types into). Four hooks handle that, plus identity, a
 "refresh" handoff trigger, and a ✅ reaction once a turn actually replies.
 Each entry in `.claude/settings.json` execs the script directly
 (`h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/<topic>/<name>"; [ ! -x "$h" ] || "$h"`),
 so a machine without the hooks installed simply runs nothing. Scripts live
 under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
-`lib/discord.sh` is sourced by the three below it, not registered itself.
+`lib/discord.sh` is sourced by the four below it, not registered itself.
 
 | Event | Matcher | Script | What |
 |---|---|---|---|
-| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn, records the message's chat_id/message_id for `on-stop` and adds an additionalContext entry with the bot's identity and the mention rule; silent on a plain CLI turn. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>`. |
+| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn, records the message's chat_id/message_id for `on-stop` and, once per session (see below), adds an additionalContext entry with the bot's identity and the mention rule; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply. |
 | Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it; always clears the per-turn files either way. |
+| SessionStart | `compact|clear` | `turn/on-compact` | Clears the per-session "primed" flag, so the next Discord turn injects the identity context again. |
 
-Both `setup` and the start path register all three, so a bot set up before
+Both `setup` and the start path register all four, so a bot set up before
 this existed gets them on its next start too. Registration is idempotent per
 entry and leaves every other key in `.claude/settings.json` alone; a session
 already running picks up a hook added to its settings file without a
-restart. To remove them, delete their three entries from `.hooks` in
+restart. To remove them, delete their four entries from `.hooks` in
 `.claude/settings.json`.
+
+The identity/mention-rule context is long, so `on-prompt` injects it once per
+session (a `turns/<session_id>.primed` marker), not on every turn -- a
+compaction or `/clear` drops it from the transcript, which is what
+`on-compact` is for. The "refresh" handoff still fires on every matching
+message regardless of the primed state, since it is a specific command, not
+boilerplate.
 
 Both also make `.claude/discord-agents/hooks` in the project a symlink to
 `~/.claude-discord/hooks/` (only when that path is absent or already a
@@ -178,12 +186,22 @@ environment; measured 2026-09-18, a fork made by `/bg` had no
 
 - The `/bg` fork does not carry `--append-system-prompt`, so the identity
   paragraph from the system prompt is gone after `/bg`. `on-prompt` re-adds
-  identity and the mention rule on every Discord turn regardless, so this
-  only matters for a turn typed straight into the CLI after `/bg`. The
-  transcript still holds everything said so far.
+  identity and the mention rule on the next Discord turn regardless (once per
+  session, see Hooks above), so this only matters for a turn typed straight
+  into the CLI after `/bg`. The transcript still holds everything said so far.
 - One token, one session. After `/bg` the foreground REPL exits; do not start
   `claude-discord alpha` again while the background copy runs, or both answer
   every mention.
+- Every start also sets `worktree.bgIsolation: "none"` in `--settings`,
+  turning off Claude Code's background-isolation guard for claude-discord
+  sessions only: measured on two machines, a session started with `--bg` was
+  otherwise refused Edit/Write in the project checkout by that guard, while a
+  session moved to the background with `/bg` from the foreground was not --
+  this makes a `--bg` start behave the same way `/bg` does, without any
+  change to the project's own settings.json. Edits land in the working copy
+  instead of an isolated worktree, which is the point for a bot editing its
+  own project. It is inert for a foreground start, and a session already
+  running keeps whatever flags it started with until relaunched.
 
 ## Behind a corporate proxy
 

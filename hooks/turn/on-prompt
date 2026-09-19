@@ -2,12 +2,11 @@
 # UserPromptSubmit hook: a turn that arrived over Discord (the transcript
 # wraps it in a <channel source="plugin:discord:discord" ...> tag) must be
 # answered through the discord reply tool only, not also typed into the CLI.
-# Also records the turn's chat_id/message_id pairs so on-stop can react to
-# them, and offers a "refresh" handoff trigger. Must never block or fail a
-# turn: any parse failure, missing field or unrelated prompt is silent
-# success.
+# Also records the turn's chat_id/message_id so on-stop can react to it, and
+# offers a "refresh" handoff trigger. Must never block or fail a turn: any
+# parse failure, missing field or unrelated prompt is silent success.
 set -u
-. "$(dirname "$0")/../lib/discord.sh"
+. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
 
 input=$(cat 2>/dev/null) || exit 0
 prompt=$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null) || exit 0
@@ -19,35 +18,61 @@ esac
 
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
 
-# Record every chat_id/message_id pair so on-stop can react to each once the
-# turn is done.
-pairs=$(printf '%s' "$prompt" | grep -oE 'chat_id="[^"]*" message_id="[^"]*"' 2>/dev/null |
-        sed -E 's/chat_id="([^"]*)" message_id="([^"]*)"/\1 \2/') || pairs=""
-if [ -n "$pairs" ] && [ -n "$session_id" ] && mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; then
-  while IFS=' ' read -r chat_id message_id; do
-    [ -n "$chat_id" ] && [ -n "$message_id" ] || continue
-    printf '%s %s\n' "$chat_id" "$message_id" >> "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null || :
-    printf '%s\n' "$message_id" > "$DISCORD_STATE_DIR/last-message-id" 2>/dev/null || :
-  done <<PAIRS
-$pairs
-PAIRS
+# ids come from the opening tag ONLY -- everything up to its closing '>' --
+# never from the free-form message body that follows. A message can contain
+# literal text that looks like an attribute (a path-traversal payload
+# disguised as a message_id), and scanning the whole prompt would pick that
+# up too. Digits only, on top of that; react() also refuses a non-numeric id.
+tag=${prompt%%>*}
+pair=$(printf '%s' "$tag" | grep -oE 'chat_id="[0-9]+" message_id="[0-9]+"' | head -1)
+chat_id="" message_id=""
+if [ -n "$pair" ]; then
+  chat_id=$(printf '%s' "$pair" | sed -E 's/chat_id="([0-9]+)".*/\1/')
+  message_id=$(printf '%s' "$pair" | sed -E 's/.*message_id="([0-9]+)"/\1/')
+fi
+if [ -n "$chat_id" ] && [ -n "$message_id" ] && [ -n "$session_id" ] && mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; then
+  # A turn that is only just starting hasn't replied yet; a stale flag here
+  # means an earlier on-stop never ran.
+  rm -f "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
+  printf '%s %s\n' "$chat_id" "$message_id" >> "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null || :
+  printf '%s\n' "$message_id" > "$DISCORD_STATE_DIR/last-message-id" 2>/dev/null || :
 fi
 
-context="Discord turn. You are $bot_name, the Claude Code session behind the Discord bot $bot_name in channel $bot_channel. Answer only with the discord reply tool and write no CLI text. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically."
+# The identity/rules preamble is injected once per session, not on every
+# turn (it is long, and repeating it every turn wastes context): only when
+# turns/<session_id>.primed does not exist yet. on-compact deletes that file
+# after a compaction or /clear, so the next Discord turn re-primes.
+context=""
+primed="$DISCORD_STATE_DIR/turns/$session_id.primed"
+if [ -n "$session_id" ] && [ ! -f "$primed" ]; then
+  context="Discord turn. You are $bot_name, the Claude Code session behind the Discord bot $bot_name in channel $bot_channel. Answer only with the discord reply tool and write no CLI text. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically."
+  mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null && : > "$primed" 2>/dev/null
+fi
 
-# "refresh", case-insensitive, once the tag and any @mentions are stripped.
-text=$(printf '%s' "${prompt#*>}" | sed -E 's/<@[0-9]+>//g; s/^[[:space:]]+//; s/[[:space:]]+$//' | tr '[:upper:]' '[:lower:]')
+# "refresh", case-insensitive, once the opening tag and the closing
+# </channel> tag are stripped, any @mentions (<@id> or <@!id>) are removed,
+# and whitespace (the tag/body are on separate lines) is collapsed and
+# trimmed. Fires on every "refresh" message regardless of the primed state,
+# since it is a specific command, not boilerplate.
+t=${prompt#*>}
+t=${t%</channel>*}
+text=$(printf '%s' "$t" | sed -E 's/<@!?[0-9]+>//g' | tr -s '[:space:]' ' ' | sed -E 's/^ +//; s/ +$//' | tr '[:upper:]' '[:lower:]')
 if [ "$text" = refresh ]; then
-  context="$context
-
-A refresh was requested: you will be replaced by a fresh session with an empty context, and the only thing that reaches it is the file you write now. Write $DISCORD_STATE_DIR/handoff.md, overwriting it, with exactly these sections:
+  refresh_text="A refresh was requested: you will be replaced by a fresh session with an empty context, and the only thing that reaches it is the file you write now. Write $DISCORD_STATE_DIR/handoff.md, overwriting it, with exactly these sections:
 # handoff — $bot_name · <ISO timestamp>
 ## Unanswered — who asked (Discord handle), what, when, message link if known. One line each. Someone is waiting.
 ## In flight — work you started and where it actually stands. Mark each claim [verified] or [assumed]; the next session treats this file as fact.
 ## Decisions — decision: why. The reasoning, not just the outcome.
 ## Next — what the fresh session should do first.
 Leave a section out if genuinely empty; do not pad. Channel conventions are already injected, do not restate them. Redact tokens and anything personal. Then run \`claude-discord refresh $bot_name\` and say nothing else."
+  if [ -n "$context" ]; then
+    context="$context
+
+$refresh_text"
+  else
+    context=$refresh_text
+  fi
 fi
 
-jq -nc --arg ctx "$context" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:$ctx}}' 2>/dev/null
+[ -n "$context" ] && jq -nc --arg ctx "$context" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:$ctx}}' 2>/dev/null
 exit 0

@@ -24,17 +24,21 @@ if [ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ]; then
 fi
 
 # react <chat_id> <message_id> <url-encoded emoji>
-# PUTs the reaction via curl, fully detached (stdin/stdout/stderr redirected,
-# backgrounded) so the caller returns before the HTTP call finishes. curl
-# honours HTTPS_PROXY on its own; nothing extra is needed for that. A no-op
-# when there is no token (covers a missing state dir too, since bot_token
-# stays empty then) or no curl on PATH.
+# PUTs the reaction via curl, fully detached (stdout/stderr redirected,
+# backgrounded) so the caller returns before the HTTP call finishes. The
+# token goes over curl's stdin (-H @-), never argv, so it never shows up in
+# ps/cmdline. curl honours HTTPS_PROXY on its own; nothing extra is needed
+# for that. A no-op when there is no token (covers a missing state dir too,
+# since bot_token stays empty then), no curl on PATH, or either id is not
+# all digits -- ids reach here from prompt text, and a non-numeric id could
+# turn the URL into a path to a different API endpoint.
 react() {
+  case $1 in ''|*[!0-9]*) return 0;; esac
+  case $2 in ''|*[!0-9]*) return 0;; esac
   [ -n "$bot_token" ] || return 0
   command -v curl >/dev/null 2>&1 || return 0
-  curl -s -m 5 -X PUT \
-    -H "Authorization: Bot $bot_token" \
+  printf 'Authorization: Bot %s\n' "$bot_token" | curl -s -m 5 -X PUT -H @- \
     "https://discord.com/api/v10/channels/$1/messages/$2/reactions/$3/@me" \
-    </dev/null >/dev/null 2>&1 &
+    >/dev/null 2>&1 &
   disown 2>/dev/null || :
 }
