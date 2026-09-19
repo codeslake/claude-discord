@@ -328,12 +328,17 @@ takes_value() {
 # to catch up from the channel history.
 if [ "${1:-}" = refresh ]; then
   shift
-  force=no; fresh=()
-  for a in "$@"; do case $a in --force) force=yes;; *) fresh+=("$a");; esac; done
-  name="" skip=0
-  for a in ${fresh[@]+"${fresh[@]}"}; do
-    if [ "$skip" = 1 ]; then skip=0; continue; fi
-    case $a in -*) takes_value "$a" && skip=1 || :;; *) name=$a; break;; esac
+  # The name is kept out of the claude args so the launch below can be given
+  # it explicitly, whether it came from the command line or from the
+  # environment: with two bots in the project the launcher cannot guess.
+  force=no; fresh=() name="" skip=0
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then fresh+=("$a"); skip=0; continue; fi
+    case $a in
+      --force) force=yes;;
+      -*) fresh+=("$a"); takes_value "$a" && skip=1 || :;;
+      *)  if [ -z "$name" ]; then name=$a; else fresh+=("$a"); fi;;
+    esac
   done
   # The session runs this from its own Bash, whose cwd has usually wandered
   # off the project by now. Its environment still says where the state is
@@ -355,8 +360,9 @@ if [ "${1:-}" = refresh ]; then
   if [ "${CLAUDE_DISCORD_REFRESH_CHILD:-}" != 1 ]; then
     # Re-run this same command detached: `claude stop` below kills the session
     # that is very likely running us, and its whole process group with it.
+    # perl's setsid rather than setsid(1): macOS ships perl but no setsid.
     export CLAUDE_DISCORD_REFRESH_CHILD=1
-    setsid nohup "$0" refresh "$@" > "$dir/refresh.log" 2>&1 < /dev/null &
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- nohup "$0" refresh "$@" > "$dir/refresh.log" 2>&1 < /dev/null &
     echo "claude-discord: refreshing $name in the background; progress in $dir/refresh.log"
     exit 0
   fi
@@ -366,7 +372,7 @@ if [ "${1:-}" = refresh ]; then
   # background session has an id for `claude stop`; a foreground one has only
   # a pid, and SIGTERM is what closing its terminal would send.
   live=$(claude agents --json 2>/dev/null |
-    jq -r --arg n "$name" --arg cwd "$PWD" \
+    jq -r --arg n "$name" --arg cwd "$(pwd -P)" \
       '.[] | select(.name == $n and .cwd == $cwd and .pid != null) | "\(.id // "-") \(.pid)"') || live=""
   if [ -z "$live" ]; then
     # Nothing to stop means either the bot is down or it is running somewhere
@@ -392,7 +398,8 @@ if [ "${1:-}" = refresh ]; then
   # a fresh gateway login while the old one is still up gets both dropped.
   [ -n "$live" ] && sleep 3
   echo "claude-discord: starting $name"
-  exec "$0" --bg ${fresh[@]+"${fresh[@]}"}
+  unset CLAUDE_DISCORD_REFRESH_CHILD   # the fresh session's own refresh must fork again
+  exec "$0" --bg "$name" ${fresh[@]+"${fresh[@]}"}
 fi
 
 args=() name="" skip=0
