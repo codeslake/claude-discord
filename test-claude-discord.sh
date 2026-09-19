@@ -35,11 +35,11 @@ bash -n "$D/hooks/peers/mention-guard"
 bash -n "$D/hooks/peers/checkin"
 bash -n "$D/hooks/peers/edit-gate"
 bash -n "$D/hooks/autoresearchclaw/on-start"
-bash -n "$D/hooks/autoresearchclaw/watch"
+bash -n "$D/hooks/autoresearchclaw/events"
 [ "$(grep -c "if (msg.author.bot) return" "$S")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in the wrapper"; exit 1; }
 unset DISCORD_STATE_DIR   # a session running this test would otherwise point refresh at its own bot
-# KILL_AT_EXIT: pids this test started (fake workers, watchers), so a failed
-# assertion cannot leave one running.
+# KILL_AT_EXIT: pids this test started (fake workers), so a failed assertion
+# cannot leave one running.
 KILL_AT_EXIT=""
 export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'kill $KILL_AT_EXIT 2>/dev/null || :; rm -rf /tmp/claude-discord-test-$$' EXIT
 mkdir -p "$HOME/.claude/plugins" "$HOME/fakeplugin" "$HOME/bin"
@@ -49,55 +49,38 @@ printf '#!/bin/bash\necho "LAUNCHER $*"\n' > "$HOME/bin/claude-launcher"; chmod 
 printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
 CURL_LOG="$HOME/curl.log"; : > "$CURL_LOG"
 CURL_STDIN_LOG="$HOME/curl.stdin.log"; : > "$CURL_STDIN_LOG"
-CURL_BODY_LOG="$HOME/curl.body.log"; : > "$CURL_BODY_LOG"
 cat > "$HOME/bin/curl" <<'EOF'
 #!/bin/bash
 # Logs its args to CURL_LOG instead of stdout, since the caller redirects
 # stdout/stderr to /dev/null for the real, detached curl call. Also drains
 # stdin to CURL_STDIN_LOG, since the real call sends the auth header there
-# (-H @-), never in argv, and logs a JSON body argument (a posted message)
-# to CURL_BODY_LOG, one line each.
+# (-H @-), never in argv.
 printf '%s\n' "$*" >> "$CURL_LOG"
-for a; do case $a in '{'*) printf '%s\n' "$a" >> "$CURL_BODY_LOG";; esac; done
 cat >> "$CURL_STDIN_LOG" 2>/dev/null
 EOF
 chmod +x "$HOME/bin/curl"
 # `sleep`, stubbed by duration so the suite stays inside its 30 s budget
 # (CLAUDE.md) without dropping an assertion; any other duration is real:
-#   60   the autoresearchclaw watcher's poll interval, under the test's
-#        control: waits for $TICK_DIR/<the watcher's pid>, which tick()
-#        creates to release one poll. It never releases on its own (so a slow
-#        machine cannot split one poll's events), only once the watcher or
-#        the test's HOME is gone (no stub outlives the test).
-#   1    the watcher's pause between two posts: counted in $ARC_SLEEPS, not
-#        slept. The watcher waits for the stub, so the count is exact once
-#        the poll is over, unlike anything the detached curl writes.
 #   0.5  refresh's wait for the old session to exit (20 rounds): 0.05 s.
 #   3    refresh's pause for the old gateway to let go: not slept.
-TICK_DIR="$HOME/ticks"; mkdir -p "$TICK_DIR"
-ARC_SLEEPS="$HOME/arc-sleeps"; : > "$ARC_SLEEPS"
 cat > "$HOME/bin/sleep" <<'EOF'
 #!/bin/bash
 case $* in
-  60) ;;
-  1) echo 1 >> "$ARC_SLEEPS"; exit 0 ;;
   0.5) exec /bin/sleep 0.05 ;;
   3) exit 0 ;;
   *) exec /bin/sleep "$@" ;;
 esac
-t=$TICK_DIR/$PPID
-: > "$t.waiting"
-while [ ! -e "$t" ] && [ -d "$TICK_DIR" ] && kill -0 "$PPID" 2>/dev/null; do /bin/sleep 0.02; done
-rm -f "$t.waiting" "$t"
 EOF
 chmod +x "$HOME/bin/sleep"
 # Stands in for a session's claude process: runs each argument through
 # sh -c, as Claude Code runs a hook command, and reads its output to EOF (a
-# hook that left a detached child holding that pipe would hang here),
-# appending it to $WORKER_OUT; then touches $WORKER_OUT.done and lives until
-# killed. It is perl, not a shell, so on-start's walk up stops here.
+# hook that left a child holding that pipe would hang here), appending it to
+# $WORKER_OUT; then touches $WORKER_OUT.done and lives until killed. It leads
+# a process group of its own, so a hook that left any child behind, its
+# output redirected or not, is found in that group once the worker is gone.
 cat > "$HOME/bin/fake-worker" <<'EOF'
 #!/usr/bin/env perl
+setpgrp(0, 0);
 for my $c (@ARGV) {
   open(my $h, "-|", "/bin/sh", "-c", $c) or die; local $/; my $o = <$h>; close $h;
   open(my $f, ">>", $ENV{WORKER_OUT}) or die; print $f $o // ""; close $f;
@@ -107,7 +90,7 @@ sleep 600;
 EOF
 chmod +x "$HOME/bin/fake-worker"
 export PATH="$HOME/bin:$PATH"
-export CURL_LOG CURL_STDIN_LOG CURL_BODY_LOG TICK_DIR ARC_SLEEPS
+export CURL_LOG CURL_STDIN_LOG
 export CLAUDE_DISCORD_LAUNCHER=claude-launcher
 mkdir -p "$HOME/.claude-discord"; : > "$HOME/.claude-discord/discord-proxy.ts"
 cp -r "$D/hooks" "$HOME/.claude-discord/hooks"   # stand-in for install.sh, not exercised here
@@ -284,7 +267,7 @@ out=$(printf '' | DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt"); rc=$?
 echo "ok: on-prompt exits 0 with no output on invalid JSON and on empty stdin"
 
 mv "$HOME/.claude-discord/hooks/lib/discord.sh" "$HOME/.claude-discord/hooks/lib/discord.sh.bak"
-for hookname in turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/edit-gate autoresearchclaw/on-start autoresearchclaw/watch; do
+for hookname in turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/edit-gate autoresearchclaw/on-start; do
   out=$(DISCORD_STATE_DIR="$DSD" bash "$R/hooks/$hookname" <<<'{"session_id":"sX","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\">\nhi\n</channel>"}'); rc=$?
   [ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: $hookname with a missing lib must exit 0 with no output"; exit 1; }
 done
@@ -770,9 +753,12 @@ cmp -s "$SJ" "$P4/settings.before" || { echo "FAIL: settings.json (turn hooks, u
 echo "ok: switching to none removes the rule file and every peers hook entry (empty groups and events dropped), keeps settings.json, the permission grants, a user's own hooks and a foreign rule file"
 
 # Back to dev-manager, then autoresearchclaw: no rule file (every session
-# under the project loads one, the pipeline's own agent sessions included)
-# and no peers hook; only on-start, in settings.local.json.
+# under the project loads one, AutoResearchClaw's own backend `claude` calls
+# included) and no peers hook; only on-start, in settings.local.json, at
+# every SessionStart source (its rule is context, which a compact or /clear
+# drops).
 CMD_ARC='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/autoresearchclaw/on-start"; [ ! -x "$h" ] || "$h"'
+arc_entries() { jq --arg c "$CMD_ARC" '[.hooks[]?[]?.hooks[]? | select(.command == $c)] | length' "$1"; }
 printf '\nn\n2\n' | bash "$S" setup mgr >/dev/null   # EOF at the peers prompt: same as empty
 has_peers_hooks "$SL" && [ -f "$RULE" ] || { echo "FAIL: back to dev-manager must restore its drops"; exit 1; }
 ! grep -q 'hooks/autoresearchclaw/' "$SL" "$SJ" || { echo "FAIL: on-start without an autoresearchclaw bot"; exit 1; }
@@ -780,252 +766,122 @@ printf '\nn\nautoresearchclaw\n' | bash "$S" setup mgr >/dev/null
 [ "$(cat "$R4/mgr/mode")" = autoresearchclaw ] || { echo "FAIL: mode autoresearchclaw"; exit 1; }
 [ -z "$(find "$P4/.claude/rules" -name 'claude-discord-*')" ] || { echo "FAIL: autoresearchclaw must drop no rule file"; exit 1; }
 ! grep -q 'hooks/peers/' "$SL" "$SJ" || { echo "FAIL: autoresearchclaw must register no peers hook"; exit 1; }
-has_matcher SessionStart 'startup|resume' "$CMD_ARC" "$SL" && ! grep -q 'hooks/autoresearchclaw/' "$SJ" || { echo "FAIL: on-start (startup|resume) belongs in settings.local.json only: $(cat "$SL")"; exit 1; }
+has_matcher SessionStart 'startup|resume|compact|clear' "$CMD_ARC" "$SL" && [ "$(arc_entries "$SL")" = 1 ] && ! grep -q 'hooks/autoresearchclaw/' "$SJ" || { echo "FAIL: on-start (startup|resume|compact|clear) belongs in settings.local.json only, once: $(cat "$SL")"; exit 1; }
 has_hooks "$SJ" || { echo "FAIL: the turn hooks must survive"; exit 1; }
 cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
 bash "$S" mgr >/dev/null 2>&1
 cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: a start with nothing new must change neither settings file"; exit 1; }
-echo "ok: autoresearchclaw drops no rule and no peers hook, only on-start (startup|resume) in settings.local.json; idempotent"
+# The entry an earlier version registered (matcher startup|resume) is
+# replaced by the current one, not kept beside it.
+jq --arg c "$CMD_ARC" '(.hooks.SessionStart[] | select(any(.hooks[]; .command == $c)) | .matcher) = "startup|resume"' "$SL" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SL" && rm -f "$P4/s.tmp"
+has_matcher SessionStart 'startup|resume' "$CMD_ARC" "$SL" || { echo "FAIL: the old entry was not planted"; exit 1; }
+bash "$S" mgr >/dev/null 2>&1
+cmp -s "$SL" "$P4/local.before" || { echo "FAIL: an on-start entry with the old matcher must be replaced, not duplicated: $(jq -c .hooks.SessionStart "$SL")"; exit 1; }
+echo "ok: autoresearchclaw drops no rule and no peers hook, only on-start (startup|resume|compact|clear) in settings.local.json, once; an entry with the old startup|resume matcher is replaced; idempotent"
 
-# ARC_RULES: word for word in on-prompt's context and in the wrapper's system
-# prompt for such a bot (checked on a refresh launch below).
-ARC_RULES="Never share credentials of any kind, raw data, cluster hostnames or absolute paths, or anything from Samsung-internal sources. Never touch the SCOP tunnel, and never kill a Claude process. AutoResearchClaw gates are answered in the run's terminal, not over Discord."
-# Primed under mode none, then the mode changes under the running session:
-# the next Discord turn primes again, now with the arc context.
+# on-prompt: an autoresearchclaw bot's Discord turn gets exactly a plain
+# bot's identity context (its rules come from on-start). Primed under mode
+# none, then the mode changes under the running session: the next Discord
+# turn primes again, with the same text.
 AP='{"session_id":"a1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"700\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}'
 echo none > "$R4/mgr/mode"
-out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")
-[ -n "$out" ] && ! grep -q AutoResearchClaw <<<"$out" && [ "$(cat "$R4/mgr/turns/a1.primed")" = none ] || { echo "FAIL: priming under mode none must record it, without the arc context: $out"; exit 1; }
+plain_out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")
+[ -n "$plain_out" ] && [ "$(cat "$R4/mgr/turns/a1.primed")" = none ] || { echo "FAIL: priming under mode none must record it: $plain_out"; exit 1; }
 echo autoresearchclaw > "$R4/mgr/mode"
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")
-ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")
-for want in 'hypothesis ids' 'config commit hash' 'metrics table (condition, seeds, primary metric, latency, tokens)' 'what failed and why' '1-3 lessons' 'commit links' "$ARC_RULES"; do
-  grep -qF "$want" <<<"$ctx" || { echo "FAIL: an autoresearchclaw bot's context (after a mode change) lacks '$want': $ctx"; exit 1; }
-done
+[ "$out" = "$plain_out" ] && [ "$(cat "$R4/mgr/turns/a1.primed")" = autoresearchclaw ] || { echo "FAIL: an autoresearchclaw bot must get a plain bot's identity context, re-primed after the mode change: $out"; exit 1; }
+! grep -qE 'AutoResearchClaw|\[arc\]' <<<"$out" || { echo "FAIL: no AutoResearchClaw text in on-prompt's context: $out"; exit 1; }
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")
 [ -z "$out" ] || { echo "FAIL: primed under the same mode: nothing more: $out"; exit 1; }
-out=$(DISCORD_STATE_DIR="$R4/plain" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"a2","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"701\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
-! grep -q 'AutoResearchClaw' <<<"$out" || { echo "FAIL: a plain bot must not get the autoresearchclaw context"; exit 1; }
-echo "ok: on-prompt gives an autoresearchclaw bot the digest format, the never-share list, the tunnel/process rule and where gates are answered, again after a mode change under a primed session; a plain bot none of it"
+echo "ok: on-prompt gives an autoresearchclaw bot the same identity context as a plain bot, no AutoResearchClaw text, re-primed after a mode change"
 
-# The watcher, through on-start as Claude Code would run it (sh -c under the
-# session's process, here a fake worker), against a fixture run in the shapes
-# AutoResearchClaw writes. The run already has history when the watcher
-# starts, and that history must not be posted.
+# on-start: the bot's session gets the installed rule file, byte for byte,
+# as SessionStart context; nothing for any other session.
 ARC="$R4/hooks/autoresearchclaw"
-RUN="$P4/artifacts/rc-20260919-000000-8b3f10"
-SECRET='SECRET Traceback /home/someone/data on gpu-node-7.cluster.internal'
-health() {  # $1 = stage dir number, $2 = stage_id, $3 = status, $4 = timestamp, $5 = error (optional)
-  mkdir -p "$RUN/stage-$1"
-  jq -n --arg id "$2" --arg st "$3" --arg ts "$4" --arg err "${5:-}" \
-    '{stage_id: $id, run_id: "rc-20260919-000000-8b3f10", duration_sec: 133.53, status: $st, artifacts_count: 2,
-      error: (if $err == "" then null else $err end), timestamp: $ts}' > "$RUN/stage-$1/stage_health.json"
-}
-decide() {  # $1 = stage, $2 = stage_name, $3 = action, $4 = timestamp: one hitl/interventions.jsonl line
-  mkdir -p "$RUN/hitl"
-  jq -nc --argjson st "$1" --arg name "$2" --arg a "$3" --arg ts "$4" --arg s "$SECRET" \
-    '{id: ("id-" + $ts), type: $a, stage: $st, stage_name: $name, timestamp: $ts,
-      human_input: {action: $a, message: $s, guidance: $s, edited_files: {}, config_changes: {}, resources: [], rollback_to_stage: null, timestamp: $ts},
-      pause_reason: "gate_approval", stage_output_summary: $s, quality_score: null, confidence_score: null,
-      outcome: ("Human chose: " + $a), accepted: true, duration_sec: 12.0}' >> "$RUN/hitl/interventions.jsonl"
-}
-waiting() {  # $1 = stage, $2 = stage_name, $3 = since
-  mkdir -p "$RUN/hitl"
-  jq -n --argjson st "$1" --arg name "$2" --arg since "$3" --arg s "$SECRET" \
-    '{stage: $st, stage_name: $name, reason: "gate_approval", since: $since,
-      available_actions: ["approve", "reject", "edit", "collaborate", "skip", "abort"], context_summary: $s, output_files: [$s]}' > "$RUN/hitl/waiting.json"
-}
-watchers() {  # live watchers started from this project; a read loop, not grep, so nothing matches itself
-  ps -eo pid=,args= | while read -r pid args; do case $args in *"$ARC/watch"*) echo "$pid";; esac; done
-}
-start_worker() {  # $1 = DISCORD_STATE_DIR (empty: unset), the rest = hook commands; sets W to the worker's pid
-  local sd=$1 n=0
-  shift
-  rm -f "$HOME/worker.out" "$HOME/worker.out.done"
-  (unset DISCORD_STATE_DIR; [ -z "$sd" ] || export DISCORD_STATE_DIR="$sd"
-   WORKER_OUT="$HOME/worker.out" CLAUDE_PROJECT_DIR="$P4" exec fake-worker "$@" </dev/null) &
-  W=$!; KILL_AT_EXIT="$KILL_AT_EXIT $W"
-  while [ ! -e "$HOME/worker.out.done" ] && [ "$n" -lt 250 ]; do sleep 0.02; n=$((n+1)); done
-  [ -e "$HOME/worker.out.done" ] || { echo "FAIL: on-start did not return (a detached child holding its output?)"; exit 1; }
-  [ ! -s "$HOME/worker.out" ] || { echo "FAIL: on-start must print nothing: $(cat "$HOME/worker.out")"; exit 1; }
-}
-asleep() {  # $1 = watcher pid: wait until it sleeps between polls
-  local n=0
-  while [ ! -e "$TICK_DIR/$1.waiting" ] && [ "$n" -lt 1000 ]; do sleep 0.02; n=$((n+1)); done
-  [ -e "$TICK_DIR/$1.waiting" ] || { echo "FAIL: watcher $1 never finished its first pass"; exit 1; }
-}
-tick() {  # $1 = watcher pid, $2 = the post count expected after it: release one poll, return once it is asleep again (or gone) and the posts landed
-  local n=0
-  : > "$TICK_DIR/$1"
-  while { [ -e "$TICK_DIR/$1" ] || [ ! -e "$TICK_DIR/$1.waiting" ]; } && kill -0 "$1" 2>/dev/null && [ "$n" -lt 400 ]; do sleep 0.02; n=$((n+1)); done
-  landed "$2"
-}
-landed() {  # $1 = the post count expected: a post's curl is detached, so wait for it (4 s at most), then 0.1 s more for a stray one
-  local n=0
-  while [ "$(posts)" -lt "$1" ] && [ "$n" -lt 200 ]; do sleep 0.02; n=$((n+1)); done
-  sleep 0.1
-}
-posts() { wc -l < "$CURL_BODY_LOG" | tr -d ' '; }
-last_post() { tail -1 "$CURL_BODY_LOG" | jq -r .content; }
+ARC_RULE="$HOME/.claude-discord/rules/autoresearchclaw.md"
+onstart() { DISCORD_STATE_DIR="$R4/$1" bash "$ARC/on-start" <<<'{"session_id":"o1","source":"compact"}'; }
+cmp -s "$D/rules/autoresearchclaw.md" "$ARC_RULE" || { echo "FAIL: the install stand-in must carry rules/autoresearchclaw.md"; exit 1; }
+out=$(onstart mgr)
+jq -e '.hookSpecificOutput.hookEventName == "SessionStart"' <<<"$out" >/dev/null || { echo "FAIL: on-start must print SessionStart JSON: $out"; exit 1; }
+jq -j '.hookSpecificOutput.additionalContext' <<<"$out" | cmp -s - "$ARC_RULE" || { echo "FAIL: additionalContext must be the installed rule file, byte for byte"; exit 1; }
+out=$(bash "$ARC/on-start" <<<'{"session_id":"o1","source":"startup"}')
+[ -z "$out" ] || { echo "FAIL: on-start must print nothing without DISCORD_STATE_DIR: $out"; exit 1; }
+out=$(onstart plain)
+[ -z "$out" ] || { echo "FAIL: on-start must print nothing for a plain bot: $out"; exit 1; }
+echo dev-manager > "$R4/mgr/mode"; out=$(onstart mgr); echo autoresearchclaw > "$R4/mgr/mode"
+[ -z "$out" ] || { echo "FAIL: on-start must print nothing for a dev-manager bot: $out"; exit 1; }
+mv "$ARC_RULE" "$ARC_RULE.bak"; rc=0; out=$(onstart mgr) || rc=$?; mv "$ARC_RULE.bak" "$ARC_RULE"
+[ "$rc" = 0 ] && [ -z "$out" ] || { echo "FAIL: on-start must print nothing, and exit 0, without the rule file: $out"; exit 1; }
+# Run as Claude Code runs it (sh -c under the session's process, here a
+# fake worker leading its own process group): the same output, and once the
+# worker is gone nothing is left in its group.
+(DISCORD_STATE_DIR="$R4/mgr" WORKER_OUT="$HOME/worker.out" CLAUDE_PROJECT_DIR="$P4" exec fake-worker "$CMD_ARC" </dev/null) &
+W=$!; KILL_AT_EXIT="$KILL_AT_EXIT $W"
+n=0; while [ ! -e "$HOME/worker.out.done" ] && [ "$n" -lt 250 ]; do sleep 0.02; n=$((n+1)); done
+[ -e "$HOME/worker.out.done" ] || { echo "FAIL: on-start did not return (a child holding its output?)"; exit 1; }
+jq -j '.hookSpecificOutput.additionalContext' "$HOME/worker.out" | cmp -s - "$ARC_RULE" || { echo "FAIL: on-start through sh -c must print the rule: $(cat "$HOME/worker.out")"; exit 1; }
+kill "$W"; wait "$W" 2>/dev/null || :
+KILL_AT_EXIT=${KILL_AT_EXIT% $W}   # reaped: its pid may be reused
+left=$(ps -eo pid=,pgid=,args= | awk -v g="$W" '$2 == g')
+[ -z "$left" ] || { echo "FAIL: on-start must start no process: $left"; exit 1; }
+echo "ok: on-start gives an autoresearchclaw bot's session the installed rule file as SessionStart context; nothing without DISCORD_STATE_DIR, for a plain or dev-manager bot, or without the rule file; it starts no process"
 
-start_worker "" "$CMD_ARC"
-[ ! -e "$R4/mgr/arc-watch.pid" ] && [ -z "$(watchers)" ] || { echo "FAIL: on-start must do nothing without DISCORD_STATE_DIR"; exit 1; }
-start_worker "$R4/plain" "$CMD_ARC"
-[ ! -e "$R4/plain/arc-watch.pid" ] && [ -z "$(watchers)" ] || { echo "FAIL: on-start must do nothing for a bot not in autoresearchclaw mode"; exit 1; }
-kill $KILL_AT_EXIT 2>/dev/null || :
-echo "ok: on-start starts nothing without DISCORD_STATE_DIR or for a bot in another mode, and prints nothing"
-
-health 01 01-topic_init done 2026-09-19T00:00:06+00:00
-decide 1 TOPIC_INIT approve 2026-09-19T00:01:00+00:00
-: > "$RUN/checkpoint.json"; : > "$RUN/stage-01/decision.json"
-: > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_BODY_LOG"
-# NESTED: what a `claude -p` run from the session's Bash looks like: a second
-# worker under a shell under this one, with the same DISCORD_STATE_DIR,
-# running on-start too. The shell waits for it, as the Bash tool does.
-export CMD_ARC
-NESTED='WORKER_OUT="$HOME/nested.out" fake-worker "$CMD_ARC" </dev/null >/dev/null 2>&1 & echo $! > "$HOME/nested.pid"; n=0; while [ ! -e "$HOME/nested.out.done" ] && [ $n -lt 250 ]; do sleep 0.02; n=$((n+1)); done'
-start_worker "$R4/mgr" "$CMD_ARC" "$CMD_ARC" "$NESTED"
-W1=$W
-KILL_AT_EXIT="$KILL_AT_EXIT $(cat "$HOME/nested.pid")"
-read -r WP1 FOR1 < "$R4/mgr/arc-watch.pid"
-KILL_AT_EXIT="$KILL_AT_EXIT $WP1"
-[ -e "$HOME/nested.out.done" ] && [ ! -s "$HOME/nested.out" ] || { echo "FAIL: the nested session's on-start must have run, silently"; exit 1; }
-[ "$FOR1" = "$W1" ] || { echo "FAIL: arc-watch.pid must name the session's worker (the hook's sh -c parent's parent), not a nested session's: got $FOR1, want $W1"; exit 1; }
-[ "$(watchers)" = "$WP1" ] || { echo "FAIL: on-start twice, then from a nested session, must leave exactly one live watcher, the pidfile's: $(watchers | tr '\n' ' ')"; exit 1; }
-kill "$(cat "$HOME/nested.pid")"
-asleep "$WP1"; landed 0
-[ "$(posts)" = 0 ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: the first pass must post nothing: $(cat "$CURL_LOG")"; exit 1; }
-[ "$(wc -l < "$R4/mgr/arc-posted" | tr -d ' ')" = 2 ] || { echo "FAIL: the first pass must record the run's existing events as posted: $(cat "$R4/mgr/arc-posted")"; exit 1; }
-echo "ok: on-start run twice under one session, and once from a nested session under it, leaves exactly one watcher, recorded in arc-watch.pid against the session's worker; the very first pass records the existing history and posts nothing"
-
-health 02 02-problem_decompose done 2026-09-19T00:19:05+00:00
-decide 2 PROBLEM_DECOMPOSE approve 2026-09-19T00:19:36+00:00
-health 03 03-search_strategy failed 2026-09-19T00:21:10+00:00 "$SECRET"
-health 04 04 done 2026-09-19T00:28:00+00:00
-health 06 06-knowledge_extract gpu-node-7.cluster.internal 2026-09-19T00:30:00+00:00
-waiting 5 LITERATURE_SCREEN 2026-09-19T00:53:58+00:00
-tick "$WP1" 1
-[ "$(posts)" = 1 ] || { echo "FAIL: one poll, one run: exactly one message, got $(posts)"; exit 1; }
-[ "$(last_post)" = "$(printf '%s\n' \
-  '[arc] stage 02 PROBLEM_DECOMPOSE done (134 s)' \
-  '[arc] gate: approve stage 02 PROBLEM_DECOMPOSE' \
-  '[arc] stage 03 SEARCH_STRATEGY failed (see run)' \
-  '[arc] stage 04 done (134 s)' \
-  '[arc] stage 06 KNOWLEDGE_EXTRACT ? (134 s)' \
-  '[arc] gate waiting: stage 05 LITERATURE_SCREEN (gate_approval)')" ] || { echo "FAIL: message wrong:"; last_post; exit 1; }
-grep -qE -- '-m 10 -X POST .*https://discord.com/api/v10/channels/42/messages$' "$CURL_LOG" || { echo "FAIL: post must POST to the channel's messages with -m 10: $(cat "$CURL_LOG")"; exit 1; }
-[ "$(tail -1 "$CURL_BODY_LOG" | jq -c .allowed_mentions)" = '{"parse":[]}' ] || { echo "FAIL: a post must not be able to ping anyone"; exit 1; }
-! grep -q tokM "$CURL_LOG" && grep -qF 'Authorization: Bot tokM' "$CURL_STDIN_LOG" || { echo "FAIL: the token must reach curl over stdin, never argv"; exit 1; }
-! grep -qE 'SECRET|/home/someone|cluster\.internal|Traceback' "$CURL_LOG" "$CURL_BODY_LOG" || { echo "FAIL: error text, summaries, messages or paths were posted"; exit 1; }
-tick "$WP1" 1
-[ "$(posts)" = 1 ] || { echo "FAIL: nothing new, nothing posted on the next poll"; exit 1; }
-echo "ok: a poll batches a run's new stages (name optional; a failure without its error; a status that is not a plain word, a hostname, as ?), gate decisions and a waiting gate (stage, name, reason only) into one message, in time order, token on stdin, mentions off; the next poll reposts nothing"
-
-health 02 02-problem_decompose done 2026-09-19T01:10:00+00:00
-tick "$WP1" 2
-[ "$(posts)" = 2 ] && [ "$(last_post)" = '[arc] stage 02 PROBLEM_DECOMPOSE done (134 s)' ] || { echo "FAIL: a rewritten stage (--from-stage, new timestamp) must post again: $(last_post)"; exit 1; }
-rm "$RUN/hitl/waiting.json"; waiting 5 LITERATURE_SCREEN 2026-09-19T00:53:58+00:00
-tick "$WP1" 2
-[ "$(posts)" = 2 ] || { echo "FAIL: the same wait (same since) must not post again"; exit 1; }
-decide 5 LITERATURE_SCREEN approve 2026-09-19T01:20:00+00:00; rm "$RUN/hitl/waiting.json"
-health 23 23-citation_verify done 2026-09-19T02:00:00+00:00
-RUN2="$P4/artifacts/rc-20260919-010000-aaaaaa"; mkdir -p "$RUN2/stage-01"
-jq -n '{stage_id: "01-topic_init", run_id: "rc-20260919-010000-aaaaaa", duration_sec: 5, status: "done", artifacts_count: 1, error: null, timestamp: "2026-09-19T01:30:00+00:00"}' > "$RUN2/stage-01/stage_health.json"
-s0=$(wc -l < "$ARC_SLEEPS")
-tick "$WP1" 4
-[ "$(posts)" = 4 ] || { echo "FAIL: two runs with news, two messages: got $(posts)"; exit 1; }
-[ $(($(wc -l < "$ARC_SLEEPS") - s0)) = 1 ] || { echo "FAIL: two posts in one poll need exactly one 1 s pause (Discord's 5 per 5 s): $(($(wc -l < "$ARC_SLEEPS") - s0))"; exit 1; }
-[ "$(jq -r 'select(.content | contains("stage 23")) | .content' "$CURL_BODY_LOG")" = "$(printf '%s\n' \
-  '[arc] gate: approve stage 05 LITERATURE_SCREEN' \
-  '[arc] stage 23 CITATION_VERIFY done (134 s)' \
-  '[arc] run rc-20260919-000000-8b3f10 finished')" ] || { echo "FAIL: the run's end (stage 23 done) must be posted"; cat "$CURL_BODY_LOG"; exit 1; }
-[ "$(jq -r 'select(.content | contains("TOPIC_INIT")) | .content' "$CURL_BODY_LOG")" = '[arc] stage 01 TOPIC_INIT done (5 s)' ] || { echo "FAIL: a run that appeared after the first pass is posted in full, in its own message"; cat "$CURL_BODY_LOG"; exit 1; }
-waiting 8 HYPOTHESIS_GEN 2026-09-19T02:10:00+00:00; chmod 444 "$R4/mgr/arc-posted"
-tick "$WP1" 4
-[ "$(posts)" = 4 ] || { echo "FAIL: an event that cannot be recorded as posted must not be posted (it would repeat every poll)"; exit 1; }
-chmod 644 "$R4/mgr/arc-posted"
-tick "$WP1" 5
-[ "$(posts)" = 5 ] && [ "$(last_post)" = '[arc] gate waiting: stage 08 HYPOTHESIS_GEN (gate_approval)' ] || { echo "FAIL: the unrecorded wait must post once recording works again: $(last_post)"; exit 1; }
-! grep -qE 'SECRET|/home/someone|cluster\.internal|Traceback' "$CURL_LOG" "$CURL_BODY_LOG" || { echo "FAIL: error text, summaries, messages or paths were posted"; exit 1; }
-echo "ok: a rewritten stage posts again, the same wait does not, the run's end is posted at stage 23, each run gets its own message a second after the last, and nothing is posted that could not be recorded"
-
-# A run dir with nothing modified since the previous poll is not read at all:
-# a new stage file with the whole run backdated stays unposted; touched, it
-# is posted.
-health 10 10-code_generation done 2026-09-19T02:30:00+00:00
-find "$RUN" -print0 | xargs -0 perl -e 'utime time - 3600, time - 3600, @ARGV'
-tick "$WP1" 5
-[ "$(posts)" = 5 ] || { echo "FAIL: a run with nothing newer than the previous poll must not be read: $(last_post)"; exit 1; }
-touch "$RUN/stage-10/stage_health.json"
-tick "$WP1" 6
-[ "$(posts)" = 6 ] && [ "$(last_post)" = '[arc] stage 10 CODE_GENERATION done (134 s)' ] || { echo "FAIL: a touched run must be read again: $(posts) posts, last: $(last_post)"; exit 1; }
-# A write in the poll's own mtime tick, after the poll read that run, must
-# still be seen next time: `find -newer` is strict, so the stamp is set back.
-# The new stage's mtime (and its directories') is the second the poll ran in.
-t0=$(perl -e 'print time')
-tick "$WP1" 6
-health 11 11-resource_planning done 2026-09-19T02:40:00+00:00
-perl -e '$t = shift; utime $t, $t, @ARGV' "$t0" "$RUN/stage-11/stage_health.json" "$RUN/stage-11" "$RUN"
-tick "$WP1" 7
-[ "$(posts)" = 7 ] && [ "$(last_post)" = '[arc] stage 11 RESOURCE_PLANNING done (134 s)' ] || { echo "FAIL: a write in the stamp's own tick must be read on the next poll: $(posts) posts, last: $(last_post)"; exit 1; }
-echo "ok: a run dir unchanged since the previous poll is skipped; a changed one is read, a write in the poll's own mtime tick included"
+# events: what the bot's standing watch runs. Paths are relative to the
+# project; arc-seen holds "<path> <cksum>" per seen file and content.
+events() { DISCORD_STATE_DIR="$R4/mgr" bash "$ARC/events"; }
+RUN=artifacts/rc-20260919-000000-8b3f10 RUN2=artifacts/rc-20260919-010000-aaaaaa
+SEEN="$R4/mgr/arc-seen"
+mkdir -p "$P4/$RUN/stage-15" "$P4/$RUN2/stage-15" "$P4/artifacts/other/stage-15"
+printf 'PROCEED\nH1 beat baseline\n' > "$P4/$RUN/stage-15/decision.md"
+out=$(events)
+[ -z "$out" ] && grep -qxF "$RUN/stage-15/decision.md $(cksum < "$P4/$RUN/stage-15/decision.md")" "$SEEN" || { echo "FAIL: the first call must print nothing and record what is there: out=$out seen=$(cat "$SEEN" 2>&1)"; exit 1; }
+[ -z "$(events)" ] || { echo "FAIL: nothing new, nothing printed"; exit 1; }
+printf 'REFINE\n' > "$P4/$RUN2/stage-15/decision.md"
+out=$(events)
+[ "$out" = "iteration-end $RUN2/stage-15/decision.md" ] || { echo "FAIL: a new decision.md must print iteration-end: $out"; exit 1; }
+[ -z "$(events)" ] || { echo "FAIL: an event must print once"; exit 1; }
+printf 'PIVOT\nH2 next\n' > "$P4/$RUN/stage-15/decision.md"
+out=$(events)
+[ "$out" = "iteration-end $RUN/stage-15/decision.md" ] || { echo "FAIL: a rewrite with other content (a relaunch) must print again: $out"; exit 1; }
+printf 'PIVOT\nH2 next\n' > "$P4/$RUN/stage-15/decision.md"; touch "$P4/$RUN2/stage-15/decision.md"
+out=$(events)
+[ -z "$out" ] || { echo "FAIL: an identical rewrite or a touch must print nothing: $out"; exit 1; }
+echo '{"status":"completed"}' > "$P4/$RUN/pipeline_summary.json"
+echo PROCEED > "$P4/artifacts/other/stage-15/decision.md"; echo '{}' > "$P4/artifacts/other/pipeline_summary.json"
+out=$(events)
+[ "$out" = "run-end $RUN/pipeline_summary.json" ] || { echo "FAIL: pipeline_summary.json must print run-end, a dir not named rc-* nothing: $out"; exit 1; }
+printf 'PROCEED\n' > "$P4/$RUN2/stage-15/decision.md"; chmod 444 "$SEEN"
+rc=0; out=$(events) || rc=$?
+chmod 644 "$SEEN"
+[ "$rc" = 0 ] && [ -z "$out" ] || { echo "FAIL: an event that cannot be recorded must not be printed (rc=$rc): $out"; exit 1; }
+out=$(events)
+[ "$out" = "iteration-end $RUN2/stage-15/decision.md" ] && [ -z "$(events)" ] || { echo "FAIL: once it can be recorded, it prints once: $out"; exit 1; }
+rc=0; out=$(bash "$ARC/events" 2>"$HOME/events.err") || rc=$?
+[ "$rc" = 2 ] && [ -z "$out" ] && [ "$(wc -l < "$HOME/events.err" | tr -d ' ')" = 1 ] || { echo "FAIL: without DISCORD_STATE_DIR events must exit 2 with one line on stderr: rc=$rc out=$out err=$(cat "$HOME/events.err")"; exit 1; }
+# A project with no run yet: the first call still starts arc-seen, so the
+# first iteration is reported, not swallowed as history.
+[ -z "$(DISCORD_STATE_DIR="$R/alpha" bash "$ARC/events")" ] && [ -e "$R/alpha/arc-seen" ] || { echo "FAIL: a first call with nothing there must still create arc-seen"; exit 1; }
+mkdir -p "$P/artifacts/rc-1/stage-15"; echo PROCEED > "$P/artifacts/rc-1/stage-15/decision.md"
+out=$(DISCORD_STATE_DIR="$R/alpha" bash "$ARC/events")
+rm -rf "$P/artifacts" "$R/alpha/arc-seen"
+[ "$out" = "iteration-end artifacts/rc-1/stage-15/decision.md" ] || { echo "FAIL: the first iteration after an empty first call must be reported: $out"; exit 1; }
+echo "ok: events records history silently on its first call (and starts arc-seen with none), prints a new decision.md as iteration-end and pipeline_summary.json as run-end once, again on a rewrite with other content, never on an identical rewrite or a touch, ignores dirs not named rc-*, prints nothing it could not record, and exits 2 without DISCORD_STATE_DIR"
 
 # A bot moved to another channel by editing its access.json (config.env still
-# says 42): the watcher posts there, and the identity text of on-prompt and of
-# the start path names it. With several groups the channel is not known: the
-# identity falls back to config.env and the watcher posts nothing, then
-# catches up once one group is left.
+# says 42): the identity text of on-prompt and of the start path names it.
+# With several groups the channel is not known: the identity falls back to
+# config.env.
 cp "$R4/mgr/access.json" "$P4/access.before"
 jq '.groups = {"4343": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
-health 12 12-experiment_run done 2026-09-19T02:50:00+00:00
-: > "$CURL_LOG"
-tick "$WP1" 8
-[ "$(posts)" = 8 ] && grep -q 'channels/4343/messages$' "$CURL_LOG" && ! grep -q 'channels/42/' "$CURL_LOG" || { echo "FAIL: the watcher must post to the access.json channel: $(cat "$CURL_LOG")"; exit 1; }
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"ch1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"800\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'in channel 4343\.' <<<"$out" || { echo "FAIL: on-prompt must name the access.json channel: $out"; exit 1; }
 out=$(bash "$S" mgr 2>&1)
 grep -q 'sharing the Discord channel 4343,' <<<"$out" || { echo "FAIL: the start prompt must name the access.json channel: $out"; exit 1; }
 jq '.groups = {"4343": .groups["42"], "4444": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
-health 13 13-iterative_refine done 2026-09-19T03:00:00+00:00
-tick "$WP1" 8
-[ "$(posts)" = 8 ] || { echo "FAIL: with several channels in access.json the watcher must post nothing: $(last_post)"; exit 1; }
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"ch2","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"801\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'in channel 42\.' <<<"$out" || { echo "FAIL: with several groups the identity falls back to config.env's channel: $out"; exit 1; }
-jq '.groups = {"4343": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
-tick "$WP1" 9
-[ "$(posts)" = 9 ] && [ "$(last_post)" = '[arc] stage 13 ITERATIVE_REFINE done (134 s)' ] && [ "$(tail -1 "$CURL_LOG" | grep -o 'channels/[0-9]*/messages$')" = channels/4343/messages ] || { echo "FAIL: once one channel is left, what was held back is posted there: $(posts) posts, last: $(last_post)"; exit 1; }
 cp "$P4/access.before" "$R4/mgr/access.json"
-echo "ok: a bot moved by editing its access.json posts and identifies with that channel (on-prompt and the start prompt); with several groups the identity falls back to config.env and the watcher posts nothing until one is left, then catches up"
-
-# A resumed session is a new worker: on-start gives it its own watcher even
-# while the previous one lives, and the previous one exits at its next wake.
-# A watcher also exits once its worker is gone.
-start_worker "$R4/mgr" "$CMD_ARC"
-W2=$W
-read -r WP2 FOR2 < "$R4/mgr/arc-watch.pid"
-KILL_AT_EXIT="$KILL_AT_EXIT $WP2"
-[ "$FOR2" = "$W2" ] && [ "$WP2" != "$WP1" ] || { echo "FAIL: a new worker must get its own watcher"; exit 1; }
-asleep "$WP2"
-tick "$WP1" 9
-! kill -0 "$WP1" 2>/dev/null || { echo "FAIL: a watcher the pidfile no longer names must exit at its next wake"; exit 1; }
-[ "$(watchers)" = "$WP2" ] || { echo "FAIL: exactly one watcher must be left: $(watchers | tr '\n' ' ')"; exit 1; }
-kill "$W2"
-tick "$WP2" 9
-! kill -0 "$WP2" 2>/dev/null && [ -z "$(watchers)" ] || { echo "FAIL: the watcher must exit once its worker is gone"; exit 1; }
-# What happened while no watcher ran is posted by the next one's first
-# pass; the wait posted before (still in waiting.json) is not repeated.
-health 09 09-experiment_design done 2026-09-19T02:20:00+00:00
-start_worker "$R4/mgr" "$CMD_ARC"
-read -r WP3 _ < "$R4/mgr/arc-watch.pid"
-KILL_AT_EXIT="$KILL_AT_EXIT $WP3"
-asleep "$WP3"; landed 10
-[ "$(posts)" = 10 ] && [ "$(last_post)" = '[arc] stage 09 EXPERIMENT_DESIGN done (134 s)' ] || { echo "FAIL: a later start must post exactly the gap, once: $(posts) posts, last: $(last_post)"; exit 1; }
-echo none > "$R4/mgr/mode"
-tick "$WP3" 10
-! kill -0 "$WP3" 2>/dev/null && [ -z "$(watchers)" ] || { echo "FAIL: the watcher must exit once the bot is no longer in autoresearchclaw mode"; exit 1; }
-echo autoresearchclaw > "$R4/mgr/mode"
-kill $KILL_AT_EXIT 2>/dev/null || :
-echo "ok: a resumed session's worker gets its own watcher and the old one exits; a watcher exits once its worker is gone or its bot leaves the mode; a later start posts the gap; none is left running"
+echo "ok: a bot moved by editing its access.json identifies with that channel (on-prompt and the start prompt); with several groups the identity falls back to config.env"
 
 # No bot is autoresearchclaw any more: on-start goes from both files (an
 # earlier copy planted in settings.json too).
@@ -1155,24 +1011,48 @@ grep -q -- '--force' "$HOME/claude.calls" && { echo "FAIL: --force leaked into c
 grep -q -- '-n alpha' "$HOME/claude.calls" || { echo "FAIL: the name must reach the launch"; exit 1; }
 grep -q 'summarize recent activity $' "$HOME/claude.calls" || { echo "FAIL: the given prompt must be the first turn: $(cat "$HOME/claude.calls")"; exit 1; }
 grep -q 'Catch up on the channel' "$HOME/claude.calls" && { echo "FAIL: a given prompt must replace the default kickoff, not join it"; exit 1; }
-grep -qF "$ARC_RULES" "$HOME/claude.calls" && { echo "FAIL: a bot not in autoresearchclaw mode must not get its rules"; exit 1; }
 echo "ok: refresh --force starts a fresh session with no handoff and no live session to stop, from a relative script path; a given prompt replaces the default kickoff"
 
 # A flag that takes a value keeps it: `--allowedTools Bash` is no prompt, so
-# the default kickoff stays. alpha in autoresearchclaw mode: that kickoff is
-# a CLI turn, which on-prompt gives no context, so the launch's system prompt
-# carries the never-share rules itself.
+# the default kickoff stays. alpha in autoresearchclaw mode: its rules reach
+# the session as on-start's SessionStart context, so the launch's system
+# prompt no longer carries the never-share sentence an earlier version
+# appended.
 echo autoresearchclaw > "$R/alpha/mode"
 rm -f "$HOME/claude.calls"
 DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force --allowedTools Bash >/dev/null
 for _ in $(seq 40); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.25; done
 grep -q -- '--allowedTools Bash ' "$HOME/claude.calls" && grep -q 'Catch up on the channel and continue from your handoff. $' "$HOME/claude.calls" || { echo "FAIL: a flag's value is no prompt; the default kickoff must stay: $(cat "$HOME/claude.calls")"; exit 1; }
-grep -qF "$ARC_RULES" "$HOME/claude.calls" || { echo "FAIL: an autoresearchclaw bot's launch must carry the never-share rules: $(cat "$HOME/claude.calls")"; exit 1; }
+! grep -qE 'Never share|AutoResearchClaw' "$HOME/claude.calls" || { echo "FAIL: an autoresearchclaw bot's launch must not carry the never-share sentence: $(cat "$HOME/claude.calls")"; exit 1; }
 echo none > "$R/alpha/mode"
 rm -f "$HOME/claude.calls"
 DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force --debug --model opus >/dev/null
 for _ in $(seq 40); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.25; done
 grep -q -- '--debug --model opus ' "$HOME/claude.calls" && grep -q 'Catch up on the channel and continue from your handoff. $' "$HOME/claude.calls" || { echo "FAIL: --debug (optional value) must not swallow --model, whose value is no prompt: $(cat "$HOME/claude.calls")"; exit 1; }
-echo "ok: refresh keeps the default kickoff past a value-taking flag (--allowedTools Bash) and past an optional-value one before another flag (--debug --model opus), and an autoresearchclaw bot's launch carries the never-share rules in its system prompt"
+echo "ok: refresh keeps the default kickoff past a value-taking flag (--allowedTools Bash) and past an optional-value one before another flag (--debug --model opus), and an autoresearchclaw bot's launch carries no never-share sentence in its system prompt"
+
+# install.sh under a HOME of its own: every shipped hook and rule lands, and
+# a file an earlier version installed that the repo no longer ships (the
+# watcher, turn/on-compact) is removed; nothing else under ~/.claude-discord/
+# is touched.
+IH="$HOME/install-home"
+mkdir -p "$IH/.claude-discord/hooks/autoresearchclaw" "$IH/.claude-discord/hooks/turn" "$IH/.claude-discord/rules"
+: > "$IH/.claude-discord/hooks/autoresearchclaw/watch"; : > "$IH/.claude-discord/hooks/turn/on-compact"
+: > "$IH/.claude-discord/rules/old.md"; echo mine > "$IH/.claude-discord/notes"
+HOME="$IH" bash "$D/install.sh" >/dev/null 2>&1 || { echo "FAIL: install.sh failed"; exit 1; }
+[ ! -e "$IH/.claude-discord/hooks/autoresearchclaw/watch" ] && [ ! -e "$IH/.claude-discord/hooks/turn/on-compact" ] && [ ! -e "$IH/.claude-discord/rules/old.md" ] || { echo "FAIL: install.sh must remove what the repo no longer ships: $(cd "$IH/.claude-discord" && find . -type f)"; exit 1; }
+[ "$(cat "$IH/.claude-discord/notes")" = mine ] && [ -x "$IH/.local/bin/claude-discord" ] || { echo "FAIL: install.sh must install the wrapper and leave other files alone"; exit 1; }
+for f in $(cd "$D" && ls hooks/*/* rules/*); do
+  cmp -s "$D/$f" "$IH/.claude-discord/$f" || { echo "FAIL: install.sh must install $f"; exit 1; }
+done
+[ -x "$IH/.claude-discord/hooks/autoresearchclaw/events" ] && [ -x "$IH/.claude-discord/hooks/autoresearchclaw/on-start" ] || { echo "FAIL: the autoresearchclaw hooks must be executable"; exit 1; }
+echo "ok: install.sh installs every shipped hook and rule (events and autoresearchclaw.md included) and removes the stale watch, on-compact and rule files, leaving everything else"
+
+# Nothing this suite started is still running: no process runs from its
+# HOME (hooks, stubs, the fake worker).
+strays() { ps -eo pid=,args= | while read -r pid args; do case $args in *"$HOME/"*) echo "$pid $args";; esac; done; }
+for _ in $(seq 20); do [ -z "$(strays)" ] && break; sleep 0.1; done
+[ -z "$(strays)" ] || { echo "FAIL: processes left behind: $(strays)"; exit 1; }
+echo "ok: no process is left behind"
 
 echo "ALL PASS"

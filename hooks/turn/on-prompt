@@ -61,17 +61,6 @@ if [ -n "$session_id" ] && { [ ! -f "$primed" ] || [ "$(cat "$primed" 2>/dev/nul
 Peers (mention to reach them): $(printf '%s' "$p" | jq -r 'map("\(.name) <@\(.bot_id)>") | join(", ")' 2>/dev/null)
 Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; after each iteration post one short report."
   fi
-  # An autoresearchclaw bot: the watcher posts run progress on its own; the
-  # session writes the cross-machine digest when asked, and knows what never
-  # leaves the machine. arc_rules is word for word the sentence the wrapper
-  # appends to such a bot's system prompt (a refreshed session's first turn
-  # is a CLI prompt, which gets no context from here).
-  arc_rules="Never share credentials of any kind, raw data, cluster hostnames or absolute paths, or anything from Samsung-internal sources. Never touch the SCOP tunnel, and never kill a Claude process. AutoResearchClaw gates are answered in the run's terminal, not over Discord."
-  if [ "$bot_mode" = autoresearchclaw ]; then
-    context="$context
-AutoResearchClaw: run progress reaches this channel on its own as [arc] lines; do not repeat it. When asked to share results with another machine, post one digest: hypothesis ids; config commit hash; a metrics table (condition, seeds, primary metric, latency, tokens); what failed and why; 1-3 lessons; repo-relative paths or commit links.
-$arc_rules"
-  fi
   mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null && printf '%s\n' "$bot_mode" > "$primed" 2>/dev/null
 fi
 

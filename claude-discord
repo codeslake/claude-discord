@@ -99,18 +99,19 @@ jq_edit() {  # $1 = file, the rest = jq arguments
 # machine with other bots. Any entry of ours (a command under
 # .claude/discord-agents/hooks/) that a file should not hold is removed from
 # it: a mode hook no bot needs, a hook in the other file (settings.json held
-# the peers hooks in an earlier version) or one that no longer exists
-# (turn/on-compact became turn/on-session-start), along with a matcher group
-# or an event left empty by that. Each command guards on [ -x ], so a machine
-# without the hooks installed simply runs nothing. Idempotent per entry, and
-# a file is written only when it changes (Claude Code writes its permission
-# grants into settings.local.json).
+# the peers hooks in an earlier version), one that no longer exists
+# (turn/on-compact became turn/on-session-start) or one under another event
+# or matcher (autoresearchclaw/on-start was startup|resume), along with a
+# matcher group or an event left empty by that. Each command guards on
+# [ -x ], so a machine without the hooks installed simply runs nothing.
+# Idempotent per entry, and a file is written only when it changes (Claude
+# Code writes its permission grants into settings.local.json).
 # Parallel arrays, not a packed "event|matcher|script" string, because a
 # matcher itself can contain "|" (startup|resume|compact|clear).
 register_hooks() {  # $1 = the project's bot modes, space-separated
   local modes=" ${1:-} "
   local events=(UserPromptSubmit PostToolUse Stop SessionStart PreToolUse PostToolUse PreToolUse SessionStart)
-  local matchers=("" "mcp__plugin_discord_discord__reply" "" "startup|resume|compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "Edit|Write|MultiEdit" "startup|resume")
+  local matchers=("" "mcp__plugin_discord_discord__reply" "" "startup|resume|compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "Edit|Write|MultiEdit" "startup|resume|compact|clear")
   local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/edit-gate autoresearchclaw/on-start)
   local needs=("" "" "" "" dev-manager dev-manager dev-manager autoresearchclaw)   # the mode an entry needs; "" = every bot
   local want='[]' i cmd file
@@ -127,14 +128,16 @@ register_hooks() {  # $1 = the project's bot modes, space-separated
   for file in settings.json settings.local.json; do
     jq_edit "$PWD/.claude/$file" --argjson all "$want" --arg file "$file" '
       ($all | map(select(.file == $file))) as $want
-      | def stale: (.command? // "" | tostring) as $c
-          | ($c | contains("/.claude/discord-agents/hooks/")) and ([$want[].cmd] | index($c)) == null;
+      | def stale($ev; $m): (.command? // "" | tostring) as $c
+          | ($c | contains("/.claude/discord-agents/hooks/"))
+            and ([$want[] | select(.ev == $ev and .m == $m) | .cmd] | index($c)) == null;
       (if (.hooks | type) != "object" then . else
-        .hooks |= with_entries(
-          if (.value | type) == "array" and any(.value[]; any(.hooks?[]?; stale)) then
-            .value |= map(if any(.hooks?[]?; stale) then (.hooks |= map(select(stale | not))) | select(.hooks | length > 0) else . end)
-            | select(.value | length > 0)
-          else . end)
+        .hooks |= with_entries(.key as $ev
+          | if (.value | type) == "array" and any(.value[]; (.matcher? // "") as $m | any(.hooks?[]?; stale($ev; $m))) then
+              .value |= map((.matcher? // "") as $m
+                | if any(.hooks?[]?; stale($ev; $m)) then (.hooks |= map(select(stale($ev; $m) | not))) | select(.hooks | length > 0) else . end)
+              | select(.value | length > 0)
+            else . end)
       end)
       | reduce $want[] as $w (.;
           if any(.hooks[$w.ev][]?.hooks?[]?; .command? == $w.cmd) then .
@@ -166,7 +169,8 @@ sync_mode_drops() {
   case " $modes " in *" dev-manager "*) keep=$rules/claude-discord-dev-manager.md;; esac
   # autoresearchclaw drops no rule file: every session under the project
   # loads one, the pipeline's own agent sessions included. Its only drop is
-  # the on-start hook (see register_hooks).
+  # the on-start hook (see register_hooks), which hands its rule to the
+  # bot's session as SessionStart context.
   for f in "$rules"/claude-discord-*.md; do
     [ "$f" = "$keep" ] || rm -f "$f" 2>/dev/null || echo "claude-discord: could not remove $f" >&2
   done
@@ -281,7 +285,7 @@ if [ "${1:-}" = setup ]; then
   mode=$(select_one Mode "$mode" \
     "none  a plain bot" \
     "dev-manager  coordinates claude-discord changes with peer bots" \
-    "autoresearchclaw  posts AutoResearchClaw run progress to the channel")
+    "autoresearchclaw  reports each AutoResearchClaw iteration to the channel")
   printf '%s\n' "$mode" > "$root/$name/mode"
   if [ "$mode" = dev-manager ]; then
     read -rp "Peer dev bots as name:bot_id:owner_id:machine, comma-separated (empty keeps the current list): " peers || :
@@ -517,12 +521,6 @@ Another bot receives your messages only when you @mention it and it allowlists y
 Sessions on this machine can also be reached with ListAgents and SendMessage, addressing them by session name; mirror every such message you send or receive into that channel as one line ('-> name: ...' or '<- name: ...') so the human can follow and step in. \
 The human's instructions override any agent's. \
 Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply."
-# on-prompt gives an autoresearchclaw bot these rules on its first Discord
-# turn; a session whose first turn is a CLI prompt (a refresh's kickoff) would
-# otherwise answer pending Discord requests without them. Word for word
-# on-prompt's arc_rules.
-[ "$(cat "$dir/mode" 2>/dev/null || :)" != autoresearchclaw ] || prompt="$prompt \
-Never share credentials of any kind, raw data, cluster hostnames or absolute paths, or anything from Samsung-internal sources. Never touch the SCOP tunnel, and never kill a Claude process. AutoResearchClaw gates are answered in the run's terminal, not over Discord."
 
 # A fresh session after a refresh must arrive already holding the handoff.
 # Consumed once: leaving it would make every later restart resume a

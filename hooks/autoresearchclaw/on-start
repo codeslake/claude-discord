@@ -1,43 +1,23 @@
 #!/usr/bin/env bash
-# SessionStart hook (matcher: startup|resume), registered while some bot in
-# the project is in autoresearchclaw mode. For such a bot, starts
-# autoresearchclaw/watch detached for this session and writes
-# $DISCORD_STATE_DIR/arc-watch.pid as "<watcher pid> <worker pid>". A live
-# watcher of this session, or of one of its ancestors, is left alone: a
-# `claude -p` run from the session's own Bash inherits DISCORD_STATE_DIR and
-# loads the same settings, and must not take the watcher over (it would die
-# with that short-lived child). A resumed session is a new worker, not a
-# descendant, so it gets its own watcher, and the old one exits at its next
-# wake because the pidfile no longer names it. Prints nothing; never fails.
+# SessionStart hook (matcher: startup|resume|compact|clear), registered while
+# some bot in the project is in autoresearchclaw mode. For such a bot's
+# session, prints the SessionStart JSON whose additionalContext is the whole
+# installed ~/.claude-discord/rules/autoresearchclaw.md: the per-iteration
+# report, the discussion rule, what never leaves the machine. At every
+# source, since a compaction or /clear drops that context from the
+# transcript. It arrives as context, not as a project .claude/rules file,
+# because every session under the project loads the project's rules,
+# AutoResearchClaw's own backend `claude` calls included, and those must not
+# take on the bot's duties.
+# ponytail: keyed on DISCORD_STATE_DIR alone, so a `claude` started from the
+# bot session's own Bash inherits it and gets this context too; tell the
+# bot's own session apart (its worker pid, say) if such a child ever acts on it.
+# Prints nothing without DISCORD_STATE_DIR, for a bot in another mode or
+# without the rule file. Starts no process; never fails.
 set -u
 . "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
 [ "$bot_mode" = autoresearchclaw ] || exit 0
-
-# The worker is the session's claude process. A hook runs as
-# `sh -c <command>` under it (measured: hook -> sh -> claude), and that sh
-# exits with the hook, so walk up past shells.
-worker=$PPID
-while c=$(ps -o comm= -p "$worker" 2>/dev/null); do
-  c=${c##*/}
-  case ${c#-} in
-    sh|bash|dash|zsh) worker=$(ps -o ppid= -p "$worker" 2>/dev/null | tr -d ' ') ;;
-    *) break ;;
-  esac
-done
-[ "${worker:-0}" -gt 1 ] 2>/dev/null && kill -0 "$worker" 2>/dev/null || exit 0
-
-pidfile=$DISCORD_STATE_DIR/arc-watch.pid
-pid="" for_worker=""
-{ read -r pid for_worker < "$pidfile"; } 2>/dev/null || :
-if kill -0 "$pid" 2>/dev/null; then
-  p=$worker
-  while [ "${p:-0}" -gt 1 ] 2>/dev/null; do
-    [ "$p" != "$for_worker" ] || exit 0
-    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
-  done
-fi
-# perl's setsid rather than setsid(1): macOS ships perl but no setsid. Every
-# stream is redirected, or the watcher would hold the hook's output open.
-perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- "$(dirname "$0")/watch" "$worker" </dev/null >/dev/null 2>&1 &
-printf '%s %s\n' "$!" "$worker" 2>/dev/null > "$pidfile"
+rule=$HOME/.claude-discord/rules/autoresearchclaw.md
+[ -f "$rule" ] || exit 0
+jq -nc --rawfile ctx "$rule" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}' 2>/dev/null
 exit 0

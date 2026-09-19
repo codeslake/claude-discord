@@ -15,10 +15,10 @@ Origin: written by d.kim4, extended here.
 |---|---|
 | Claude Code 2.1.x with channels support | `--channels` flag |
 | `bun` | the plugin's runtime (`curl -fsSL https://bun.sh/install \| bash`) |
-| `jq` | writes `access.json` and the settings files, reads the plugin's install path; every hook and the `autoresearchclaw` watcher need it too, and without it they silently do nothing |
+| `jq` | writes `access.json` and the settings files, reads the plugin's install path; every hook needs it too, and without it they silently do nothing |
 | the plugin | `claude plugin install discord@claude-plugins-official` then `claude plugin disable discord@claude-plugins-official` (see below) |
-| `curl` (optional) | the ✅ reaction on a finished reply and the `autoresearchclaw` progress posts; without it, neither is sent, everything else still works |
-| `perl` | patches the plugin at every start, and starts the `autoresearchclaw` watcher in its own session (macOS has no `setsid`) |
+| `curl` (optional) | the ✅ reaction on a finished reply; without it, none is sent, everything else still works |
+| `perl` | patches the plugin at every start, and detaches a `refresh` in its own session (macOS has no `setsid`) |
 
 Disable the plugin globally after installing it: enabled globally, every
 session without a bot token tries to start a Discord server. The wrapper
@@ -60,7 +60,11 @@ enables it per session with `--settings`.
 ```
 
 puts `claude-discord` in `~/.local/bin/` and the helpers (`discord-proxy.ts`,
-`hooks/`, `rules/`) in `~/.claude-discord/`. Re-run it after a pull.
+`hooks/`, `rules/`) in `~/.claude-discord/`. Re-run it after a pull. It also
+removes every file under `~/.claude-discord/hooks/<topic>/` and
+`~/.claude-discord/rules/` that the repo no longer ships (an earlier
+version's `autoresearchclaw/watch` or `turn/on-compact`); nothing else there
+is touched.
 
 ## Usage
 
@@ -83,7 +87,7 @@ The setup prompts:
 
 | Prompt | Stored in | Notes |
 |---|---|---|
-| Discord channel ID | `config.env` (shared) | also written as the channel group of each bot's `access.json`. A running bot's channel is that group: to move one bot, edit its `access.json` (the plugin, the hooks' identity text, the start prompt and the `autoresearchclaw` watcher all follow it; `config.env` is the fallback when the file has no single group). A setup re-run writes `config.env`'s channel into `access.json` again |
+| Discord channel ID | `config.env` (shared) | also written as the channel group of each bot's `access.json`. A running bot's channel is that group: to move one bot, edit its `access.json` (the plugin, the hooks' identity text and the start prompt all follow it; `config.env` is the fallback when the file has no single group). A setup re-run writes `config.env`'s channel into `access.json` again |
 | Your Discord user ID | `config.env` (shared) | the only user allowed to DM the bot |
 | Other user or bot IDs | `config.env` (shared) | comma-separated; may be empty. These can trigger the bot in the channel |
 | Bot token | `<name>/.env` | input is hidden, like a password. On a re-run, empty keeps the current token |
@@ -106,7 +110,7 @@ empty for the default (the current mode on a re-run).
 |---|---|
 | `none` | nothing beyond the Discord-turn hooks every bot gets |
 | `dev-manager` | for bots that change claude-discord together with peer bots on other machines: the rule `.claude/rules/claude-discord-dev-manager.md` (from `rules/dev-manager.md`) and the three peers hooks below |
-| `autoresearchclaw` | for a bot next to AutoResearchClaw runs in the project: the `autoresearchclaw/on-start` hook, which posts run progress to the channel (see AutoResearchClaw progress below). No rule file: every session under the project loads one, the pipeline's own agent sessions included. Give it to one bot per project: two such bots each post every event |
+| `autoresearchclaw` | for a bot next to AutoResearchClaw runs in the project: the `autoresearchclaw/on-start` hook, which gives the bot's session `rules/autoresearchclaw.md`, so it reports each research iteration to the channel (see AutoResearchClaw reports below). No rule file in the project: every session under the project loads one, the pipeline's own agent sessions included. Give it to one bot per project: two such bots each report every iteration |
 
 A dev-manager's setup also asks for its peers as
 `name:bot_id:owner_id:machine`, comma-separated. They are merged by `bot_id`
@@ -130,55 +134,42 @@ sessions and plain `claude` sessions included), so it opens by telling a
 session to ignore it unless its Discord-turn context has the `Dev manager:`
 line, which `on-prompt` adds for a dev-manager bot only.
 
-## AutoResearchClaw progress
+## AutoResearchClaw reports
 
-An `autoresearchclaw` bot makes the runs of the AutoResearchClaw pipeline in
-its project visible in the channel, one way: nothing in the channel steers
-a run. At every session start (and resume) `on-start` starts a watcher,
-`hooks/autoresearchclaw/watch`, detached from the session; it lives as long
-as the session's process and the bot's `autoresearchclaw` mode, and writes
-nothing to the terminal. Once a minute it reads every `artifacts/rc-*/` run
-directory and posts what is new to the bot's channel (see Usage: the one
-group in its `access.json`; with several groups it posts nothing until one
-is left), one message per run (a second apart: Discord takes 5 messages per
-5 s in a channel), one line per event:
+An `autoresearchclaw` bot posts one report per research iteration of the
+AutoResearchClaw runs in its project, written by the bot's own session; nothing
+in the channel steers a run, and gates are answered in the run's terminal.
 
-| Source | Line |
-|---|---|
-| `stage-NN/stage_health.json` | `[arc] stage 05 LITERATURE_SCREEN done (132 s)`; a failure says `failed (see run)` |
-| a new `hitl/interventions.jsonl` entry | `[arc] gate: approve stage 05 LITERATURE_SCREEN` |
-| `hitl/waiting.json` appearing | `[arc] gate waiting: stage 05 LITERATURE_SCREEN (gate_approval)` |
-| stage 23 done | `[arc] run rc-<stamp>-<hash> finished` |
-
-Only ids, numbers and enum words are posted. Error text, `context_summary`
-(it quotes paper text and paths), a human's gate message, paths and
-hostnames never are; a value that is not a plain word (letters, digits, `_`,
-`-`: a dotted hostname is not one) shows as `?`, and a post cannot mention
-anyone. Gates are answered in the run's terminal, not in
-Discord.
-
-What was posted is recorded in `.claude/discord-agents/<bot>/arc-posted`,
-keyed by run, event and the event's own timestamp (`since` for a wait), so a
-run relaunched with `--from-stage` into the same directory posts its
-rewritten stages again. The bot's very first watcher (no `arc-posted` yet)
-only records on its first pass: a run that already has history posts none of
-it. Every later start (a resume, a refresh) posts what happened while no
-watcher ran. `<bot>/arc-watch.pid` holds `<watcher pid> <session pid>`; a
-second start of the same session leaves the running watcher alone, and so
-does a session started under it (a `claude -p` from its Bash inherits the
-bot's state directory and runs `on-start` too). A resumed session gets its
-own watcher and the old one exits at its next wake. So does any other
-session started in the project with the bot's environment (its
-`DISCORD_STATE_DIR`) that is not under the bot's session: it takes the
-watcher over, and when it ends nothing watches until the bot's next start.
-
-The same mode also gives the session, once per session, the format for a
-cross-machine digest (hypothesis ids, config commit hash, a metrics table,
-what failed and why, lessons, commit links) and the list of what never
-leaves the machine. That list (with "never touch the SCOP tunnel, never kill
-a Claude process" and "gates are answered in the run's terminal") is also
-in the system prompt of every launch through the wrapper, so a refreshed
-session, whose first turn is a CLI prompt, has it before it answers anyone.
+- **Trigger.** An iteration ends when a run (`artifacts/rc-*/`) writes a new
+  `stage-15/decision.md` (PROCEED, PIVOT or REFINE); a run ends when it
+  writes `pipeline_summary.json`, aborted and failed runs included.
+- **`hooks/autoresearchclaw/events`** prints one line per new event,
+  `iteration-end <path>` or `run-end <path>` (relative to the project), and
+  nothing otherwise. What it has seen is `.claude/discord-agents/<bot>/arc-seen`,
+  one `<path> <cksum>` line per file and content: a relaunch that rewrites
+  `decision.md` with other content is a new event, an identical rewrite is
+  not. Its first call ever (no `arc-seen` yet) records what is there and
+  prints nothing, so a project's history is not reported. It records before
+  it prints, so no event is printed twice. Outside a bot session (no
+  `DISCORD_STATE_DIR`) it exits 2.
+- **Waking the session.** The session keeps one standing watch that runs
+  `events` and wakes it when a line comes out: the machine's watch daemon if
+  it has one, otherwise a background loop (`until e=$(events); [ -n "$e" ];
+  do sleep 60; done`) it starts on its first turn and again after every
+  report. It then reads that iteration's `stage-13`/`stage-14`/`stage-15`
+  files and posts one short Korean report with the reply tool: what was
+  tried, the key numbers labeled measured or proposed, the decision and why,
+  the next step.
+- **Discussion.** Only when an owner asks does it talk to other research
+  bots: one digest of its recent iterations, critique both ways, at most
+  three messages each, then one summary for both owners.
+- **Why SessionStart context, not a project rule.** The rules
+  (`rules/autoresearchclaw.md`, installed to `~/.claude-discord/rules/`) reach
+  the session through `on-start` as SessionStart context, at startup, resume,
+  compact and clear. A `.claude/rules/` file would be loaded by every session
+  under the project, AutoResearchClaw's own backend `claude` calls included,
+  and they are not the bot. A `claude` started from the bot session's own
+  Bash inherits its `DISCORD_STATE_DIR` and gets the context too.
 
 ## Resuming by name
 
@@ -221,7 +212,7 @@ under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
 | PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/mention-guard` | dev-manager only. Denies a reply that names a peer (a whole word, case-insensitive) without its `<@bot_id>` or `<@!bot_id>`, or that answers a peer without mentioning it: the author of the message in `reply_to` when that is set, else of the turn's last message. A bot only receives messages that mention it. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `peers/checkin` | dev-manager only. A reply that mentions a peer (`<@bot_id>` or `<@!bot_id>`) touches `.claude/discord-agents/checkin/<session_id>`. |
 | PreToolUse | `Edit\|Write\|MultiEdit` | `peers/edit-gate` | dev-manager only. Denies an edit under a path whose realpath contains `/claude-discord/` unless the session checked in within the last 60 minutes; an allowed edit renews the check-in. Paths git ignores (a bot's state such as the refresh `handoff.md`, `.superpowers/`) pass. Bash and git edits are not seen; the rule asks for the same announcement by hand. |
-| SessionStart | `startup\|resume` | `autoresearchclaw/on-start` | autoresearchclaw only. Starts the progress watcher for this session unless one already watches it; prints nothing. See AutoResearchClaw progress above. |
+| SessionStart | `startup\|resume\|compact\|clear` | `autoresearchclaw/on-start` | autoresearchclaw only. Prints the installed `rules/autoresearchclaw.md` as the session's additionalContext (nothing when the file is missing); starts no process. An entry an earlier version registered with `startup\|resume` is replaced. See AutoResearchClaw reports above. |
 
 Which file holds what:
 
@@ -403,7 +394,7 @@ rest of Claude Code.
 | `claude-discord: ~/.claude-discord/rules/dev-manager.md is missing` | wrapper newer than the installed helpers; re-run `./install.sh` |
 | `refresh` says `handoff.md is missing or empty` | the session did not write it; ask it to, or pass `--force` |
 | `refresh` says `no running session named <name> started in <dir>` | the session was renamed (`/rename`) or started elsewhere; `claude agents` shows it, stop it by hand, then `refresh --force` |
-| No `[arc]` lines in the channel | the bot's `mode` is not `autoresearchclaw`, the session was started before the mode was set (on-start runs at session start), `curl` or `perl` is missing, or the runs are not under `artifacts/rc-*/` of the project the bot was set up in. `<bot>/arc-watch.pid` names the watcher and the session it watches |
+| No report after an iteration | the bot's `mode` is not `autoresearchclaw`; the session has no standing watch running `events` (ask it to start one); the session started before the mode was set (the rules arrive at session start: restart or `/clear` it); or the runs are not under `artifacts/rc-*/` of the project the bot was set up in. `<bot>/arc-seen` lists what `events` has already reported (running `events` by hand records what it prints, so the watch will not see it again) |
 
 ## Test
 

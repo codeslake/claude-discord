@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Run by an autoresearchclaw bot's session, from its standing watch (see
+# rules/autoresearchclaw.md); never registered as a hook. Prints one line per
+# NEW event under the project's AutoResearchClaw runs (artifacts/rc-*/ only),
+# nothing when nothing is new:
+#   iteration-end artifacts/rc-<run>/stage-15/decision.md    an iteration ended
+#   run-end artifacts/rc-<run>/pipeline_summary.json         a run ended
+# The project is $DISCORD_STATE_DIR/../../.. (the state dir is
+# <project>/.claude/discord-agents/<bot>). Dedup key: the file's path
+# relative to the project plus the cksum of its content, one
+# "<path> <cksum>" line per seen pair in $DISCORD_STATE_DIR/arc-seen. So a
+# relaunch that rewrites decision.md with other content is a new event, and
+# an identical rewrite (or a touch) is not. The first call ever (no arc-seen
+# yet) records everything present and prints nothing: a bot's first watch on
+# a project with history reports none of it. A pair is recorded before it is
+# printed, so an event is printed at most once; one that cannot be recorded
+# is not printed at all. Exits 0, except 2 (with a line on stderr) without
+# DISCORD_STATE_DIR: it only means something inside a bot session.
+set -u
+[ -n "${DISCORD_STATE_DIR:-}" ] || { echo "events: DISCORD_STATE_DIR is unset; run this inside a claude-discord bot session" >&2; exit 2; }
+seen=$DISCORD_STATE_DIR/arc-seen
+cd "$DISCORD_STATE_DIR/../../.." 2>/dev/null || exit 0
+[ -e "$seen" ] && first=0 || first=1
+keys="" lines=""
+for f in artifacts/rc-*/stage-15/decision.md artifacts/rc-*/pipeline_summary.json; do
+  [ -f "$f" ] || continue
+  k="$f $(cksum < "$f" 2>/dev/null)" || continue
+  grep -qxF -- "$k" "$seen" 2>/dev/null && continue
+  keys="$keys$k"$'\n'
+  case $f in
+    */pipeline_summary.json) lines="${lines}run-end $f"$'\n' ;;
+    *) lines="${lines}iteration-end $f"$'\n' ;;
+  esac
+done
+# Written even when empty: a project with no runs yet must not stay "first".
+printf '%s' "$keys" >> "$seen" 2>/dev/null || exit 0
+[ "$first" = 1 ] || printf '%s' "$lines"
+exit 0
