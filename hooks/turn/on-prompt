@@ -24,8 +24,9 @@ prompt=$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null) || exit 0
 # newline follows its '>'), not "up to the first >": the display name in
 # user="" comes before user_id and may hold `">`, but no newline, so the
 # tag's own user_id is the line's last one.
-tag='^[[:space:]]*<channel source="plugin:discord:discord" chat_id="([0-9]+)" message_id="([0-9]+)"'
-head=${prompt%%$'\n'*}
+tag='^<channel source="plugin:discord:discord" chat_id="([0-9]+)" message_id="([0-9]+)"'
+trimmed=${prompt#"${prompt%%[![:space:]]*}"}   # leading whitespace, a newline included, then the first line
+head=${trimmed%%$'\n'*}
 [[ $head =~ $tag ]] || exit 0
 chat_id=${BASH_REMATCH[1]} message_id=${BASH_REMATCH[2]}
 [ -n "$bot_name" ] || exit 0
