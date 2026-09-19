@@ -1008,7 +1008,7 @@ out=$(tguard "$(body 42 "$A500")")
 [ -z "$out" ] || { echo "FAIL: 500 characters is not over the limit: $out"; exit 1; }
 out=$(tguard "$(body 42 "$KO200")")
 [ -z "$out" ] || { echo "FAIL: 200 Korean characters (600 bytes) must pass: bytes were counted, not characters: $out"; exit 1; }
-out=$(tguard "$(body 1550575144320110662 "$A501")")
+out=$(tguard "$(body 43 "$A501")")   # 43: a thread of channel 42, not the channel
 [ -z "$out" ] || { echo "FAIL: the same long text sent to a thread id must pass: $out"; exit 1; }
 out=$(tguard "$(body 42 "$A501")" plain)
 [ -z "$out" ] || { echo "FAIL: thread-guard must be a no-op for a bot that is not a dev-manager: $out"; exit 1; }

@@ -267,7 +267,7 @@ Which file holds what:
 
 - The four `turn/` hooks go into `.claude/settings.json`. Every bot on every
   machine gets the same four, so this file can be committed and shared.
-- Every mode hook (the three `peers/` hooks while some bot in the project is
+- Every mode hook (the four `peers/` hooks while some bot in the project is
   a dev-manager, `autoresearchclaw/on-start` while one is autoresearchclaw;
   see Modes) goes into
   `.claude/settings.local.json`. Which modes a project has depends on the
@@ -279,7 +279,8 @@ Which file holds what:
 
 Both `setup` and the start path register them, so a bot set up before this
 existed gets them on its next start too. The `peers/` hooks do nothing in a
-session whose bot is not a dev-manager, or without `peers.json`;
+session whose bot is not a dev-manager, and all but `thread-guard` (which
+reads no peer) also do nothing without `peers.json`;
 `autoresearchclaw/on-start` does nothing for a bot in another mode. `on-prompt`
 also records each message's sender (`user_id`) for `mention-guard`, and
 gives a dev-manager its peers' mentions and the working rule once per
