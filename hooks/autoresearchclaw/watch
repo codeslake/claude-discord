@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Started detached by on-start for an autoresearchclaw bot's session; never
+# registered itself. Once a minute it looks at every AutoResearchClaw run
+# under <project>/artifacts/rc-*/ and posts to the bot's channel what is new
+# there, one message per run: a line per stage-NN/stage_health.json (stage
+# number, the name when the stage_id carries one, status, duration; a failure
+# says only "failed (see run)"), per hitl/interventions.jsonl entry (the gate
+# decision), per hitl/waiting.json that appears (stage, stage_name and reason
+# only: its context_summary quotes paper text and paths) and the run's end
+# (stage 23 done). Error text, summaries, messages, paths and hostnames are
+# never posted: every posted field is an id, a number or an enum word.
+# What was posted is keyed in $DISCORD_STATE_DIR/arc-posted by run, event and
+# its timestamp or since, since a --from-stage relaunch rewrites a stage in
+# the same run dir. The first pass only records, so a start on a run with
+# history posts none of it. Exits when the session's worker ($1) is gone, or
+# when arc-watch.pid names another watcher (on-start started one for a new
+# session).
+set -u
+. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+worker=${1:-}
+case $worker in ''|*[!0-9]*) exit 0;; esac
+[ -n "$bot_name" ] || exit 0
+project=${DISCORD_STATE_DIR%/.claude/discord-agents/*}
+posted=$DISCORD_STATE_DIR/arc-posted
+pidfile=$DISCORD_STATE_DIR/arc-watch.pid
+tab=$(printf '\t')
+
+# Each event is one "<timestamp> TAB <key> TAB <line>" record. A value that
+# is not a plain word becomes "?", so no free text can reach a post.
+defs='def word: tostring | if test("^[A-Za-z0-9_.:+-]+$") then . else "?" end;
+def stage($n; $name): "stage " + ($n | tostring | if test("^[0-9]$") then "0" + . else word end)
+  + ($name // "" | tostring | if test("^[A-Za-z0-9_]+$") then " " + ascii_upcase else "" end);
+def rec($ts; $key; $line): [($ts // "" | word), $run + " " + $key, "[arc] " + $line] | join("\t");'
+health=$defs'
+(.stage_id | tostring | capture("^(?<n>[0-9]+)(-(?<name>.*))?$")) as $id
+| (.status // "" | word) as $st
+| rec(.timestamp; "stage \($id.n) \(.timestamp // "" | word)";
+    stage($id.n; $id.name) + " "
+    + if $st == "failed" then "failed (see run)"
+      elif (.duration_sec | type) == "number" then "\($st) (\(.duration_sec | round) s)"
+      else $st end),
+  (select(($id.n | tonumber) == 23 and $st == "done") | rec(.timestamp; "end \(.timestamp // "" | word)"; "run \($run | word) finished"))'
+gate=$defs'
+fromjson? | objects
+| rec(.timestamp; "gate \(.stage | word) \(.timestamp // "" | word) \(.id // "" | word)";
+    "gate: \((.human_input | objects | .action) // .type // "" | word) " + stage(.stage; .stage_name))'
+waiting=$defs'
+rec(.since; "wait \(.stage | word) \(.since // "" | word)"; "gate waiting: " + stage(.stage; .stage_name) + " (\(.reason // "" | word))")'
+
+poll() {  # $1 = 1 on the first pass: record, post nothing
+  local run name new f
+  [ -e "$posted" ] || : 2>/dev/null > "$posted"
+  for run in "$project"/artifacts/rc-*/; do
+    [ -d "$run" ] || continue
+    name=$(basename "$run")
+    new=$(
+      {
+        for f in "$run"stage-*/stage_health.json; do
+          [ -f "$f" ] && jq -r --arg run "$name" "$health" "$f" 2>/dev/null
+        done
+        [ -f "${run}hitl/interventions.jsonl" ] && jq -rR --arg run "$name" "$gate" "${run}hitl/interventions.jsonl" 2>/dev/null
+        [ -f "${run}hitl/waiting.json" ] && jq -r --arg run "$name" "$waiting" "${run}hitl/waiting.json" 2>/dev/null
+      } | LC_ALL=C sort -s -t "$tab" -k1,1 |
+        awk -F "$tab" -v f="$posted" 'BEGIN { while ((getline k < f) > 0) seen[k] } NF >= 3 && !($2 in seen) { seen[$2]; print }'
+    )
+    [ -n "$new" ] || continue
+    # Recorded before posting: an event that cannot be recorded would be
+    # posted again every minute.
+    printf '%s\n' "$new" | cut -f2 2>/dev/null >> "$posted" || continue
+    [ "$1" = 1 ] || post "$bot_channel" "$(printf '%s\n' "$new" | cut -f3)"
+  done
+}
+
+poll 1
+while sleep 60; do
+  kill -0 "$worker" 2>/dev/null && [ "$(cat "$pidfile" 2>/dev/null)" = "$$ $worker" ] || exit 0
+  poll 0
+done

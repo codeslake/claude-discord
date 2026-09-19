@@ -90,30 +90,32 @@ jq_edit() {  # $1 = file, the rest = jq arguments
 # re-priming after a compact/clear), which make a turn that arrived over
 # Discord be answered through the discord reply tool only, never also typed
 # into the CLI, are the same for every bot on every machine: they go into
-# settings.json, which can be committed and shared. Every other entry
-# depends on the modes of the bots THIS machine runs (now: the three peers
-# hooks, when $1 is 1 because some bot here is a dev-manager), so it goes
-# into settings.local.json, which is per machine; in a committed
-# settings.json it would flip on every start of a machine with other bots.
-# Such an entry that is not wanted is removed from BOTH files (settings.json
-# held the peers hooks in an earlier version), along with a matcher group or
-# an event left empty by that. Each command guards on [ -x ], so a machine
-# without the hooks installed simply runs nothing. Idempotent per entry, and
-# a file is written only when it changes (Claude Code writes its permission
-# grants into settings.local.json). Parallel arrays, not a packed
-# "event|matcher|script" string, because a matcher itself can contain "|"
-# (compact|clear).
-register_hooks() {  # $1 = 1 to register the peers hooks, anything else removes them
-  local peers=${1:-}
-  local events=(UserPromptSubmit PostToolUse Stop SessionStart PreToolUse PostToolUse PreToolUse)
-  local matchers=("" "mcp__plugin_discord_discord__reply" "" "compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "Edit|Write|MultiEdit")
-  local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-compact peers/mention-guard peers/checkin peers/edit-gate)
+# settings.json, which can be committed and shared. Every other entry is
+# registered only while its mode is among $1, the modes of the bots THIS
+# machine runs (the three peers hooks for dev-manager, on-start for
+# autoresearchclaw), so it goes into settings.local.json, which is per
+# machine; in a committed settings.json it would flip on every start of a
+# machine with other bots. Such an entry that is not wanted is removed from
+# BOTH files (settings.json held the peers hooks in an earlier version),
+# along with a matcher group or an event left empty by that. Each command
+# guards on [ -x ], so a machine without the hooks installed simply runs
+# nothing. Idempotent per entry, and a file is written only when it changes
+# (Claude Code writes its permission grants into settings.local.json).
+# Parallel arrays, not a packed "event|matcher|script" string, because a
+# matcher itself can contain "|" (compact|clear).
+register_hooks() {  # $1 = the project's bot modes, space-separated
+  local modes=" ${1:-} "
+  local events=(UserPromptSubmit PostToolUse Stop SessionStart PreToolUse PostToolUse PreToolUse SessionStart)
+  local matchers=("" "mcp__plugin_discord_discord__reply" "" "compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "Edit|Write|MultiEdit" "startup|resume")
+  local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-compact peers/mention-guard peers/checkin peers/edit-gate autoresearchclaw/on-start)
+  local needs=("" "" "" "" dev-manager dev-manager dev-manager autoresearchclaw)   # the mode an entry needs; "" = every bot
   local want='[]' i cmd file
   for i in "${!events[@]}"; do
-    case ${scripts[i]} in
-      turn/*) file=settings.json ;;
-      *) [ "$peers" = 1 ] || continue; file=settings.local.json ;;
-    esac
+    if [ -z "${needs[i]}" ]; then
+      file=settings.json
+    else
+      case $modes in *" ${needs[i]} "*) file=settings.local.json ;; *) continue ;; esac
+    fi
     cmd="h=\"\$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/${scripts[i]}\"; [ ! -x \"\$h\" ] || \"\$h\""
     want=$(printf '%s' "$want" | jq -c --arg ev "${events[i]}" --arg m "${matchers[i]}" --arg cmd "$cmd" --arg file "$file" \
       '. + [{ev: $ev, m: $m, cmd: $cmd, file: $file}]') || return 0
@@ -154,12 +156,14 @@ ensure_ack_reaction() {  # $1 = bot dir
 # (see register_hooks). Run by setup and every start; idempotent; never
 # aborts either.
 sync_mode_drops() {
-  local dev=0 f keep="" rules=$PWD/.claude/rules src=$helpers/rules/dev-manager.md
+  local modes="" f keep="" rules=$PWD/.claude/rules src=$helpers/rules/dev-manager.md
   for f in "$root"/*/mode; do
-    [ "$(cat "$f" 2>/dev/null)" != dev-manager ] || dev=1
+    modes="$modes $(cat "$f" 2>/dev/null || :)"   # no bot yet: the glob stays literal, and set -e must not see cat fail
   done
-  [ "$dev" = 0 ] || keep=$rules/claude-discord-dev-manager.md
-  # autoresearchclaw: installs nothing yet; its drops go here once its spec is agreed.
+  case " $modes " in *" dev-manager "*) keep=$rules/claude-discord-dev-manager.md;; esac
+  # autoresearchclaw drops no rule file: every session under the project
+  # loads one, the pipeline's own agent sessions included. Its only drop is
+  # the on-start hook (see register_hooks).
   for f in "$rules"/claude-discord-*.md; do
     [ "$f" = "$keep" ] || rm -f "$f" 2>/dev/null || echo "claude-discord: could not remove $f" >&2
   done
@@ -170,7 +174,7 @@ sync_mode_drops() {
       echo "claude-discord: could not write $keep" >&2
     fi
   fi
-  register_hooks "$dev"
+  register_hooks "$modes"
 }
 
 # Makes <project>/.claude/discord-agents/hooks a symlink to the installed
@@ -274,7 +278,7 @@ if [ "${1:-}" = setup ]; then
   mode=$(select_one Mode "$mode" \
     "none  a plain bot" \
     "dev-manager  coordinates claude-discord changes with peer bots" \
-    "autoresearchclaw  placeholder: installs nothing yet")
+    "autoresearchclaw  posts AutoResearchClaw run progress to the channel")
   printf '%s\n' "$mode" > "$root/$name/mode"
   if [ "$mode" = dev-manager ]; then
     read -rp "Peer dev bots as name:bot_id:owner_id:machine, comma-separated (empty keeps the current list): " peers || :
