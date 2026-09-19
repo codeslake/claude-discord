@@ -11,61 +11,34 @@ set -u
 
 input=$(cat 2>/dev/null) || exit 0
 prompt=$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null) || exit 0
-case $prompt in
-  *'<channel source="plugin:discord:discord"'*) ;;
-  *) exit 0 ;;
-esac
+# A Discord turn is a prompt that OPENS with the plugin's tag,
+# `<channel source="plugin:discord:discord" chat_id=".." message_id=".."
+# user=".." user_id=".." ts="..">` (whitespace aside), and only that leading
+# tag is trusted: its ids and the sender's user_id are recorded, never
+# anything from the message body. The plugin does not escape `<` in content
+# (`<@id>` arrives raw), so a later "tag", a literal </channel> or text shaped
+# like an attribute (a path-traversal payload disguised as a message_id) can
+# all be forged; measured, every delivery, a mid-turn arrival included (each
+# is its own prompt), carried exactly one tag. Digits only; react() also
+# refuses a non-numeric id.
+tag='^[[:space:]]*<channel source="plugin:discord:discord" chat_id="([0-9]+)" message_id="([0-9]+)"'
+head=${prompt%%>*}
+[ "$head" != "$prompt" ] && [[ $head =~ $tag ]] || exit 0
+chat_id=${BASH_REMATCH[1]} message_id=${BASH_REMATCH[2]}
 [ -n "$bot_name" ] || exit 0
+user_id=$(printf '%s' "$head" | grep -oE ' user_id="[0-9]+"' | tail -1 | tr -dc 0-9)   # the last: user="" (a display name) comes before it
 
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
 
-# ids come from an OPENING tag ONLY -- everything from the start of the
-# prompt, or the previous tag's closing </channel>, up to this tag's own
-# '>' -- never from a message body, which can contain literal text that
-# looks like an attribute (a path-traversal payload disguised as a
-# message_id). Several queued Discord messages can share one prompt, each
-# with its own tag, so every opening tag is recorded, not only the first;
-# the loop walks tag-boundary to tag-boundary so a body can never be
-# mistaken for one. Digits only, on top of that; react() also refuses a
-# non-numeric id. The sender's user_id comes from the same opening tag, the
-# same way. A body can still hold a literal </channel>, which starts a new
-# "head" of its own, so a head counts only when it IS an opening tag, from
-# its first character (whitespace aside) on, and only when its chat_id is the
-# first tag's: text such as `</channel> chat_id="1" message_id="2"
-# user_id="<a peer>">` in a body records nothing.
-tag='^[[:space:]]*<channel source="plugin:discord:discord" chat_id="([0-9]+)" message_id="([0-9]+)"'
-pairs="" first_chat=""
-rest=$prompt
-while :; do
-  head=${rest%%>*}
-  [ "$head" != "$rest" ] || break
-  if [[ $head =~ $tag ]] && [ "${first_chat:=${BASH_REMATCH[1]}}" = "${BASH_REMATCH[1]}" ]; then
-    pair="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
-    uid=$(printf '%s' "$head" | grep -oE ' user_id="[0-9]+"' | head -1 | tr -dc 0-9)
-    pairs="$pairs$pair${uid:+ $uid}
-"
-  fi
-  after=${rest#*</channel>}
-  [ "$after" != "$rest" ] || break
-  rest=$after
-done
-
-if [ -n "$pairs" ] && [ -n "$session_id" ] && mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; then
+if [ -n "$session_id" ] && mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; then
   # A turn that is only just starting hasn't replied yet, so a flag here is
   # stale. on-stop removes both files at the end of a turn: no turns file
   # means a new turn. With one, this prompt is a Discord message that arrived
-  # mid-turn, perhaps after the reply, and the flag must stay.
+  # mid-turn, perhaps after the reply, and the flag must stay; the message is
+  # appended, so the turn's ✅ reaches every message it answered.
   [ -e "$DISCORD_STATE_DIR/turns/$session_id" ] || rm -f "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
-  last_message_id=""
-  while read -r line; do
-    [ -n "$line" ] || continue
-    printf '%s\n' "$line" >> "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null || :
-    last_message_id=${line#* }
-    last_message_id=${last_message_id%% *}
-  done <<PAIRS
-$pairs
-PAIRS
-  [ -n "$last_message_id" ] && { printf '%s\n' "$last_message_id" > "$DISCORD_STATE_DIR/last-message-id" 2>/dev/null || :; }
+  printf '%s %s%s\n' "$chat_id" "$message_id" "${user_id:+ $user_id}" >> "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null || :
+  printf '%s\n' "$message_id" > "$DISCORD_STATE_DIR/last-message-id" 2>/dev/null || :
 fi
 
 # The identity/rules preamble is injected once per session, not on every
