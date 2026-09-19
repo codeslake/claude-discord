@@ -17,6 +17,7 @@ Origin: written by d.kim4, extended here.
 | `bun` | the plugin's runtime (`curl -fsSL https://bun.sh/install \| bash`) |
 | `jq` | writes `access.json` and reads the plugin's install path |
 | the plugin | `claude plugin install discord@claude-plugins-official` then `claude plugin disable discord@claude-plugins-official` (see below) |
+| `curl` (optional) | the ✅ reaction on a finished reply; without it, no reaction is sent, everything else still works |
 
 Disable the plugin globally after installing it: enabled globally, every
 session without a bot token tries to start a Discord server. The wrapper
@@ -58,7 +59,7 @@ enables it per session with `--settings`.
 ```
 
 puts `claude-discord` in `~/.local/bin/` and the helpers (`discord-proxy.ts`,
-`discord-turn-hook`) in `~/.claude-discord/`. Re-run it after a pull.
+`hooks/`) in `~/.claude-discord/`. Re-run it after a pull.
 
 ## Usage
 
@@ -111,21 +112,40 @@ passed through and claude decides.
   "respond without mention" on every bot, one human message gets one reply
   per bot.
 
-## Keeping Discord turns out of the CLI
+## Hooks
 
 A message that arrives over Discord should be answered through the discord
 reply tool only, not also typed into the CLI (that would waste a reply on a
-channel nobody types into). `discord-turn-hook` is a `UserPromptSubmit` hook
-that recognises a Discord-origin prompt and adds a short instruction to that
-effect; it never blocks or fails a turn.
+channel nobody types into). Three hooks handle that, plus identity, a
+"refresh" handoff trigger, and a ✅ reaction once a turn actually replies.
+Each entry in `.claude/settings.json` execs the script directly
+(`h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/<topic>/<name>"; [ ! -x "$h" ] || "$h"`),
+so a machine without the hooks installed simply runs nothing. Scripts live
+under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
+`lib/discord.sh` is sourced by the three below it, not registered itself.
 
-Both `setup` and the start path register it in the project's own
-`.claude/settings.json`, under `.hooks.UserPromptSubmit`, so a bot set up
-before this existed gets it on its next start too. Registration is
-idempotent and leaves every other key in the file alone; a session already
-running picks up a hook added to its settings file without a restart. To
-remove it, delete its entry from `.hooks.UserPromptSubmit` in
+| Event | Matcher | Script | What |
+|---|---|---|---|
+| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn, records the message's chat_id/message_id for `on-stop` and adds an additionalContext entry with the bot's identity and the mention rule; silent on a plain CLI turn. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>`. |
+| PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply. |
+| Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it; always clears the per-turn files either way. |
+
+Both `setup` and the start path register all three, so a bot set up before
+this existed gets them on its next start too. Registration is idempotent per
+entry and leaves every other key in `.claude/settings.json` alone; a session
+already running picks up a hook added to its settings file without a
+restart. To remove them, delete their three entries from `.hooks` in
 `.claude/settings.json`.
+
+Both also make `.claude/discord-agents/hooks` in the project a symlink to
+`~/.claude-discord/hooks/` (only when that path is absent or already a
+symlink; a real directory there is left alone with a warning), so
+`./install.sh` after a pull reaches a session that is already running too --
+no restart needed there either.
+
+The 👀 reaction on receipt is not a hook: it is the plugin's own
+`ackReaction` in `access.json`, added the same never-overwrite-when-present
+way (an explicit `""` means the owner disabled it, and is kept).
 
 ## Bots hearing each other
 
@@ -138,9 +158,9 @@ patch is idempotent and re-applied every start because a plugin update replaces
 the plugin directory. If upstream changes that line, the patch silently no-ops
 and bots go back to ignoring each other.
 
-The system prompt tells the session never to @mention a bot when answering
-one, because a mention would make it answer again and the two would loop until
-a human steps in.
+`on-prompt` (see Hooks above) tells the session to mention a bot only when it
+needs that bot to act or answer, and to stay silent if it was mentioned but
+nothing was asked of it, so two bots don't @mention each other into a loop.
 
 A second one-line patch, applied the same way, stops `@everyone` and `@here`
 from counting as a mention of every bot (discord.js's default), so one
@@ -157,8 +177,10 @@ environment; measured 2026-09-18, a fork made by `/bg` had no
 `DISCORD_STATE_DIR` and its plugin server died silently. Two things to know:
 
 - The `/bg` fork does not carry `--append-system-prompt`, so the identity
-  paragraph (name, channel, the "never @mention a bot" rule) is gone after
-  `/bg`. The transcript still holds everything said so far.
+  paragraph from the system prompt is gone after `/bg`. `on-prompt` re-adds
+  identity and the mention rule on every Discord turn regardless, so this
+  only matters for a turn typed straight into the CLI after `/bg`. The
+  transcript still holds everything said so far.
 - One token, one session. After `/bg` the foreground REPL exits; do not start
   `claude-discord alpha` again while the background copy runs, or both answer
   every mention.

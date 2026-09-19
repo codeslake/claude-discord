@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Stop hook: if this turn recorded any Discord messages and actually sent a
+# reply, reacts ✅ on each of them, then always clears the per-turn files.
+# Must never block or fail a turn.
+set -u
+. "$(dirname "$0")/../lib/discord.sh"
+
+session_id=$(jq -r '.session_id // empty' 2>/dev/null) || exit 0
+if [ -n "$session_id" ] && [ -n "$bot_name" ]; then
+  turns="$DISCORD_STATE_DIR/turns/$session_id"
+  replied="$turns.replied"
+  if [ -f "$turns" ] && [ -f "$replied" ]; then
+    while IFS=' ' read -r chat_id message_id; do
+      [ -n "$chat_id" ] && [ -n "$message_id" ] || continue
+      react "$chat_id" "$message_id" '%E2%9C%85'
+    done < "$turns"
+  fi
+  rm -f "$turns" "$replied" 2>/dev/null
+fi
+exit 0

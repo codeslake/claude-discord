@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# PostToolUse hook (matcher: mcp__plugin_discord_discord__reply): marks that
+# this turn actually sent a Discord reply, so on-stop knows to react ✅ on
+# it. Must never block or fail a turn.
+set -u
+. "$(dirname "$0")/../lib/discord.sh"
+
+session_id=$(jq -r '.session_id // empty' 2>/dev/null) || exit 0
+[ -n "$session_id" ] && [ -n "$bot_name" ] || exit 0
+mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null && : >> "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
+exit 0

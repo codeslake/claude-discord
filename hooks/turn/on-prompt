@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# UserPromptSubmit hook: a turn that arrived over Discord (the transcript
+# wraps it in a <channel source="plugin:discord:discord" ...> tag) must be
+# answered through the discord reply tool only, not also typed into the CLI.
+# Also records the turn's chat_id/message_id pairs so on-stop can react to
+# them, and offers a "refresh" handoff trigger. Must never block or fail a
+# turn: any parse failure, missing field or unrelated prompt is silent
+# success.
+set -u
+. "$(dirname "$0")/../lib/discord.sh"
+
+input=$(cat 2>/dev/null) || exit 0
+prompt=$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null) || exit 0
+case $prompt in
+  *'<channel source="plugin:discord:discord"'*) ;;
+  *) exit 0 ;;
+esac
+[ -n "$bot_name" ] || exit 0
+
+session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
+
+# Record every chat_id/message_id pair so on-stop can react to each once the
+# turn is done.
+pairs=$(printf '%s' "$prompt" | grep -oE 'chat_id="[^"]*" message_id="[^"]*"' 2>/dev/null |
+        sed -E 's/chat_id="([^"]*)" message_id="([^"]*)"/\1 \2/') || pairs=""
+if [ -n "$pairs" ] && [ -n "$session_id" ] && mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; then
+  while IFS=' ' read -r chat_id message_id; do
+    [ -n "$chat_id" ] && [ -n "$message_id" ] || continue
+    printf '%s %s\n' "$chat_id" "$message_id" >> "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null || :
+    printf '%s\n' "$message_id" > "$DISCORD_STATE_DIR/last-message-id" 2>/dev/null || :
+  done <<PAIRS
+$pairs
+PAIRS
+fi
+
+context="Discord turn. You are $bot_name, the Claude Code session behind the Discord bot $bot_name in channel $bot_channel. Answer only with the discord reply tool and write no CLI text. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically."
+
+# "refresh", case-insensitive, once the tag and any @mentions are stripped.
+text=$(printf '%s' "${prompt#*>}" | sed -E 's/<@[0-9]+>//g; s/^[[:space:]]+//; s/[[:space:]]+$//' | tr '[:upper:]' '[:lower:]')
+if [ "$text" = refresh ]; then
+  context="$context
+
+A refresh was requested: you will be replaced by a fresh session with an empty context, and the only thing that reaches it is the file you write now. Write $DISCORD_STATE_DIR/handoff.md, overwriting it, with exactly these sections:
+# handoff — $bot_name · <ISO timestamp>
+## Unanswered — who asked (Discord handle), what, when, message link if known. One line each. Someone is waiting.
+## In flight — work you started and where it actually stands. Mark each claim [verified] or [assumed]; the next session treats this file as fact.
+## Decisions — decision: why. The reasoning, not just the outcome.
+## Next — what the fresh session should do first.
+Leave a section out if genuinely empty; do not pad. Channel conventions are already injected, do not restate them. Redact tokens and anything personal. Then run \`claude-discord refresh $bot_name\` and say nothing else."
+fi
+
+jq -nc --arg ctx "$context" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:$ctx}}' 2>/dev/null
+exit 0
