@@ -1104,6 +1104,39 @@ done
 [ -x "$IH/.claude-discord/hooks/autoresearchclaw/events" ] && [ -x "$IH/.claude-discord/hooks/autoresearchclaw/on-start" ] || { echo "FAIL: the autoresearchclaw hooks must be executable"; exit 1; }
 echo "ok: install.sh installs every shipped hook and rule (events and autoresearchclaw.md included) and removes the stale watch, on-compact and rule files, leaving everything else"
 
+# setup --mode: changes only a set-up bot's mode. A fresh project, so these
+# assertions are not entangled with any other bot's state.
+P5="$HOME/project5"; mkdir -p "$P5"; cd "$P5"
+R5="$P5/.claude/discord-agents"
+SL5="$P5/.claude/settings.local.json"
+CMD_ARC5='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/autoresearchclaw/on-start"; [ ! -x "$h" ] || "$h"'
+
+out=$(printf '' | bash "$S" setup nosetup --mode 2>&1) && { echo "FAIL: --mode on a bot that is not set up should refuse"; exit 1; }
+rc=$?
+[ "$rc" -eq 2 ] && grep -qF "run 'claude-discord setup nosetup' first" <<<"$out" || { echo "FAIL: --mode on an unset bot must exit 2 with a hint, got rc=$rc: $out"; exit 1; }
+[ ! -e "$R5" ] || { echo "FAIL: --mode on an unset bot must create nothing (no bot dir, .gitignore or config.env): $(find "$R5")"; exit 1; }
+echo "ok: --mode on a bot that is not set up exits 2 with a hint and creates nothing"
+
+printf '1\n222\n\ntokF\nn\n' | bash "$S" setup five >/dev/null   # mode kept at its default, none
+cp "$R5/five/.env" "$P5/five.env.before"; cp "$R5/five/access.json" "$P5/five.access.before"
+printf 'autoresearchclaw\n' | bash "$S" setup five --mode >/dev/null
+[ "$(cat "$R5/five/mode")" = autoresearchclaw ] || { echo "FAIL: --mode fed only the mode answer did not switch the mode"; exit 1; }
+has_matcher SessionStart 'startup|resume|compact|clear' "$CMD_ARC5" "$SL5" || { echo "FAIL: --mode must register the new mode's hooks exactly like a full setup: $(cat "$SL5" 2>&1)"; exit 1; }
+cmp -s "$R5/five/.env" "$P5/five.env.before" || { echo "FAIL: --mode must not touch the token file"; exit 1; }
+cmp -s "$R5/five/access.json" "$P5/five.access.before" || { echo "FAIL: --mode must not touch access.json"; exit 1; }
+printf 'none\n' | bash "$S" setup five --mode >/dev/null
+[ "$(cat "$R5/five/mode")" = none ] || { echo "FAIL: --mode did not switch back to none"; exit 1; }
+! grep -q 'hooks/autoresearchclaw/' "$SL5" 2>/dev/null || { echo "FAIL: --mode must remove the old mode's hooks exactly like a full setup: $(cat "$SL5")"; exit 1; }
+cmp -s "$R5/five/.env" "$P5/five.env.before" || { echo "FAIL: --mode must not touch the token file (second run)"; exit 1; }
+cmp -s "$R5/five/access.json" "$P5/five.access.before" || { echo "FAIL: --mode must not touch access.json (second run)"; exit 1; }
+echo "ok: --mode fed only the mode answer switches a set-up bot's mode, registers/removes the mode's hooks exactly like a full setup, and leaves the token file and access.json byte-identical"
+
+printf 'dev-manager\npeerx:700:800:host\n' | bash "$S" setup five --mode >/dev/null
+[ "$(cat "$R5/five/mode")" = dev-manager ] || { echo "FAIL: --mode to dev-manager did not switch the mode"; exit 1; }
+[ "$(jq -c '.peers' "$R5/peers.json" 2>/dev/null)" = '[{"name":"peerx","bot_id":"700","owner_id":"800","machine":"host"}]' ] || { echo "FAIL: --mode to dev-manager must record the peer: $(cat "$R5/peers.json" 2>&1)"; exit 1; }
+[ "$(jq -c '.groups["1"].allowFrom' "$R5/five/access.json")" = '["222","700"]' ] || { echo "FAIL: the peer must reach access.json's allowFrom: $(jq -c . "$R5/five/access.json")"; exit 1; }
+echo "ok: --mode to dev-manager also asks the peers question and records a peer in peers.json and access.json's allowFrom"
+
 # Nothing this suite started is still running: no process runs from its
 # HOME (hooks, stubs, the fake worker).
 strays() { ps -eo pid=,args= | while read -r pid args; do case $args in *"$HOME/"*) echo "$pid $args";; esac; done; }

@@ -80,6 +80,7 @@ claude-discord --bg alpha             # the name may sit before the flags too
 claude-discord --bg --resume my-bot   # with one bot in the project, its name may be left out
 claude-discord alpha --resume my-bot  # a session NAME or a short id also works, see below
 claude-discord setup alpha --reset    # forget alpha's token and policy AND the shared IDs; ask everything again
+claude-discord setup alpha --mode     # change only alpha's mode (and, for dev-manager, its peers); needs alpha already set up
 claude-discord refresh alpha          # replace the running session with a fresh one, from its handoff
 ```
 

@@ -5,9 +5,11 @@
 # patches the plugin to let other bots through), and sessions on one machine
 # can also use SendMessage, mirroring those exchanges into the channel.
 #
-#   claude-discord setup <name> [--reset]  ask for channel/user IDs, allowed users, the bot
-#                                          token, mention policy and mode (dev-manager
-#                                          also asks for its peers); --reset asks all again
+#   claude-discord setup <name> [--reset|--mode]  ask for channel/user IDs, allowed users, the
+#                                          bot token, mention policy and mode (dev-manager also
+#                                          asks for its peers); --reset asks all again; --mode
+#                                          asks only the mode (and, for dev-manager, the peers)
+#                                          for a bot already set up
 #   claude-discord [name] [claude args]  start the session named <name>; the
 #                                          name may come before or after the
 #                                          claude args, and may be left out when
@@ -252,44 +254,56 @@ select_one() (
 )
 
 if [ "${1:-}" = setup ]; then
-  name=${2:?usage: claude-discord setup <name> [--reset]}
+  name=${2:?usage: claude-discord setup <name> [--reset|--mode]}
   case $name in
     ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
     hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
   esac
   umask 077
-  # --reset forgets this bot's token and access policy AND the shared IDs, so
-  # every prompt is asked again; other bots keep their own files.
-  [ "${3:-}" = --reset ] && rm -rf "$root/$name" "$root/config.env"
-  mkdir -p "$root/$name"
-  printf '*\n' > "$root/.gitignore"
-  if [ ! -f "$root/config.env" ]; then
-    read -rp "Discord channel ID: " channel
-    read -rp "Your Discord user ID: " user
-    read -rp "Other user or bot IDs allowed to trigger bots there (comma-separated, empty for none): " others
-    others=${others//[[:space:]]/}   # the file is sourced: a stray space would run an ID as a command
-    printf "DISCORD_CHANNEL_ID='%s'\nDISCORD_USER_ID='%s'\nDISCORD_ALLOW_IDS='%s'\n" "$channel" "$user" "$others" > "$root/config.env"
-  fi
-  . "$root/config.env"
-  keep=""
-  [ -f "$root/$name/.env" ] && keep=" (empty keeps the current one)"
-  read -rsp "Bot token for $name$keep: " token
-  echo
-  [ -z "$token" ] && [ -n "$keep" ] || printf 'DISCORD_BOT_TOKEN=%s\n' "$token" > "$root/$name/.env"
-  # Every bot in one channel answering every message means N replies per human
-  # message, so the default stays mention-only; opt in per bot.
-  read -rp "Respond to every message in the channel without an @mention? [y/N] " nomention
-  case $nomention in y|Y) mention=false;; *) mention=true;; esac
-  # access.json is the bot's LIVE policy: the plugin re-reads it on every
-  # message, and its groups may have been hand-edited since the last setup
-  # (moved to another channel, allowFrom trimmed, ackReaction silenced). A
-  # re-run must not clobber that; only a bot with none yet (new, or just
-  # after --reset, which deletes the bot dir first) gets one written fresh.
-  if [ -f "$root/$name/access.json" ]; then
-    jq_edit "$root/$name/access.json" --argjson mention "$mention" \
-      'if (.groups | type) == "object" then .groups |= map_values(.requireMention = $mention) else . end'
+  if [ "${3:-}" = --mode ]; then
+    # --mode changes only an already set-up bot's mode, so re-picking a mode
+    # never re-asks the token or the mention question. It creates nothing:
+    # a bot without both files gets neither a directory nor config.env.
+    [ -f "$root/$name/.env" ] && [ -f "$root/$name/access.json" ] || {
+      echo "claude-discord: bot '$name' is not set up; run 'claude-discord setup $name' first" >&2
+      exit 2
+    }
   else
-    write_access "$root/$name" "$mention"
+    # --reset forgets this bot's token and access policy AND the shared IDs, so
+    # every prompt is asked again; other bots keep their own files.
+    [ "${3:-}" = --reset ] && rm -rf "$root/$name" "$root/config.env"
+    mkdir -p "$root/$name"
+    printf '*\n' > "$root/.gitignore"
+    if [ ! -f "$root/config.env" ]; then
+      read -rp "Discord channel ID: " channel
+      read -rp "Your Discord user ID: " user
+      read -rp "Other user or bot IDs allowed to trigger bots there (comma-separated, empty for none): " others
+      others=${others//[[:space:]]/}   # the file is sourced: a stray space would run an ID as a command
+      printf "DISCORD_CHANNEL_ID='%s'\nDISCORD_USER_ID='%s'\nDISCORD_ALLOW_IDS='%s'\n" "$channel" "$user" "$others" > "$root/config.env"
+    fi
+  fi
+  [ -f "$root/config.env" ] && . "$root/config.env"   # sourced whenever present: later code (write_access) reads its variables
+  if [ "${3:-}" != --mode ]; then
+    keep=""
+    [ -f "$root/$name/.env" ] && keep=" (empty keeps the current one)"
+    read -rsp "Bot token for $name$keep: " token
+    echo
+    [ -z "$token" ] && [ -n "$keep" ] || printf 'DISCORD_BOT_TOKEN=%s\n' "$token" > "$root/$name/.env"
+    # Every bot in one channel answering every message means N replies per human
+    # message, so the default stays mention-only; opt in per bot.
+    read -rp "Respond to every message in the channel without an @mention? [y/N] " nomention
+    case $nomention in y|Y) mention=false;; *) mention=true;; esac
+    # access.json is the bot's LIVE policy: the plugin re-reads it on every
+    # message, and its groups may have been hand-edited since the last setup
+    # (moved to another channel, allowFrom trimmed, ackReaction silenced). A
+    # re-run must not clobber that; only a bot with none yet (new, or just
+    # after --reset, which deletes the bot dir first) gets one written fresh.
+    if [ -f "$root/$name/access.json" ]; then
+      jq_edit "$root/$name/access.json" --argjson mention "$mention" \
+        'if (.groups | type) == "object" then .groups |= map_values(.requireMention = $mention) else . end'
+    else
+      write_access "$root/$name" "$mention"
+    fi
   fi
   mode=$(cat "$root/$name/mode" 2>/dev/null) || mode=none
   mode=$(select_one Mode "$mode" \
@@ -320,7 +334,11 @@ if [ "${1:-}" = setup ]; then
   fi
   ensure_hooks_symlink
   sync_mode_drops
-  echo "claude-discord: $root/$name/access.json written (requireMention=$mention, mode=$mode)"
+  if [ "${3:-}" = --mode ]; then
+    echo "claude-discord: $root/$name/mode set to $mode"
+  else
+    echo "claude-discord: $root/$name/access.json written (requireMention=$mention, mode=$mode)"
+  fi
   exit 0
 fi
 
