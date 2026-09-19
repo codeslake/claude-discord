@@ -2,6 +2,12 @@
 # Acceptance test for dotfiles/scripts/claude-discord. Runs entirely in a
 # throwaway HOME; touches nothing real. Usage: test-claude-discord.sh <script>
 set -euo pipefail
+# claude-discord and its hooks read CLAUDE_* and DISCORD_* from the caller
+# (launcher, process wrapper, state dir, refresh child marker, project dir).
+# Clear the whole namespace first: a bot session running this suite would
+# otherwise point refresh at its own state dir, and a shell that wraps claude
+# would turn PLAIN into LAUNCHER. The suite sets the ones it needs below.
+for v in "${!CLAUDE_@}" "${!DISCORD_@}"; do unset "$v"; done
 S=${1:?script path}; S=$(cd "$(dirname "$S")" && pwd)/$(basename "$S")   # absolute: the test cd-s into a throwaway project
 D=$(dirname "$S")   # repo root: where hooks/ and install.sh live
 
@@ -37,7 +43,6 @@ bash -n "$D/hooks/peers/edit-gate"
 bash -n "$D/hooks/autoresearchclaw/on-start"
 bash -n "$D/hooks/autoresearchclaw/events"
 [ "$(grep -c "if (msg.author.bot) return" "$S")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in the wrapper"; exit 1; }
-unset DISCORD_STATE_DIR   # a session running this test would otherwise point refresh at its own bot
 # KILL_AT_EXIT: pids this test started (fake workers), so a failed assertion
 # cannot leave one running.
 KILL_AT_EXIT=""
