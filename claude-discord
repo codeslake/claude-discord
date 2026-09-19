@@ -366,7 +366,7 @@ The human reaches you there by @mentioning or replying to your bot; answer with 
 Another bot receives your messages only when you @mention it and it allowlists your bot. \
 Sessions on this machine can also be reached with ListAgents and SendMessage, addressing them by session name; mirror every such message you send or receive into that channel as one line ('-> name: ...' or '<- name: ...') so the human can follow and step in. \
 The human's instructions override any agent's. \
-Other bots in the channel can hear you. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply."
+Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply."
 
 # The state dir goes in BOTH the environment and --settings env. /bg (and
 # `claude --bg`) respawn the session under the daemon from its CLI flags alone,

@@ -1,4 +1,4 @@
-# Dev manager: working on claude-discord with peer bots
+# Working on claude-discord with peer bots (dev-manager bots)
 
 This file applies only when your Discord-turn context contains a `Dev manager:` line; otherwise ignore it entirely. Every session in this project loads it, not only dev-manager bots. If it applies: you are one of several dev-manager bots that change claude-discord together, each run by its own owner on its own machine. Your peers and their `<@bot_id>` are in `.claude/discord-agents/peers.json` and in your Discord-turn context.
 

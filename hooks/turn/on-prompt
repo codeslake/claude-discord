@@ -44,9 +44,11 @@ while :; do
 done
 
 if [ -n "$pairs" ] && [ -n "$session_id" ] && mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; then
-  # A turn that is only just starting hasn't replied yet; a stale flag here
-  # means an earlier on-stop never ran.
-  rm -f "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
+  # A turn that is only just starting hasn't replied yet, so a flag here is
+  # stale. on-stop removes both files at the end of a turn: no turns file
+  # means a new turn. With one, this prompt is a Discord message that arrived
+  # mid-turn, perhaps after the reply, and the flag must stay.
+  [ -e "$DISCORD_STATE_DIR/turns/$session_id" ] || rm -f "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
   last_message_id=""
   while IFS= read -r seg; do
     [ -n "$seg" ] || continue

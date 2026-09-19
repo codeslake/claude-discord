@@ -20,7 +20,8 @@ case $session_id in
   ''|*[!A-Za-z0-9_-]*) ;;
   *) turns="$DISCORD_STATE_DIR/turns/$session_id"
      if [ -n "$reply_to" ]; then
-       from=$(awk -v m="$reply_to" '$2 == m { u = $3 } END { print u }' "$turns" 2>/dev/null)
+       # $2"" and m"": a string compare; as numbers, 19-digit snowflakes collide.
+       from=$(awk -v m="$reply_to" '$2"" == m"" { u = $3 } END { print u }' "$turns" 2>/dev/null)
      else
        from=$(tail -n 1 "$turns" 2>/dev/null | cut -d' ' -f3)
      fi ;;

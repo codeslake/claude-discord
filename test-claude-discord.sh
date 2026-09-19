@@ -102,24 +102,28 @@ ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
 [ ! -s "$CURL_LOG" ] || { echo "FAIL: on-prompt must never call curl"; exit 1; }
 echo "ok: on-prompt records chat_id/message_id/user_id and last-message-id, and prints the identity context, without calling curl"
 
-# A stale .replied flag (as if an earlier on-stop never ran) must not survive
-# into a new turn on the same session_id, or on-stop would react on it using
-# an old reply that has nothing to do with this turn.
-: > "$DSD/turns/s1.replied"
-out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"555\" message_id=\"666\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi again\n</channel>"}')
-[ ! -e "$DSD/turns/s1.replied" ] || { echo "FAIL: on-prompt must clear a stale .replied flag when it records a new turn"; exit 1; }
-echo "ok: on-prompt clears a stale .replied flag when it records a new Discord turn"
-
 # UserPromptSubmit also fires for a Discord message that arrives mid-turn, so
-# two prompts with no Stop in between are one turn: both messages keep their
-# records and both get the checkmark.
-[ "$(cat "$DSD/turns/s1")" = "$(printf '111 222 9\n555 666 9')" ] || { echo "FAIL: a second prompt in the same turn must append, not replace: $(cat "$DSD/turns/s1")"; exit 1; }
+# two prompts with no Stop in between are one turn, even when the first was
+# already answered: both keep their records, the reply flag survives the
+# second prompt, and both messages get the checkmark.
 DISCORD_STATE_DIR="$DSD" bash "$H/on-reply" <<<'{"session_id":"s1"}'
+DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"555\" message_id=\"666\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi again\n</channel>"}' >/dev/null
+[ -e "$DSD/turns/s1.replied" ] || { echo "FAIL: a mid-turn prompt after the reply must keep the turn's reply flag"; exit 1; }
+[ "$(cat "$DSD/turns/s1")" = "$(printf '111 222 9\n555 666 9')" ] || { echo "FAIL: a second prompt in the same turn must append, not replace: $(cat "$DSD/turns/s1")"; exit 1; }
 : > "$CURL_LOG"
 DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s1"}'
 n=0; while [ "$(wc -l < "$CURL_LOG" 2>/dev/null || echo 0)" -lt 2 ] && [ "$n" -lt 20 ]; do sleep 0.1; n=$((n+1)); done
 grep -q 'channels/111/messages/222/reactions/%E2%9C%85/@me' "$CURL_LOG" && grep -q 'channels/555/messages/666/reactions/%E2%9C%85/@me' "$CURL_LOG" || { echo "FAIL: both prompts of one turn must get the checkmark: $(cat "$CURL_LOG")"; exit 1; }
-echo "ok: two prompts in one turn (a mid-turn Discord message) are both recorded and both get the checkmark"
+echo "ok: prompt, reply, then a mid-turn prompt: both are recorded, the reply flag survives, both get the checkmark"
+
+# A .replied flag with no turns file is stale (on-stop removes both at the end
+# of a turn, so no turns file means a new turn) and must not survive into it,
+# or on-stop would react on a reply that has nothing to do with this turn.
+: > "$DSD/turns/s1n.replied"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1n","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"555\" message_id=\"667\" user=\"u\" user_id=\"9\" ts=\"t\">\nnew turn\n</channel>"}' >/dev/null
+[ ! -e "$DSD/turns/s1n.replied" ] || { echo "FAIL: on-prompt must clear a stale .replied flag when it starts a new turn"; exit 1; }
+rm -f "$DSD/turns/s1n"
+echo "ok: on-prompt clears a stale .replied flag when it starts a new Discord turn"
 
 # chat_id/message_id must come from the opening tag only, digits only: the
 # message body can contain literal text shaped like an attribute (here, a
@@ -262,7 +266,7 @@ echo "ok: run refuses without setup"
 
 out=$(bash "$S" alpha 2>&1)
 grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out"
-grep -q "Other bots in the channel can hear you." <<<"$out"
+! grep -q "Other bots in the channel can hear you." <<<"$out" || { echo "FAIL: the system prompt must not claim other bots hear every message"; exit 1; }
 grep -qF "Another bot receives your messages only when you @mention it and it allowlists your bot." <<<"$out" || { echo "FAIL: the system prompt must say how bots reach each other now"; exit 1; }
 grep -qF "Sessions on this machine can also be reached with ListAgents and SendMessage" <<<"$out" || { echo "FAIL: the system prompt must keep SendMessage for same-machine sessions"; exit 1; }
 ! grep -q "Bots cannot hear each other" <<<"$out" || { echo "FAIL: the stale 'Bots cannot hear each other' claim is still in the system prompt"; exit 1; }
@@ -506,6 +510,7 @@ grep -qF 'bad:x:1:2' "$P4/err" || { echo "FAIL: a malformed peer entry must be w
 grep -qF "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed." <<<"$out" || { echo "FAIL: the both-directions note is missing"; exit 1; }
 cmp -s "$D/rules/dev-manager.md" "$RULE" || { echo "FAIL: the dev-manager rule was not dropped into .claude/rules"; exit 1; }
 sed -n 3p "$RULE" | grep -qF 'only when your Discord-turn context contains a `Dev manager:` line' || { echo "FAIL: the rule must open with its condition, since every session in the project loads it"; exit 1; }
+[ "$(grep -c 'Dev manager:' "$RULE")" = 1 ] || { echo "FAIL: only the conditional line may contain the 'Dev manager:' marker (not the heading)"; exit 1; }
 has_hooks "$SJ" && ! grep -q 'hooks/peers/' "$SJ" || { echo "FAIL: settings.json must hold the turn hooks and no peers hook: $(cat "$SJ")"; exit 1; }
 has_peers_hooks "$SL" && ! grep -q 'hooks/turn/' "$SL" || { echo "FAIL: settings.local.json must hold the three peers hooks and no turn hook: $(cat "$SL")"; exit 1; }
 [ "$(jq -c '.permissions' "$SJ")" = '{"allow":["Bash(ls)"]}' ] && has_cmd PostToolUse my-own-hook "$SJ" || { echo "FAIL: unrelated settings keys and the user's own hook must survive"; exit 1; }
@@ -595,6 +600,14 @@ out=$(guard '{"session_id":"g4","tool_input":{"chat_id":"42","reply_to":"558","t
 [ -z "$out" ] || { echo "FAIL: a reply_to the human's message must not be held to the peer's mention: $out"; exit 1; }
 out=$(guard '{"session_id":"g4","tool_input":{"chat_id":"42","reply_to":"557","text":"thanks"}}')
 [ "$(reason <<<"$out")" = "$REASON_B" ] || { echo "FAIL: a reply_to the peer's message without its mention must be denied: $out"; exit 1; }
+# Snowflakes past 2^53: the human's id and the peer's differ only in the last
+# digit, the peer's line last. reply_to the human's must not match the peer's
+# (a numeric compare in awk would).
+DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g5","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"1550575144320110000\" user=\"u\" user_id=\"111\" ts=\"t\">\nship it?\n</channel>\n<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"1550575144320110001\" user=\"junyong\" user_id=\"901\" ts=\"t\">\nlooks good\n</channel>"}' >/dev/null
+out=$(guard '{"session_id":"g5","tool_input":{"chat_id":"42","reply_to":"1550575144320110000","text":"yes, shipping"}}')
+[ -z "$out" ] || { echo "FAIL: reply_to must match its message id exactly, as a string: $out"; exit 1; }
+out=$(guard '{"session_id":"g5","tool_input":{"chat_id":"42","reply_to":"1550575144320110001","text":"thanks"}}')
+[ "$(reason <<<"$out")" = "$REASON_B" ] || { echo "FAIL: reply_to the peer's snowflake without its mention must be denied: $out"; exit 1; }
 out=$(printf 'not json' | DISCORD_STATE_DIR="$R4/mgr" bash "$G/mention-guard" 2>&1) || { echo "FAIL: mention-guard must exit 0 on invalid JSON"; exit 1; }
 [ -z "$out" ] || { echo "FAIL: mention-guard must print nothing on invalid JSON"; exit 1; }
 echo "ok: mention-guard denies a named peer (word boundaries, Korean suffix ok) without its <@id> or <@!id>, and an unmentioned answer to the peer that reply_to or else the turn's last message names; passes for self, a non-dev-manager, dongyong22, a reply to a human, and invalid JSON; on-prompt adds the peers context for a dev-manager only"
