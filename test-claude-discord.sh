@@ -604,10 +604,11 @@ echo "ok: an existing real hooks directory is left alone with a warning, not clo
 
 # --- dead sessions in the agent view ---------------------------------------
 # Its own project and its own claude stub: `agents` logs its arguments, prints
-# the fixture the case planted and exits with agents.rc (empty = 0); `rm`
-# appends its argument to rm.log; anything else is a launch, as before. The
-# fixture's cwd is the project's RESOLVED path, which is what the wrapper
-# compares against (on macOS $HOME here is under a symlinked /tmp).
+# the fixture the case planted and exits with agents.rc (empty = 0); `rm` logs
+# its argument to rm.log and exits with rm.rc; anything else is a launch, as
+# before. The fixture's cwd is the project's RESOLVED path, which is what the
+# wrapper compares against (on macOS $HOME here is under a symlinked /tmp), and
+# startedAt is epoch milliseconds, the type the daemon really prints.
 PD="$HOME/project-dead"; mkdir -p "$PD/.claude/discord-agents/dead"; cd "$PD"
 PDP=$(pwd -P)
 printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$PD/.claude/discord-agents/config.env"
@@ -617,46 +618,80 @@ cat > "$HOME/bin/claude" <<'STUB'
 case "$1" in
   agents) printf '%s\n' "$*" >> "$HOME/agents.calls"; cat "$HOME/agents.json" 2>/dev/null
           rc=$(cat "$HOME/agents.rc" 2>/dev/null); exit "${rc:-0}";;
-  rm)     printf '%s\n' "$2" >> "$HOME/rm.log";;
+  rm)     printf '%s\n' "$2" >> "$HOME/rm.log"
+          rc=$(cat "$HOME/rm.rc" 2>/dev/null); exit "${rc:-0}";;
   *)      echo "PLAIN $*";;
 esac
 STUB
 chmod +x "$HOME/bin/claude"
-# Two dead sessions of this bot here (the first with an id that is NOT its
-# sessionId: the removal must use sessionId), one live one per live state, an
-# interactive entry with no state, a dead one of another bot and a dead one of
-# this bot in another project.
+# Three dead sessions of this bot here: dead-0001 (whose id is NOT its
+# sessionId, so the removal must use sessionId), dead-0002, and fade-0001 with
+# no startedAt at all, which must neither break the sort nor escape selection.
+# Left alone: one live entry per live state (11fe-0001..0005, in the order
+# idle, busy, waiting, working, blocked), an interactive entry with no state,
+# a dead one of another bot, a dead one of this bot in another project, and two
+# whose sessionId is not a daemon id -- one starting with a dash, which `rm`
+# would read as a flag, and one holding a newline, which arrives as two lines.
 jq -n --arg cwd "$PDP" '
-  [{id:"id-dead-1", sessionId:"sess-dead-1", kind:"background", name:"dead", cwd:$cwd, state:"stopped", startedAt:"2026-09-19T01:00:00Z"},
-   {id:"sess-dead-2", sessionId:"sess-dead-2", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:"2026-09-19T02:00:00Z"},
-   {id:"sess-interactive", sessionId:"sess-interactive", kind:"interactive", name:"dead", cwd:$cwd, startedAt:"2026-09-19T03:00:00Z"},
-   {id:"sess-other-name", sessionId:"sess-other-name", kind:"background", name:"beta", cwd:$cwd, state:"stopped", startedAt:"2026-09-19T00:10:00Z"},
-   {id:"sess-other-cwd", sessionId:"sess-other-cwd", kind:"background", name:"dead", cwd:"/elsewhere", state:"done", startedAt:"2026-09-19T00:20:00Z"}]
-  + (["idle","busy","waiting","working","blocked"]
-     | map({id:("sess-live-" + .), sessionId:("sess-live-" + .), kind:"background", name:"dead", cwd:$cwd, state:., startedAt:"2026-09-19T00:30:00Z"}))' \
+  [{id:"d0000001", sessionId:"dead-0001", kind:"background", name:"dead", cwd:$cwd, state:"stopped", startedAt:1758240000000},
+   {id:"dead-0002", sessionId:"dead-0002", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758243600000},
+   {id:"fade-0001", sessionId:"fade-0001", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:null},
+   {id:"facade-01", sessionId:"facade-01", kind:"interactive", name:"dead", cwd:$cwd, startedAt:1758247200000},
+   {id:"beef-0001", sessionId:"beef-0001", kind:"background", name:"beta", cwd:$cwd, state:"stopped", startedAt:1758236400000},
+   {id:"cafe-0001", sessionId:"cafe-0001", kind:"background", name:"dead", cwd:"/elsewhere", state:"done", startedAt:1758236400000},
+   {id:"bad-dash", sessionId:"-force-0001", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758236400000},
+   {id:"bad-nl", sessionId:"nope-0001\n-rf", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758236400000}]
+  + (["idle","busy","waiting","working","blocked"] | to_entries
+     | map({id:("11fe-000" + (.key + 1 | tostring)), sessionId:("11fe-000" + (.key + 1 | tostring)),
+            kind:"background", name:"dead", cwd:$cwd, state:.value, startedAt:1758250000000}))' \
   > "$HOME/agents.full.json"
 start_dead() {  # $out = the start's output; a start that FAILS must say so, not die silently under set -e
-  out=$(bash "$S" dead 2>&1) || { echo "FAIL: housekeeping must never fail the start (exit $?): $out"; exit 1; }
+  out=$(bash "$S" dead ${1+"$@"} 2>&1) || { echo "FAIL: housekeeping must never fail the start (exit $?): $out"; exit 1; }
 }
 cp "$HOME/agents.full.json" "$HOME/agents.json"
-: > "$HOME/agents.rc"; : > "$HOME/rm.log"; : > "$HOME/agents.calls"
+: > "$HOME/agents.rc"; : > "$HOME/rm.rc"; : > "$HOME/rm.log"; : > "$HOME/agents.calls"
 start_dead
 grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" && grep -q -- "-n dead" <<<"$out" || { echo "FAIL: the start must reach the exec with its usual arguments: $out"; exit 1; }
-[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "sess-dead-1 sess-dead-2 " ] || { echo "FAIL: exactly this bot's dead sessions must be removed, by sessionId: $(cat "$HOME/rm.log")"; exit 1; }
+[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "dead-0001 dead-0002 fade-0001 " ] || { echo "FAIL: exactly this bot's dead sessions must be removed, by sessionId, and no implausible id: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
 grep -qx -- "agents --json --all" "$HOME/agents.calls" || { echo "FAIL: the listing must ask for --all, or a retired session is not even listed: $(cat "$HOME/agents.calls")"; exit 1; }
-echo "ok: a start removes this bot's dead sessions in this project (by sessionId) and leaves live, stateless, other-name and other-project entries alone"
+echo "ok: a start removes this bot's dead sessions in this project (by sessionId, startedAt or none) and leaves live, stateless, other-name, other-project and implausible-id entries alone"
+
+# The session the start is RESUMING is dead by the daemon's reckoning and in
+# this bot's project, so it is exactly what the reaping selects -- and deleting
+# it would delete what the start is reopening. It must survive, resolved from a
+# name (a transcript's basename is the session id) as well as passed through.
+PROJD="$HOME/.claude/projects/$(printf '%s' "$PD" | tr './' '--')"; mkdir -p "$PROJD"
+printf '{"type":"custom-title","customTitle":"my-dead-bot"}\n' > "$PROJD/dead-0002.jsonl"
+: > "$HOME/rm.log"
+start_dead --resume my-dead-bot
+grep -q -- "--resume dead-0002" <<<"$out" || { echo "FAIL: the resumed name must still resolve to its session id: $out"; exit 1; }
+[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "dead-0001 fade-0001 " ] || { echo "FAIL: the session being resumed must not be removed: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+: > "$HOME/rm.log"
+start_dead --resume dead-0002
+grep -q -- "--resume dead-0002" <<<"$out" && [ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "dead-0001 fade-0001 " ] || { echo "FAIL: a --resume passed through untouched must not be removed either: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+rm -f "$PROJD/dead-0002.jsonl"
+echo "ok: the session a start is resuming is never removed, whether --resume named it or gave its id, and the exec still carries it"
 
 # The cap: 20 removals per start, the oldest first, so a long-neglected daemon
 # cannot stall a start; the five newest are left for the next one.
 jq -n --arg cwd "$PDP" '[range(25) | ((100 + .) | tostring | .[1:]) as $n
-  | {id:("sess-cap-" + $n), sessionId:("sess-cap-" + $n), kind:"background", name:"dead", cwd:$cwd,
-     state:"stopped", startedAt:("2026-09-19T00:" + $n + ":00Z")}]' > "$HOME/agents.json"
+  | {id:("cab0-00" + $n), sessionId:("cab0-00" + $n), kind:"background", name:"dead", cwd:$cwd,
+     state:"stopped", startedAt:(1758240000000 + . * 60000)}]' > "$HOME/agents.json"
 : > "$HOME/rm.log"
 start_dead
 grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: the capped start must still reach the exec: $out"; exit 1; }
 [ "$(wc -l < "$HOME/rm.log")" -eq 20 ] || { echo "FAIL: at most 20 removals per start, got $(wc -l < "$HOME/rm.log")"; exit 1; }
-grep -qx sess-cap-00 "$HOME/rm.log" && grep -qx sess-cap-19 "$HOME/rm.log" && ! grep -qE '^sess-cap-2[0-4]$' "$HOME/rm.log" || { echo "FAIL: the 20 removed must be the oldest by startedAt: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
-echo "ok: a start removes at most 20 dead sessions, the oldest by startedAt first"
+grep -qx cab0-0000 "$HOME/rm.log" && grep -qx cab0-0019 "$HOME/rm.log" && ! grep -qE '^cab0-002[0-4]$' "$HOME/rm.log" || { echo "FAIL: the 20 removed must be the oldest by startedAt: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+echo "ok: a start removes at most 20 dead sessions, the oldest by startedAt (epoch ms) first"
+
+# A removal that fails is reported once, on stderr, and the start goes on.
+cp "$HOME/agents.full.json" "$HOME/agents.json"; echo 1 > "$HOME/rm.rc"; : > "$HOME/rm.log"
+start_dead
+grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: a failing rm must never abort the start: $out"; exit 1; }
+[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "dead-0001 dead-0002 fade-0001 " ] || { echo "FAIL: one failing rm must not stop the others: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+[ "$(grep -cF 'could not remove 3 dead session(s) of dead' <<<"$out")" -eq 1 ] || { echo "FAIL: failed removals must be reported in exactly one line: $out"; exit 1; }
+: > "$HOME/rm.rc"
+echo "ok: removals that fail are counted into one stderr line and the start still execs"
 
 # Housekeeping never costs the start: a listing that is not JSON, one that is
 # an empty array, and a call that fails all leave the start exactly as it is,

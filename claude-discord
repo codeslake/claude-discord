@@ -614,6 +614,13 @@ if [ -n "$want" ] && ! printf '%s' "$want" | grep -qE '^[0-9a-f]{8}(-[0-9a-f]{4}
     echo "claude-discord: --resume $want -> ${found%.jsonl}" >&2
   fi
 fi
+# Whatever --resume ends up pointing at, resolved just above or passed through
+# as a full id, is the session this start is about to reopen: the reaping below
+# must never delete it. A transcript's basename IS the session id, and a name
+# resolves to the newest transcript of this bot in this project, which is
+# exactly the kind of row the daemon calls done.
+resume_id=""
+[ "$res_i" -ge 0 ] && resume_id=${args[res_i]:-} && resume_id=${resume_id#"$res_pre"}
 
 # `claude` here is whatever bash finds on PATH, never a shell function: a setup
 # that wraps claude in a process wrapper must name it, or that wrapping is
@@ -632,14 +639,18 @@ run=("$bin")
 [ -n "$launcher" ] && run=("$launcher" "$bin")
 
 # Claude Code's daemon retires a background session after about an hour idle,
-# and nothing here ever removed the retired row: `refresh` stops a session but
+# and nothing here ever removed the retired one: `refresh` stops a session but
 # never `rm`s it, so every start of a bot left one more dead entry in the agent
 # view for ever (measured 2026-09-19 on an owner's machine: 7 rows for 2 bots,
-# 4 of them stopped or done). So a start reaps its OWN dead rows first: this
-# bot's name, started in THIS project directory, and a state that says the
-# session is over. Everything else stays -- another name, another project, any
-# live state (idle, busy, waiting, working, blocked), and an interactive entry
-# with no state at all, none of which is this start's to remove.
+# 4 of them stopped or done). So a start reaps its OWN dead sessions first:
+# this bot's name, started in THIS project directory, and a state that says the
+# session is over. `claude rm` deletes the session and, if it had one (the
+# wrapper passes -w/--worktree through), its worktree, so everything else
+# stays -- another name, another project, any live state (idle, busy, waiting,
+# working, blocked), and an interactive entry with no state at all, none of
+# which is this start's to remove. The session this very start is resuming is
+# kept too ($resume_id, see above): --resume resolves a name to exactly such a
+# done row, and reaping it would delete what the start is reopening.
 # Both calls go to "$bin", never "$run": they are local daemon bookkeeping and
 # start no session, so a process wrapper (a proxy chain, a version pin) has
 # nothing to wrap here and would only add a process per call.
@@ -654,15 +665,18 @@ prune_dead_sessions() {
   command -v jq >/dev/null 2>&1 || return 0
   if command -v timeout >/dev/null 2>&1; then t=(timeout 5); fi
   list=$(${t[@]+"${t[@]}"} "$bin" agents --json --all 2>/dev/null) || return 0
-  ids=$(printf '%s' "${list:-null}" | jq -r --arg n "$name" --arg cwd "$(pwd -P)" '
+  ids=$(printf '%s' "${list:-null}" | jq -r --arg n "$name" --arg cwd "$(pwd -P)" --arg keep "${resume_id:-}" '
     if type != "array" then empty else
       [ .[] | select(.name == $n and .cwd == $cwd
                      and (.state == "stopped" or .state == "done")
-                     and (.sessionId // "") != "") ]
+                     and (.sessionId // "") != "" and .sessionId != $keep) ]
       | sort_by(.startedAt) | .[0:20][] | .sessionId end' 2>/dev/null) || return 0
   [ -n "$ids" ] || return 0
   while IFS= read -r id; do
-    [ -n "$id" ] || continue
+    # A daemon session id is hex digits and dashes. Anything else is not one,
+    # and a crafted id must not become an argument to a delete: a leading dash
+    # would read as a flag, and a newline in it arrives here as two lines.
+    [[ $id =~ ^[0-9a-fA-F][0-9a-fA-F-]{7,}$ ]] || continue
     "$bin" rm "$id" >/dev/null 2>&1 || failed=$((failed + 1))
   done <<<"$ids"
   [ "$failed" = 0 ] || echo "claude-discord: could not remove $failed dead session(s) of $name from the agent view" >&2
@@ -670,7 +684,7 @@ prune_dead_sessions() {
 
 ensure_hooks_symlink
 sync_mode_drops
-prune_dead_sessions
+prune_dead_sessions || :   # even its last line (a warning on a closed stderr) may not fail the start
 # worktree.bgIsolation "none" turns off Claude Code's background-isolation
 # guard for this session: measured on two machines, a session started with
 # --bg is refused Edit/Write in the checkout by that guard while a session
