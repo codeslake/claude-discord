@@ -151,6 +151,16 @@ under `~/.claude-discord/scratch/<bot name>/` when they must survive, in
 `/tmp` under a session-unique name when they need not -- never under
 `~/.claude`, and `$CLAUDE_JOB_DIR` exists only in a background session.
 
+Once a change to claude-discord itself is on main and installed here, that
+same rule has a dev-manager tell the machine's OTHER claude-discord bots --
+not its peers, its machine's other bots, in whatever other project runs one
+-- `~/.claude-discord/hooks/tools/local-bots` prints them: every other live
+bot session on this machine, one line per session as `<name><TAB><project
+dir>`, sorted by name. Discovery is `claude agents --json --all` filtered to
+a session whose project has a `.claude/discord-agents/<name>` directory,
+this bot's own session excluded by state dir; it prints nothing, never
+fails, and is never registered as a hook.
+
 ## AutoResearchClaw reports
 
 An `autoresearchclaw` bot posts one report per research iteration of the
@@ -248,8 +258,9 @@ Each entry in the project's settings (see below for which file) execs the script
 (`h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/<topic>/<name>"; [ ! -x "$h" ] || "$h"`),
 so a machine without the hooks installed simply runs nothing. Scripts live
 under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
-`lib/discord.sh` and `tools/thread` are not registered: the first is sourced
-by every script below, the second is run by the session (see Modes above).
+`lib/discord.sh` and `tools/thread`/`tools/local-bots` are not registered:
+the first is sourced by every script below, the other two are run by the
+session (see Modes above).
 
 | Event | Matcher | Script | What |
 |---|---|---|---|

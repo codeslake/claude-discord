@@ -34,6 +34,8 @@ This file applies only when your Discord-turn context contains a `Dev manager:` 
 - Before you edit, announce on Discord what you will change, mentioning your peers. You do not need to wait for an answer. The edit-gate hook denies Edit, Write and MultiEdit under claude-discord without such an announcement in the last 60 minutes.
 - The hook does not see Bash or git. A change made through Bash (sed, a heredoc, git apply, git checkout) follows the same announce rule, by hand.
 - Before pushing to main, share the diff summary in the channel.
+- Tell the machine's other claude-discord sessions only after the change is on main AND installed here, once per deployment, and only when it changes something they see: a hook, the rule text, or the wrapper's behaviour. A test-only or README-only change is not worth a message. `~/.claude-discord/hooks/tools/local-bots` prints their names and projects. Send each one a short message: what changed, and whether it must act. Hooks and rule text reach a running session without a restart; a new hook entry or a mode drop needs `claude-discord setup <bot> --mode` in that project, which touches neither the token nor access.json.
+- Those sessions are not your peers: they are the machine's other bots. Tell them, do not ask them to work.
 
 ## Language
 

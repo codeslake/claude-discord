@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Lists every OTHER live claude-discord bot session on this machine, one
+# line per session: "<name><TAB><project dir>", sorted by name. A dev-manager
+# session runs this by hand to find who else on this machine to tell about a
+# change (see rules/dev-manager.md); it is not registered as a hook.
+#
+# Discovery (measured 2026-09-19): `claude agents --json --all` lists every
+# live session's name and cwd; a session is a claude-discord bot when
+# "<cwd>/.claude/discord-agents/<name>" is a directory -- a bot's own state
+# dir, which only `claude-discord setup` creates.
+#
+# Both calls this needs (`command -v claude`, `agents --json --all`) are
+# local daemon bookkeeping, exactly like claude-discord's own dead-session
+# reaping, not a session launch: CLAUDE_DISCORD_LAUNCHER /
+# CLAUDE_CODE_PROCESS_WRAPPER wrap a `claude` that starts a real session, and
+# have nothing to wrap here, so they are not consulted.
+#
+# Never fails: no jq, no claude on PATH, a non-array (or absent) answer, or a
+# listing that does not return within about 5s (`timeout`, where it exists)
+# all print nothing and exit 0 -- a caller need not guard this.
+set -u
+
+self=""
+[ -n "${DISCORD_STATE_DIR:-}" ] && self=$(cd "$DISCORD_STATE_DIR" 2>/dev/null && pwd -P) || :
+
+command -v jq >/dev/null 2>&1 || exit 0
+bin=$(command -v claude) || exit 0
+t=()
+command -v timeout >/dev/null 2>&1 && t=(timeout 5)
+list=$(${t[@]+"${t[@]}"} "$bin" agents --json --all 2>/dev/null) || exit 0
+
+# @tsv backslash-escapes any tab/newline/backslash inside name or cwd, so the
+# real tab below is always the field boundary: a control character in a
+# session's name cannot forge an extra row or split one row into two.
+rows=$(printf '%s' "${list:-null}" | jq -r '
+  if type != "array" then empty else
+    .[] | select((.name|type) == "string" and (.cwd|type) == "string") | [.name, .cwd] | @tsv
+  end' 2>/dev/null) || exit 0
+[ -n "$rows" ] || exit 0
+
+printf '%s\n' "$rows" | while IFS=$'\t' read -r name cwd; do
+  [ -n "$name" ] && [ -n "$cwd" ] || continue
+  # A name holding "/" (or being "." or "..") would make the directory check
+  # below resolve outside "discord-agents/<name>", so a crafted name could
+  # pass by riding a DIFFERENT bot's real state dir while printing its own,
+  # forged name. Reject anything that is not one plain path component.
+  case $name in */*|.|..) continue ;; esac
+  dir="$cwd/.claude/discord-agents/$name"
+  [ -d "$dir" ] || continue
+  state_dir=$(cd "$dir" 2>/dev/null && pwd -P) || continue
+  [ -n "$self" ] && [ "$state_dir" = "$self" ] && continue
+  printf '%s\t%s\n' "$name" "$cwd"
+done | LC_ALL=C sort -t "$(printf '\t')" -k1,1

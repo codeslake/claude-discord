@@ -42,6 +42,7 @@ bash -n "$D/hooks/peers/checkin"
 bash -n "$D/hooks/peers/thread-guard"
 bash -n "$D/hooks/peers/edit-gate"
 bash -n "$D/hooks/tools/thread"
+bash -n "$D/hooks/tools/local-bots"
 bash -n "$D/hooks/autoresearchclaw/on-start"
 bash -n "$D/hooks/autoresearchclaw/events"
 [ "$(grep -c "if (msg.author.bot) return" "$S")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in the wrapper"; exit 1; }
@@ -812,6 +813,37 @@ start_dead
 grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: a failing 'agents' call must never abort the start: $out"; exit 1; }
 [ ! -s "$HOME/rm.log" ] || { echo "FAIL: a failing 'agents' call must remove nothing: $(cat "$HOME/rm.log")"; exit 1; }
 echo "ok: a listing that is not JSON, one that is empty and one that fails each leave the start untouched and remove nothing"
+
+# hooks/tools/local-bots: not a hook, run by hand, reusing the "dead"
+# project's still-active claude stub ("agents" cats agents.json, exits
+# agents.rc) and two more real directories beside "dead" -- the check only
+# needs a directory to exist, nothing else about a bot.
+mkdir -p "$PD/.claude/discord-agents/beta" "$PD/.claude/discord-agents/b sp"
+jq -n --arg cwd "$PDP" '[
+  {name:"dead", cwd:$cwd},
+  {name:"beta", cwd:$cwd},
+  {name:"b sp", cwd:$cwd},
+  {name:"nodir", cwd:$cwd},
+  {name:"x/../beta", cwd:$cwd},
+  {name:"other", cwd:"/elsewhere"}]' > "$HOME/agents.json"
+: > "$HOME/agents.rc"
+out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/hooks/tools/local-bots")
+[ "$out" = "$(printf 'b sp\t%s\nbeta\t%s' "$PDP" "$PDP")" ] || { echo "FAIL: local-bots must print exactly the OTHER bots (a real .claude/discord-agents/<name> dir), name-TAB-project, sorted by name; self ('dead', by state dir) excluded, a name holding a slash never riding another bot's directory, and a name whose directory is missing ('nodir') or whose project does not exist ('other') left out: $out"; exit 1; }
+echo "ok: local-bots lists this machine's other bot sessions only, name-TAB-project sorted, self excluded by state dir, a traversal name rejected, a session with no discord-agents/<name> directory left out"
+
+# Never fails: no output and exit 0 on bad JSON, an empty array, or a
+# listing call that itself fails.
+printf 'not json\n' > "$HOME/agents.json"
+out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/hooks/tools/local-bots"; echo "rc=$?")
+[ "$out" = "rc=0" ] || { echo "FAIL: invalid JSON must print nothing and exit 0: $out"; exit 1; }
+printf '[]\n' > "$HOME/agents.json"
+out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/hooks/tools/local-bots"; echo "rc=$?")
+[ "$out" = "rc=0" ] || { echo "FAIL: an empty array must print nothing and exit 0: $out"; exit 1; }
+cp "$HOME/agents.full.json" "$HOME/agents.json"; echo 1 > "$HOME/agents.rc"
+out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/hooks/tools/local-bots"; echo "rc=$?")
+[ "$out" = "rc=0" ] || { echo "FAIL: a failing listing must print nothing and exit 0: $out"; exit 1; }
+: > "$HOME/agents.rc"
+echo "ok: local-bots prints nothing and exits 0 on invalid JSON, an empty array, and a failing listing"
 printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"   # back to the plain stub for the sections below
 
 # Modes. A fresh project (channel 42) with a foreign rule file, a user's own
@@ -1395,7 +1427,8 @@ mkdir -p "$IH/.claude-discord/hooks/autoresearchclaw" "$IH/.claude-discord/hooks
 : > "$IH/.claude-discord/rules/old.md"; echo mine > "$IH/.claude-discord/notes"
 HOME="$IH" bash "$D/install.sh" >/dev/null 2>&1 || { echo "FAIL: install.sh failed"; exit 1; }
 [ ! -e "$IH/.claude-discord/hooks/autoresearchclaw/watch" ] && [ ! -e "$IH/.claude-discord/hooks/turn/on-compact" ] && [ ! -e "$IH/.claude-discord/hooks/tools/old-tool" ] && [ ! -e "$IH/.claude-discord/rules/old.md" ] || { echo "FAIL: install.sh must remove what the repo no longer ships: $(cd "$IH/.claude-discord" && find . -type f)"; exit 1; }
-[ -x "$IH/.claude-discord/hooks/tools/thread" ] && [ -x "$IH/.claude-discord/hooks/peers/thread-guard" ] || { echo "FAIL: install.sh must install the thread helper and the thread guard, executable"; exit 1; }
+[ -x "$IH/.claude-discord/hooks/tools/thread" ] && [ -x "$IH/.claude-discord/hooks/tools/local-bots" ] && [ -x "$IH/.claude-discord/hooks/peers/thread-guard" ] || { echo "FAIL: install.sh must install the thread and local-bots helpers and the thread guard, executable"; exit 1; }
+grep -qF '~/.claude-discord/hooks/tools/local-bots' "$IH/.claude-discord/rules/dev-manager.md" && grep -qF 'Those sessions are not your peers' "$IH/.claude-discord/rules/dev-manager.md" || { echo "FAIL: the installed rule file must carry both local-bots notify bullets"; exit 1; }
 [ "$(cat "$IH/.claude-discord/notes")" = mine ] && [ -x "$IH/.local/bin/claude-discord" ] || { echo "FAIL: install.sh must install the wrapper and leave other files alone"; exit 1; }
 for f in $(cd "$D" && ls hooks/*/* rules/*); do
   cmp -s "$D/$f" "$IH/.claude-discord/$f" || { echo "FAIL: install.sh must install $f"; exit 1; }
