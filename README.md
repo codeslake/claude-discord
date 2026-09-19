@@ -87,7 +87,7 @@ The setup prompts:
 
 | Prompt | Stored in | Notes |
 |---|---|---|
-| Discord channel ID | `config.env` (shared) | also written as the channel group of each bot's `access.json`. A running bot's channel is that group: to move one bot, edit its `access.json` (the plugin, the hooks' identity text and the start prompt all follow it; `config.env` is the fallback when the file has no single group). A setup re-run writes `config.env`'s channel into `access.json` again |
+| Discord channel ID | `config.env` (shared) | also written as the channel group of each bot's `access.json` the first time it is set up. A running bot's channel is that group: to move one bot, edit its `access.json` (the plugin, the hooks' identity text and the start prompt all follow it; `config.env` is the fallback when the file has no single group). A setup re-run keeps `access.json` as it is, wherever its group has moved to, and only updates `requireMention` there; `setup ... --reset` (which deletes the bot's directory first) writes `config.env`'s channel into a fresh one |
 | Your Discord user ID | `config.env` (shared) | the only user allowed to DM the bot |
 | Other user or bot IDs | `config.env` (shared) | comma-separated; may be empty. These can trigger the bot in the channel |
 | Bot token | `<name>/.env` | input is hidden, like a password. On a re-run, empty keeps the current token |
@@ -116,9 +116,9 @@ A dev-manager's setup also asks for its peers as
 `name:bot_id:owner_id:machine`, comma-separated. They are merged by `bot_id`
 into `.claude/discord-agents/peers.json` (one file per project, so the same
 list can be pasted on every machine: each bot skips itself by name), and
-every peer's `bot_id` is added to this bot's channel `allowFrom` (not the DM
-one). Peers need this bot's id in their own `allowFrom` too; ask their
-owners.
+every peer's `bot_id` is added to every group's `allowFrom` in this bot's
+`access.json` (not the DM one). Peers need this bot's id in their own
+`allowFrom` too; ask their owners.
 
 What a project gets is the union over its bots' modes, re-synced by `setup`
 and by every start: one dev-manager bot keeps the rule and the peers hooks in

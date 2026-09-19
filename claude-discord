@@ -280,7 +280,17 @@ if [ "${1:-}" = setup ]; then
   # message, so the default stays mention-only; opt in per bot.
   read -rp "Respond to every message in the channel without an @mention? [y/N] " nomention
   case $nomention in y|Y) mention=false;; *) mention=true;; esac
-  write_access "$root/$name" "$mention"
+  # access.json is the bot's LIVE policy: the plugin re-reads it on every
+  # message, and its groups may have been hand-edited since the last setup
+  # (moved to another channel, allowFrom trimmed, ackReaction silenced). A
+  # re-run must not clobber that; only a bot with none yet (new, or just
+  # after --reset, which deletes the bot dir first) gets one written fresh.
+  if [ -f "$root/$name/access.json" ]; then
+    jq_edit "$root/$name/access.json" --argjson mention "$mention" \
+      'if (.groups | type) == "object" then .groups |= map_values(.requireMention = $mention) else . end'
+  else
+    write_access "$root/$name" "$mention"
+  fi
   mode=$(cat "$root/$name/mode" 2>/dev/null) || mode=none
   mode=$(select_one Mode "$mode" \
     "none  a plain bot" \
@@ -297,11 +307,15 @@ if [ "${1:-}" = setup ]; then
       reduce ($in | split(",")[] | select(test($re)) | split(":") | {name: .[0], bot_id: .[1], owner_id: .[2], machine: .[3]}) as $p
         (.; if any(.peers[]?; .bot_id == $p.bot_id) then .peers |= map(if .bot_id == $p.bot_id then $p else . end)
             else .peers = (.peers // []) + [$p] end)'
-    # write_access above rewrote the group allowFrom, so every peer is added
-    # again, not only the new ones; this bot itself is skipped by name.
+    # access.json's groups are kept as they are (see above), so peers go into
+    # every existing group's allowFrom, wherever the bot's channel actually
+    # is, not only the one keyed by config.env's channel; this bot itself is
+    # skipped by name, and $a + ($ids - $a) keeps it additive, as before.
     ids=$(jq -c --arg self "$name" '[.peers[]? | select((.name // "" | tostring | ascii_downcase) != ($self | ascii_downcase)) | .bot_id | tostring]' "$root/peers.json" 2>/dev/null) || ids='[]'
-    jq_edit "$root/$name/access.json" --arg ch "$DISCORD_CHANNEL_ID" --argjson ids "${ids:-[]}" \
-      '.groups[$ch].allowFrom = ((.groups[$ch].allowFrom // []) as $a | $a + ($ids - $a))'
+    jq_edit "$root/$name/access.json" --argjson ids "${ids:-[]}" \
+      'if (.groups | type) == "object"
+       then .groups |= map_values(.allowFrom = ((.allowFrom // []) as $a | $a + ($ids - $a)))
+       else . end'
     echo "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed."
   fi
   ensure_hooks_symlink

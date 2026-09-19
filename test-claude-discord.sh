@@ -117,11 +117,48 @@ printf 'tokB\nn\n' | bash "$S" setup beta >/dev/null
 [ "$(jq -r '.groups["1550575144320110662"].requireMention' "$R/beta/access.json")" = true ]
 echo "ok: second bot asks only token+mention and reuses shared IDs"
 
+# Its own throwaway project, so the bot-count assumptions the rest of this
+# suite makes about $P (project) are untouched.
+PM="$HOME/project-moved"; mkdir -p "$PM"; cd "$PM"
+RM="$PM/.claude/discord-agents"
+
+# A fresh setup still writes config.env's channel group (unchanged behaviour).
+printf '55\n11\n\ntokZ\nn\n' | bash "$S" setup moved >/dev/null
+[ "$(jq -c '.groups | keys' "$RM/moved/access.json")" = '["55"]' ] || { echo "FAIL: a fresh setup must write config.env's channel group: $(jq -c . "$RM/moved/access.json")"; exit 1; }
+echo "ok: a fresh setup still writes config.env's channel group"
+
+# The owner moved this bot by hand-editing access.json (the plugin reads it
+# live): a new group key "777", an extra allowFrom id, and ackReaction
+# disabled ("", meaning "don't react"). A setup re-run must keep all of that
+# and only set requireMention on the group that is actually there; config.env's
+# channel (55) must not reappear as a second group.
+jq '.groups = {"777": (.groups["55"] + {allowFrom: (.groups["55"].allowFrom + ["444"])})} | .ackReaction = ""' \
+  "$RM/moved/access.json" > "$RM/moved/access.json.tmp" && cat "$RM/moved/access.json.tmp" > "$RM/moved/access.json" && rm -f "$RM/moved/access.json.tmp"
+printf '\ny\n\n' | bash "$S" setup moved >/dev/null   # token empty keeps it, y = respond without mention, mode empty keeps it
+grep -q '^DISCORD_BOT_TOKEN=tokZ$' "$RM/moved/.env" || { echo "FAIL: an empty token on a re-run must keep the current token"; exit 1; }
+[ "$(jq -c '.groups | keys' "$RM/moved/access.json")" = '["777"]' ] || { echo "FAIL: a re-run must not add config.env's channel as a second group, and must keep the moved one: $(jq -c . "$RM/moved/access.json")"; exit 1; }
+[ "$(jq -c '.groups["777"].allowFrom' "$RM/moved/access.json")" = '["11","444"]' ] || { echo "FAIL: a re-run must keep the moved group's allowFrom: $(jq -c . "$RM/moved/access.json")"; exit 1; }
+[ "$(jq -r '.ackReaction' "$RM/moved/access.json")" = "" ] || { echo "FAIL: a re-run must keep an owner-disabled ackReaction: $(jq -c . "$RM/moved/access.json")"; exit 1; }
+[ "$(jq -r '.groups["777"].requireMention' "$RM/moved/access.json")" = false ] || { echo "FAIL: a re-run must still set requireMention on the moved group: $(jq -c . "$RM/moved/access.json")"; exit 1; }
+echo "ok: a setup re-run on a bot whose access.json group was moved by hand keeps the group, its allowFrom and ackReaction, only setting requireMention"
+
+# Same, in dev-manager mode: a peer added on the re-run must reach the moved
+# group's allowFrom, not a freshly-created group keyed by config.env's
+# channel, and only once.
+printf 'tokY\nn\ndev-manager\n\n' | bash "$S" setup movedmgr >/dev/null
+jq '.groups = {"777": .groups["55"]}' "$RM/movedmgr/access.json" > "$RM/movedmgr/access.json.tmp" && cat "$RM/movedmgr/access.json.tmp" > "$RM/movedmgr/access.json" && rm -f "$RM/movedmgr/access.json.tmp"
+printf '\ny\n\npeerz:501:601:host\n' | bash "$S" setup movedmgr >/dev/null
+[ "$(jq -c '.groups | keys' "$RM/movedmgr/access.json")" = '["777"]' ] || { echo "FAIL: dev-manager re-run must not recreate config.env's channel group: $(jq -c . "$RM/movedmgr/access.json")"; exit 1; }
+[ "$(jq -c '.groups["777"].allowFrom' "$RM/movedmgr/access.json")" = '["11","501"]' ] || { echo "FAIL: the peer must join the moved group's allowFrom, once: $(jq -c . "$RM/movedmgr/access.json")"; exit 1; }
+echo "ok: dev-manager re-run adds a peer to the moved group's allowFrom, not to a group keyed by config.env's channel"
+
+cd "$P"
 printf '999\n111\n\ntokA2\nn\n' | bash "$S" setup alpha --reset >/dev/null
 grep -q "^DISCORD_CHANNEL_ID='999'$" "$R/config.env"
 grep -q "^DISCORD_BOT_TOKEN=tokA2$" "$R/alpha/.env"
+[ "$(jq -c '.groups | keys' "$R/alpha/access.json")" = '["999"]' ] || { echo "FAIL: --reset must rewrite access.json from config.env's new channel: $(jq -c . "$R/alpha/access.json")"; exit 1; }
 [ -f "$R/beta/.env" ] && [ -f "$R/beta/access.json" ]
-echo "ok: --reset re-asks everything, other bots untouched"
+echo "ok: --reset re-asks everything and rewrites access.json from config.env, other bots untouched"
 
 # Direct hook-behaviour tests, through the project's own symlinked copy
 # (alpha's state is now stable: channel 999, token tokA2).
