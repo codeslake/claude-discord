@@ -630,8 +630,47 @@ launcher=${CLAUDE_DISCORD_LAUNCHER:-${CLAUDE_CODE_PROCESS_WRAPPER:-}}
 [ -n "$launcher" ] || launcher=$(jq -r '.env.CLAUDE_CODE_PROCESS_WRAPPER // empty' "$HOME/.claude/settings.json" 2>/dev/null) || :
 run=("$bin")
 [ -n "$launcher" ] && run=("$launcher" "$bin")
+
+# Claude Code's daemon retires a background session after about an hour idle,
+# and nothing here ever removed the retired row: `refresh` stops a session but
+# never `rm`s it, so every start of a bot left one more dead entry in the agent
+# view for ever (measured 2026-09-19 on an owner's machine: 7 rows for 2 bots,
+# 4 of them stopped or done). So a start reaps its OWN dead rows first: this
+# bot's name, started in THIS project directory, and a state that says the
+# session is over. Everything else stays -- another name, another project, any
+# live state (idle, busy, waiting, working, blocked), and an interactive entry
+# with no state at all, none of which is this start's to remove.
+# Both calls go to "$bin", never "$run": they are local daemon bookkeeping and
+# start no session, so a process wrapper (a proxy chain, a version pin) has
+# nothing to wrap here and would only add a process per call.
+# A start must never fail or stall on housekeeping, so every step is optional:
+# no jq, no `timeout`, a listing that fails, hangs past 5 s, is not JSON, is
+# not an array or is empty all leave the start exactly as it was, at most one
+# line on stderr. The removals are capped at 20 per start, oldest first by
+# startedAt, so a first run against a long-neglected daemon cannot turn a start
+# into a minute of `rm` calls; the next start takes the next 20.
+prune_dead_sessions() {
+  local list ids id failed=0 t=()
+  command -v jq >/dev/null 2>&1 || return 0
+  if command -v timeout >/dev/null 2>&1; then t=(timeout 5); fi
+  list=$(${t[@]+"${t[@]}"} "$bin" agents --json --all 2>/dev/null) || return 0
+  ids=$(printf '%s' "${list:-null}" | jq -r --arg n "$name" --arg cwd "$(pwd -P)" '
+    if type != "array" then empty else
+      [ .[] | select(.name == $n and .cwd == $cwd
+                     and (.state == "stopped" or .state == "done")
+                     and (.sessionId // "") != "") ]
+      | sort_by(.startedAt) | .[0:20][] | .sessionId end' 2>/dev/null) || return 0
+  [ -n "$ids" ] || return 0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    "$bin" rm "$id" >/dev/null 2>&1 || failed=$((failed + 1))
+  done <<<"$ids"
+  [ "$failed" = 0 ] || echo "claude-discord: could not remove $failed dead session(s) of $name from the agent view" >&2
+}
+
 ensure_hooks_symlink
 sync_mode_drops
+prune_dead_sessions
 # worktree.bgIsolation "none" turns off Claude Code's background-isolation
 # guard for this session: measured on two machines, a session started with
 # --bg is refused Edit/Write in the checkout by that guard while a session

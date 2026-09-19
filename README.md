@@ -186,6 +186,28 @@ first, against the transcripts of the project you are in: a session name (what
 full id, and it says so on stderr. A full id, or a name it cannot find, is
 passed through and claude decides.
 
+## Dead sessions in the agent view
+
+Claude Code's daemon retires an idle background session after about an hour,
+and nothing here ever removed the retired row (`refresh` stops a session, it
+never `rm`s it), so the agent view grew by one dead entry per start: measured
+2026-09-19, 7 rows for 2 bots, 4 of them dead. Every start now reaps its own
+dead rows first. An entry goes only when all three hold: the name is this
+bot's, the `cwd` is this project directory, and the state is `stopped` or
+`done`. A live one (`idle`, `busy`, `waiting`, `working`, `blocked`), an
+interactive entry with no state, another bot's entry and this bot's entry in
+another checkout are all left alone.
+
+It is housekeeping, so it never costs the start: the listing
+(`claude agents --json --all`, and the `rm` calls, go to the `claude` binary
+itself rather than through `CLAUDE_DISCORD_LAUNCHER`: they are local daemon
+bookkeeping and start no session) gets 5 seconds where `timeout` exists, and a
+missing `jq`, an answer that is not JSON, an empty list or a failing call all
+skip the step with at most one line on stderr. At most 20 rows go per start,
+the oldest by `startedAt` first, so a first run against a long-neglected
+daemon cannot turn a start into a minute of `rm` calls; the next start takes
+the next 20.
+
 ## Expected behaviour
 
 - In the channel, `@alpha do X` reaches session alpha only. A reply to one of
@@ -400,6 +422,7 @@ rest of Claude Code.
 | `claude-discord: ~/.claude-discord/rules/dev-manager.md is missing` | wrapper newer than the installed helpers; re-run `./install.sh` |
 | `refresh` says `handoff.md is missing or empty` | the session did not write it; ask it to, or pass `--force` |
 | `refresh` says `no running session named <name> started in <dir>` | the session was renamed (`/rename`) or started elsewhere; `claude agents` shows it, stop it by hand, then `refresh --force` |
+| The agent view still lists dead sessions of my bot | rows of another name or another project are left alone on purpose, and only 20 go per start (oldest first), so start again for the next 20. Otherwise the wrapper predates 2026-09-19 (reinstall), or `claude agents --json --all` is not answering: run it by hand |
 | No report after an iteration | the bot's `mode` is not `autoresearchclaw`; the session has no standing watch running `events` (ask it to start one); the session started before the mode was set (the rules arrive at session start: restart or `/clear` it); or the runs are not under `artifacts/rc-*/` of the project the bot was set up in. `<bot>/arc-seen` lists what `events` has already reported (running `events` by hand records what it prints, so the watch will not see it again) |
 
 ## Test

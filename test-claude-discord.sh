@@ -602,6 +602,81 @@ out=$(bash "$S" eps 2>&1)
 grep -q "is not a symlink, leaving it alone" <<<"$out" || { echo "FAIL: a real hooks directory must warn on stderr"; exit 1; }
 echo "ok: an existing real hooks directory is left alone with a warning, not clobbered"
 
+# --- dead sessions in the agent view ---------------------------------------
+# Its own project and its own claude stub: `agents` logs its arguments, prints
+# the fixture the case planted and exits with agents.rc (empty = 0); `rm`
+# appends its argument to rm.log; anything else is a launch, as before. The
+# fixture's cwd is the project's RESOLVED path, which is what the wrapper
+# compares against (on macOS $HOME here is under a symlinked /tmp).
+PD="$HOME/project-dead"; mkdir -p "$PD/.claude/discord-agents/dead"; cd "$PD"
+PDP=$(pwd -P)
+printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$PD/.claude/discord-agents/config.env"
+printf 'DISCORD_BOT_TOKEN=tokDead\n' > "$PD/.claude/discord-agents/dead/.env"
+cat > "$HOME/bin/claude" <<'STUB'
+#!/bin/bash
+case "$1" in
+  agents) printf '%s\n' "$*" >> "$HOME/agents.calls"; cat "$HOME/agents.json" 2>/dev/null
+          rc=$(cat "$HOME/agents.rc" 2>/dev/null); exit "${rc:-0}";;
+  rm)     printf '%s\n' "$2" >> "$HOME/rm.log";;
+  *)      echo "PLAIN $*";;
+esac
+STUB
+chmod +x "$HOME/bin/claude"
+# Two dead sessions of this bot here (the first with an id that is NOT its
+# sessionId: the removal must use sessionId), one live one per live state, an
+# interactive entry with no state, a dead one of another bot and a dead one of
+# this bot in another project.
+jq -n --arg cwd "$PDP" '
+  [{id:"id-dead-1", sessionId:"sess-dead-1", kind:"background", name:"dead", cwd:$cwd, state:"stopped", startedAt:"2026-09-19T01:00:00Z"},
+   {id:"sess-dead-2", sessionId:"sess-dead-2", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:"2026-09-19T02:00:00Z"},
+   {id:"sess-interactive", sessionId:"sess-interactive", kind:"interactive", name:"dead", cwd:$cwd, startedAt:"2026-09-19T03:00:00Z"},
+   {id:"sess-other-name", sessionId:"sess-other-name", kind:"background", name:"beta", cwd:$cwd, state:"stopped", startedAt:"2026-09-19T00:10:00Z"},
+   {id:"sess-other-cwd", sessionId:"sess-other-cwd", kind:"background", name:"dead", cwd:"/elsewhere", state:"done", startedAt:"2026-09-19T00:20:00Z"}]
+  + (["idle","busy","waiting","working","blocked"]
+     | map({id:("sess-live-" + .), sessionId:("sess-live-" + .), kind:"background", name:"dead", cwd:$cwd, state:., startedAt:"2026-09-19T00:30:00Z"}))' \
+  > "$HOME/agents.full.json"
+start_dead() {  # $out = the start's output; a start that FAILS must say so, not die silently under set -e
+  out=$(bash "$S" dead 2>&1) || { echo "FAIL: housekeeping must never fail the start (exit $?): $out"; exit 1; }
+}
+cp "$HOME/agents.full.json" "$HOME/agents.json"
+: > "$HOME/agents.rc"; : > "$HOME/rm.log"; : > "$HOME/agents.calls"
+start_dead
+grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" && grep -q -- "-n dead" <<<"$out" || { echo "FAIL: the start must reach the exec with its usual arguments: $out"; exit 1; }
+[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "sess-dead-1 sess-dead-2 " ] || { echo "FAIL: exactly this bot's dead sessions must be removed, by sessionId: $(cat "$HOME/rm.log")"; exit 1; }
+grep -qx -- "agents --json --all" "$HOME/agents.calls" || { echo "FAIL: the listing must ask for --all, or a retired session is not even listed: $(cat "$HOME/agents.calls")"; exit 1; }
+echo "ok: a start removes this bot's dead sessions in this project (by sessionId) and leaves live, stateless, other-name and other-project entries alone"
+
+# The cap: 20 removals per start, the oldest first, so a long-neglected daemon
+# cannot stall a start; the five newest are left for the next one.
+jq -n --arg cwd "$PDP" '[range(25) | ((100 + .) | tostring | .[1:]) as $n
+  | {id:("sess-cap-" + $n), sessionId:("sess-cap-" + $n), kind:"background", name:"dead", cwd:$cwd,
+     state:"stopped", startedAt:("2026-09-19T00:" + $n + ":00Z")}]' > "$HOME/agents.json"
+: > "$HOME/rm.log"
+start_dead
+grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: the capped start must still reach the exec: $out"; exit 1; }
+[ "$(wc -l < "$HOME/rm.log")" -eq 20 ] || { echo "FAIL: at most 20 removals per start, got $(wc -l < "$HOME/rm.log")"; exit 1; }
+grep -qx sess-cap-00 "$HOME/rm.log" && grep -qx sess-cap-19 "$HOME/rm.log" && ! grep -qE '^sess-cap-2[0-4]$' "$HOME/rm.log" || { echo "FAIL: the 20 removed must be the oldest by startedAt: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+echo "ok: a start removes at most 20 dead sessions, the oldest by startedAt first"
+
+# Housekeeping never costs the start: a listing that is not JSON, one that is
+# an empty array, and a call that fails all leave the start exactly as it is,
+# removing nothing. The failing call keeps the full fixture, so it is the
+# failure that stops the removals, not an empty list.
+printf 'not json\n' > "$HOME/agents.json"; : > "$HOME/rm.log"
+start_dead
+grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: a non-JSON listing must leave the start alone: $out"; exit 1; }
+[ ! -s "$HOME/rm.log" ] || { echo "FAIL: a non-JSON listing must remove nothing: $(cat "$HOME/rm.log")"; exit 1; }
+printf '[]\n' > "$HOME/agents.json"; : > "$HOME/rm.log"
+start_dead
+grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: an empty listing must leave the start alone: $out"; exit 1; }
+[ ! -s "$HOME/rm.log" ] || { echo "FAIL: an empty listing must remove nothing: $(cat "$HOME/rm.log")"; exit 1; }
+cp "$HOME/agents.full.json" "$HOME/agents.json"; echo 1 > "$HOME/agents.rc"; : > "$HOME/rm.log"
+start_dead
+grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: a failing 'agents' call must never abort the start: $out"; exit 1; }
+[ ! -s "$HOME/rm.log" ] || { echo "FAIL: a failing 'agents' call must remove nothing: $(cat "$HOME/rm.log")"; exit 1; }
+echo "ok: a listing that is not JSON, one that is empty and one that fails each leave the start untouched and remove nothing"
+printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"   # back to the plain stub for the sections below
+
 # Modes. A fresh project (channel 42) with a foreign rule file, a user's own
 # PostToolUse hook in settings.json and Claude Code's own permission grants in
 # settings.local.json; mgr is a dev-manager. peers.json lists mgr itself too
