@@ -150,16 +150,21 @@ in the channel steers a run, and gates are answered in the run's terminal.
   `decision.md` with other content is a new event, an identical rewrite is
   not. Its first call ever (no `arc-seen` yet) records what is there and
   prints nothing, so a project's history is not reported. It records before
-  it prints, so no event is printed twice. Outside a bot session (no
-  `DISCORD_STATE_DIR`) it exits 2.
+  it prints, so to one caller at a time (one standing watch) no event is
+  printed twice; two watches running at once can both print it. An empty
+  file, or one written less than 2 s ago, waits for a later call
+  (AutoResearchClaw writes both files non-atomically). Outside a bot session
+  (no `DISCORD_STATE_DIR`) it exits 2.
 - **Waking the session.** The session keeps one standing watch that runs
   `events` and wakes it when a line comes out: the machine's watch daemon if
   it has one, otherwise a background loop (`until e=$(events); [ -n "$e" ];
   do sleep 60; done`) it starts on its first turn and again after every
-  report. It then reads that iteration's `stage-13`/`stage-14`/`stage-15`
-  files and posts one short Korean report with the reply tool: what was
-  tried, the key numbers labeled measured or proposed, the decision and why,
-  the next step.
+  report. It then reads the run's hypotheses (`stage-08/hypotheses.md`),
+  that iteration's `stage-13` to `stage-15` files and the debate files, and
+  posts one short Korean report with the reply tool: what was tried, the key
+  numbers labeled measured or proposed, the decision and why, the next step.
+  A run-end report adds the gist of `stage-18/reviews.md` when the run
+  reached peer review.
 - **Discussion.** Only when an owner asks does it talk to other research
   bots: one digest of its recent iterations, critique both ways, at most
   three messages each, then one summary for both owners.

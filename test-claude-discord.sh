@@ -827,30 +827,47 @@ left=$(ps -eo pid=,pgid=,args= | awk -v g="$W" '$2 == g')
 echo "ok: on-start gives an autoresearchclaw bot's session the installed rule file as SessionStart context; nothing without DISCORD_STATE_DIR, for a plain or dev-manager bot, or without the rule file; it starts no process"
 
 # events: what the bot's standing watch runs. Paths are relative to the
-# project; arc-seen holds "<path> <cksum>" per seen file and content.
+# project; arc-seen holds "<path> <cksum>" per seen file and content. A file
+# written less than 2 s ago is left for a later call, so every write below
+# is backdated (put) unless the test is about that wait.
 events() { DISCORD_STATE_DIR="$R4/mgr" bash "$ARC/events"; }
-RUN=artifacts/rc-20260919-000000-8b3f10 RUN2=artifacts/rc-20260919-010000-aaaaaa
+put() { printf '%b' "$1" > "$2" && age 10 "$2"; }   # $1 = content (printf %b), $2 = file
+RUN=artifacts/rc-20260919-000000-8b3f10 RUN2=artifacts/rc-20260919-010000-aaaaaa RUN3=artifacts/rc-20260919-020000-bbbbbb
 SEEN="$R4/mgr/arc-seen"
-mkdir -p "$P4/$RUN/stage-15" "$P4/$RUN2/stage-15" "$P4/artifacts/other/stage-15"
-printf 'PROCEED\nH1 beat baseline\n' > "$P4/$RUN/stage-15/decision.md"
+mkdir -p "$P4/$RUN/stage-15" "$P4/$RUN2/stage-15" "$P4/$RUN3/stage-15" "$P4/artifacts/other/stage-15"
+put 'PROCEED\nH1 beat baseline\n' "$P4/$RUN/stage-15/decision.md"
 out=$(events)
 [ -z "$out" ] && grep -qxF "$RUN/stage-15/decision.md $(cksum < "$P4/$RUN/stage-15/decision.md")" "$SEEN" || { echo "FAIL: the first call must print nothing and record what is there: out=$out seen=$(cat "$SEEN" 2>&1)"; exit 1; }
 [ -z "$(events)" ] || { echo "FAIL: nothing new, nothing printed"; exit 1; }
-printf 'REFINE\n' > "$P4/$RUN2/stage-15/decision.md"
+put 'REFINE\n' "$P4/$RUN2/stage-15/decision.md"
 out=$(events)
 [ "$out" = "iteration-end $RUN2/stage-15/decision.md" ] || { echo "FAIL: a new decision.md must print iteration-end: $out"; exit 1; }
 [ -z "$(events)" ] || { echo "FAIL: an event must print once"; exit 1; }
-printf 'PIVOT\nH2 next\n' > "$P4/$RUN/stage-15/decision.md"
+put 'PIVOT\nH2 next\n' "$P4/$RUN/stage-15/decision.md"
 out=$(events)
 [ "$out" = "iteration-end $RUN/stage-15/decision.md" ] || { echo "FAIL: a rewrite with other content (a relaunch) must print again: $out"; exit 1; }
-printf 'PIVOT\nH2 next\n' > "$P4/$RUN/stage-15/decision.md"; touch "$P4/$RUN2/stage-15/decision.md"
+put 'PIVOT\nH2 next\n' "$P4/$RUN/stage-15/decision.md"; touch "$P4/$RUN2/stage-15/decision.md"; age 30 "$P4/$RUN2/stage-15/decision.md"
 out=$(events)
 [ -z "$out" ] || { echo "FAIL: an identical rewrite or a touch must print nothing: $out"; exit 1; }
-echo '{"status":"completed"}' > "$P4/$RUN/pipeline_summary.json"
-echo PROCEED > "$P4/artifacts/other/stage-15/decision.md"; echo '{}' > "$P4/artifacts/other/pipeline_summary.json"
+put '{"status":"completed"}\n' "$P4/$RUN/pipeline_summary.json"
+put 'PROCEED\n' "$P4/artifacts/other/stage-15/decision.md"; put '{}\n' "$P4/artifacts/other/pipeline_summary.json"
 out=$(events)
 [ "$out" = "run-end $RUN/pipeline_summary.json" ] || { echo "FAIL: pipeline_summary.json must print run-end, a dir not named rc-* nothing: $out"; exit 1; }
-printf 'PROCEED\n' > "$P4/$RUN2/stage-15/decision.md"; chmod 444 "$SEEN"
+# AutoResearchClaw writes both files with one non-atomic write: an empty
+# file, or one written in the last 2 s, may be half written. Neither is
+# printed nor recorded; the complete file is printed once on a later call.
+put '' "$P4/$RUN3/stage-15/decision.md"
+[ -z "$(events)" ] || { echo "FAIL: an empty decision.md must print nothing"; exit 1; }
+put 'REFINE\nH3\n' "$P4/$RUN3/stage-15/decision.md"
+out=$(events)
+[ "$out" = "iteration-end $RUN3/stage-15/decision.md" ] || { echo "FAIL: once written, the file emptied before must print: $out"; exit 1; }
+printf 'PIVOT\nH4\n' > "$P4/$RUN3/stage-15/decision.md"   # fresh: not backdated
+out=$(events)
+[ -z "$out" ] && ! grep -q 'H4' "$SEEN" || { echo "FAIL: a file written less than 2 s ago must wait for a later call: $out"; exit 1; }
+age 10 "$P4/$RUN3/stage-15/decision.md"
+out=$(events)
+[ "$out" = "iteration-end $RUN3/stage-15/decision.md" ] && [ -z "$(events)" ] || { echo "FAIL: the fresh file must print once it is 2 s old: $out"; exit 1; }
+put 'PROCEED\n' "$P4/$RUN2/stage-15/decision.md"; chmod 444 "$SEEN"
 rc=0; out=$(events) || rc=$?
 chmod 644 "$SEEN"
 [ "$rc" = 0 ] && [ -z "$out" ] || { echo "FAIL: an event that cannot be recorded must not be printed (rc=$rc): $out"; exit 1; }
@@ -861,11 +878,11 @@ rc=0; out=$(bash "$ARC/events" 2>"$HOME/events.err") || rc=$?
 # A project with no run yet: the first call still starts arc-seen, so the
 # first iteration is reported, not swallowed as history.
 [ -z "$(DISCORD_STATE_DIR="$R/alpha" bash "$ARC/events")" ] && [ -e "$R/alpha/arc-seen" ] || { echo "FAIL: a first call with nothing there must still create arc-seen"; exit 1; }
-mkdir -p "$P/artifacts/rc-1/stage-15"; echo PROCEED > "$P/artifacts/rc-1/stage-15/decision.md"
+mkdir -p "$P/artifacts/rc-1/stage-15"; put 'PROCEED\n' "$P/artifacts/rc-1/stage-15/decision.md"
 out=$(DISCORD_STATE_DIR="$R/alpha" bash "$ARC/events")
 rm -rf "$P/artifacts" "$R/alpha/arc-seen"
 [ "$out" = "iteration-end artifacts/rc-1/stage-15/decision.md" ] || { echo "FAIL: the first iteration after an empty first call must be reported: $out"; exit 1; }
-echo "ok: events records history silently on its first call (and starts arc-seen with none), prints a new decision.md as iteration-end and pipeline_summary.json as run-end once, again on a rewrite with other content, never on an identical rewrite or a touch, ignores dirs not named rc-*, prints nothing it could not record, and exits 2 without DISCORD_STATE_DIR"
+echo "ok: events records history silently on its first call (and starts arc-seen with none), prints a new decision.md as iteration-end and pipeline_summary.json as run-end once, again on a rewrite with other content, never on an identical rewrite or a touch, ignores dirs not named rc-*, waits out an empty or just-written file, prints nothing it could not record, and exits 2 without DISCORD_STATE_DIR"
 
 # A bot moved to another channel by editing its access.json (config.env still
 # says 42): the identity text of on-prompt and of the start path names it.
@@ -880,8 +897,10 @@ grep -q 'sharing the Discord channel 4343,' <<<"$out" || { echo "FAIL: the start
 jq '.groups = {"4343": .groups["42"], "4444": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"ch2","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"801\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'in channel 42\.' <<<"$out" || { echo "FAIL: with several groups the identity falls back to config.env's channel: $out"; exit 1; }
+out=$(bash "$S" mgr 2>&1)
+grep -q 'sharing the Discord channel 42,' <<<"$out" || { echo "FAIL: with several groups the start prompt falls back to config.env's channel: $out"; exit 1; }
 cp "$P4/access.before" "$R4/mgr/access.json"
-echo "ok: a bot moved by editing its access.json identifies with that channel (on-prompt and the start prompt); with several groups the identity falls back to config.env"
+echo "ok: a bot moved by editing its access.json identifies with that channel (on-prompt and the start prompt); with several groups both fall back to config.env"
 
 # No bot is autoresearchclaw any more: on-start goes from both files (an
 # earlier copy planted in settings.json too).

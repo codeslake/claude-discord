@@ -19,5 +19,5 @@ set -u
 [ "$bot_mode" = autoresearchclaw ] || exit 0
 rule=$HOME/.claude-discord/rules/autoresearchclaw.md
 [ -f "$rule" ] || exit 0
-jq -nc --rawfile ctx "$rule" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}' 2>/dev/null
+jq -Rsc '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: .}}' 2>/dev/null < "$rule"   # not --rawfile: jq 1.5 lacks it
 exit 0
