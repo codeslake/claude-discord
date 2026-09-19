@@ -298,9 +298,12 @@ echo "ok: the identity context is injected once per session, on-session-start re
 
 # The pin: on-session-start adds this background job's id (CLAUDE_JOB_DIR's
 # basename) to <jobs root>/pins.json under the CLI's lock (mkdir pins.json.lock)
-# and removes only the id it pinned last time. $1 = job id, $2 = source.
+# and removes only the id it pinned last time. $1 = job id, $2 = source,
+# $3 = the job's state.json (default: one naming this session, sPin).
 J="$HOME/.claude/jobs"; PINS="$J/pins.json"; mkdir -p "$J"
 pin() {
+  local st=${3:-'{"sessionId":"sPin"}'}
+  mkdir -p "$J/$1"; printf '%s' "$st" 2>/dev/null > "$J/$1/state.json"
   out=$(CLAUDE_JOB_DIR="$J/$1" DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<"{\"session_id\":\"sPin\",\"source\":\"${2:-startup}\"}" 2>&1) || { echo "FAIL: on-session-start must never fail: $out"; exit 1; }
   [ -z "$out" ] || { echo "FAIL: on-session-start must print nothing: $out"; exit 1; }
 }
@@ -309,7 +312,7 @@ pin AAAA0001; pin aaaa00011
 [ ! -e "$PINS" ] && [ ! -e "$DSD/pinned-job" ] || { echo "FAIL: a start with no job id (every run above) or one that is not 8 lowercase hex characters must pin nothing"; exit 1; }
 pin aaaa0001
 [ "$(cat "$PINS"; echo .)" = "$(cli_pins aaaa0001)." ] && [ "$(cat "$DSD/pinned-job")" = aaaa0001 ] || { echo "FAIL: a missing pins.json must be created with the job id, in the CLI's format: $(cat "$PINS" 2>&1)"; exit 1; }
-[ "$(ls -A "$J")" = pins.json ] || { echo "FAIL: the lock and the temp file must be gone after a pin: $(ls -A "$J")"; exit 1; }
+[ ! -e "$PINS.lock" ] && [ -z "$(ls "$J"/pins.json.* 2>/dev/null)" ] || { echo "FAIL: the lock and the temp file must be gone after a pin: $(ls -A "$J")"; exit 1; }
 pin aaaa0001 resume
 [ "$(cat "$PINS")" = "$(cli_pins aaaa0001)" ] || { echo "FAIL: the same id twice must not be pinned twice: $(cat "$PINS")"; exit 1; }
 cli_pins 11110001 22220002 > "$PINS"; rm -f "$DSD/pinned-job"
@@ -317,6 +320,36 @@ pin aaaa0001
 [ "$(cat "$PINS"; echo .)" = "$(cli_pins 11110001 22220002 aaaa0001)." ] || { echo "FAIL: the id must be appended with every other entry kept, in order: $(cat "$PINS")"; exit 1; }
 pin bbbb0002 resume
 [ "$(cat "$PINS")" = "$(cli_pins 11110001 22220002 bbbb0002)" ] && [ "$(cat "$DSD/pinned-job")" = bbbb0002 ] || { echo "FAIL: the id pinned last time must be replaced and no other entry touched: $(cat "$PINS")"; exit 1; }
+# An id already in the file is someone else's pin: it stays, and this bot
+# must not record it as its own, or its next start (a copy-resume, which gets
+# a new job id) would remove a human's pin.
+cli_pins eeee0005 11110001 > "$PINS"; rm -f "$DSD/pinned-job"
+pin eeee0005
+[ "$(cat "$PINS")" = "$(cli_pins eeee0005 11110001)" ] && [ ! -e "$DSD/pinned-job" ] || { echo "FAIL: an id already pinned by someone else must be kept and not recorded as this bot's: $(cat "$PINS") $(cat "$DSD/pinned-job" 2>&1)"; exit 1; }
+pin bbbb0002 resume
+[ "$(cat "$PINS")" = "$(cli_pins eeee0005 11110001 bbbb0002)" ] && [ "$(cat "$DSD/pinned-job")" = bbbb0002 ] || { echo "FAIL: a resume must not remove the pin someone else added: $(cat "$PINS")"; exit 1; }
+# A pinned-job that is not a job id (a trailing space, garbage) names nothing
+# this bot pinned, so nothing is removed for it; a well-formed one still is.
+for stale in '22220002 ' 'x
+y'; do
+  cli_pins 22220002 'x
+y' > "$PINS"; printf '%s' "$stale" > "$DSD/pinned-job"
+  pin cccc0003
+  [ "$(cat "$PINS")" = "$(cli_pins 22220002 'x
+y' cccc0003)" ] || { echo "FAIL: a pinned-job that is not a job id must remove nothing: $(cat "$PINS")"; exit 1; }
+done
+printf '22220002\n' > "$DSD/pinned-job"
+pin cccc0003
+[ "$(cat "$PINS")" = "$(cli_pins 'x
+y' cccc0003)" ] || { echo "FAIL: a well-formed stale own id must still be replaced: $(cat "$PINS")"; exit 1; }
+# CLAUDE_JOB_DIR is inherited: a job whose state.json names another session is
+# not this session's to pin, one whose resumeSessionId names it is.
+cli_pins 11110001 > "$PINS"; printf 'cccc0003\n' > "$DSD/pinned-job"
+pin ffff0006 startup '{"sessionId":"sOther","resumeSessionId":"sOther2"}'
+[ "$(cat "$PINS")" = "$(cli_pins 11110001)" ] && [ "$(cat "$DSD/pinned-job")" = cccc0003 ] || { echo "FAIL: a job whose state.json names another session must not be pinned: $(cat "$PINS")"; exit 1; }
+pin ffff0006 resume '{"sessionId":"sOrig","resumeSessionId":"sPin"}'
+[ "$(cat "$PINS")" = "$(cli_pins 11110001 ffff0006)" ] && [ "$(cat "$DSD/pinned-job")" = ffff0006 ] || { echo "FAIL: a job whose resumeSessionId names this session must be pinned: $(cat "$PINS")"; exit 1; }
+printf 'bbbb0002\n' > "$DSD/pinned-job"
 for bad in '{"a":1}' 'not json' '["x",1]'; do
   printf '%s' "$bad" > "$PINS"
   pin cccc0003
@@ -333,7 +366,7 @@ for src in compact clear; do
   [ "$(cat "$PINS")" = "$(cli_pins 11110001)" ] && [ "$(cat "$DSD/pinned-job")" = bbbb0002 ] || { echo "FAIL: a $src must pin nothing: $(cat "$PINS")"; exit 1; }
 done
 rm -rf "$J" "$DSD/pinned-job"
-echo "ok: a background start pins its job id (created, appended, deduplicated, its previous id replaced, every other entry kept in order), under the CLI's lock; a non-array file, a held lock, no job id, and a compact or clear write nothing"
+echo "ok: a background start pins its job id (created, appended, deduplicated, its previous id replaced, every other entry kept in order), under the CLI's lock; someone else's pin is kept and never recorded as this bot's; a pinned-job that is not a job id removes nothing; a non-array file, a held lock, no job id, another session's job dir, and a compact or clear write nothing"
 
 rm -rf "$DSD/turns/s2"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s2","prompt":"hello from cli"}')

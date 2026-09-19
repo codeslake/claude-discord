@@ -383,8 +383,18 @@ agent view's `ctrl+t` writes, and removes the id this bot pinned last time
 touched, a file that is not a JSON array of strings is left alone, and the
 write takes the CLI's own lock (the directory `pins.json.lock`), skipping the
 start when another process holds it. A foreground bot has no job and pins
-nothing. To undo: `ctrl+t` on the bot in the agent view (`claude agents`), or
-delete its id from `pins.json`; the bot's next start pins it again.
+nothing, and neither does a session that merely inherited `$CLAUDE_JOB_DIR`
+from a background session's shell: the job's `state.json` must name this
+session. To undo: `ctrl+t` on the bot in the agent view (`claude agents`), or
+delete its id from `pins.json`; the bot's next start pins it again. An id
+already in the file is left there and is not recorded as the bot's, so a pin
+a human added is never removed later.
+
+Where the CLI stores pins in its v5 backend instead, they live under a
+storage key and the CLI may not read `pins.json` at all, so the pin does
+nothing there and nothing in the hook can tell. To check by hand: while a bot
+is pinned, `grep "bg retire <its job id>" ~/.claude/daemon.log`. A line there
+means pins do not work on that machine.
 
 ## Refreshing a session
 

@@ -19,11 +19,15 @@
 # So a background bot (CLAUDE_JOB_DIR set; a foreground bot has no job and is
 # skipped) adds its own job id at startup/resume, and removes the id it pinned
 # last time (recorded in <state dir>/pinned-job) when that differs. No other
-# entry is ever touched, and a pins.json that is not a JSON array of strings
-# is left as it is. The id is CLAUDE_JOB_DIR's basename: measured 2026-09-19,
+# entry is ever touched -- an id already in the file is another pinner's, so
+# it is left both in the file and out of pinned-job -- and a pins.json that is
+# not a JSON array of strings is left as it is. The id is CLAUDE_JOB_DIR's basename: measured 2026-09-19,
 # a hook sees the job's own dir even in a worker started from a pre-warmed
 # spare whose process environment names another job's. Anything but
-# exactly 8 lowercase hex characters pins nothing.
+# exactly 8 lowercase hex characters pins nothing, and so does a job whose
+# state.json names another session: CLAUDE_JOB_DIR is inherited by anything
+# started from a background session's shell, and only the job whose sessionId
+# or resumeSessionId is this session's is this session's to pin.
 # The write takes the lock the CLI itself takes around pins.json
 # (proper-lockfile: mkdir "pins.json.lock", released by rmdir) and replaces
 # the file by a rename; a lock still held after about 0.2 s skips this start
@@ -48,8 +52,13 @@ esac
 
 id=${CLAUDE_JOB_DIR:-}; id=${id##*/}
 [[ $id =~ ^[0-9a-f]{8}$ ]] || exit 0
+jq -e --arg s "$session_id" '.sessionId == $s or .resumeSessionId == $s' \
+  "$CLAUDE_JOB_DIR/state.json" >/dev/null 2>&1 || exit 0
 pins=${CLAUDE_JOB_DIR%/*}/pins.json
 old=$(cat "$DISCORD_STATE_DIR/pinned-job" 2>/dev/null) || old=""
+# A pinned-job that is not a job id names nothing this bot pinned: an entry
+# that happens to equal it must not be removed.
+[[ $old =~ ^[0-9a-f]{8}$ ]] || old=""
 # ponytail: a lock left by a crashed CLI is not broken here (the CLI breaks one
 # older than 5 s on its own next pin write); until then this start skips.
 n=0
@@ -58,16 +67,23 @@ until mkdir "$pins.lock" 2>/dev/null; do
   sleep 0.05
 done
 trap 'rmdir "$pins.lock" 2>/dev/null' EXIT
+# jq prints "added" or "kept" (raw, -r) on the first line and the new array
+# on the rest: only an id this start really added is recorded as this bot's.
 if [ -e "$pins" ]; then
-  new=$(jq -s --arg id "$id" --arg old "$old" '
+  new=$(jq -rs --arg id "$id" --arg old "$old" '
     if length == 1 and (.[0] | type == "array" and all(.[]; type == "string")) then .[0]
       | if $old != "" and $old != $id then map(select(. != $old)) else . end
-      | if any(.[]; . == $id) then . else . + [$id] end
+      | if any(.[]; . == $id) then "kept", . else "added", . + [$id] end
     else empty end' "$pins" 2>/dev/null) || exit 0
   [ -n "$new" ] || exit 0
 else
-  new=$(jq -n --arg id "$id" '[$id]') || exit 0
+  new=$(jq -rn --arg id "$id" '"added", [$id]') || exit 0
 fi
-printf '%s' "$new" > "$pins.tmp.$$" 2>/dev/null && mv -f "$pins.tmp.$$" "$pins" 2>/dev/null || { rm -f "$pins.tmp.$$" 2>/dev/null; exit 0; }
-printf '%s\n' "$id" > "$DISCORD_STATE_DIR/pinned-job" 2>/dev/null
+added=${new%%$'\n'*}; new=${new#*$'\n'}
+printf '%s' "$new" 2>/dev/null > "$pins.tmp.$$" && mv -f "$pins.tmp.$$" "$pins" 2>/dev/null || { rm -f "$pins.tmp.$$" 2>/dev/null; exit 0; }
+if [ "$added" = added ]; then
+  printf '%s\n' "$id" 2>/dev/null > "$DISCORD_STATE_DIR/pinned-job"
+elif [ "$old" != "$id" ]; then
+  rm -f "$DISCORD_STATE_DIR/pinned-job" 2>/dev/null   # someone else pinned this job
+fi
 exit 0
