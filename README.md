@@ -267,7 +267,7 @@ session (see Modes above).
 | UserPromptSubmit | | `turn/on-prompt` | On a Discord turn (a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag), records that tag's chat_id/message_id/user_id for `on-stop` and `mention-guard` (only the leading tag is trusted: the plugin does not escape `<` in message text, so anything after it could be forged; a message arriving mid-turn comes as a prompt of its own and is appended) and, once per session (see below), adds an additionalContext entry with the bot's identity and the mention rule; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply. |
 | Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it; always clears the per-turn files either way. |
-| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | After a compact or `/clear`, clears the per-session "primed" flag, so the next Discord turn injects the identity context again. At a startup or resume, clears the per-turn files a turn whose Stop never ran (an interrupt, a kill) left behind, keeping the primed flag (a resumed conversation still holds that context). An `on-compact` entry an earlier version registered is replaced. |
+| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | After a compact or `/clear`, clears the per-session "primed" flag, so the next Discord turn injects the identity context again. At a startup or resume, clears the per-turn files a turn whose Stop never ran (an interrupt, a kill) left behind, keeping the primed flag (a resumed conversation still holds that context), then pins a background session's job (see Background sessions below). An `on-compact` entry an earlier version registered is replaced. |
 | PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/mention-guard` | dev-manager only. Denies a reply that names a peer (a whole word, case-insensitive) without its `<@bot_id>` or `<@!bot_id>`, or that answers a peer without mentioning it: the author of the message in `reply_to` when that is set, else of the turn's last message. A bot only receives messages that mention it. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `peers/checkin` | dev-manager only. A reply that mentions a peer (`<@bot_id>` or `<@!bot_id>`) touches `.claude/discord-agents/checkin/<session_id>`. |
 | PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/thread-guard` | dev-manager only. Denies a reply to the CHANNEL (a `chat_id` equal to the bot's channel; a thread has an id of its own) longer than 500 characters, counted in characters and not bytes, so the long text goes in the item's thread and the channel keeps one line. |
@@ -367,6 +367,22 @@ environment; measured 2026-09-18, a fork made by `/bg` had no
   instead of an isolated worktree, which is the point for a bot editing its
   own project. It is inert for a foreground start, and a session already
   running keeps whatever flags it started with until relaunched.
+
+### Pinned, so the daemon keeps it
+
+The daemon retires a background session about 60 minutes after its last
+input, so a bot nobody talked to for an hour went offline. A pinned job is
+exempt: measured 2026-09-19, of identical idle probes the unpinned one died on
+its predicted sweep and the pinned one survived. So `on-session-start` pins
+every background bot at startup and resume: it adds the session's job id (the
+basename of `$CLAUDE_JOB_DIR`) to `~/.claude/jobs/pins.json`, the file the
+agent view's `ctrl+t` writes, and removes the id this bot pinned last time
+(kept in `.claude/discord-agents/<bot>/pinned-job`). No other entry is
+touched, a file that is not a JSON array of strings is left alone, and the
+write takes the CLI's own lock (the directory `pins.json.lock`), skipping the
+start when another process holds it. A foreground bot has no job and pins
+nothing. To undo: `ctrl+t` on the bot in the agent view (`claude agents`), or
+delete its id from `pins.json`; the bot's next start pins it again.
 
 ## Refreshing a session
 

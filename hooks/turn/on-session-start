@@ -7,7 +7,31 @@
 #   its .replied flag) is left over from a turn whose Stop never ran (an
 #   interrupt, a kill). on-prompt would read it as mid-turn; delete both. The
 #   .primed flag stays: a resumed conversation still holds that context.
+#   Then pin this bot's background job, below.
 # Must never block or fail a turn: any failure is silent success.
+#
+# The pin. Claude Code's daemon retires a background session about 60
+# minutes after its last input (a sweep every 60 s), so a bot nobody talks to
+# for an hour goes offline. A job id listed in <jobs root>/pins.json (a JSON
+# array of 8-character job ids, the file the agent view's ctrl+t writes) is
+# exempt: measured 2026-09-19, of identical idle probes the unpinned one died
+# on its predicted sweep and the one written into pins.json by hand survived.
+# So a background bot (CLAUDE_JOB_DIR set; a foreground bot has no job and is
+# skipped) adds its own job id at startup/resume, and removes the id it pinned
+# last time (recorded in <state dir>/pinned-job) when that differs. No other
+# entry is ever touched, and a pins.json that is not a JSON array of strings
+# is left as it is. The id is CLAUDE_JOB_DIR's basename: measured 2026-09-19,
+# a hook sees the job's own dir even in a worker started from a pre-warmed
+# spare whose process environment names another job's. Anything but
+# exactly 8 lowercase hex characters pins nothing.
+# The write takes the lock the CLI itself takes around pins.json
+# (proper-lockfile: mkdir "pins.json.lock", released by rmdir) and replaces
+# the file by a rename; a lock still held after about 0.2 s skips this start
+# and changes nothing. Limit: where the CLI keeps pins in its v5 storage
+# backend instead (an internal gate, off by default), this file is not what it
+# reads, and nothing here can tell.
+# Undo: ctrl+t on the bot in the agent view (`claude agents`), or delete its
+# id from pins.json.
 set -u
 . "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
 
@@ -17,7 +41,33 @@ EOF2
 [ -n "$session_id" ] && [ -n "$bot_name" ] || exit 0
 t=$DISCORD_STATE_DIR/turns/$session_id
 case $source in
-  compact|clear) rm -f "$t.primed" 2>/dev/null ;;
+  compact|clear) rm -f "$t.primed" 2>/dev/null; exit 0 ;;
   startup|resume) rm -f "$t" "$t.replied" 2>/dev/null ;;
+  *) exit 0 ;;
 esac
+
+id=${CLAUDE_JOB_DIR:-}; id=${id##*/}
+[[ $id =~ ^[0-9a-f]{8}$ ]] || exit 0
+pins=${CLAUDE_JOB_DIR%/*}/pins.json
+old=$(cat "$DISCORD_STATE_DIR/pinned-job" 2>/dev/null) || old=""
+# ponytail: a lock left by a crashed CLI is not broken here (the CLI breaks one
+# older than 5 s on its own next pin write); until then this start skips.
+n=0
+until mkdir "$pins.lock" 2>/dev/null; do
+  n=$((n + 1)); [ "$n" -lt 5 ] || exit 0
+  sleep 0.05
+done
+trap 'rmdir "$pins.lock" 2>/dev/null' EXIT
+if [ -e "$pins" ]; then
+  new=$(jq -s --arg id "$id" --arg old "$old" '
+    if length == 1 and (.[0] | type == "array" and all(.[]; type == "string")) then .[0]
+      | if $old != "" and $old != $id then map(select(. != $old)) else . end
+      | if any(.[]; . == $id) then . else . + [$id] end
+    else empty end' "$pins" 2>/dev/null) || exit 0
+  [ -n "$new" ] || exit 0
+else
+  new=$(jq -n --arg id "$id" '[$id]') || exit 0
+fi
+printf '%s' "$new" > "$pins.tmp.$$" 2>/dev/null && mv -f "$pins.tmp.$$" "$pins" 2>/dev/null || { rm -f "$pins.tmp.$$" 2>/dev/null; exit 0; }
+printf '%s\n' "$id" > "$DISCORD_STATE_DIR/pinned-job" 2>/dev/null
 exit 0

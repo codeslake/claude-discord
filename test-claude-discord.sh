@@ -296,6 +296,45 @@ out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$RP" | jq -r '.hookSpecif
 grep -q "handoff.md" <<<"$out" || { echo "FAIL: refresh must still fire on an already-primed session"; exit 1; }
 echo "ok: the identity context is injected once per session, on-session-start re-primes after a compaction/clear and clears a leftover turn (not the primed flag) at a startup/resume, and refresh still fires while primed"
 
+# The pin: on-session-start adds this background job's id (CLAUDE_JOB_DIR's
+# basename) to <jobs root>/pins.json under the CLI's lock (mkdir pins.json.lock)
+# and removes only the id it pinned last time. $1 = job id, $2 = source.
+J="$HOME/.claude/jobs"; PINS="$J/pins.json"; mkdir -p "$J"
+pin() {
+  out=$(CLAUDE_JOB_DIR="$J/$1" DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<"{\"session_id\":\"sPin\",\"source\":\"${2:-startup}\"}" 2>&1) || { echo "FAIL: on-session-start must never fail: $out"; exit 1; }
+  [ -z "$out" ] || { echo "FAIL: on-session-start must print nothing: $out"; exit 1; }
+}
+cli_pins() { jq -n '$ARGS.positional' --args "$@"; }   # the CLI's own format: JSON.stringify(ids, null, 2), no trailing newline
+pin AAAA0001; pin aaaa00011
+[ ! -e "$PINS" ] && [ ! -e "$DSD/pinned-job" ] || { echo "FAIL: a start with no job id (every run above) or one that is not 8 lowercase hex characters must pin nothing"; exit 1; }
+pin aaaa0001
+[ "$(cat "$PINS"; echo .)" = "$(cli_pins aaaa0001)." ] && [ "$(cat "$DSD/pinned-job")" = aaaa0001 ] || { echo "FAIL: a missing pins.json must be created with the job id, in the CLI's format: $(cat "$PINS" 2>&1)"; exit 1; }
+[ "$(ls -A "$J")" = pins.json ] || { echo "FAIL: the lock and the temp file must be gone after a pin: $(ls -A "$J")"; exit 1; }
+pin aaaa0001 resume
+[ "$(cat "$PINS")" = "$(cli_pins aaaa0001)" ] || { echo "FAIL: the same id twice must not be pinned twice: $(cat "$PINS")"; exit 1; }
+cli_pins 11110001 22220002 > "$PINS"; rm -f "$DSD/pinned-job"
+pin aaaa0001
+[ "$(cat "$PINS"; echo .)" = "$(cli_pins 11110001 22220002 aaaa0001)." ] || { echo "FAIL: the id must be appended with every other entry kept, in order: $(cat "$PINS")"; exit 1; }
+pin bbbb0002 resume
+[ "$(cat "$PINS")" = "$(cli_pins 11110001 22220002 bbbb0002)" ] && [ "$(cat "$DSD/pinned-job")" = bbbb0002 ] || { echo "FAIL: the id pinned last time must be replaced and no other entry touched: $(cat "$PINS")"; exit 1; }
+for bad in '{"a":1}' 'not json' '["x",1]'; do
+  printf '%s' "$bad" > "$PINS"
+  pin cccc0003
+  [ "$(cat "$PINS")" = "$bad" ] && [ "$(cat "$DSD/pinned-job")" = bbbb0002 ] || { echo "FAIL: a pins.json that is not an array of strings ($bad) must be left untouched: $(cat "$PINS")"; exit 1; }
+done
+cli_pins 11110001 > "$PINS"; mkdir "$PINS.lock"
+printf '111 222\n' > "$DSD/turns/sPin"
+pin cccc0003
+[ "$(cat "$PINS")" = "$(cli_pins 11110001)" ] && [ "$(cat "$DSD/pinned-job")" = bbbb0002 ] && [ -d "$PINS.lock" ] || { echo "FAIL: a held lock must leave pins.json, pinned-job and the lock itself alone: $(cat "$PINS")"; exit 1; }
+[ ! -e "$DSD/turns/sPin" ] || { echo "FAIL: a held lock must not stop the rest of the start"; exit 1; }
+rmdir "$PINS.lock"
+for src in compact clear; do
+  pin dddd0004 "$src"
+  [ "$(cat "$PINS")" = "$(cli_pins 11110001)" ] && [ "$(cat "$DSD/pinned-job")" = bbbb0002 ] || { echo "FAIL: a $src must pin nothing: $(cat "$PINS")"; exit 1; }
+done
+rm -rf "$J" "$DSD/pinned-job"
+echo "ok: a background start pins its job id (created, appended, deduplicated, its previous id replaced, every other entry kept in order), under the CLI's lock; a non-array file, a held lock, no job id, and a compact or clear write nothing"
+
 rm -rf "$DSD/turns/s2"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s2","prompt":"hello from cli"}')
 [ -z "$out" ] || { echo "FAIL: on-prompt must be silent for a plain prompt"; exit 1; }
