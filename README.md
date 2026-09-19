@@ -186,9 +186,9 @@ Which file holds what:
 Both `setup` and the start path register them, so a bot set up before this
 existed gets them on its next start too. The `peers/` hooks do nothing in a
 session whose bot is not a dev-manager, or without `peers.json`. `on-prompt`
-also records each message's sender (`user_id`) for `mention-guard`, starting
-fresh on every new Discord turn, and gives a dev-manager its peers' mentions
-and the working rule once per session. Registration is idempotent per entry,
+also records each message's sender (`user_id`) for `mention-guard`, and
+gives a dev-manager its peers' mentions and the working rule once per
+session. Registration is idempotent per entry,
 leaves every other key in either file alone, and writes a file only when it
 changes (Claude Code keeps its permission grants in `settings.local.json`); a
 session already running picks up a hook added to its settings files without

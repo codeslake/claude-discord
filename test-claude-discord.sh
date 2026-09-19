@@ -108,8 +108,18 @@ echo "ok: on-prompt records chat_id/message_id/user_id and last-message-id, and 
 : > "$DSD/turns/s1.replied"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"555\" message_id=\"666\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi again\n</channel>"}')
 [ ! -e "$DSD/turns/s1.replied" ] || { echo "FAIL: on-prompt must clear a stale .replied flag when it records a new turn"; exit 1; }
-[ "$(cat "$DSD/turns/s1")" = "555 666 9" ] || { echo "FAIL: a new Discord turn must start a fresh turns file, not append to an interrupted turn's: $(cat "$DSD/turns/s1")"; exit 1; }
-echo "ok: on-prompt clears a stale .replied flag and the previous turn's records when it records a new Discord turn"
+echo "ok: on-prompt clears a stale .replied flag when it records a new Discord turn"
+
+# UserPromptSubmit also fires for a Discord message that arrives mid-turn, so
+# two prompts with no Stop in between are one turn: both messages keep their
+# records and both get the checkmark.
+[ "$(cat "$DSD/turns/s1")" = "$(printf '111 222 9\n555 666 9')" ] || { echo "FAIL: a second prompt in the same turn must append, not replace: $(cat "$DSD/turns/s1")"; exit 1; }
+DISCORD_STATE_DIR="$DSD" bash "$H/on-reply" <<<'{"session_id":"s1"}'
+: > "$CURL_LOG"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s1"}'
+n=0; while [ "$(wc -l < "$CURL_LOG" 2>/dev/null || echo 0)" -lt 2 ] && [ "$n" -lt 20 ]; do sleep 0.1; n=$((n+1)); done
+grep -q 'channels/111/messages/222/reactions/%E2%9C%85/@me' "$CURL_LOG" && grep -q 'channels/555/messages/666/reactions/%E2%9C%85/@me' "$CURL_LOG" || { echo "FAIL: both prompts of one turn must get the checkmark: $(cat "$CURL_LOG")"; exit 1; }
+echo "ok: two prompts in one turn (a mid-turn Discord message) are both recorded and both get the checkmark"
 
 # chat_id/message_id must come from the opening tag only, digits only: the
 # message body can contain literal text shaped like an attribute (here, a

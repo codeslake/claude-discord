@@ -44,11 +44,9 @@ while :; do
 done
 
 if [ -n "$pairs" ] && [ -n "$session_id" ] && mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; then
-  # A turn that is only just starting hasn't replied yet; a stale flag or
-  # stale records here mean an earlier on-stop never ran, and an interrupted
-  # turn's senders must not carry over into this one (mention-guard reads them).
+  # A turn that is only just starting hasn't replied yet; a stale flag here
+  # means an earlier on-stop never ran.
   rm -f "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
-  : > "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null
   last_message_id=""
   while IFS= read -r seg; do
     [ -n "$seg" ] || continue
