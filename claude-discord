@@ -112,10 +112,10 @@ jq_edit() {  # $1 = file, the rest = jq arguments
 # matcher itself can contain "|" (startup|resume|compact|clear).
 register_hooks() {  # $1 = the project's bot modes, space-separated
   local modes=" ${1:-} "
-  local events=(UserPromptSubmit PostToolUse Stop SessionStart PreToolUse PostToolUse PreToolUse SessionStart)
-  local matchers=("" "mcp__plugin_discord_discord__reply" "" "startup|resume|compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "Edit|Write|MultiEdit" "startup|resume|compact|clear")
-  local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/edit-gate autoresearchclaw/on-start)
-  local needs=("" "" "" "" dev-manager dev-manager dev-manager autoresearchclaw)   # the mode an entry needs; "" = every bot
+  local events=(UserPromptSubmit PostToolUse Stop SessionStart PreToolUse PostToolUse PreToolUse PreToolUse SessionStart)
+  local matchers=("" "mcp__plugin_discord_discord__reply" "" "startup|resume|compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "Edit|Write|MultiEdit" "startup|resume|compact|clear")
+  local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/thread-guard peers/edit-gate autoresearchclaw/on-start)
+  local needs=("" "" "" "" dev-manager dev-manager dev-manager dev-manager autoresearchclaw)   # the mode an entry needs; "" = every bot
   local want='[]' i cmd file
   for i in "${!events[@]}"; do
     if [ -z "${needs[i]}" ]; then

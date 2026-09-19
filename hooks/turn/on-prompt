@@ -59,7 +59,7 @@ if [ -n "$session_id" ] && { [ ! -f "$primed" ] || [ "$(cat "$primed" 2>/dev/nul
   if p=$(peers) && [ -n "$p" ]; then
     context="$context
 Peers (mention to reach them): $(printf '%s' "$p" | jq -r 'map("\(.name) <@\(.bot_id)>") | join(", ")' 2>/dev/null)
-Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; after each iteration post one short report."
+Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; after each iteration post one short report. Threads: one item per thread (thread start prints its id; thread close ends it); the channel holds one line when an item starts and one when it lands."
   fi
   mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null && printf '%s\n' "$bot_mode" > "$primed" 2>/dev/null
 fi

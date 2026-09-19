@@ -17,7 +17,7 @@ Origin: written by d.kim4, extended here.
 | `bun` | the plugin's runtime (`curl -fsSL https://bun.sh/install \| bash`) |
 | `jq` | writes `access.json` and the settings files, reads the plugin's install path; every hook needs it too, and without it they silently do nothing |
 | the plugin | `claude plugin install discord@claude-plugins-official` then `claude plugin disable discord@claude-plugins-official` (see below) |
-| `curl` (optional) | the ✅ reaction on a finished reply; without it, none is sent, everything else still works |
+| `curl` (optional) | the ✅ reaction on a finished reply, and the `tools/thread` helper; without it no reaction is sent and no thread can be opened, everything else still works |
 | `perl` | patches the plugin at every start, and detaches a `refresh` in its own session (macOS has no `setsid`) |
 
 Disable the plugin globally after installing it: enabled globally, every
@@ -63,7 +63,8 @@ puts `claude-discord` in `~/.local/bin/` and the helpers (`discord-proxy.ts`,
 `hooks/`, `rules/`) in `~/.claude-discord/`. Re-run it after a pull. It also
 removes every file under `~/.claude-discord/hooks/<topic>/` and
 `~/.claude-discord/rules/` that the repo no longer ships (an earlier
-version's `autoresearchclaw/watch` or `turn/on-compact`); nothing else there
+version's `autoresearchclaw/watch` or `turn/on-compact`; `hooks/tools/` is
+swept like any other topic directory); nothing else there
 is touched.
 
 ## Usage
@@ -110,7 +111,7 @@ empty for the default (the current mode on a re-run).
 | Mode | What it installs |
 |---|---|
 | `none` | nothing beyond the Discord-turn hooks every bot gets |
-| `dev-manager` | for bots that change claude-discord together with peer bots on other machines: the rule `.claude/rules/claude-discord-dev-manager.md` (from `rules/dev-manager.md`) and the three peers hooks below |
+| `dev-manager` | for bots that change claude-discord together with peer bots on other machines: the rule `.claude/rules/claude-discord-dev-manager.md` (from `rules/dev-manager.md`) and the four peers hooks below |
 | `autoresearchclaw` | for a bot next to AutoResearchClaw runs in the project: the `autoresearchclaw/on-start` hook, which gives the bot's session `rules/autoresearchclaw.md`, so it reports each research iteration to the channel (see AutoResearchClaw reports below). No rule file in the project: every session under the project loads one, the pipeline's own agent sessions included. Give it to one bot per project: two such bots each report every iteration |
 
 A dev-manager's setup also asks for its peers as
@@ -134,6 +135,21 @@ The dev-manager rule file is loaded by every session in the project (subdirector
 sessions and plain `claude` sessions included), so it opens by telling a
 session to ignore it unless its Discord-turn context has the `Dev manager:`
 line, which `on-prompt` adds for a dev-manager bot only.
+
+That rule gives a dev-manager one item -- a defect, a feature, a measurement,
+a review -- per Discord thread. `~/.claude-discord/hooks/tools/thread start
+"[<area>] <short title>"` posts that one short line in the channel, opens a
+thread on it (`auto_archive_duration` 1440) and prints the thread id; the
+full answer, the diff summary and the back-and-forth go inside, with that id
+as `chat_id`. The line comes first on purpose: Discord opens a thread only
+from a message already in the channel, so starting one from the long answer
+would leave the long answer in the channel. `thread close <thread_id>`
+archives a finished thread, which takes it out of the sidebar. The helper
+needs `DISCORD_STATE_DIR` (every hook and the bot's own session have it);
+`thread-guard` below keeps the channel to short lines. Scratch files belong
+under `~/.claude-discord/scratch/<bot name>/` when they must survive, in
+`/tmp` under a session-unique name when they need not -- never under
+`~/.claude`, and `$CLAUDE_JOB_DIR` exists only in a background session.
 
 ## AutoResearchClaw reports
 
@@ -232,7 +248,8 @@ Each entry in the project's settings (see below for which file) execs the script
 (`h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/<topic>/<name>"; [ ! -x "$h" ] || "$h"`),
 so a machine without the hooks installed simply runs nothing. Scripts live
 under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
-`lib/discord.sh` is sourced by every script below, not registered itself.
+`lib/discord.sh` and `tools/thread` are not registered: the first is sourced
+by every script below, the second is run by the session (see Modes above).
 
 | Event | Matcher | Script | What |
 |---|---|---|---|
@@ -242,6 +259,7 @@ under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
 | SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | After a compact or `/clear`, clears the per-session "primed" flag, so the next Discord turn injects the identity context again. At a startup or resume, clears the per-turn files a turn whose Stop never ran (an interrupt, a kill) left behind, keeping the primed flag (a resumed conversation still holds that context). An `on-compact` entry an earlier version registered is replaced. |
 | PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/mention-guard` | dev-manager only. Denies a reply that names a peer (a whole word, case-insensitive) without its `<@bot_id>` or `<@!bot_id>`, or that answers a peer without mentioning it: the author of the message in `reply_to` when that is set, else of the turn's last message. A bot only receives messages that mention it. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `peers/checkin` | dev-manager only. A reply that mentions a peer (`<@bot_id>` or `<@!bot_id>`) touches `.claude/discord-agents/checkin/<session_id>`. |
+| PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/thread-guard` | dev-manager only. Denies a reply to the CHANNEL (a `chat_id` equal to the bot's channel; a thread has an id of its own) longer than 500 characters, counted in characters and not bytes, so the long text goes in the item's thread and the channel keeps one line. |
 | PreToolUse | `Edit\|Write\|MultiEdit` | `peers/edit-gate` | dev-manager only. Denies an edit under a path whose realpath contains `/claude-discord/` unless the session checked in within the last 60 minutes; an allowed edit renews the check-in. Paths git ignores (a bot's state such as the refresh `handoff.md`, `.superpowers/`) pass. Bash and git edits are not seen; the rule asks for the same announcement by hand. |
 | SessionStart | `startup\|resume\|compact\|clear` | `autoresearchclaw/on-start` | autoresearchclaw only. Prints the installed `rules/autoresearchclaw.md` as the session's additionalContext (nothing when the file is missing); starts no process. An entry an earlier version registered with `startup\|resume` is replaced. See AutoResearchClaw reports above. |
 
@@ -421,6 +439,7 @@ rest of Claude Code.
 | `bot name must be a plain directory name` | the name contained `/`, or was `.`/`..` |
 | `bot name 'hooks'` (or `'checkin'`) `is reserved` | those names are claude-discord's own directories under `.claude/discord-agents/`; pick another |
 | Two bots answer each other forever | the mention policy is off on both; turn it back on for at least one |
+| `Over 500 characters in the channel: start a thread ...` | a dev-manager tried to put a long answer in the channel; `thread start "[<area>] <short title>"`, then post it inside the thread |
 | `Before changing claude-discord, announce on Discord ...` | a dev-manager edited claude-discord without mentioning a peer in the last 60 minutes; announce the change, then edit |
 | `claude-discord: ~/.claude-discord/rules/dev-manager.md is missing` | wrapper newer than the installed helpers; re-run `./install.sh` |
 | `refresh` says `handoff.md is missing or empty` | the session did not write it; ask it to, or pass `--force` |

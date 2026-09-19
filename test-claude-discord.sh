@@ -39,7 +39,9 @@ bash -n "$D/hooks/turn/on-stop"
 bash -n "$D/hooks/turn/on-session-start"
 bash -n "$D/hooks/peers/mention-guard"
 bash -n "$D/hooks/peers/checkin"
+bash -n "$D/hooks/peers/thread-guard"
 bash -n "$D/hooks/peers/edit-gate"
+bash -n "$D/hooks/tools/thread"
 bash -n "$D/hooks/autoresearchclaw/on-start"
 bash -n "$D/hooks/autoresearchclaw/events"
 [ "$(grep -c "if (msg.author.bot) return" "$S")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in the wrapper"; exit 1; }
@@ -54,14 +56,23 @@ printf '#!/bin/bash\necho "LAUNCHER $*"\n' > "$HOME/bin/claude-launcher"; chmod 
 printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
 CURL_LOG="$HOME/curl.log"; : > "$CURL_LOG"
 CURL_STDIN_LOG="$HOME/curl.stdin.log"; : > "$CURL_STDIN_LOG"
+CURL_REPLIES="$HOME/curl.replies"; : > "$CURL_REPLIES"
 cat > "$HOME/bin/curl" <<'EOF'
 #!/bin/bash
 # Logs its args to CURL_LOG instead of stdout, since the caller redirects
 # stdout/stderr to /dev/null for the real, detached curl call. Also drains
 # stdin to CURL_STDIN_LOG, since the real call sends the auth header there
-# (-H @-), never in argv.
+# (-H @-), never in argv. A caller that READS the answer (the thread helper)
+# queues one "<http status> <body>" line per call in CURL_REPLIES; the line
+# is consumed and printed back as the real `-w '\n%{http_code}'` shape, body
+# first. With nothing queued nothing is printed, as before.
 printf '%s\n' "$*" >> "$CURL_LOG"
 cat >> "$CURL_STDIN_LOG" 2>/dev/null
+line=$(head -n 1 "$CURL_REPLIES" 2>/dev/null) || line=""
+if [ -n "$line" ]; then
+  tail -n +2 "$CURL_REPLIES" > "$CURL_REPLIES.rest" && mv "$CURL_REPLIES.rest" "$CURL_REPLIES"
+  printf '%s\n%s' "${line#* }" "${line%% *}"
+fi
 EOF
 chmod +x "$HOME/bin/curl"
 # `sleep`, stubbed by duration so the suite stays inside its 30 s budget
@@ -95,7 +106,7 @@ sleep 600;
 EOF
 chmod +x "$HOME/bin/fake-worker"
 export PATH="$HOME/bin:$PATH"
-export CURL_LOG CURL_STDIN_LOG
+export CURL_LOG CURL_STDIN_LOG CURL_REPLIES
 export CLAUDE_DISCORD_LAUNCHER=claude-launcher
 mkdir -p "$HOME/.claude-discord"; : > "$HOME/.claude-discord/discord-proxy.ts"
 cp -r "$D/hooks" "$HOME/.claude-discord/hooks"   # stand-in for install.sh, not exercised here
@@ -309,7 +320,7 @@ out=$(printf '' | DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt"); rc=$?
 echo "ok: on-prompt exits 0 with no output on invalid JSON and on empty stdin"
 
 mv "$HOME/.claude-discord/hooks/lib/discord.sh" "$HOME/.claude-discord/hooks/lib/discord.sh.bak"
-for hookname in turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/edit-gate autoresearchclaw/on-start; do
+for hookname in turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/thread-guard peers/edit-gate autoresearchclaw/on-start; do
   out=$(DISCORD_STATE_DIR="$DSD" bash "$R/hooks/$hookname" <<<'{"session_id":"sX","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\">\nhi\n</channel>"}'); rc=$?
   [ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: $hookname with a missing lib must exit 0 with no output"; exit 1; }
 done
@@ -818,9 +829,11 @@ SL="$P4/.claude/settings.local.json"
 CMD_GUARD='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/mention-guard"; [ ! -x "$h" ] || "$h"'
 CMD_CHECKIN='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/checkin"; [ ! -x "$h" ] || "$h"'
 CMD_GATE='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/edit-gate"; [ ! -x "$h" ] || "$h"'
+CMD_TGUARD='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/thread-guard"; [ ! -x "$h" ] || "$h"'
 has_peers_hooks() {
   has_matcher PreToolUse mcp__plugin_discord_discord__reply "$CMD_GUARD" "$1" &&
   has_matcher PostToolUse mcp__plugin_discord_discord__reply "$CMD_CHECKIN" "$1" &&
+  has_matcher PreToolUse mcp__plugin_discord_discord__reply "$CMD_TGUARD" "$1" &&
   has_matcher PreToolUse 'Edit|Write|MultiEdit' "$CMD_GATE" "$1"
 }
 echo mine > "$P4/.claude/rules/other.md"
@@ -837,7 +850,7 @@ cmp -s "$D/rules/dev-manager.md" "$RULE" || { echo "FAIL: the dev-manager rule w
 sed -n 3p "$RULE" | grep -qF 'only when your Discord-turn context contains a `Dev manager:` line' || { echo "FAIL: the rule must open with its condition, since every session in the project loads it"; exit 1; }
 [ "$(grep -c 'Dev manager:' "$RULE")" = 1 ] || { echo "FAIL: only the conditional line may contain the 'Dev manager:' marker (not the heading)"; exit 1; }
 has_hooks "$SJ" && ! grep -q 'hooks/peers/' "$SJ" || { echo "FAIL: settings.json must hold the turn hooks and no peers hook: $(cat "$SJ")"; exit 1; }
-has_peers_hooks "$SL" && ! grep -q 'hooks/turn/' "$SL" || { echo "FAIL: settings.local.json must hold the three peers hooks and no turn hook: $(cat "$SL")"; exit 1; }
+has_peers_hooks "$SL" && ! grep -q 'hooks/turn/' "$SL" || { echo "FAIL: settings.local.json must hold the four peers hooks and no turn hook: $(cat "$SL")"; exit 1; }
 [ "$(jq -c '.permissions' "$SJ")" = '{"allow":["Bash(ls)"]}' ] && has_cmd PostToolUse my-own-hook "$SJ" || { echo "FAIL: unrelated settings keys and the user's own hook must survive"; exit 1; }
 [ "$(jq -c '.permissions' "$SL")" = '{"allow":["Bash(git status)"]}' ] || { echo "FAIL: settings.local.json's permission grants must survive"; exit 1; }
 echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned), the group allowFrom, the rule file (conditional first line), the turn hooks in settings.json and the peers hooks in settings.local.json"
@@ -907,7 +920,7 @@ out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_
 [ "$(cat "$R4/mgr/turns/g2")" = "42 555 901" ] || { echo "FAIL: on-prompt must record the triggering user_id"; exit 1; }
 ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")
 grep -qxF 'Peers (mention to reach them): dong <@900>, junyong <@901>' <<<"$ctx" || { echo "FAIL: a dev-manager's context must list its peers, self excluded: $ctx"; exit 1; }
-grep -qxF 'Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; after each iteration post one short report.' <<<"$ctx" || { echo "FAIL: the dev-manager line is missing: $ctx"; exit 1; }
+grep -qxF 'Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; after each iteration post one short report. Threads: one item per thread (thread start prints its id; thread close ends it); the channel holds one line when an item starts and one when it lands.' <<<"$ctx" || { echo "FAIL: the dev-manager line is missing: $ctx"; exit 1; }
 out=$(DISCORD_STATE_DIR="$R4/plain" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g3","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"556\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'Peers\|Dev manager' <<<"$out" && { echo "FAIL: a plain bot must not get the dev-manager context"; exit 1; }
 REASON_B='You are answering junyong; mention it as <@901> or it never sees this.'
@@ -979,6 +992,84 @@ age 3700 "$R4/checkin/e1"
 out=$(gate e1 "$CD/x.sh")
 [ "$(reason <<<"$out")" = "$GATE_REASON" ] || { echo "FAIL: a check-in older than 60 minutes must be denied: $out"; exit 1; }
 echo "ok: edit-gate denies claude-discord edits (tracked or untracked, via a symlink, a new file) without a check-in or with a stale one; passes with a fresh one and re-touches it, for gitignored bot state (a handoff.md in a dir not created yet), outside claude-discord and for a non-dev-manager"
+
+# thread-guard: the channel keeps short lines, the long text goes in a
+# thread. 500 is counted in CHARACTERS, so a Korean line well over 500 bytes
+# still passes.
+TG_REASON='Over 500 characters in the channel: start a thread (~/.claude-discord/hooks/tools/thread start "[<area>] <short title>") and post this inside it, leaving one line here.'
+tguard() { DISCORD_STATE_DIR="${3:-$R4/${2:-mgr}}" CLAUDE_PROJECT_DIR="$P4" bash "$G/thread-guard" <<<"$1"; }
+body() { jq -nc --arg c "$1" --arg t "$2" '{session_id: "t1", tool_input: {chat_id: $c, text: $t}}'; }
+A501=$(printf 'a%.0s' $(seq 501)); A500=${A501%a}
+KO200=$(jq -rn '"한" * 200')   # 200 characters, 600 bytes: over the limit only if bytes are counted
+[ "$(printf '%s' "$KO200" | wc -c)" = 600 ] || { echo "FAIL: the Korean sample must be over 500 bytes"; exit 1; }
+out=$(tguard "$(body 42 "$A501")")
+[ "$(reason <<<"$out")" = "$TG_REASON" ] || { echo "FAIL: a 501-character channel reply must be denied: $out"; exit 1; }
+out=$(tguard "$(body 42 "$A500")")
+[ -z "$out" ] || { echo "FAIL: 500 characters is not over the limit: $out"; exit 1; }
+out=$(tguard "$(body 42 "$KO200")")
+[ -z "$out" ] || { echo "FAIL: 200 Korean characters (600 bytes) must pass: bytes were counted, not characters: $out"; exit 1; }
+out=$(tguard "$(body 1550575144320110662 "$A501")")
+[ -z "$out" ] || { echo "FAIL: the same long text sent to a thread id must pass: $out"; exit 1; }
+out=$(tguard "$(body 42 "$A501")" plain)
+[ -z "$out" ] || { echo "FAIL: thread-guard must be a no-op for a bot that is not a dev-manager: $out"; exit 1; }
+mkdir -p "$HOME/nochan/bot"; echo dev-manager > "$HOME/nochan/bot/mode"   # no access.json, no config.env: no channel
+out=$(tguard "$(body 42 "$A501")" '' "$HOME/nochan/bot")
+[ -z "$out" ] || { echo "FAIL: thread-guard must be silent when the bot has no channel: $out"; exit 1; }
+out=$(printf 'not json' | DISCORD_STATE_DIR="$R4/mgr" bash "$G/thread-guard" 2>&1) || { echo "FAIL: thread-guard must exit 0 on invalid JSON"; exit 1; }
+[ -z "$out" ] || { echo "FAIL: thread-guard must print nothing on invalid JSON"; exit 1; }
+echo "ok: thread-guard denies a channel reply over 500 characters and passes 500, 200 Korean characters (600 bytes), the same text in a thread, a non-dev-manager, a bot without a channel and invalid JSON"
+
+# The thread helper, against the stubbed curl: each call takes the next
+# queued "<status> <body>" line.
+T="$R4/hooks/tools/thread"
+thread() { DISCORD_STATE_DIR="$R4/mgr" bash "$T" "$@"; }
+replies() { printf '%s\n' "$@" > "$CURL_REPLIES"; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; }
+call() { sed -n "$1p" "$CURL_LOG"; }
+replies '200 {"id":"1234"}' '201 {"id":"1234","name":"[guard] short"}'
+out=$(thread start '[guard] short')
+[ "$out" = 1234 ] || { echo "FAIL: thread start must print the thread id: $out / $(cat "$CURL_LOG")"; exit 1; }
+grep -qF 'channels/42/messages' <<<"$(call 1)" && ! grep -qF '/threads' <<<"$(call 1)" && grep -qF '{"content":"[guard] short"}' <<<"$(call 1)" || { echo "FAIL: the title must be posted as a message in the bot's channel: $(call 1)"; exit 1; }
+grep -qF 'channels/42/messages/1234/threads' <<<"$(call 2)" || { echo "FAIL: the thread must be opened on the returned message id: $(call 2)"; exit 1; }
+grep -qF '"auto_archive_duration":1440' <<<"$(call 2)" || { echo "FAIL: auto_archive_duration 1440 is missing: $(call 2)"; exit 1; }
+[ "$(wc -l < "$CURL_LOG")" = 2 ] || { echo "FAIL: thread start makes exactly two calls: $(cat "$CURL_LOG")"; exit 1; }
+grep -q 'tokM' "$CURL_LOG" && { echo "FAIL: the bot token appeared in curl's argv (visible in ps/cmdline)"; exit 1; }
+[ "$(grep -cF 'Authorization: Bot tokM' "$CURL_STDIN_LOG")" = 2 ] || { echo "FAIL: both calls must send the token via stdin (-H @-): $(cat "$CURL_STDIN_LOG")"; exit 1; }
+
+# A 120-character Korean title: the channel message keeps all 120, the thread
+# name is cut to Discord's limit of 100 CHARACTERS (300 bytes here, so a byte
+# cut would land mid-character).
+KT=$(jq -rn '"가나다라마바사아자차" * 12')
+KT100=$(perl -CSDA -e 'print substr($ARGV[0], 0, 100)' "$KT")
+[ "$(printf '%s' "$KT" | wc -c)" = 360 ] && [ "$(printf '%s' "$KT100" | wc -c)" = 300 ] || { echo "FAIL: the Korean title sample is not 120/100 characters"; exit 1; }
+replies '200 {"id":"77"}' '201 {"id":"77"}'
+out=$(thread start "$KT")
+[ "$out" = 77 ] || { echo "FAIL: thread start with a long title must still print the thread id: $out"; exit 1; }
+grep -qF "$(jq -nc --arg c "$KT" '{content: $c}')" <<<"$(call 1)" || { echo "FAIL: the channel message must keep the whole 120-character title: $(call 1)"; exit 1; }
+grep -qF "\"name\":\"$KT100\"" <<<"$(call 2)" || { echo "FAIL: the thread name must be the title's first 100 characters: $(call 2)"; exit 1; }
+
+replies '200 {"id":"88"}' '400 {"code":160004,"message":"A thread has already been created for this message"}'
+out=$(thread start '[guard] again')
+[ "$out" = 88 ] || { echo "FAIL: a 160004 answer must print the message id (a message-started thread's id): $out"; exit 1; }
+
+replies '200 {"id":"88"}' '403 {"code":50013,"message":"Missing Permissions"}'
+rc=0; out=$(thread start '[guard] nope' 2>"$P4/thread.err") || rc=$?
+[ "$rc" = 1 ] && [ -z "$out" ] || { echo "FAIL: another error must exit 1 and print no id: rc=$rc out=$out"; exit 1; }
+[ "$(wc -l < "$P4/thread.err")" = 1 ] && grep -q 403 "$P4/thread.err" && grep -q 50013 "$P4/thread.err" || { echo "FAIL: one stderr line naming the status and the error code: $(cat "$P4/thread.err")"; exit 1; }
+grep -q 'tokM\|Missing Permissions' "$P4/thread.err" && { echo "FAIL: neither the token nor the response body may be echoed: $(cat "$P4/thread.err")"; exit 1; }
+
+replies '200 {"id":"99","archived":true}'
+rc=0; out=$(thread close 99) || rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] || { echo "FAIL: thread close must be silent on success: rc=$rc out=$out"; exit 1; }
+grep -qF 'PATCH' <<<"$(call 1)" && grep -qF 'channels/99' <<<"$(call 1)" && grep -qF '{"archived":true}' <<<"$(call 1)" || { echo "FAIL: close must PATCH the thread with archived true: $(call 1)"; exit 1; }
+replies
+rc=0; out=$(thread close '99; rm -rf' 2>&1) || rc=$?
+[ "$rc" = 2 ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: a non-digit id must exit 2 before any call: rc=$rc log=$(cat "$CURL_LOG")"; exit 1; }
+rc=0; out=$(bash "$T" start hi 2>&1) || rc=$?
+[ "$rc" = 2 ] && [ "$(wc -l <<<"$out")" = 1 ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: without DISCORD_STATE_DIR: exit 2, one stderr line, no call: rc=$rc out=$out"; exit 1; }
+rc=0; out=$(thread 2>&1) || rc=$?
+[ "$rc" = 2 ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: no verb must exit 2 before any call: rc=$rc out=$out"; exit 1; }
+: > "$CURL_REPLIES"
+echo "ok: thread start posts the channel line and opens its thread (auto_archive_duration 1440, name cut to 100 characters while the message keeps 120), prints the message id on 160004, exits 1 with the status and code on another error, closes by PATCH, and exits 2 on a bad id, no verb or no state -- the token never in argv"
 
 # Switching mgr to none (by number): no bot is a dev-manager any more. A
 # user's own hook inside our edit-gate group must survive the cleanup.
@@ -1298,17 +1389,19 @@ echo "ok: refresh keeps the default kickoff past a value-taking flag (--allowedT
 # watcher, turn/on-compact) is removed; nothing else under ~/.claude-discord/
 # is touched.
 IH="$HOME/install-home"
-mkdir -p "$IH/.claude-discord/hooks/autoresearchclaw" "$IH/.claude-discord/hooks/turn" "$IH/.claude-discord/rules"
+mkdir -p "$IH/.claude-discord/hooks/autoresearchclaw" "$IH/.claude-discord/hooks/turn" "$IH/.claude-discord/hooks/tools" "$IH/.claude-discord/rules"
 : > "$IH/.claude-discord/hooks/autoresearchclaw/watch"; : > "$IH/.claude-discord/hooks/turn/on-compact"
+: > "$IH/.claude-discord/hooks/tools/old-tool"
 : > "$IH/.claude-discord/rules/old.md"; echo mine > "$IH/.claude-discord/notes"
 HOME="$IH" bash "$D/install.sh" >/dev/null 2>&1 || { echo "FAIL: install.sh failed"; exit 1; }
-[ ! -e "$IH/.claude-discord/hooks/autoresearchclaw/watch" ] && [ ! -e "$IH/.claude-discord/hooks/turn/on-compact" ] && [ ! -e "$IH/.claude-discord/rules/old.md" ] || { echo "FAIL: install.sh must remove what the repo no longer ships: $(cd "$IH/.claude-discord" && find . -type f)"; exit 1; }
+[ ! -e "$IH/.claude-discord/hooks/autoresearchclaw/watch" ] && [ ! -e "$IH/.claude-discord/hooks/turn/on-compact" ] && [ ! -e "$IH/.claude-discord/hooks/tools/old-tool" ] && [ ! -e "$IH/.claude-discord/rules/old.md" ] || { echo "FAIL: install.sh must remove what the repo no longer ships: $(cd "$IH/.claude-discord" && find . -type f)"; exit 1; }
+[ -x "$IH/.claude-discord/hooks/tools/thread" ] && [ -x "$IH/.claude-discord/hooks/peers/thread-guard" ] || { echo "FAIL: install.sh must install the thread helper and the thread guard, executable"; exit 1; }
 [ "$(cat "$IH/.claude-discord/notes")" = mine ] && [ -x "$IH/.local/bin/claude-discord" ] || { echo "FAIL: install.sh must install the wrapper and leave other files alone"; exit 1; }
 for f in $(cd "$D" && ls hooks/*/* rules/*); do
   cmp -s "$D/$f" "$IH/.claude-discord/$f" || { echo "FAIL: install.sh must install $f"; exit 1; }
 done
 [ -x "$IH/.claude-discord/hooks/autoresearchclaw/events" ] && [ -x "$IH/.claude-discord/hooks/autoresearchclaw/on-start" ] || { echo "FAIL: the autoresearchclaw hooks must be executable"; exit 1; }
-echo "ok: install.sh installs every shipped hook and rule (events and autoresearchclaw.md included) and removes the stale watch, on-compact and rule files, leaving everything else"
+echo "ok: install.sh installs every shipped hook and rule (events and autoresearchclaw.md included) and removes the stale watch, on-compact, hooks/tools and rule files, leaving everything else"
 
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.

@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# One item, one thread. Discord opens a thread only FROM a message that is
+# already in the channel, so whatever is posted first stays in the channel
+# for good: starting a thread from a long answer leaves the long answer
+# behind. `thread start` therefore posts the short title ITSELF and opens the
+# thread on it, and everything else about the item is written inside, under
+# the id this prints (a message-started thread's id is that message's id).
+# `thread close` archives a finished thread so it leaves the sidebar.
+#
+#   thread start "[<area>] <short title>"   prints the thread id
+#   thread close <thread_id>                silent on success
+#
+# Run by the session, not registered as a hook. Exit 2: no bot to speak as,
+# or a bad argument. Exit 1: Discord refused, named by HTTP status and error
+# code only -- never the token, never the response body.
+set -u
+. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || :
+
+status=000 resp=""
+
+is_id() { case ${1:-} in ''|*[!0-9]*) return 1;; esac; return 0; }
+
+# api <method> <path> [json]: sets $status and $resp. The Authorization
+# header goes on curl's stdin (-H @-), never argv, so the token cannot be
+# read out of ps; the JSON body carries no secret and goes in argv.
+api() {
+  # -w '\n%{http_code}': curl expands the \n itself, which keeps the status
+  # on a line of its own without putting a newline in argv.
+  local out args=(-s --max-time 10 -w '\n%{http_code}' -X "$1" -H @- "https://discord.com/api/v10/$2")
+  [ $# -lt 3 ] || args+=(-H 'Content-Type: application/json' --data-raw "$3")
+  out=$(printf 'Authorization: Bot %s\n' "$bot_token" | curl "${args[@]}" 2>/dev/null) || out=""
+  status=${out##*$'\n'} resp=${out%$'\n'*}
+  case $status in ''|*[!0-9]*) status=000;; esac
+}
+
+err_code() { printf '%s' "$resp" | jq -r '.code // empty' 2>/dev/null; }
+
+fail() {  # $1 = what was being done
+  local c; c=$(err_code)
+  printf 'thread: %s failed: HTTP %s, discord code %s\n' "$1" "$status" "${c:-none}" >&2
+  exit 1
+}
+
+if [ -z "${bot_token:-}" ] || ! is_id "${bot_channel:-}"; then
+  echo "thread: no bot channel or token; DISCORD_STATE_DIR must name the bot's state directory" >&2
+  exit 2
+fi
+
+case ${1:-} in
+  start)
+    title=${2:-}
+    [ -n "$title" ] || { echo "thread: usage: thread start \"[<area>] <short title>\"" >&2; exit 2; }
+    api POST "channels/$bot_channel/messages" "$(jq -nc --arg c "$title" '{content: $c}')"
+    case $status in 2*) ;; *) fail "posting the channel line";; esac
+    mid=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null)
+    is_id "$mid" || fail "posting the channel line"
+    # jq slices a string by CHARACTERS whatever the shell's locale says, so a
+    # Korean title is cut at Discord's 100-character limit and never
+    # mid-byte. Only the thread name is cut: the channel message above keeps
+    # the whole title.
+    api POST "channels/$bot_channel/messages/$mid/threads" \
+      "$(jq -nc --arg n "$title" '{name: $n[0:100], auto_archive_duration: 1440}')"
+    case $status in
+      2*) tid=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null)
+          is_id "$tid" || fail "opening the thread"
+          printf '%s\n' "$tid" ;;
+      # 160004: a thread is already open on that message. Its id IS the
+      # message id, so the caller gets what it came for instead of an error.
+      *) [ "$(err_code)" = 160004 ] || fail "opening the thread"
+         printf '%s\n' "$mid" ;;
+    esac ;;
+  close)
+    is_id "${2:-}" || { echo "thread: usage: thread close <thread_id> (digits only)" >&2; exit 2; }
+    api PATCH "channels/$2" "$(jq -nc '{archived: true}')"
+    case $status in 2*) ;; *) fail "archiving the thread";; esac ;;
+  *)
+    echo "thread: usage: thread start \"[<area>] <short title>\" | thread close <thread_id>" >&2
+    exit 2 ;;
+esac
