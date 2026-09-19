@@ -83,7 +83,7 @@ The setup prompts:
 
 | Prompt | Stored in | Notes |
 |---|---|---|
-| Discord channel ID | `config.env` (shared) | |
+| Discord channel ID | `config.env` (shared) | also written as the channel group of each bot's `access.json`. A running bot's channel is that group: to move one bot, edit its `access.json` (the plugin, the hooks' identity text, the start prompt and the `autoresearchclaw` watcher all follow it; `config.env` is the fallback when the file has no single group). A setup re-run writes `config.env`'s channel into `access.json` again |
 | Your Discord user ID | `config.env` (shared) | the only user allowed to DM the bot |
 | Other user or bot IDs | `config.env` (shared) | comma-separated; may be empty. These can trigger the bot in the channel |
 | Bot token | `<name>/.env` | input is hidden, like a password. On a re-run, empty keeps the current token |
@@ -138,8 +138,10 @@ a run. At every session start (and resume) `on-start` starts a watcher,
 `hooks/autoresearchclaw/watch`, detached from the session; it lives as long
 as the session's process and the bot's `autoresearchclaw` mode, and writes
 nothing to the terminal. Once a minute it reads every `artifacts/rc-*/` run
-directory and posts what is new, one message per run (a second apart:
-Discord takes 5 messages per 5 s in a channel), one line per event:
+directory and posts what is new to the bot's channel (see Usage: the one
+group in its `access.json`; with several groups it posts nothing until one
+is left), one message per run (a second apart: Discord takes 5 messages per
+5 s in a channel), one line per event:
 
 | Source | Line |
 |---|---|

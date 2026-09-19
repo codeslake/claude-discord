@@ -503,7 +503,15 @@ grep -q 'if (msg.author.bot) return' "$install/server.ts" &&
 grep -q 'msg.mentions.has(client.user))' "$install/server.ts" &&
   perl -pi -e 's/msg\.mentions\.has\(client\.user\)\)/msg.mentions.has(client.user, { ignoreEveryone: true }))/' "$install/server.ts"
 
-prompt="You are \"$name\", one of several Claude Code sessions sharing the Discord channel $DISCORD_CHANNEL_ID, each through its own bot. \
+# The bot's channel is the single group key in its access.json, where a bot
+# is moved to another channel; config.env's DISCORD_CHANNEL_ID otherwise (no
+# file, no group, several). The same rule as hooks/lib/discord.sh's
+# resolve_channel, which cannot be sourced here (it is not set -e safe, and
+# the installed copy may be older than this script).
+channel=$DISCORD_CHANNEL_ID
+groups=$(jq -r '.groups | objects | keys[]' "$dir/access.json" 2>/dev/null) || groups=""
+case $groups in ''|*[!0-9]*) ;; *) channel=$groups ;; esac
+prompt="You are \"$name\", one of several Claude Code sessions sharing the Discord channel $channel, each through its own bot. \
 The human reaches you there by @mentioning or replying to your bot; answer with the discord reply tool. \
 Another bot receives your messages only when you @mention it and it allowlists your bot. \
 Sessions on this machine can also be reached with ListAgents and SendMessage, addressing them by session name; mirror every such message you send or receive into that channel as one line ('-> name: ...' or '<- name: ...') so the human can follow and step in. \

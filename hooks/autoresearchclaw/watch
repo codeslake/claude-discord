@@ -93,9 +93,13 @@ poll() {  # $1 = 1: record, post nothing
 }
 
 [ -e "$posted" ] && first=0 || first=1
-poll "$first"
-while sleep 60; do
+while :; do
+  # The channel is resolved again every poll (the bot can be moved while its
+  # session runs). With several channels in access.json which one is meant
+  # is not known: nothing is read, recorded or posted until there is one.
+  resolve_channel
+  case $bot_groups in *$'\n'*) ;; *) poll "$first"; first=0 ;; esac
+  sleep 60
   kill -0 "$worker" 2>/dev/null && [ "$(cat "$pidfile" 2>/dev/null)" = "$$ $worker" ] &&
     [ "$(cat "$DISCORD_STATE_DIR/mode" 2>/dev/null)" = autoresearchclaw ] || exit 0
-  poll 0
 done

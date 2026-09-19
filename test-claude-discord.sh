@@ -970,6 +970,33 @@ tick "$WP1" 7
 [ "$(posts)" = 7 ] && [ "$(last_post)" = '[arc] stage 11 RESOURCE_PLANNING done (134 s)' ] || { echo "FAIL: a write in the stamp's own tick must be read on the next poll: $(posts) posts, last: $(last_post)"; exit 1; }
 echo "ok: a run dir unchanged since the previous poll is skipped; a changed one is read, a write in the poll's own mtime tick included"
 
+# A bot moved to another channel by editing its access.json (config.env still
+# says 42): the watcher posts there, and the identity text of on-prompt and of
+# the start path names it. With several groups the channel is not known: the
+# identity falls back to config.env and the watcher posts nothing, then
+# catches up once one group is left.
+cp "$R4/mgr/access.json" "$P4/access.before"
+jq '.groups = {"4343": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
+health 12 12-experiment_run done 2026-09-19T02:50:00+00:00
+: > "$CURL_LOG"
+tick "$WP1" 8
+[ "$(posts)" = 8 ] && grep -q 'channels/4343/messages$' "$CURL_LOG" && ! grep -q 'channels/42/' "$CURL_LOG" || { echo "FAIL: the watcher must post to the access.json channel: $(cat "$CURL_LOG")"; exit 1; }
+out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"ch1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"800\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
+grep -q 'in channel 4343\.' <<<"$out" || { echo "FAIL: on-prompt must name the access.json channel: $out"; exit 1; }
+out=$(bash "$S" mgr 2>&1)
+grep -q 'sharing the Discord channel 4343,' <<<"$out" || { echo "FAIL: the start prompt must name the access.json channel: $out"; exit 1; }
+jq '.groups = {"4343": .groups["42"], "4444": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
+health 13 13-iterative_refine done 2026-09-19T03:00:00+00:00
+tick "$WP1" 8
+[ "$(posts)" = 8 ] || { echo "FAIL: with several channels in access.json the watcher must post nothing: $(last_post)"; exit 1; }
+out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"ch2","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"801\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
+grep -q 'in channel 42\.' <<<"$out" || { echo "FAIL: with several groups the identity falls back to config.env's channel: $out"; exit 1; }
+jq '.groups = {"4343": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
+tick "$WP1" 9
+[ "$(posts)" = 9 ] && [ "$(last_post)" = '[arc] stage 13 ITERATIVE_REFINE done (134 s)' ] && [ "$(tail -1 "$CURL_LOG" | grep -o 'channels/[0-9]*/messages$')" = channels/4343/messages ] || { echo "FAIL: once one channel is left, what was held back is posted there: $(posts) posts, last: $(last_post)"; exit 1; }
+cp "$P4/access.before" "$R4/mgr/access.json"
+echo "ok: a bot moved by editing its access.json posts and identifies with that channel (on-prompt and the start prompt); with several groups the identity falls back to config.env and the watcher posts nothing until one is left, then catches up"
+
 # A resumed session is a new worker: on-start gives it its own watcher even
 # while the previous one lives, and the previous one exits at its next wake.
 # A watcher also exits once its worker is gone.
@@ -979,11 +1006,11 @@ read -r WP2 FOR2 < "$R4/mgr/arc-watch.pid"
 KILL_AT_EXIT="$KILL_AT_EXIT $WP2"
 [ "$FOR2" = "$W2" ] && [ "$WP2" != "$WP1" ] || { echo "FAIL: a new worker must get its own watcher"; exit 1; }
 asleep "$WP2"
-tick "$WP1" 7
+tick "$WP1" 9
 ! kill -0 "$WP1" 2>/dev/null || { echo "FAIL: a watcher the pidfile no longer names must exit at its next wake"; exit 1; }
 [ "$(watchers)" = "$WP2" ] || { echo "FAIL: exactly one watcher must be left: $(watchers | tr '\n' ' ')"; exit 1; }
 kill "$W2"
-tick "$WP2" 7
+tick "$WP2" 9
 ! kill -0 "$WP2" 2>/dev/null && [ -z "$(watchers)" ] || { echo "FAIL: the watcher must exit once its worker is gone"; exit 1; }
 # What happened while no watcher ran is posted by the next one's first
 # pass; the wait posted before (still in waiting.json) is not repeated.
@@ -991,10 +1018,10 @@ health 09 09-experiment_design done 2026-09-19T02:20:00+00:00
 start_worker "$R4/mgr" "$CMD_ARC"
 read -r WP3 _ < "$R4/mgr/arc-watch.pid"
 KILL_AT_EXIT="$KILL_AT_EXIT $WP3"
-asleep "$WP3"; landed 8
-[ "$(posts)" = 8 ] && [ "$(last_post)" = '[arc] stage 09 EXPERIMENT_DESIGN done (134 s)' ] || { echo "FAIL: a later start must post exactly the gap, once: $(posts) posts, last: $(last_post)"; exit 1; }
+asleep "$WP3"; landed 10
+[ "$(posts)" = 10 ] && [ "$(last_post)" = '[arc] stage 09 EXPERIMENT_DESIGN done (134 s)' ] || { echo "FAIL: a later start must post exactly the gap, once: $(posts) posts, last: $(last_post)"; exit 1; }
 echo none > "$R4/mgr/mode"
-tick "$WP3" 8
+tick "$WP3" 10
 ! kill -0 "$WP3" 2>/dev/null && [ -z "$(watchers)" ] || { echo "FAIL: the watcher must exit once the bot is no longer in autoresearchclaw mode"; exit 1; }
 echo autoresearchclaw > "$R4/mgr/mode"
 kill $KILL_AT_EXIT 2>/dev/null || :

@@ -1,24 +1,43 @@
 # Sourced by every script under hooks/turn/, hooks/peers/ and
 # hooks/autoresearchclaw/; never registered on its own. Resolves the current
-# bot's identity and mode from $DISCORD_STATE_DIR and provides `react` to add
-# a reaction, `post` to send a channel message and `peers` to list a
-# dev-manager's peers. No `set -e`: a caller under `set -u` must survive
+# bot's identity, channel and mode from $DISCORD_STATE_DIR and provides
+# `react` to add a reaction, `post` to send a channel message and `peers` to
+# list a dev-manager's peers. No `set -e`: a caller under `set -u` must survive
 # every file here being missing.
 
 bot_name=""
 bot_channel=""
+bot_groups=""
 bot_token=""
 bot_mode=""
 
-if [ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ]; then
-  bot_name=$(basename "$DISCORD_STATE_DIR")
-  config="$DISCORD_STATE_DIR/../config.env"
+# resolve_channel: sets bot_channel to the bot's channel. That is the single
+# group key in its access.json: the plugin reads that file on every message,
+# and moving a bot to another channel is an edit there, which config.env's
+# DISCORD_CHANNEL_ID (written once, at setup) does not follow. Without
+# exactly one digits-only key (the file missing or unreadable, no group, or
+# several) it is config.env's DISCORD_CHANNEL_ID. bot_groups holds the keys,
+# one per line, so a caller can tell "several" apart. The start path in
+# claude-discord applies the same rule.
+resolve_channel() {
+  local config="$DISCORD_STATE_DIR/../config.env"
+  bot_channel=""
   if [ -f "$config" ]; then
     bot_channel=$(grep '^DISCORD_CHANNEL_ID=' "$config" | head -1)
     bot_channel=${bot_channel#DISCORD_CHANNEL_ID=}
     bot_channel=${bot_channel#\'}
     bot_channel=${bot_channel%\'}
   fi
+  bot_groups=$(jq -r '.groups | objects | keys[]' "$DISCORD_STATE_DIR/access.json" 2>/dev/null) || bot_groups=""
+  case $bot_groups in
+    ''|*[!0-9]*) ;;
+    *) bot_channel=$bot_groups ;;
+  esac
+}
+
+if [ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ]; then
+  bot_name=$(basename "$DISCORD_STATE_DIR")
+  resolve_channel
   env_file="$DISCORD_STATE_DIR/.env"
   if [ -f "$env_file" ]; then
     bot_token=$(grep '^DISCORD_BOT_TOKEN=' "$env_file" | head -1)
