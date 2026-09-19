@@ -424,8 +424,15 @@ if [ "${1:-}" = refresh ]; then
   echo "claude-discord: starting $name"
   unset CLAUDE_DISCORD_REFRESH_CHILD   # the fresh session's own refresh must fork again
   # A first turn, or the fresh session sits idle until the next message and
-  # whoever asked for the refresh sees nothing happen.
-  exec "$self" --bg "$name" ${fresh[@]+"${fresh[@]}"} "Catch up on the channel and continue from your handoff."
+  # whoever asked for the refresh sees nothing happen. A prompt given on the
+  # command line (a bare word after the name) is that first turn instead.
+  kickoff=("Catch up on the channel and continue from your handoff.")
+  skip=0
+  for a in ${fresh[@]+"${fresh[@]}"}; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case $a in -*) takes_value "$a" && skip=1 || :;; *) kickoff=();; esac
+  done
+  exec "$self" --bg "$name" ${fresh[@]+"${fresh[@]}"} ${kickoff[@]+"${kickoff[@]}"}
 fi
 
 args=() name="" skip=0

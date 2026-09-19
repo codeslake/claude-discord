@@ -787,14 +787,17 @@ grep -q "no running session" "$R/alpha/refresh.log" || { echo "FAIL: should refu
 echo "ok: refresh refuses when no live session of that name is found in this project"
 
 # --force with an empty list starts one; run through a RELATIVE script path,
-# which the cd inside must not break.
+# which the cd inside must not break. A prompt on the command line is the
+# first turn, so the default kickoff must stay out.
 rm -f "$HOME/claude.calls" "$R/alpha/handoff.md"
-(cd "$(dirname "$S")" && DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "./$(basename "$S")" refresh --force >/dev/null)
+(cd "$(dirname "$S")" && DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "./$(basename "$S")" refresh alpha --force --model y "summarize recent activity" >/dev/null)
 for _ in $(seq 40); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.25; done
 grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: --force refresh never started a session; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
 grep -q 'HANDOFF_BODY' "$HOME/claude.calls" && { echo "FAIL: --force must not resurrect the consumed handoff"; exit 1; }
 grep -q -- '--force' "$HOME/claude.calls" && { echo "FAIL: --force leaked into claude args"; exit 1; }
-grep -q -- '-n alpha' "$HOME/claude.calls" || { echo "FAIL: the name from the environment must reach the launch"; exit 1; }
-echo "ok: refresh --force starts a fresh session with no handoff and no live session to stop, from a relative script path"
+grep -q -- '-n alpha' "$HOME/claude.calls" || { echo "FAIL: the name must reach the launch"; exit 1; }
+grep -q 'summarize recent activity $' "$HOME/claude.calls" || { echo "FAIL: the given prompt must be the first turn: $(cat "$HOME/claude.calls")"; exit 1; }
+grep -q 'Catch up on the channel' "$HOME/claude.calls" && { echo "FAIL: a given prompt must replace the default kickoff, not join it"; exit 1; }
+echo "ok: refresh --force starts a fresh session with no handoff and no live session to stop, from a relative script path; a given prompt replaces the default kickoff"
 
 echo "ALL PASS"
