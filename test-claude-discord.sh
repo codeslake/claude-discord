@@ -632,17 +632,21 @@ chmod +x "$HOME/bin/claude"
 # also the row a later --resume test points at), and "f96ea453" (sessionId
 # "60568320...", and no startedAt at all, which must neither break the sort
 # nor escape selection). "no-id" has no `.id` field at all and must be
-# skipped without breaking anything else. Left alone: one live entry per live
-# state (11fe0001..0005, in the order idle, busy, waiting, working, blocked),
-# an interactive entry with neither `.id` nor `.state`, a dead one of another
-# bot, a dead one of this bot in another project, and two whose `.id` is not
-# a job id -- one starting with a dash, which `rm` would read as a flag, and
-# one holding a newline, which arrives as two lines.
+# skipped without breaking anything else. "5ea7e1e5" has a plausible `.id`
+# but no `.state` at all, isolating the state filter from the `.id` shape
+# check: a stateless row with a real-looking id must still be left alone.
+# Left alone: one live entry per live state (11fe0001..0005, in the order
+# idle, busy, waiting, working, blocked), an interactive entry with neither
+# `.id` nor `.state`, a dead one of another bot, a dead one of this bot in
+# another project, and two whose `.id` is not a job id -- one starting with a
+# dash, which `rm` would read as a flag, and one holding a newline, which
+# arrives as two lines.
 jq -n --arg cwd "$PDP" '
   [{id:"8705916e", sessionId:"ed0dd12f-0000-4000-8000-000000000001", kind:"background", name:"dead", cwd:$cwd, state:"stopped", startedAt:1758240000000},
    {id:"d0000002", sessionId:"dead-0002", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758243600000},
    {id:"f96ea453", sessionId:"60568320-0000-4000-8000-000000000002", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:null},
    {sessionId:"99999999-0000-4000-8000-000000000003", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758244000000},
+   {id:"5ea7e1e5", sessionId:"5ea7e1e5-0000-4000-8000-00000000000a", kind:"background", name:"dead", cwd:$cwd, startedAt:1758248000000},
    {sessionId:"facade01-0000-4000-8000-00000000face", kind:"interactive", name:"dead", cwd:$cwd, startedAt:1758247200000},
    {id:"beef0001", sessionId:"beef0001-0000-4000-8000-000000000004", kind:"background", name:"beta", cwd:$cwd, state:"stopped", startedAt:1758236400000},
    {id:"cafe0001", sessionId:"cafe0001-0000-4000-8000-000000000005", kind:"background", name:"dead", cwd:"/elsewhere", state:"done", startedAt:1758236400000},
@@ -692,6 +696,24 @@ start_dead
 grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: a start with only an id-less row must still reach the exec: $out"; exit 1; }
 [ ! -s "$HOME/rm.log" ] || { echo "FAIL: an id-less row must never be removed via a fallback to a sessionId that happens to look like a job id: $(cat "$HOME/rm.log")"; exit 1; }
 echo "ok: a dead row with no job id is never removed by falling back to a sessionId that happens to look like one"
+
+# An id holding a newline must never reach `rm` at all -- splitting it on the
+# newline can produce two lines that individually look like a valid 8-hex job
+# id, which would send two arbitrary rm calls from one malformed row -- and it
+# must never take a cap slot from a real row either. The shape check now runs
+# in jq, before the sort and the cap, not only in the shell loop after it.
+jq -n --arg cwd "$PDP" '[range(20) | (3000 + .) as $n
+   | {id:("face" + ($n | tostring)), sessionId:("nl-cap-session-" + ($n | tostring)), kind:"background", name:"dead", cwd:$cwd,
+      state:"done", startedAt:(1758270000000 + . * 60000)}]
+  + [{id:"8705916e\nabcdef12", sessionId:"nl-oldest-0000-4000-8000-00000000000b", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1}]' \
+  > "$HOME/agents.json"
+: > "$HOME/rm.log"
+start_dead
+grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: a start with a newline-id row must still reach the exec: $out"; exit 1; }
+! grep -qF "8705916e" "$HOME/rm.log" && ! grep -qF "abcdef12" "$HOME/rm.log" || { echo "FAIL: neither half of a newline-joined id may reach rm: $(cat "$HOME/rm.log")"; exit 1; }
+[ "$(wc -l < "$HOME/rm.log")" -eq 20 ] || { echo "FAIL: a newline-joined id must never take a cap slot from a real row: got $(wc -l < "$HOME/rm.log") removed"; exit 1; }
+grep -qx face3019 "$HOME/rm.log" || { echo "FAIL: the newest real row must not be pushed out by the implausible phantom: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+echo "ok: an id holding a newline never reaches rm and never takes a cap slot, filtered by shape before the cap"
 cp "$HOME/agents.full.json" "$HOME/agents.json"
 
 # The session the start is RESUMING is dead by the daemon's reckoning and in
@@ -709,6 +731,20 @@ start_dead --resume dead-0002
 grep -q -- "--resume dead-0002" <<<"$out" && [ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "8705916e f96ea453 " ] || { echo "FAIL: a --resume passed through untouched must not be removed either: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
 rm -f "$PROJD/dead-0002.jsonl"
 echo "ok: the session a start is resuming is never removed by its job id either, whether --resume named it or gave its full session id, and the exec still carries it"
+
+# A resumed job's SHORT id (as `claude agents` prints it) must not delete the
+# job it is resuming either. The resolver above maps a short id by transcript
+# PREFIX to that job's ORIGINAL transcript (see the comment there), so for a
+# job that has been resumed before, $keep ends up that stale sessionId, which
+# matches neither this row's sessionId nor, without comparing against just
+# its first 8 characters, this row's own `.id`.
+printf '{"type":"init"}\n' > "$PROJD/8705916e-3644-4000-8000-000000000099.jsonl"
+: > "$HOME/rm.log"
+start_dead --resume 8705916e
+grep -q -- "--resume 8705916e -> 8705916e-3644-4000-8000-000000000099" <<<"$out" || { echo "FAIL: a short id must still resolve to its (possibly stale) transcript: $out"; exit 1; }
+[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "d0000002 f96ea453 " ] || { echo "FAIL: a --resume given the job's own short id must not delete that job: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+rm -f "$PROJD/8705916e-3644-4000-8000-000000000099.jsonl"
+echo "ok: --resume given a job's short id, resolved to its stale original transcript, never removes that job"
 
 # The cap: 20 removals per start, the oldest first, so a long-neglected daemon
 # cannot stall a start; the five newest are left for the next one.
