@@ -272,8 +272,8 @@ it can still choose well:
 1. The session writes `handoff.md` in its own state directory — unanswered
    requests first (someone is waiting), then work in flight with each claim
    marked `[verified]` or `[assumed]`, decisions with their reasoning, and what
-   to do next. The identity prompt tells it to do this when someone in the
-   channel asks for a refresh; the hooks give it the exact format.
+   to do next. A channel message that is exactly `refresh` triggers this
+   through the hooks, which also give the exact format.
 2. It runs `claude-discord refresh` (from its own shell, wherever that shell
    has wandered: the state directory is in the session's environment, so the
    name may be left out). The wrapper refuses without a handoff (`--force`
@@ -282,15 +282,20 @@ it can still choose well:
    command.
 3. The child stops the live session registered under the bot's name and this
    project directory (a background one through `claude stop`, a foreground one
-   with SIGTERM), waits a moment for the token to be released, and starts a
-   fresh `--bg` session. That launch folds `handoff.md` into the system prompt
-   and moves the file to `handoff.prev.md`, so a later restart does not resume
-   a conversation that has moved on.
+   with SIGTERM), waits until its process is gone and a moment more for the
+   token to be released, and starts a fresh `--bg` session with a first turn
+   that tells it to catch up. That launch folds `handoff.md` into the system
+   prompt and moves the file to `handoff.prev.md`, so a later start through the
+   wrapper does not resume a conversation that has moved on. (A crash respawn
+   by Claude's daemon reuses the flags of the launch, handoff included.)
 
 Stop before start, never the reverse: two sessions on one token both answer.
-For the same reason a refresh that finds no live session to stop refuses
+So a session that is still running ten seconds after its stop is reported and
+nothing is started; and a refresh that finds no live session to stop refuses
 rather than start one (the bot may be running under another name or from
-another directory); `--force` overrides that too. Messages that arrive in the
+another directory); `--force` overrides that too, but not a `claude agents`
+listing that failed outright, which says nothing about what is running.
+Messages that arrive in the
 gap are not redelivered, so the fresh session is told the id of the last
 message its predecessor saw (the hooks keep it in `last-message-id`) and to
 read the channel from there before doing anything else.

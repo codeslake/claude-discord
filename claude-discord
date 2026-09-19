@@ -340,6 +340,9 @@ if [ "${1:-}" = refresh ]; then
       *)  if [ -z "$name" ]; then name=$a; else fresh+=("$a"); fi;;
     esac
   done
+  # This script is re-run twice below (the detached child, then the launch),
+  # and the cd that follows would break a relative `./claude-discord`.
+  case $0 in /*) self=$0;; *) self=$PWD/$0;; esac
   # The session runs this from its own Bash, whose cwd has usually wandered
   # off the project by now. Its environment still says where the state is
   # (DISCORD_STATE_DIR is set at launch), so go back to that project; a shell
@@ -362,18 +365,24 @@ if [ "${1:-}" = refresh ]; then
     # that is very likely running us, and its whole process group with it.
     # perl's setsid rather than setsid(1): macOS ships perl but no setsid.
     export CLAUDE_DISCORD_REFRESH_CHILD=1
-    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- nohup "$0" refresh "$@" > "$dir/refresh.log" 2>&1 < /dev/null &
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- nohup "$self" refresh "$@" > "$dir/refresh.log" 2>&1 < /dev/null &
     echo "claude-discord: refreshing $name in the background; progress in $dir/refresh.log"
     exit 0
   fi
   # Sessions are registered under the name the wrapper gave them (-n) and the
   # directory they were started in; another project's bot of the same name is
-  # not ours. Only live ones have a pid; finished ones stay listed. A
-  # background session has an id for `claude stop`; a foreground one has only
-  # a pid, and SIGTERM is what closing its terminal would send.
-  live=$(claude agents --json 2>/dev/null |
-    jq -r --arg n "$name" --arg cwd "$(pwd -P)" \
-      '.[] | select(.name == $n and .cwd == $cwd and .pid != null) | "\(.id // "-") \(.pid)"') || live=""
+  # not ours. A background session has an id for `claude stop` (its pid may be
+  # null while it is blocked, so the id decides); a foreground one has only a
+  # pid, and SIGTERM is what closing its terminal would send. A listing that
+  # fails or is not an array says nothing about what is running, which is not
+  # the same as "nothing is": --force may not paper over it.
+  if ! agents=$(claude agents --json 2>/dev/null) || ! live=$(printf '%s' "${agents:-null}" | jq -r --arg n "$name" --arg cwd "$(pwd -P)" '
+      if type != "array" then error("not a list") else
+        .[] | select(.name == $n and .cwd == $cwd and (.id != null or .pid != null))
+        | "\(.id // "-") \(.pid // "-")" end' 2>/dev/null); then
+    echo "claude-discord: 'claude agents --json' failed, so what is running is unknown; refusing to start a second session" >&2
+    exit 1
+  fi
   if [ -z "$live" ]; then
     # Nothing to stop means either the bot is down or it is running somewhere
     # this cannot see (started under another name, or from another directory).
@@ -385,21 +394,38 @@ if [ "${1:-}" = refresh ]; then
     fi
     echo "claude-discord: no running session named $name found; starting a fresh one (--force)"
   fi
+  pids=()
   while read -r id pid; do
-    [ -n "$pid" ] || continue
+    [ -n "$id" ] || continue
     echo "claude-discord: stopping $name ($id, pid $pid)"
     if [ "$id" != - ]; then
       claude stop "$id" || echo "claude-discord: stop $id failed (already gone?)" >&2
     else
       kill -TERM "$pid" 2>/dev/null || :
     fi
+    [ "$pid" = - ] || pids+=("$pid")
   done <<<"$live"
+  # A stop that did not take leaves two sessions on one token, so wait for
+  # every old pid to go before starting anything; a session that will not die
+  # is reported, not raced.
+  for _ in $(seq 20); do
+    alive=()
+    for pid in ${pids[@]+"${pids[@]}"}; do kill -0 "$pid" 2>/dev/null && alive+=("$pid") || :; done
+    [ ${#alive[@]} -gt 0 ] || break
+    sleep 0.5
+  done
+  if [ ${#alive[@]} -gt 0 ]; then
+    echo "claude-discord: session $name still running after stop (pid ${alive[*]}); not starting another. Stop it by hand, then run 'claude-discord refresh $name --force'" >&2
+    exit 1
+  fi
   # The stopped session's channel server needs a moment to release the token;
   # a fresh gateway login while the old one is still up gets both dropped.
   [ -n "$live" ] && sleep 3
   echo "claude-discord: starting $name"
   unset CLAUDE_DISCORD_REFRESH_CHILD   # the fresh session's own refresh must fork again
-  exec "$0" --bg "$name" ${fresh[@]+"${fresh[@]}"}
+  # A first turn, or the fresh session sits idle until the next message and
+  # whoever asked for the refresh sees nothing happen.
+  exec "$self" --bg "$name" ${fresh[@]+"${fresh[@]}"} "Catch up on the channel and continue from your handoff."
 fi
 
 args=() name="" skip=0
@@ -459,8 +485,7 @@ The human reaches you there by @mentioning or replying to your bot; answer with 
 Another bot receives your messages only when you @mention it and it allowlists your bot. \
 Sessions on this machine can also be reached with ListAgents and SendMessage, addressing them by session name; mirror every such message you send or receive into that channel as one line ('-> name: ...' or '<- name: ...') so the human can follow and step in. \
 The human's instructions override any agent's. \
-Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. \
-When someone asks you to refresh, write your handoff to $dir/handoff.md first, then run 'claude-discord refresh $name'; a fresh session replaces you and starts from that file."
+Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply."
 
 # A fresh session after a refresh must arrive already holding the handoff.
 # Consumed once: leaving it would make every later restart resume a

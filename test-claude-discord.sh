@@ -679,14 +679,20 @@ echo "ok: autoresearchclaw drops nothing"
 
 cd "$P"   # back to the project whose alpha bot the refresh tests drive
 # --- refresh ---------------------------------------------------------------
-# A stub `claude` that records what it was asked to do: `agents --json` lists
-# one live session under alpha's name and one finished, `stop` logs the id, and
-# a launch logs its flags. The refresh child runs detached, so wait on its log.
+# A stub `claude` that records what it was asked to do. `agents --json` lists,
+# under alpha's name in this project, one live session whose pid is a real
+# `sleep` (so the wrapper's wait-for-exit is exercised) and one blocked
+# background session with pid null; a bot of another name and one from
+# another directory must be left alone. `stop` logs the id and kills the
+# sleep; a launch logs its flags. The refresh child runs detached, so wait
+# on its log.
+sleep 300 & OLD=$!
+echo "$OLD" > "$HOME/old.pid"
 cat > "$HOME/bin/claude" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
-  agents) echo '[{"id":"live1111","pid":42,"name":"alpha","cwd":"'"$PWD"'"},{"id":"dead2222","name":"alpha","cwd":"'"$PWD"'"},{"id":"other333","pid":43,"name":"beta","cwd":"'"$PWD"'"},{"id":"else4444","pid":44,"name":"alpha","cwd":"/elsewhere"}]';;
-  stop)   echo "STOP $2" >> "$HOME/claude.calls";;
+  agents) echo '[{"id":"live1111","pid":'"$(cat "$HOME/old.pid")"',"name":"alpha","cwd":"'"$PWD"'"},{"id":"blkd5555","pid":null,"name":"alpha","cwd":"'"$PWD"'"},{"id":"other333","pid":43,"name":"beta","cwd":"'"$PWD"'"},{"id":"else4444","pid":44,"name":"alpha","cwd":"/elsewhere"}]';;
+  stop)   echo "STOP $2" >> "$HOME/claude.calls"; [ "$2" != live1111 ] || kill "$(cat "$HOME/old.pid")";;
   *)      printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;   # one line: the prompt holds newlines
 esac
 STUB
@@ -702,25 +708,71 @@ printf '# handoff\n## Next\nHANDOFF_BODY\n' > "$R/alpha/handoff.md"
 echo 1550600000000000000 > "$R/alpha/last-message-id"
 # Run from elsewhere with the state dir in the environment, as a session's Bash would.
 (cd / && DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh --model x >/dev/null)
-for _ in $(seq 40); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.25; done
+for _ in $(seq 60); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.25; done
 grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: refresh never started a session; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
-[ "$(grep -c '^STOP ' "$HOME/claude.calls")" = 1 ] || { echo "FAIL: expected exactly one stop: $(cat "$HOME/claude.calls")"; exit 1; }
-grep -q '^STOP live1111$' "$HOME/claude.calls" || { echo "FAIL: stopped the wrong session"; exit 1; }
-[ "$(head -1 "$HOME/claude.calls")" = "STOP live1111" ] || { echo "FAIL: stop must come before start"; exit 1; }
+[ "$(grep -c '^STOP ' "$HOME/claude.calls")" = 2 ] || { echo "FAIL: expected the live and the blocked session stopped: $(cat "$HOME/claude.calls")"; exit 1; }
+grep -q '^STOP live1111$' "$HOME/claude.calls" && grep -q '^STOP blkd5555$' "$HOME/claude.calls" || { echo "FAIL: stopped the wrong sessions"; exit 1; }
+[ "$(tail -1 "$HOME/claude.calls" | cut -c1-5)" = PLAIN ] || { echo "FAIL: stop must come before start"; exit 1; }
+kill -0 "$OLD" 2>/dev/null && { echo "FAIL: the old session must be gone before the start"; exit 1; }
 launch=$(grep '^PLAIN' "$HOME/claude.calls")
 grep -qE -- ' --bg( |$)' <<<"$launch" || { echo "FAIL: fresh session must be backgrounded: $launch"; exit 1; }
 grep -q -- ' --model x' <<<"$launch" || { echo "FAIL: claude args not passed through: $launch"; exit 1; }
 grep -q -- '-n alpha' <<<"$launch" || { echo "FAIL: fresh session not named: $launch"; exit 1; }
 grep -q 'HANDOFF_BODY' <<<"$launch" || { echo "FAIL: handoff not folded into the system prompt"; exit 1; }
 grep -q 'last one your predecessor saw was 1550600000000000000' <<<"$launch" || { echo "FAIL: catch-up must name the last message id"; exit 1; }
+grep -q 'Catch up on the channel and continue from your handoff. $' <<<"$launch" || { echo "FAIL: the fresh session needs a first turn: $launch"; exit 1; }
 [ ! -f "$R/alpha/handoff.md" ] && [ -f "$R/alpha/handoff.prev.md" ] || { echo "FAIL: handoff.md must be consumed into handoff.prev.md"; exit 1; }
-echo "ok: refresh from any cwd stops only alpha's live session in this project, then starts a fresh --bg one holding the handoff and the last message id; the file is consumed once"
+echo "ok: refresh from any cwd stops alpha's live and blocked sessions in this project, waits for the old pid to go, then starts a fresh --bg one holding the handoff, the last message id and a kickoff turn; the file is consumed once"
+
+# A stop that does not take: the old process stays up, so nothing may start.
+sleep 300 & OLD=$!
+echo "$OLD" > "$HOME/old.pid"
+cat > "$HOME/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  agents) echo '[{"id":"live1111","pid":'"$(cat "$HOME/old.pid")"',"name":"alpha","cwd":"'"$PWD"'"}]';;
+  stop)   echo "STOP $2" >> "$HOME/claude.calls"; exit 1;;
+  *)      printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
+esac
+STUB
+rm -f "$HOME/claude.calls"
+printf 'x\n' > "$R/alpha/handoff.md"
+env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null
+for _ in $(seq 80); do grep -q "still running after stop" "$R/alpha/refresh.log" 2>/dev/null && break; sleep 0.25; done
+grep -q "still running after stop" "$R/alpha/refresh.log" || { echo "FAIL: a stop that did not take must be reported; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+grep -q PLAIN "$HOME/claude.calls" && { echo "FAIL: a session that would not stop must not be doubled"; exit 1; }
+[ -f "$R/alpha/handoff.md" ] || { echo "FAIL: a refused refresh must leave the handoff for the next try"; exit 1; }
+kill "$OLD" 2>/dev/null || :
+echo "ok: refresh reports a session that is still running after its stop and starts nothing"
+
+# `claude agents --json` failing, or not returning a list, is not "nothing
+# running": refuse even under --force.
+cat > "$HOME/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  agents) echo "daemon not running" >&2; exit 1;;
+  stop)   echo "STOP $2" >> "$HOME/claude.calls";;
+  *)      printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
+esac
+STUB
+rm -f "$HOME/claude.calls"
+env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force >/dev/null
+for _ in $(seq 12); do grep -q "what is running is unknown" "$R/alpha/refresh.log" 2>/dev/null && break; sleep 0.25; done
+grep -q "what is running is unknown" "$R/alpha/refresh.log" || { echo "FAIL: a failed listing must refuse; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+[ ! -f "$HOME/claude.calls" ] || { echo "FAIL: a failed listing must start nothing, even with --force"; exit 1; }
+sed -i 's/^  agents) .*/  agents) echo "{}";;/' "$HOME/bin/claude"
+rm -f "$R/alpha/refresh.log"
+env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force >/dev/null
+for _ in $(seq 12); do grep -q "what is running is unknown" "$R/alpha/refresh.log" 2>/dev/null && break; sleep 0.25; done
+grep -q "what is running is unknown" "$R/alpha/refresh.log" || { echo "FAIL: a listing that is not an array must refuse; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+[ ! -f "$HOME/claude.calls" ] || { echo "FAIL: a non-list listing must start nothing, even with --force"; exit 1; }
+echo "ok: refresh refuses, --force or not, when 'claude agents --json' fails or is not a list"
 
 # No live session under the name: refuse (it may be running unseen), unless forced.
 cat > "$HOME/bin/claude" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
-  agents) echo '[{"id":"dead2222","name":"alpha","cwd":"'"$PWD"'"}]';;
+  agents) echo '[{"id":"other333","pid":43,"name":"beta","cwd":"'"$PWD"'"}]';;
   stop)   echo "STOP $2" >> "$HOME/claude.calls";;
   *)      printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
 esac
@@ -734,12 +786,15 @@ grep -q "no running session" "$R/alpha/refresh.log" || { echo "FAIL: should refu
 [ -f "$R/alpha/handoff.md" ] || { echo "FAIL: a refused refresh must leave the handoff for the next try"; exit 1; }
 echo "ok: refresh refuses when no live session of that name is found in this project"
 
+# --force with an empty list starts one; run through a RELATIVE script path,
+# which the cd inside must not break.
 rm -f "$HOME/claude.calls" "$R/alpha/handoff.md"
-env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force >/dev/null
+(cd "$(dirname "$S")" && DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "./$(basename "$S")" refresh --force >/dev/null)
 for _ in $(seq 40); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.25; done
 grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: --force refresh never started a session; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
 grep -q 'HANDOFF_BODY' "$HOME/claude.calls" && { echo "FAIL: --force must not resurrect the consumed handoff"; exit 1; }
 grep -q -- '--force' "$HOME/claude.calls" && { echo "FAIL: --force leaked into claude args"; exit 1; }
-echo "ok: refresh --force starts a fresh session with no handoff and no live session to stop"
+grep -q -- '-n alpha' "$HOME/claude.calls" || { echo "FAIL: the name from the environment must reach the launch"; exit 1; }
+echo "ok: refresh --force starts a fresh session with no handoff and no live session to stop, from a relative script path"
 
 echo "ALL PASS"
