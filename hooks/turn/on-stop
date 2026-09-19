@@ -10,7 +10,7 @@ if [ -n "$session_id" ] && [ -n "$bot_name" ]; then
   turns="$DISCORD_STATE_DIR/turns/$session_id"
   replied="$turns.replied"
   if [ -f "$turns" ] && [ -f "$replied" ]; then
-    while IFS=' ' read -r chat_id message_id; do
+    while IFS=' ' read -r chat_id message_id _; do
       [ -n "$chat_id" ] && [ -n "$message_id" ] || continue
       react "$chat_id" "$message_id" '%E2%9C%85'
     done < "$turns"

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# PreToolUse hook (matcher: mcp__plugin_discord_discord__reply), dev-manager
+# bots only: a bot only receives messages that mention it, so deny a reply
+# that names a peer (case-insensitive) without its <@bot_id>, or that answers
+# a turn a peer triggered (a user_id on-prompt recorded for this turn) without
+# mentioning that peer. Prints nothing unless it denies; a no-op without
+# peers.json. Must never fail a turn.
+set -u
+. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+
+p=$(peers) && [ -n "$p" ] || exit 0
+input=$(cat 2>/dev/null) || exit 0
+text=$(printf '%s' "$input" | jq -r '.tool_input.text // empty' 2>/dev/null) || exit 0
+session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
+from=""
+case $session_id in
+  ''|*[!A-Za-z0-9_-]*) ;;
+  *) from=$(cut -d' ' -f3 "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null | tr '\n' ' ') ;;
+esac
+reason=$(printf '%s' "$p" | jq -r --arg text "$text" --arg from " $from " '
+  def lacks: . as $p | $text | contains("<@\($p.bot_id)>") | not;
+  ([.[] | select(. as $p | $from | contains(" \($p.bot_id) ")) | select(lacks)][0] // empty
+    | "You are answering \(.name); mention it as <@\(.bot_id)> or it never sees this."),
+  ([.[] | select(. as $p | $text | ascii_downcase | contains($p.name | ascii_downcase)) | select(lacks)][0] // empty
+    | "Mention \(.name) as <@\(.bot_id)>; a bot only receives messages that mention it.")' 2>/dev/null | head -1)
+[ -n "$reason" ] || exit 0
+jq -nc --arg r "$reason" '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}' 2>/dev/null
+exit 0

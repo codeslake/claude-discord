@@ -59,7 +59,7 @@ enables it per session with `--settings`.
 ```
 
 puts `claude-discord` in `~/.local/bin/` and the helpers (`discord-proxy.ts`,
-`hooks/`) in `~/.claude-discord/`. Re-run it after a pull.
+`hooks/`, `rules/`) in `~/.claude-discord/`. Re-run it after a pull.
 
 ## Usage
 
@@ -84,13 +84,44 @@ The setup prompts:
 | Discord channel ID | `config.env` (shared) | |
 | Your Discord user ID | `config.env` (shared) | the only user allowed to DM the bot |
 | Other user or bot IDs | `config.env` (shared) | comma-separated; may be empty. These can trigger the bot in the channel |
-| Bot token | `<name>/.env` | input is hidden, like a password |
+| Bot token | `<name>/.env` | input is hidden, like a password. On a re-run, empty keeps the current token |
 | Respond without an @mention? | `<name>/access.json` | default N. With Y the bot answers every channel message |
+| Mode | `<name>/mode` | `none` (default), `dev-manager` or `autoresearchclaw`; see Modes below. On a re-run the picker starts at the current mode |
+| Peer dev bots (dev-manager only) | `peers.json` (shared), `<name>/access.json` | `name:bot_id:owner_id:machine`, comma-separated; empty keeps the current list |
 
 Everything lives under `./.claude/discord-agents/` in the project, mode 0700.
 Setup writes a `*` `.gitignore` inside that directory, so the token can never
 be staged even with `git add -A`; your project's own `.gitignore` is untouched.
 A second project gets its own setup and its own bots.
+
+## Modes
+
+`setup` asks for the bot's mode with a picker (↑/↓ or k/j, Enter). Without a
+terminal on stdin it reads one line instead: the mode's name or its number,
+empty for the default (the current mode on a re-run).
+
+| Mode | What it installs |
+|---|---|
+| `none` | nothing beyond the Discord-turn hooks every bot gets |
+| `dev-manager` | for bots that change claude-discord together with peer bots on other machines: the rule `.claude/rules/claude-discord-dev-manager.md` (from `rules/dev-manager.md`) and the three peers hooks below |
+| `autoresearchclaw` | nothing yet; a placeholder until its spec is agreed |
+
+A dev-manager's setup also asks for its peers as
+`name:bot_id:owner_id:machine`, comma-separated. They are merged by `bot_id`
+into `.claude/discord-agents/peers.json` (one file per project, so the same
+list can be pasted on every machine: each bot skips itself by name), and
+every peer's `bot_id` is added to this bot's channel `allowFrom` (not the DM
+one). Peers need this bot's id in their own `allowFrom` too; ask their
+owners.
+
+What a project gets is the union over its bots' modes, re-synced by `setup`
+and by every start: one dev-manager bot keeps the rule and the peers hooks in
+place. Once no bot needs them they are removed: every
+`.claude/rules/claude-discord-*.md` that no mode produces (that prefix belongs
+to claude-discord; name your own rules differently), and every
+`.claude/settings.json` hook entry pointing into
+`.claude/discord-agents/hooks/peers/`, along with a matcher group or an event
+left empty by that. Nothing else in either place is touched.
 
 ## Resuming by name
 
@@ -122,7 +153,7 @@ Each entry in `.claude/settings.json` execs the script directly
 (`h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/<topic>/<name>"; [ ! -x "$h" ] || "$h"`),
 so a machine without the hooks installed simply runs nothing. Scripts live
 under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
-`lib/discord.sh` is sourced by the four below it, not registered itself.
+`lib/discord.sh` is sourced by every script below, not registered itself.
 
 | Event | Matcher | Script | What |
 |---|---|---|---|
@@ -130,13 +161,20 @@ under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply. |
 | Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it; always clears the per-turn files either way. |
 | SessionStart | `compact\|clear` | `turn/on-compact` | Clears the per-session "primed" flag, so the next Discord turn injects the identity context again. |
+| PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/mention-guard` | dev-manager only. Denies a reply that names a peer (case-insensitive) without its `<@bot_id>`, or that answers a turn a peer triggered without mentioning that peer: a bot only receives messages that mention it. |
+| PostToolUse | `mcp__plugin_discord_discord__reply` | `peers/checkin` | dev-manager only. A reply that mentions a peer touches `.claude/discord-agents/checkin/<session_id>`. |
+| PreToolUse | `Edit\|Write\|MultiEdit` | `peers/edit-gate` | dev-manager only. Denies an edit under a path whose realpath contains `/claude-discord/` unless the session checked in within the last 60 minutes; an allowed edit renews the check-in. Bash and git edits are not seen; the rule asks for the same announcement by hand. |
 
-Both `setup` and the start path register all four, so a bot set up before
-this existed gets them on its next start too. Registration is idempotent per
-entry and leaves every other key in `.claude/settings.json` alone; a session
-already running picks up a hook added to its settings file without a
-restart. To remove them, delete their four entries from `.hooks` in
-`.claude/settings.json`.
+Both `setup` and the start path register the four `turn/` hooks, so a bot
+set up before this existed gets them on its next start too. The three `peers/` hooks are
+registered only while some bot in the project is a dev-manager (see Modes),
+and do nothing in a session whose bot is not one, or without `peers.json`.
+`on-prompt` also records each message's sender (`user_id`) for
+`mention-guard`, and gives a dev-manager its peers' mentions and the working
+rule once per session. Registration is idempotent per entry and leaves every
+other key in `.claude/settings.json` alone; a session already running picks
+up a hook added to its settings file without a restart. To remove them,
+delete their entries from `.hooks` in `.claude/settings.json`.
 
 The identity/mention-rule context is long, so `on-prompt` injects it once per
 session (a `turns/<session_id>.primed` marker), not on every turn -- a
@@ -239,6 +277,8 @@ rest of Claude Code.
 | `no bot '<name>' under ./.claude/discord-agents` | no setup in THIS directory; `cd` to the project you set it up in, or run setup here |
 | `bot name must be a plain directory name` | the name contained `/`, or was `.`/`..` |
 | Two bots answer each other forever | the mention policy is off on both; turn it back on for at least one |
+| `Before changing claude-discord, announce on Discord ...` | a dev-manager edited claude-discord without mentioning a peer in the last 60 minutes; announce the change, then edit |
+| `claude-discord: ~/.claude-discord/rules/dev-manager.md is missing` | wrapper newer than the installed helpers; re-run `./install.sh` |
 
 ## Test
 

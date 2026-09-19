@@ -1,11 +1,13 @@
-# Sourced by hooks/turn/on-prompt, on-reply, on-stop and on-compact; never
-# registered on its own. Resolves the current bot's identity from $DISCORD_STATE_DIR
-# and provides `react` to add a reaction. No `set -e`: a caller under
-# `set -u` must survive every file here being missing.
+# Sourced by every hook under hooks/turn/ and hooks/peers/; never registered
+# on its own. Resolves the current bot's identity and mode from
+# $DISCORD_STATE_DIR and provides `react` to add a reaction and `peers` to
+# list a dev-manager's peers. No `set -e`: a caller under `set -u` must
+# survive every file here being missing.
 
 bot_name=""
 bot_channel=""
 bot_token=""
+bot_mode=""
 
 if [ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ]; then
   bot_name=$(basename "$DISCORD_STATE_DIR")
@@ -21,6 +23,7 @@ if [ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ]; then
     bot_token=$(grep '^DISCORD_BOT_TOKEN=' "$env_file" | head -1)
     bot_token=${bot_token#DISCORD_BOT_TOKEN=}
   fi
+  bot_mode=$(cat "$DISCORD_STATE_DIR/mode" 2>/dev/null) || bot_mode=""
 fi
 
 # react <chat_id> <message_id> <url-encoded emoji>
@@ -41,4 +44,15 @@ react() {
     "https://discord.com/api/v10/channels/$1/messages/$2/reactions/$3/@me" \
     >/dev/null 2>&1 &
   disown 2>/dev/null || :
+}
+
+# peers: prints this bot's peers from the project's peers.json as a JSON
+# array of {name, bot_id}, self excluded by name (case-insensitive), entries
+# without a name or a numeric bot_id dropped. Prints nothing -- the caller's
+# cue to do nothing -- unless this bot is a dev-manager and has a peer.
+peers() {
+  [ "$bot_mode" = dev-manager ] || return 0
+  jq -c --arg self "$bot_name" '[.peers[]? | {name: (.name // "" | tostring), bot_id: (.bot_id // "" | tostring)}
+    | select(.name != "" and (.bot_id | test("^[0-9]+$")) and (.name | ascii_downcase) != ($self | ascii_downcase))]
+    | select(length > 0)' "$DISCORD_STATE_DIR/../peers.json" 2>/dev/null
 }

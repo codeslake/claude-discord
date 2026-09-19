@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# PostToolUse hook (matcher: mcp__plugin_discord_discord__reply), dev-manager
+# bots only: a reply that mentions a peer (<@bot_id>) is a check-in, so touch
+# $CLAUDE_PROJECT_DIR/.claude/discord-agents/checkin/<session_id>, which
+# edit-gate reads. Prints nothing; a no-op without peers.json. Must never fail
+# a turn.
+set -u
+. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+
+p=$(peers) && [ -n "$p" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
+input=$(cat 2>/dev/null) || exit 0
+text=$(printf '%s' "$input" | jq -r '.tool_input.text // empty' 2>/dev/null) || exit 0
+session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
+case $session_id in ''|*[!A-Za-z0-9_-]*) exit 0 ;; esac
+printf '%s' "$p" | jq -e --arg text "$text" 'any(.[]; . as $p | $text | contains("<@\($p.bot_id)>"))' >/dev/null 2>&1 || exit 0
+d="$CLAUDE_PROJECT_DIR/.claude/discord-agents/checkin"
+mkdir -p "$d" 2>/dev/null && touch "$d/$session_id" 2>/dev/null
+exit 0

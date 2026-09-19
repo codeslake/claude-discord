@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# PreToolUse hook (matcher: Edit|Write|MultiEdit), dev-manager bots only: an
+# edit whose realpath (its directory's, for a file not created yet) contains
+# /claude-discord/ is denied unless this session checked in with a peer on
+# Discord (checkin/<session_id>, touched by the checkin hook) within the last
+# 60 minutes; an allowed edit re-touches it, so the window slides. Prints
+# nothing unless it denies; a no-op without peers.json. Must never fail a turn.
+set -u
+. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+
+p=$(peers) && [ -n "$p" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
+input=$(cat 2>/dev/null) || exit 0
+f=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null) || exit 0
+session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
+[ -n "$f" ] || exit 0
+case $session_id in ''|*[!A-Za-z0-9_-]*) exit 0 ;; esac
+r=$(realpath "$f" 2>/dev/null) || r=$(cd "$(dirname "$f")" 2>/dev/null && pwd -P) || r=$f
+case $r/ in */claude-discord/*) ;; *) exit 0 ;; esac
+ci="$CLAUDE_PROJECT_DIR/.claude/discord-agents/checkin/$session_id"
+if [ -n "$(find "$ci" -mmin -60 2>/dev/null)" ]; then
+  touch "$ci" 2>/dev/null
+  exit 0
+fi
+ids=$(printf '%s' "$p" | jq -r '[.[] | "<@\(.bot_id)>"] | join(" ")' 2>/dev/null)
+jq -nc --arg r "Before changing claude-discord, announce on Discord what you will change (mention $ids); you do not need to wait for an answer." \
+  '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}' 2>/dev/null
+exit 0

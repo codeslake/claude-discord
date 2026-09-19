@@ -5,7 +5,8 @@
 # messages from bots) and mirror those exchanges into the channel.
 #
 #   claude-discord setup <name> [--reset]  ask for channel/user IDs, allowed users, the bot
-#                                          token and mention policy; --reset asks all again
+#                                          token, mention policy and mode (dev-manager
+#                                          also asks for its peers); --reset asks all again
 #   claude-discord [name] [claude args]  start the session named <name>; the
 #                                          name may come before or after the
 #                                          claude args, and may be left out when
@@ -54,94 +55,103 @@ write_access() {  # $1 = bot dir, $2 = requireMention (true|false)
     > "$1/access.json"
 }
 
-# Registers this project's four Discord-turn hooks (identity/refresh, primed
-# once per session; the reply flag; the checkmark reaction; re-priming after
-# a compact/clear) in the project's own settings.json, so a turn that arrived
-# over Discord is answered through the discord reply tool only, never also
-# typed into the CLI. Each command guards on [ -x ], so the settings file can
-# be committed and shared, and a machine without the hooks installed simply
-# runs nothing. Idempotent per entry: a missing file gets exactly the missing
-# entries, an entry already present means no write for it, and invalid JSON
-# is warned about and left alone -- registration must never fail the setup or
-# the start it runs inside. Parallel arrays, not a packed "event|matcher|
-# script" string, because a matcher itself can contain "|" (compact|clear).
-register_hooks() {
-  local settings=$PWD/.claude/settings.json
-  local base='{}'
-  if [ -f "$settings" ]; then
-    if ! jq empty "$settings" 2>/dev/null; then
-      echo "claude-discord: $settings is not valid JSON, skipping hook registration" >&2
-      return 0
-    fi
-    base=$(cat "$settings")
-    [ -n "$base" ] || base='{}'   # a 0-byte file passes `jq empty`; treat it as {}
+# Every JSON file claude-discord edits in place (settings.json, access.json,
+# peers.json) goes through here: the file (a missing or 0-byte one reads as
+# {}) is run through the jq filter in the arguments and written back only
+# when the result differs, through a symlink (`cat tmp > file`, never mv)
+# and with a trailing newline. A file that is not valid JSON, a filter that
+# fails on it (a non-object, an event key holding a non-array) or a failed
+# write is warned about on stderr, naming the file, and left alone: an edit
+# must never fail the setup or the start it runs inside.
+jq_edit() {  # $1 = file, the rest = jq arguments
+  local f=$1 base='{}' merged
+  shift
+  if [ -e "$f" ]; then
+    base=$(jq . "$f" 2>/dev/null) || { echo "claude-discord: $f is not valid JSON, leaving it alone" >&2; return 0; }
+    [ -n "$base" ] || base='{}'
   fi
-  local events=(UserPromptSubmit PostToolUse Stop SessionStart)
-  local matchers=("" "mcp__plugin_discord_discord__reply" "" "compact|clear")
-  local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-compact)
-  local changed=0 i event matcher script cmd merged
-  for i in "${!events[@]}"; do
-    event=${events[i]}; matcher=${matchers[i]}; script=${scripts[i]}
-    cmd="h=\"\$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/$script\"; [ ! -x \"\$h\" ] || \"\$h\""
-    if printf '%s' "$base" | jq -e --arg ev "$event" --arg cmd "$cmd" \
-        '[.hooks[$ev][]?.hooks[]?.command] | index($cmd) != null' >/dev/null 2>&1; then
-      continue
-    fi
-    changed=1
-    if [ -n "$matcher" ]; then
-      merged=$(printf '%s' "$base" | jq --arg ev "$event" --arg m "$matcher" --arg cmd "$cmd" \
-        '.hooks[$ev] = ((.hooks[$ev] // []) + [{matcher: $m, hooks: [{type: "command", command: $cmd}]}])' 2>/dev/null) || merged=""
-    else
-      merged=$(printf '%s' "$base" | jq --arg ev "$event" --arg cmd "$cmd" \
-        '.hooks[$ev] = ((.hooks[$ev] // []) + [{hooks: [{type: "command", command: $cmd}]}])' 2>/dev/null) || merged=""
-    fi
-    # A failure here (JSON jq can't merge into, e.g. the event key already
-    # holding a non-array) must warn and move on, never abort the setup or
-    # the start it runs inside.
-    [ -n "$merged" ] || { base=""; break; }
-    base=$merged
-  done
-  [ "$changed" = 1 ] || return 0
-  if [ -z "$base" ]; then
-    echo "claude-discord: could not register hooks in $settings, skipping" >&2
-    return 0
-  fi
-  if ! mkdir -p "$PWD/.claude" 2>/dev/null; then
-    echo "claude-discord: could not register hooks in $settings, skipping" >&2
-    return 0
-  fi
-  if printf '%s\n' "$base" > "$settings.tmp.$$" 2>/dev/null && cat "$settings.tmp.$$" > "$settings" 2>/dev/null; then
+  merged=$(printf '%s' "$base" | jq "$@" 2>/dev/null) || merged=""
+  [ -n "$merged" ] || { echo "claude-discord: could not update $f, leaving it alone" >&2; return 0; }
+  [ "$merged" != "$base" ] || return 0
+  if mkdir -p "$(dirname "$f")" 2>/dev/null && printf '%s\n' "$merged" > "$f.tmp.$$" 2>/dev/null && cat "$f.tmp.$$" > "$f" 2>/dev/null; then
     :
   else
-    echo "claude-discord: could not register hooks in $settings, skipping" >&2
+    echo "claude-discord: could not write $f, leaving it alone" >&2
   fi
-  rm -f "$settings.tmp.$$"
+  rm -f "$f.tmp.$$"
+}
+
+# Registers this project's hooks in its own settings.json: the four
+# Discord-turn hooks for every bot (identity/refresh, primed once per
+# session; the reply flag; the checkmark reaction; re-priming after a
+# compact/clear), so a turn that arrived over Discord is answered through the
+# discord reply tool only, never also typed into the CLI; and, when $1 is 1
+# (some bot here is a dev-manager), the three peers hooks. When $1 is not 1,
+# every entry whose command points into hooks/peers/ is removed instead,
+# along with a matcher group or an event that only held such entries. Each
+# command guards on [ -x ], so the settings file can be committed and
+# shared, and a machine without the hooks installed simply runs nothing.
+# Idempotent per entry. Parallel arrays, not a packed "event|matcher|script"
+# string, because a matcher itself can contain "|" (compact|clear).
+register_hooks() {  # $1 = 1 to register the peers hooks, anything else removes them
+  local peers=${1:-}
+  local events=(UserPromptSubmit PostToolUse Stop SessionStart PreToolUse PostToolUse PreToolUse)
+  local matchers=("" "mcp__plugin_discord_discord__reply" "" "compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "Edit|Write|MultiEdit")
+  local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-compact peers/mention-guard peers/checkin peers/edit-gate)
+  local want='[]' i cmd
+  for i in "${!events[@]}"; do
+    case ${scripts[i]} in peers/*) [ "$peers" = 1 ] || continue;; esac
+    cmd="h=\"\$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/${scripts[i]}\"; [ ! -x \"\$h\" ] || \"\$h\""
+    want=$(printf '%s' "$want" | jq -c --arg ev "${events[i]}" --arg m "${matchers[i]}" --arg cmd "$cmd" '. + [{ev: $ev, m: $m, cmd: $cmd}]') || return 0
+  done
+  jq_edit "$PWD/.claude/settings.json" --argjson want "$want" --arg peers "$peers" '
+    def peer: (.command? // "") | tostring | contains("/.claude/discord-agents/hooks/peers/");
+    (if $peers == "1" or (.hooks | type) != "object" then . else
+      .hooks |= with_entries(
+        if (.value | type) == "array" and any(.value[]; any(.hooks?[]?; peer)) then
+          .value |= map(if any(.hooks?[]?; peer) then (.hooks |= map(select(peer | not))) | select(.hooks | length > 0) else . end)
+          | select(.value | length > 0)
+        else . end)
+    end)
+    | reduce $want[] as $w (.;
+        if any(.hooks[$w.ev][]?.hooks?[]?; .command? == $w.cmd) then .
+        else .hooks[$w.ev] = ((.hooks[$w.ev] // []) + [(if $w.m == "" then {} else {matcher: $w.m} end) + {hooks: [{type: "command", command: $w.cmd}]}])
+        end)'
 }
 
 # Adds access.json's ackReaction key (the plugin's own read-receipt
 # reaction) only when the key is absent; an explicit "" means the owner
-# disabled it and is left alone. Same never-abort/write-through guarantees
-# as register_hooks.
+# disabled it and is left alone.
 ensure_ack_reaction() {  # $1 = bot dir
-  local f="$1/access.json"
-  [ -f "$f" ] || return 0
-  if ! jq empty "$f" 2>/dev/null; then
-    echo "claude-discord: $f is not valid JSON, skipping ackReaction" >&2
-    return 0
+  [ -f "$1/access.json" ] || return 0
+  jq_edit "$1/access.json" 'if has("ackReaction") then . else . + {ackReaction: "👀"} end'
+}
+
+# A project's mode drops are the union over its bots' modes (<bot>/mode), so
+# one dev-manager bot keeps the dev-manager rule and the peers hooks in place
+# for the whole project. Whatever no bot's mode produces any more is removed:
+# every .claude/rules/claude-discord-*.md but the ones kept (that prefix is
+# claude-discord's own; no other file is touched), and every hook entry
+# pointing into hooks/peers/. Run by setup and every start; idempotent; never
+# aborts either.
+sync_mode_drops() {
+  local dev=0 f keep="" rules=$PWD/.claude/rules src=$helpers/rules/dev-manager.md
+  for f in "$root"/*/mode; do
+    [ "$(cat "$f" 2>/dev/null)" != dev-manager ] || dev=1
+  done
+  [ "$dev" = 0 ] || keep=$rules/claude-discord-dev-manager.md
+  # autoresearchclaw: installs nothing yet; its drops go here once its spec is agreed.
+  for f in "$rules"/claude-discord-*.md; do
+    [ "$f" = "$keep" ] || rm -f "$f" 2>/dev/null || echo "claude-discord: could not remove $f" >&2
+  done
+  if [ -n "$keep" ] && ! cmp -s "$src" "$keep"; then
+    if [ ! -f "$src" ]; then
+      echo "claude-discord: $src is missing; re-run install.sh" >&2
+    elif ! { mkdir -p "$rules" && cat "$src" > "$keep"; } 2>/dev/null; then
+      echo "claude-discord: could not write $keep" >&2
+    fi
   fi
-  local base merged
-  base=$(cat "$f")
-  [ -n "$base" ] || base='{}'
-  if printf '%s' "$base" | jq -e 'has("ackReaction")' >/dev/null 2>&1; then
-    return 0
-  fi
-  merged=$(printf '%s' "$base" | jq '. + {ackReaction: "👀"}' 2>/dev/null) || merged=""
-  if [ -n "$merged" ] && printf '%s\n' "$merged" > "$f.tmp.$$" 2>/dev/null && cat "$f.tmp.$$" > "$f" 2>/dev/null; then
-    :
-  else
-    echo "claude-discord: could not add ackReaction to $f, skipping" >&2
-  fi
-  rm -f "$f.tmp.$$"
+  register_hooks "$dev"
 }
 
 # Makes <project>/.claude/discord-agents/hooks a symlink to the installed
@@ -157,6 +167,59 @@ ensure_hooks_symlink() {
   mkdir -p "$root" 2>/dev/null || return 0
   ln -sfn "$helpers/hooks" "$link" 2>/dev/null || echo "claude-discord: could not symlink $link" >&2
 }
+
+# select_one <label> <default> <option>...: prints the chosen option's first
+# word (an option is "<name>  <hint>"). On a terminal, an @clack-style picker
+# drawn on /dev/tty: ◆ while active, ● on the cursor row, ○ on the others;
+# ↑/↓ or k/j move, Enter picks, the default starts under the cursor; it
+# collapses to "◇ <label> — <choice>". Without a terminal on stdin, one line
+# is read: an option name or its 1-based number; empty means the default,
+# anything else too, with a warning. A subshell, so the stty change and the
+# traps that undo it (Ctrl-C included) never leak into setup.
+select_one() (
+  label=$1 def=$2
+  shift 2
+  opts=("$@") cur=0
+  for i in "${!opts[@]}"; do [ "${opts[i]%% *}" != "$def" ] || cur=$i; done
+  if [ ! -t 0 ]; then
+    IFS= read -r ans || :
+    ans=${ans//[[:space:]]/} pick=-1
+    for i in "${!opts[@]}"; do [ "$ans" != "${opts[i]%% *}" ] && [ "$ans" != "$((i + 1))" ] || pick=$i; done
+    if [ "$pick" = -1 ]; then
+      [ -z "$ans" ] || echo "claude-discord: no $label '$ans', using ${opts[cur]%% *}" >&2
+      pick=$cur
+    fi
+    echo "${opts[pick]%% *}"
+    exit 0
+  fi
+  exec 3<>/dev/tty
+  saved=$(stty -g <&3)
+  trap 'stty "$saved" <&3; printf "\e[?25h" >&3' EXIT
+  trap 'exit 130' INT TERM
+  stty -echo -icanon <&3
+  cols=$(stty size <&3) cols=${cols#* }
+  [ "$cols" -gt 20 ] 2>/dev/null || cols=80
+  printf '\e[?25l' >&3
+  n=0
+  while :; do
+    [ "$n" = 0 ] || printf '\e[%dF\e[J' "$n" >&3
+    printf '\e[36m◆\e[0m  %s  \e[2m↑/↓ · enter\e[0m\n' "$label" >&3
+    for i in "${!opts[@]}"; do
+      if [ "$i" = "$cur" ]; then printf '\e[2m│\e[0m  \e[32m●\e[0m \e[36m%s\e[0m\n' "${opts[i]:0:cols-6}"
+      else printf '\e[2m│\e[0m  ○ %s\n' "${opts[i]:0:cols-6}"; fi >&3
+    done
+    n=$((${#opts[@]} + 1))
+    IFS= read -rn1 key <&3 || key=""
+    [ "$key" != $'\e' ] || read -rn2 -t 1 key <&3 || key=x   # an arrow is ESC [ A/B; a lone ESC does nothing
+    case $key in
+      k|'[A') cur=$(((cur + ${#opts[@]} - 1) % ${#opts[@]}));;
+      j|'[B') cur=$(((cur + 1) % ${#opts[@]}));;
+      '') break;;
+    esac
+  done
+  printf '\e[%dF\e[J\e[32m◇\e[0m  %s — %s\n' "$n" "$label" "${opts[cur]%% *}" >&3
+  echo "${opts[cur]%% *}"
+)
 
 if [ "${1:-}" = setup ]; then
   name=${2:?usage: claude-discord setup <name> [--reset]}
@@ -178,17 +241,42 @@ if [ "${1:-}" = setup ]; then
     printf "DISCORD_CHANNEL_ID='%s'\nDISCORD_USER_ID='%s'\nDISCORD_ALLOW_IDS='%s'\n" "$channel" "$user" "$others" > "$root/config.env"
   fi
   . "$root/config.env"
-  read -rsp "Bot token for $name: " token
+  keep=""
+  [ -f "$root/$name/.env" ] && keep=" (empty keeps the current one)"
+  read -rsp "Bot token for $name$keep: " token
   echo
-  printf 'DISCORD_BOT_TOKEN=%s\n' "$token" > "$root/$name/.env"
+  [ -z "$token" ] && [ -n "$keep" ] || printf 'DISCORD_BOT_TOKEN=%s\n' "$token" > "$root/$name/.env"
   # Every bot in one channel answering every message means N replies per human
   # message, so the default stays mention-only; opt in per bot.
   read -rp "Respond to every message in the channel without an @mention? [y/N] " nomention
   case $nomention in y|Y) mention=false;; *) mention=true;; esac
   write_access "$root/$name" "$mention"
+  mode=$(cat "$root/$name/mode" 2>/dev/null) || mode=none
+  mode=$(select_one Mode "$mode" \
+    "none  a plain bot" \
+    "dev-manager  coordinates claude-discord changes with peer bots" \
+    "autoresearchclaw  placeholder: installs nothing yet")
+  printf '%s\n' "$mode" > "$root/$name/mode"
+  if [ "$mode" = dev-manager ]; then
+    read -rp "Peer dev bots as name:bot_id:owner_id:machine, comma-separated (empty keeps the current list): " peers || :
+    peers=${peers//[[:space:]]/}
+    entry='^[^:]+:[0-9]+:[0-9]+:[^:]+$'
+    bad=$(jq -rn --arg in "$peers" --arg re "$entry" '$in | split(",")[] | select(. != "" and (test($re) | not))')
+    [ -z "$bad" ] || echo "claude-discord: skipping peers not shaped name:bot_id:owner_id:machine: ${bad//$'\n'/ }" >&2
+    jq_edit "$root/peers.json" --arg in "$peers" --arg re "$entry" '
+      reduce ($in | split(",")[] | select(test($re)) | split(":") | {name: .[0], bot_id: .[1], owner_id: .[2], machine: .[3]}) as $p
+        (.; if any(.peers[]?; .bot_id == $p.bot_id) then .peers |= map(if .bot_id == $p.bot_id then $p else . end)
+            else .peers = (.peers // []) + [$p] end)'
+    # write_access above rewrote the group allowFrom, so every peer is added
+    # again, not only the new ones; this bot itself is skipped by name.
+    ids=$(jq -c --arg self "$name" '[.peers[]? | select((.name | ascii_downcase) != ($self | ascii_downcase)) | .bot_id | tostring]' "$root/peers.json" 2>/dev/null) || ids='[]'
+    jq_edit "$root/$name/access.json" --arg ch "$DISCORD_CHANNEL_ID" --argjson ids "${ids:-[]}" \
+      '.groups[$ch].allowFrom = ((.groups[$ch].allowFrom // []) as $a | $a + ($ids - $a))'
+    echo "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed."
+  fi
   ensure_hooks_symlink
-  register_hooks
-  echo "claude-discord: $root/$name/access.json written (requireMention=$mention)"
+  sync_mode_drops
+  echo "claude-discord: $root/$name/access.json written (requireMention=$mention, mode=$mode)"
   exit 0
 fi
 
@@ -320,7 +408,7 @@ launcher=${CLAUDE_DISCORD_LAUNCHER:-${CLAUDE_CODE_PROCESS_WRAPPER:-}}
 run=("$bin")
 [ -n "$launcher" ] && run=("$launcher" "$bin")
 ensure_hooks_symlink
-register_hooks
+sync_mode_drops
 # worktree.bgIsolation "none" turns off Claude Code's background-isolation
 # guard for this session: measured on two machines, a session started with
 # --bg is refused Edit/Write in the checkout by that guard while a session
