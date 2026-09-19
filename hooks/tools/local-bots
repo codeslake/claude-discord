@@ -4,12 +4,14 @@
 # session runs this by hand to find who else on this machine to tell about a
 # change (see rules/dev-manager.md); it is not registered as a hook.
 #
-# Discovery (measured 2026-09-19): `claude agents --json --all` lists every
-# live session's name and cwd; a session is a claude-discord bot when
+# Discovery: `claude agents --json` lists the active sessions' names and
+# cwds; `--all` would add completed (dead) ones, which once named retired bots
+# as targets, so it is not passed. No filter on `.state`: a live bot can show
+# "done" while its pid runs. A session is a claude-discord bot when
 # "<cwd>/.claude/discord-agents/<name>" is a directory -- a bot's own state
 # dir, which only `claude-discord setup` creates.
 #
-# Both calls this needs (`command -v claude`, `agents --json --all`) are
+# Both calls this needs (`command -v claude`, `agents --json`) are
 # local daemon bookkeeping, exactly like claude-discord's own dead-session
 # reaping, not a session launch: CLAUDE_DISCORD_LAUNCHER /
 # CLAUDE_CODE_PROCESS_WRAPPER wrap a `claude` that starts a real session, and
@@ -27,7 +29,7 @@ command -v jq >/dev/null 2>&1 || exit 0
 bin=$(command -v claude) || exit 0
 t=()
 command -v timeout >/dev/null 2>&1 && t=(timeout 5)
-list=$(${t[@]+"${t[@]}"} "$bin" agents --json --all 2>/dev/null) || exit 0
+list=$(${t[@]+"${t[@]}"} "$bin" agents --json 2>/dev/null) || exit 0
 
 # @tsv backslash-escapes any tab/newline/backslash inside name or cwd, so the
 # real tab below is always the field boundary: a control character in a

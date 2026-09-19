@@ -655,7 +655,9 @@ echo "ok: an existing real hooks directory is left alone with a warning, not clo
 
 # --- dead sessions in the agent view ---------------------------------------
 # Its own project and its own claude stub: `agents` logs its arguments, prints
-# the fixture the case planted and exits with agents.rc (empty = 0); `rm` logs
+# the fixture the case planted (with --all, agents.all.json instead when a case
+# planted one, as the daemon adds completed sessions) and exits with agents.rc
+# (empty = 0); `rm` logs
 # its argument to rm.log and exits with rm.rc; anything else is a launch, as
 # before. The fixture's cwd is the project's RESOLVED path, which is what the
 # wrapper compares against (on macOS $HOME here is under a symlinked /tmp), and
@@ -667,7 +669,9 @@ printf 'DISCORD_BOT_TOKEN=tokDead\n' > "$PD/.claude/discord-agents/dead/.env"
 cat > "$HOME/bin/claude" <<'STUB'
 #!/bin/bash
 case "$1" in
-  agents) printf '%s\n' "$*" >> "$HOME/agents.calls"; cat "$HOME/agents.json" 2>/dev/null
+  agents) printf '%s\n' "$*" >> "$HOME/agents.calls"; f=agents.json
+          case " $* " in *" --all "*) [ ! -e "$HOME/agents.all.json" ] || f=agents.all.json;; esac
+          cat "$HOME/$f" 2>/dev/null
           rc=$(cat "$HOME/agents.rc" 2>/dev/null); exit "${rc:-0}";;
   rm)     printf '%s\n' "$2" >> "$HOME/rm.log"
           rc=$(cat "$HOME/rm.rc" 2>/dev/null); exit "${rc:-0}";;
@@ -854,21 +858,27 @@ grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out
 echo "ok: a listing that is not JSON, one that is empty and one that fails each leave the start untouched and remove nothing"
 
 # hooks/tools/local-bots: not a hook, run by hand, reusing the "dead"
-# project's still-active claude stub ("agents" cats agents.json, exits
-# agents.rc) and two more real directories beside "dead" -- the check only
-# needs a directory to exist, nothing else about a bot.
-mkdir -p "$PD/.claude/discord-agents/beta" "$PD/.claude/discord-agents/b sp"
+# project's still-active claude stub ("agents" cats agents.json, or
+# agents.all.json for --all, exits agents.rc) and more real directories beside
+# "dead" -- the check only needs a directory to exist, nothing else about a
+# bot. "gone" is a completed session: only the --all answer carries it.
+# "donepid" is live (a pid) with state "done", which a live bot can show.
+mkdir -p "$PD/.claude/discord-agents/beta" "$PD/.claude/discord-agents/b sp" "$PD/.claude/discord-agents/gone" "$PD/.claude/discord-agents/donepid"
 jq -n --arg cwd "$PDP" '[
   {name:"dead", cwd:$cwd},
   {name:"beta", cwd:$cwd},
   {name:"b sp", cwd:$cwd},
+  {name:"donepid", cwd:$cwd, pid:4242, state:"done"},
   {name:"nodir", cwd:$cwd},
   {name:"x/../beta", cwd:$cwd},
   {name:"other", cwd:"/elsewhere"}]' > "$HOME/agents.json"
-: > "$HOME/agents.rc"
+jq --arg cwd "$PDP" '. + [{name:"gone", cwd:$cwd, state:"done"}]' "$HOME/agents.json" > "$HOME/agents.all.json"
+: > "$HOME/agents.rc"; : > "$HOME/agents.calls"
 out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/hooks/tools/local-bots")
-[ "$out" = "$(printf 'b sp\t%s\nbeta\t%s' "$PDP" "$PDP")" ] || { echo "FAIL: local-bots must print exactly the OTHER bots (a real .claude/discord-agents/<name> dir), name-TAB-project, sorted by name; self ('dead', by state dir) excluded, a name holding a slash never riding another bot's directory, and a name whose directory is missing ('nodir') or whose project does not exist ('other') left out: $out"; exit 1; }
-echo "ok: local-bots lists this machine's other bot sessions only, name-TAB-project sorted, self excluded by state dir, a traversal name rejected, a session with no discord-agents/<name> directory left out"
+[ "$(cat "$HOME/agents.calls")" = "agents --json" ] || { echo "FAIL: local-bots must list active sessions only, without --all: $(cat "$HOME/agents.calls")"; exit 1; }
+[ "$out" = "$(printf 'b sp\t%s\nbeta\t%s\ndonepid\t%s' "$PDP" "$PDP" "$PDP")" ] || { echo "FAIL: local-bots must print exactly the OTHER live bots (a real .claude/discord-agents/<name> dir), name-TAB-project, sorted by name; self ('dead', by state dir) excluded, a live 'done' row kept, a completed session ('gone') absent, a name holding a slash never riding another bot's directory, and a name whose directory is missing ('nodir') or whose project does not exist ('other') left out: $out"; exit 1; }
+rm -f "$HOME/agents.all.json"
+echo "ok: local-bots lists this machine's other live bot sessions only (no --all, a completed one absent, a live 'done' one kept), name-TAB-project sorted, self excluded by state dir, a traversal name rejected, a session with no discord-agents/<name> directory left out"
 
 # Never fails: no output and exit 0 on bad JSON, an empty array, or a
 # listing call that itself fails.

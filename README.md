@@ -156,7 +156,9 @@ same rule has a dev-manager tell the machine's OTHER claude-discord bots --
 not its peers, its machine's other bots, in whatever other project runs one
 -- `~/.claude-discord/hooks/tools/local-bots` prints them: every other live
 bot session on this machine, one line per session as `<name><TAB><project
-dir>`, sorted by name. Discovery is `claude agents --json --all` filtered to
+dir>`, sorted by name. Discovery is `claude agents --json` (active sessions
+only: `--all` would add completed ones, retired bots among them; no filter on
+the state, since a live bot can show `done`) filtered to
 a session whose project has a `.claude/discord-agents/<name>` directory,
 this bot's own session excluded by state dir; it prints nothing, never
 fails, and is never registered as a hook.
