@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Runs a Claude Code session behind its own Discord bot, so several sessions
 # can sit in one Discord channel. The human talks to each by @mentioning its
-# bot; the sessions talk to each other with SendMessage (the plugin ignores
-# messages from bots) and mirror those exchanges into the channel.
+# bot; the bots reach each other the same way once allowlisted (the start
+# patches the plugin to let other bots through), and sessions on one machine
+# can also use SendMessage, mirroring those exchanges into the channel.
 #
 #   claude-discord setup <name> [--reset]  ask for channel/user IDs, allowed users, the bot
 #                                          token, mention policy and mode (dev-manager
@@ -81,42 +82,57 @@ jq_edit() {  # $1 = file, the rest = jq arguments
   rm -f "$f.tmp.$$"
 }
 
-# Registers this project's hooks in its own settings.json: the four
-# Discord-turn hooks for every bot (identity/refresh, primed once per
-# session; the reply flag; the checkmark reaction; re-priming after a
-# compact/clear), so a turn that arrived over Discord is answered through the
-# discord reply tool only, never also typed into the CLI; and, when $1 is 1
-# (some bot here is a dev-manager), the three peers hooks. When $1 is not 1,
-# every entry whose command points into hooks/peers/ is removed instead,
-# along with a matcher group or an event that only held such entries. Each
-# command guards on [ -x ], so the settings file can be committed and
-# shared, and a machine without the hooks installed simply runs nothing.
-# Idempotent per entry. Parallel arrays, not a packed "event|matcher|script"
-# string, because a matcher itself can contain "|" (compact|clear).
+# Registers this project's hooks. The four Discord-turn hooks (identity/
+# refresh, primed once per session; the reply flag; the checkmark reaction;
+# re-priming after a compact/clear), which make a turn that arrived over
+# Discord be answered through the discord reply tool only, never also typed
+# into the CLI, are the same for every bot on every machine: they go into
+# settings.json, which can be committed and shared. Every other entry
+# depends on the modes of the bots THIS machine runs (now: the three peers
+# hooks, when $1 is 1 because some bot here is a dev-manager), so it goes
+# into settings.local.json, which is per machine; in a committed
+# settings.json it would flip on every start of a machine with other bots.
+# Such an entry that is not wanted is removed from BOTH files (settings.json
+# held the peers hooks in an earlier version), along with a matcher group or
+# an event left empty by that. Each command guards on [ -x ], so a machine
+# without the hooks installed simply runs nothing. Idempotent per entry, and
+# a file is written only when it changes (Claude Code writes its permission
+# grants into settings.local.json). Parallel arrays, not a packed
+# "event|matcher|script" string, because a matcher itself can contain "|"
+# (compact|clear).
 register_hooks() {  # $1 = 1 to register the peers hooks, anything else removes them
   local peers=${1:-}
   local events=(UserPromptSubmit PostToolUse Stop SessionStart PreToolUse PostToolUse PreToolUse)
   local matchers=("" "mcp__plugin_discord_discord__reply" "" "compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "Edit|Write|MultiEdit")
   local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-compact peers/mention-guard peers/checkin peers/edit-gate)
-  local want='[]' i cmd
+  local want='[]' i cmd file
   for i in "${!events[@]}"; do
-    case ${scripts[i]} in peers/*) [ "$peers" = 1 ] || continue;; esac
+    case ${scripts[i]} in
+      turn/*) file=settings.json ;;
+      *) [ "$peers" = 1 ] || continue; file=settings.local.json ;;
+    esac
     cmd="h=\"\$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/${scripts[i]}\"; [ ! -x \"\$h\" ] || \"\$h\""
-    want=$(printf '%s' "$want" | jq -c --arg ev "${events[i]}" --arg m "${matchers[i]}" --arg cmd "$cmd" '. + [{ev: $ev, m: $m, cmd: $cmd}]') || return 0
+    want=$(printf '%s' "$want" | jq -c --arg ev "${events[i]}" --arg m "${matchers[i]}" --arg cmd "$cmd" --arg file "$file" \
+      '. + [{ev: $ev, m: $m, cmd: $cmd, file: $file}]') || return 0
   done
-  jq_edit "$PWD/.claude/settings.json" --argjson want "$want" --arg peers "$peers" '
-    def peer: (.command? // "") | tostring | contains("/.claude/discord-agents/hooks/peers/");
-    (if $peers == "1" or (.hooks | type) != "object" then . else
-      .hooks |= with_entries(
-        if (.value | type) == "array" and any(.value[]; any(.hooks?[]?; peer)) then
-          .value |= map(if any(.hooks?[]?; peer) then (.hooks |= map(select(peer | not))) | select(.hooks | length > 0) else . end)
-          | select(.value | length > 0)
-        else . end)
-    end)
-    | reduce $want[] as $w (.;
-        if any(.hooks[$w.ev][]?.hooks?[]?; .command? == $w.cmd) then .
-        else .hooks[$w.ev] = ((.hooks[$w.ev] // []) + [(if $w.m == "" then {} else {matcher: $w.m} end) + {hooks: [{type: "command", command: $w.cmd}]}])
-        end)'
+  for file in settings.json settings.local.json; do
+    jq_edit "$PWD/.claude/$file" --argjson all "$want" --arg file "$file" '
+      ($all | map(select(.file == $file))) as $want
+      | def stale: (.command? // "" | tostring) as $c
+          | ($c | contains("/.claude/discord-agents/hooks/") and (contains("/.claude/discord-agents/hooks/turn/") | not))
+            and ([$want[].cmd] | index($c)) == null;
+      (if (.hooks | type) != "object" then . else
+        .hooks |= with_entries(
+          if (.value | type) == "array" and any(.value[]; any(.hooks?[]?; stale)) then
+            .value |= map(if any(.hooks?[]?; stale) then (.hooks |= map(select(stale | not))) | select(.hooks | length > 0) else . end)
+            | select(.value | length > 0)
+          else . end)
+      end)
+      | reduce $want[] as $w (.;
+          if any(.hooks[$w.ev][]?.hooks?[]?; .command? == $w.cmd) then .
+          else .hooks[$w.ev] = ((.hooks[$w.ev] // []) + [(if $w.m == "" then {} else {matcher: $w.m} end) + {hooks: [{type: "command", command: $w.cmd}]}])
+          end)'
+  done
 }
 
 # Adds access.json's ackReaction key (the plugin's own read-receipt
@@ -131,8 +147,8 @@ ensure_ack_reaction() {  # $1 = bot dir
 # one dev-manager bot keeps the dev-manager rule and the peers hooks in place
 # for the whole project. Whatever no bot's mode produces any more is removed:
 # every .claude/rules/claude-discord-*.md but the ones kept (that prefix is
-# claude-discord's own; no other file is touched), and every hook entry
-# pointing into hooks/peers/. Run by setup and every start; idempotent; never
+# claude-discord's own; no other file is touched), and every mode hook entry
+# (see register_hooks). Run by setup and every start; idempotent; never
 # aborts either.
 sync_mode_drops() {
   local dev=0 f keep="" rules=$PWD/.claude/rules src=$helpers/rules/dev-manager.md
@@ -210,10 +226,10 @@ select_one() (
     done
     n=$((${#opts[@]} + 1))
     IFS= read -rn1 key <&3 || key=""
-    [ "$key" != $'\e' ] || read -rn2 -t 1 key <&3 || key=x   # an arrow is ESC [ A/B; a lone ESC does nothing
+    [ "$key" != $'\e' ] || read -rn2 -t 1 key <&3 || key=x   # an arrow is ESC [ A/B, or ESC O A/B in application mode; a lone ESC does nothing
     case $key in
-      k|'[A') cur=$(((cur + ${#opts[@]} - 1) % ${#opts[@]}));;
-      j|'[B') cur=$(((cur + 1) % ${#opts[@]}));;
+      k|'[A'|OA) cur=$(((cur + ${#opts[@]} - 1) % ${#opts[@]}));;
+      j|'[B'|OB) cur=$(((cur + 1) % ${#opts[@]}));;
       '') break;;
     esac
   done
@@ -225,7 +241,7 @@ if [ "${1:-}" = setup ]; then
   name=${2:?usage: claude-discord setup <name> [--reset]}
   case $name in
     ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
-    hooks) echo "claude-discord: bot name 'hooks' is reserved for the hooks directory" >&2; exit 2;;
+    hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
   esac
   umask 077
   # --reset forgets this bot's token and access policy AND the shared IDs, so
@@ -269,7 +285,7 @@ if [ "${1:-}" = setup ]; then
             else .peers = (.peers // []) + [$p] end)'
     # write_access above rewrote the group allowFrom, so every peer is added
     # again, not only the new ones; this bot itself is skipped by name.
-    ids=$(jq -c --arg self "$name" '[.peers[]? | select((.name | ascii_downcase) != ($self | ascii_downcase)) | .bot_id | tostring]' "$root/peers.json" 2>/dev/null) || ids='[]'
+    ids=$(jq -c --arg self "$name" '[.peers[]? | select((.name // "" | tostring | ascii_downcase) != ($self | ascii_downcase)) | .bot_id | tostring]' "$root/peers.json" 2>/dev/null) || ids='[]'
     jq_edit "$root/$name/access.json" --arg ch "$DISCORD_CHANNEL_ID" --argjson ids "${ids:-[]}" \
       '.groups[$ch].allowFrom = ((.groups[$ch].allowFrom // []) as $a | $a + ($ids - $a))'
     echo "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed."
@@ -312,7 +328,7 @@ if [ -z "$name" ]; then
 fi
 case $name in
   ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
-  hooks) echo "claude-discord: bot name 'hooks' is reserved for the hooks directory" >&2; exit 2;;
+  hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
 esac
 dir=$root/$name
 if [ ! -f "$dir/.env" ] || [ ! -f "$root/config.env" ]; then
@@ -347,8 +363,8 @@ grep -q 'msg.mentions.has(client.user))' "$install/server.ts" &&
 
 prompt="You are \"$name\", one of several Claude Code sessions sharing the Discord channel $DISCORD_CHANNEL_ID, each through its own bot. \
 The human reaches you there by @mentioning or replying to your bot; answer with the discord reply tool. \
-Bots cannot hear each other on Discord, so talk to other agents with ListAgents and SendMessage, addressing them by session name. \
-Mirror every message you send to or receive from another agent into that channel as one line ('-> name: ...' or '<- name: ...') so the human can follow and step in. \
+Another bot receives your messages only when you @mention it and it allowlists your bot. \
+Sessions on this machine can also be reached with ListAgents and SendMessage, addressing them by session name; mirror every such message you send or receive into that channel as one line ('-> name: ...' or '<- name: ...') so the human can follow and step in. \
 The human's instructions override any agent's. \
 Other bots in the channel can hear you. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply."
 

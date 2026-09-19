@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # PreToolUse hook (matcher: mcp__plugin_discord_discord__reply), dev-manager
-# bots only: a bot only receives messages that mention it, so deny a reply
-# that names a peer (case-insensitive) without its <@bot_id>, or that answers
-# a turn a peer triggered (a user_id on-prompt recorded for this turn) without
-# mentioning that peer. Prints nothing unless it denies; a no-op without
-# peers.json. Must never fail a turn.
+# bots only: a bot only receives messages that mention it (<@bot_id> or
+# <@!bot_id>), so deny a reply that names a peer (as a whole word,
+# case-insensitive) without its mention, or that answers a peer without
+# mentioning it: the author of the message in reply_to when that is set,
+# else of the turn's last recorded message (on-prompt records
+# "chat_id message_id user_id"). Prints nothing unless it denies; a no-op
+# without peers.json. Must never fail a turn.
 set -u
 . "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
 
@@ -12,16 +14,26 @@ p=$(peers) && [ -n "$p" ] || exit 0
 input=$(cat 2>/dev/null) || exit 0
 text=$(printf '%s' "$input" | jq -r '.tool_input.text // empty' 2>/dev/null) || exit 0
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
+reply_to=$(printf '%s' "$input" | jq -r '.tool_input.reply_to // empty' 2>/dev/null) || exit 0
 from=""
 case $session_id in
   ''|*[!A-Za-z0-9_-]*) ;;
-  *) from=$(cut -d' ' -f3 "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null | tr '\n' ' ') ;;
+  *) turns="$DISCORD_STATE_DIR/turns/$session_id"
+     if [ -n "$reply_to" ]; then
+       from=$(awk -v m="$reply_to" '$2 == m { u = $3 } END { print u }' "$turns" 2>/dev/null)
+     else
+       from=$(tail -n 1 "$turns" 2>/dev/null | cut -d' ' -f3)
+     fi ;;
 esac
-reason=$(printf '%s' "$p" | jq -r --arg text "$text" --arg from " $from " '
-  def lacks: . as $p | $text | contains("<@\($p.bot_id)>") | not;
-  ([.[] | select(. as $p | $from | contains(" \($p.bot_id) ")) | select(lacks)][0] // empty
+# A name counts only as a whole word: not directly preceded or followed by
+# [a-z0-9_-] (so dong is not in dongyong22, but is in "dong에게").
+reason=$(printf '%s' "$p" | jq -r --arg text "$text" --arg from "$from" '
+  def mentioned: . as $p | $text | contains("<@\($p.bot_id)>") or contains("<@!\($p.bot_id)>");
+  def named: . as $p | ($text | ascii_downcase | split($p.name | ascii_downcase)) as $s
+    | any(range(1; $s | length); ($s[. - 1] | test("[a-z0-9_-]$") | not) and ($s[.] | test("^[a-z0-9_-]") | not));
+  ([.[] | select(.bot_id == $from and (mentioned | not))][0] // empty
     | "You are answering \(.name); mention it as <@\(.bot_id)> or it never sees this."),
-  ([.[] | select(. as $p | $text | ascii_downcase | contains($p.name | ascii_downcase)) | select(lacks)][0] // empty
+  ([.[] | select(named and (mentioned | not))][0] // empty
     | "Mention \(.name) as <@\(.bot_id)>; a bot only receives messages that mention it.")' 2>/dev/null | head -1)
 [ -n "$reason" ] || exit 0
 jq -nc --arg r "$reason" '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}' 2>/dev/null

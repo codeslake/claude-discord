@@ -108,7 +108,8 @@ echo "ok: on-prompt records chat_id/message_id/user_id and last-message-id, and 
 : > "$DSD/turns/s1.replied"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"555\" message_id=\"666\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi again\n</channel>"}')
 [ ! -e "$DSD/turns/s1.replied" ] || { echo "FAIL: on-prompt must clear a stale .replied flag when it records a new turn"; exit 1; }
-echo "ok: on-prompt clears a stale .replied flag when it records a new Discord turn"
+[ "$(cat "$DSD/turns/s1")" = "555 666 9" ] || { echo "FAIL: a new Discord turn must start a fresh turns file, not append to an interrupted turn's: $(cat "$DSD/turns/s1")"; exit 1; }
+echo "ok: on-prompt clears a stale .replied flag and the previous turn's records when it records a new Discord turn"
 
 # chat_id/message_id must come from the opening tag only, digits only: the
 # message body can contain literal text shaped like an attribute (here, a
@@ -238,7 +239,13 @@ rc=$?
 out=$(bash "$S" hooks 2>&1) && { echo "FAIL: starting a bot named hooks should have been refused"; exit 1; }
 rc=$?
 [ "$rc" -eq 2 ] && grep -qF "bot name 'hooks' is reserved for the hooks directory" <<<"$out" || { echo "FAIL: starting a bot named hooks must be refused by the reserved-name guard specifically (exit 2, its own message), got rc=$rc: $out"; exit 1; }
-echo "ok: the bot name 'hooks' is reserved and rejected by both setup and start, by the reserved-name guard specifically"
+out=$(printf '' | bash "$S" setup checkin 2>&1) && { echo "FAIL: setup checkin should have been refused"; exit 1; }
+rc=$?
+[ "$rc" -eq 2 ] && grep -qF "bot name 'checkin' is reserved for the checkin directory" <<<"$out" || { echo "FAIL: setup checkin must be refused by the reserved-name guard, got rc=$rc: $out"; exit 1; }
+out=$(bash "$S" checkin 2>&1) && { echo "FAIL: starting a bot named checkin should have been refused"; exit 1; }
+rc=$?
+[ "$rc" -eq 2 ] && grep -qF "bot name 'checkin' is reserved for the checkin directory" <<<"$out" || { echo "FAIL: starting a bot named checkin must be refused by the reserved-name guard, got rc=$rc: $out"; exit 1; }
+echo "ok: the bot names 'hooks' and 'checkin' are reserved and rejected by both setup and start, by the reserved-name guard specifically"
 
 bash "$S" gamma >/dev/null 2>&1 && { echo "FAIL: run without setup should refuse"; exit 1; }
 echo "ok: run refuses without setup"
@@ -246,6 +253,9 @@ echo "ok: run refuses without setup"
 out=$(bash "$S" alpha 2>&1)
 grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out"
 grep -q "Other bots in the channel can hear you." <<<"$out"
+grep -qF "Another bot receives your messages only when you @mention it and it allowlists your bot." <<<"$out" || { echo "FAIL: the system prompt must say how bots reach each other now"; exit 1; }
+grep -qF "Sessions on this machine can also be reached with ListAgents and SendMessage" <<<"$out" || { echo "FAIL: the system prompt must keep SendMessage for same-machine sessions"; exit 1; }
+! grep -q "Bots cannot hear each other" <<<"$out" || { echo "FAIL: the stale 'Bots cannot hear each other' claim is still in the system prompt"; exit 1; }
 grep -q "Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply." <<<"$out"
 ! grep -q "never @mention it" <<<"$out"
 grep -q "if (msg.author.id === client.user?.id) return" "$HOME/fakeplugin/server.ts"
@@ -348,6 +358,7 @@ jq -n '{dmPolicy:"allowlist", allowFrom:["2"], groups:{"1":{requireMention:true,
 bash "$S" gamma >/dev/null 2>&1
 has_hooks "$P2/.claude/settings.json"
 [ "$(jq -c 'keys' "$P2/.claude/settings.json")" = '["hooks"]' ]
+[ ! -e "$P2/.claude/settings.local.json" ] || { echo "FAIL: a project with no dev-manager must get no settings.local.json"; exit 1; }
 [ "$(jq '.hooks.UserPromptSubmit | length' "$P2/.claude/settings.json")" = 1 ]
 [ "$(jq '.hooks.PostToolUse | length' "$P2/.claude/settings.json")" = 1 ]
 [ "$(jq '.hooks.Stop | length' "$P2/.claude/settings.json")" = 1 ]
@@ -453,13 +464,18 @@ out=$(bash "$S" eps 2>&1)
 grep -q "is not a symlink, leaving it alone" <<<"$out" || { echo "FAIL: a real hooks directory must warn on stderr"; exit 1; }
 echo "ok: an existing real hooks directory is left alone with a warning, not clobbered"
 
-# Modes. A fresh project (channel 42) with a foreign rule file and a user's own
-# PostToolUse hook next to ours; mgr is a dev-manager. peers.json lists mgr
-# itself too (one list shared across machines), which every consumer must skip
-# by name.
+# Modes. A fresh project (channel 42) with a foreign rule file, a user's own
+# PostToolUse hook in settings.json and Claude Code's own permission grants in
+# settings.local.json; mgr is a dev-manager. peers.json lists mgr itself too
+# (one list shared across machines), which every consumer must skip by name.
+# The turn hooks live in settings.json (the same on every machine); the peers
+# hooks in settings.local.json, since they depend on which bots this machine
+# runs.
 P4="$HOME/project4"; mkdir -p "$P4/.claude/rules"; cd "$P4"
 R4="$P4/.claude/discord-agents"
 RULE="$P4/.claude/rules/claude-discord-dev-manager.md"
+SJ="$P4/.claude/settings.json"
+SL="$P4/.claude/settings.local.json"
 CMD_GUARD='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/mention-guard"; [ ! -x "$h" ] || "$h"'
 CMD_CHECKIN='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/checkin"; [ ! -x "$h" ] || "$h"'
 CMD_GATE='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/edit-gate"; [ ! -x "$h" ] || "$h"'
@@ -469,7 +485,8 @@ has_peers_hooks() {
   has_matcher PreToolUse 'Edit|Write|MultiEdit' "$CMD_GATE" "$1"
 }
 echo mine > "$P4/.claude/rules/other.md"
-echo '{"permissions":{"allow":["Bash(ls)"]},"hooks":{"PostToolUse":[{"matcher":"mcp__plugin_discord_discord__reply","hooks":[{"type":"command","command":"my-own-hook"}]}]}}' > "$P4/.claude/settings.json"
+echo '{"permissions":{"allow":["Bash(ls)"]},"hooks":{"PostToolUse":[{"matcher":"mcp__plugin_discord_discord__reply","hooks":[{"type":"command","command":"my-own-hook"}]}]}}' > "$SJ"
+echo '{"permissions":{"allow":["Bash(git status)"]}}' > "$SL"
 out=$(printf '42\n111\n\ntokM\nn\ndev-manager\ndong:900:800:wmac, junyong:901:801:lmd42,mgr:902:803:here,bad:x:1:2\n' | bash "$S" setup mgr 2>"$P4/err")
 [ "$(cat "$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: mode by name was not stored"; exit 1; }
 [ "$(jq -c '.peers' "$R4/peers.json")" = '[{"name":"dong","bot_id":"900","owner_id":"800","machine":"wmac"},{"name":"junyong","bot_id":"901","owner_id":"801","machine":"lmd42"},{"name":"mgr","bot_id":"902","owner_id":"803","machine":"here"}]' ] || { echo "FAIL: peers.json wrong: $(cat "$R4/peers.json")"; exit 1; }
@@ -478,16 +495,19 @@ grep -qF 'bad:x:1:2' "$P4/err" || { echo "FAIL: a malformed peer entry must be w
 [ "$(jq -c '.allowFrom' "$R4/mgr/access.json")" = '["111"]' ] || { echo "FAIL: the DM allowFrom must not get the peers"; exit 1; }
 grep -qF "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed." <<<"$out" || { echo "FAIL: the both-directions note is missing"; exit 1; }
 cmp -s "$D/rules/dev-manager.md" "$RULE" || { echo "FAIL: the dev-manager rule was not dropped into .claude/rules"; exit 1; }
-has_hooks "$P4/.claude/settings.json" && has_peers_hooks "$P4/.claude/settings.json" || { echo "FAIL: dev-manager setup must register the turn and the three peers hooks"; exit 1; }
-[ "$(jq -c '.permissions' "$P4/.claude/settings.json")" = '{"allow":["Bash(ls)"]}' ] && has_cmd PostToolUse my-own-hook "$P4/.claude/settings.json" || { echo "FAIL: unrelated settings keys and the user's own hook must survive"; exit 1; }
-echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned), the group allowFrom, the rule file and the peers hooks"
+sed -n 3p "$RULE" | grep -qF 'only when your Discord-turn context contains a `Dev manager:` line' || { echo "FAIL: the rule must open with its condition, since every session in the project loads it"; exit 1; }
+has_hooks "$SJ" && ! grep -q 'hooks/peers/' "$SJ" || { echo "FAIL: settings.json must hold the turn hooks and no peers hook: $(cat "$SJ")"; exit 1; }
+has_peers_hooks "$SL" && ! grep -q 'hooks/turn/' "$SL" || { echo "FAIL: settings.local.json must hold the three peers hooks and no turn hook: $(cat "$SL")"; exit 1; }
+[ "$(jq -c '.permissions' "$SJ")" = '{"allow":["Bash(ls)"]}' ] && has_cmd PostToolUse my-own-hook "$SJ" || { echo "FAIL: unrelated settings keys and the user's own hook must survive"; exit 1; }
+[ "$(jq -c '.permissions' "$SL")" = '{"allow":["Bash(git status)"]}' ] || { echo "FAIL: settings.local.json's permission grants must survive"; exit 1; }
+echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned), the group allowFrom, the rule file (conditional first line), the turn hooks in settings.json and the peers hooks in settings.local.json"
 
-cp "$R4/peers.json" "$P4/peers.before"; cp "$P4/.claude/settings.json" "$P4/settings.before"
+cp "$R4/peers.json" "$P4/peers.before"; cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
 printf '\nn\n2\n\n' | bash "$S" setup mgr >/dev/null
 grep -q '^DISCORD_BOT_TOKEN=tokM$' "$R4/mgr/.env" || { echo "FAIL: an empty token on a re-run must keep the current token"; exit 1; }
 [ "$(cat "$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: mode by number was not stored"; exit 1; }
 cmp -s "$R4/peers.json" "$P4/peers.before" || { echo "FAIL: an empty peers answer must keep peers.json as it was"; exit 1; }
-cmp -s "$P4/.claude/settings.json" "$P4/settings.before" || { echo "FAIL: a re-run with nothing new must leave settings.json byte-identical"; exit 1; }
+cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: a re-run with nothing new must leave both settings files byte-identical"; exit 1; }
 [ "$(jq -c '.groups["42"].allowFrom' "$R4/mgr/access.json")" = '["111","900","901"]' ] || { echo "FAIL: a re-run rewrites access.json, and the kept peers must be re-added"; exit 1; }
 printf '\nn\n2\ndong2:900:810:pmac\n' | bash "$S" setup mgr >/dev/null
 [ "$(jq -c '[.peers[] | select(.bot_id == "900")]' "$R4/peers.json")" = '[{"name":"dong2","bot_id":"900","owner_id":"810","machine":"pmac"}]' ] && [ "$(jq '.peers | length' "$R4/peers.json")" = 3 ] || { echo "FAIL: peers must merge by bot_id: $(cat "$R4/peers.json")"; exit 1; }
@@ -497,27 +517,48 @@ printf '\nn\n\ndong:900:800:wmac\n' | bash "$S" setup mgr >/dev/null
 err=$(printf '\nn\nbogus\n\n' | bash "$S" setup mgr 2>&1 >/dev/null)
 [ "$(cat "$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: an unknown mode answer must keep the default (the current mode)"; exit 1; }
 grep -q bogus <<<"$err" || { echo "FAIL: an unknown mode answer must be warned about"; exit 1; }
-echo "ok: re-run: empty token keeps it, mode by number, empty/unknown mode keeps the current one (unknown warned), empty peers keeps the list, peers merge by bot_id"
+cp "$R4/peers.json" "$P4/peers.before"
+jq '.peers += [{"bot_id":"905"}]' "$P4/peers.before" > "$R4/peers.json"
+printf '\nn\n2\n\n' | bash "$S" setup mgr >/dev/null
+[ "$(jq -c '.groups["42"].allowFrom' "$R4/mgr/access.json")" = '["111","900","901","905"]' ] || { echo "FAIL: a peer without a name must not empty the allowFrom update: $(jq -c . "$R4/mgr/access.json")"; exit 1; }
+cp "$P4/peers.before" "$R4/peers.json"
+echo "ok: re-run: empty token keeps it, mode by number, empty/unknown mode keeps the current one (unknown warned), empty peers keeps the list, peers merge by bot_id, a nameless peer still reaches allowFrom"
 
 printf 'tokP\nn\nnone\n' | bash "$S" setup plain >/dev/null
-[ "$(cat "$R4/plain/mode")" = none ] && [ -f "$RULE" ] && has_peers_hooks "$P4/.claude/settings.json" || { echo "FAIL: one dev-manager bot is enough to keep the dev-manager drops (union over bots)"; exit 1; }
+[ "$(cat "$R4/plain/mode")" = none ] && [ -f "$RULE" ] && has_peers_hooks "$SL" || { echo "FAIL: one dev-manager bot is enough to keep the dev-manager drops (union over bots)"; exit 1; }
 echo stale > "$RULE"; echo x > "$P4/.claude/rules/claude-discord-old.md"
 bash "$S" mgr >/dev/null 2>&1
 cmp -s "$D/rules/dev-manager.md" "$RULE" || { echo "FAIL: start must restore a changed rule file"; exit 1; }
 [ ! -e "$P4/.claude/rules/claude-discord-old.md" ] || { echo "FAIL: start must remove a claude-discord-*.md no mode produces"; exit 1; }
-cp "$P4/.claude/settings.json" "$P4/settings.before"; cp "$RULE" "$P4/rule.before"
+cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"; cp "$RULE" "$P4/rule.before"
 bash "$S" mgr >/dev/null 2>&1
-cmp -s "$P4/.claude/settings.json" "$P4/settings.before" && cmp -s "$RULE" "$P4/rule.before" || { echo "FAIL: a second start must change nothing"; exit 1; }
+cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" && cmp -s "$RULE" "$P4/rule.before" || { echo "FAIL: a second start must change nothing"; exit 1; }
 echo "ok: the drops are the union over the project's bots; start restores the rule, removes a stale claude-discord-*.md, and is idempotent"
+
+# Migration: an earlier version registered the peers hooks in settings.json.
+# A start moves them: gone from settings.json (PreToolUse, then empty, goes
+# too), kept once in settings.local.json.
+jq --arg g "$CMD_GUARD" --arg c "$CMD_CHECKIN" --arg e "$CMD_GATE" '.hooks.PreToolUse = [{matcher: "mcp__plugin_discord_discord__reply", hooks: [{type: "command", command: $g}]}, {matcher: "Edit|Write|MultiEdit", hooks: [{type: "command", command: $e}]}] | .hooks.PostToolUse += [{matcher: "mcp__plugin_discord_discord__reply", hooks: [{type: "command", command: $c}]}]' "$SJ" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SJ" && rm -f "$P4/s.tmp"
+bash "$S" mgr >/dev/null 2>&1
+! grep -q 'hooks/peers/' "$SJ" && [ "$(jq '.hooks | has("PreToolUse")' "$SJ")" = false ] || { echo "FAIL: start must move the peers hooks out of settings.json: $(jq -c . "$SJ")"; exit 1; }
+cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: after the migration both files must be as before, the peers hooks only in settings.local.json"; exit 1; }
+echo "ok: peers hooks an earlier version left in settings.json are removed from it (an event left empty goes), settings.local.json keeps its single copy"
 
 # Peers hooks, through the project's symlinked copy.
 G="$R4/hooks/peers"
 guard() { DISCORD_STATE_DIR="$R4/${2:-mgr}" CLAUDE_PROJECT_DIR="$P4" bash "$G/mention-guard" <<<"$1"; }
 reason() { jq -r 'select(.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny") | .hookSpecificOutput.permissionDecisionReason'; }
+REASON_A='Mention dong as <@900>; a bot only receives messages that mention it.'
 out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"Dong, please review"}}')
-[ "$(reason <<<"$out")" = 'Mention dong as <@900>; a bot only receives messages that mention it.' ] || { echo "FAIL: naming a peer without its mention must be denied: $out"; exit 1; }
+[ "$(reason <<<"$out")" = "$REASON_A" ] || { echo "FAIL: naming a peer without its mention must be denied: $out"; exit 1; }
+out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"dong에게 리뷰 부탁"}}')
+[ "$(reason <<<"$out")" = "$REASON_A" ] || { echo "FAIL: a peer name followed by Korean text is still a name: $out"; exit 1; }
 out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"<@900> dong, please review"}}')
 [ -z "$out" ] || { echo "FAIL: naming a peer with its mention must pass silently: $out"; exit 1; }
+out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"<@!900> dong, please review"}}')
+[ -z "$out" ] || { echo "FAIL: the nickname form <@!id> is a mention too: $out"; exit 1; }
+out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"<@123> dongyong22, your call"}}')
+[ -z "$out" ] || { echo "FAIL: a peer name inside a longer word (dong in dongyong22) is not the peer: $out"; exit 1; }
 out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"MGR here, all done"}}')
 [ -z "$out" ] || { echo "FAIL: the bot naming itself must pass (self skipped by name): $out"; exit 1; }
 out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"Dong, please review"}}' plain)
@@ -529,13 +570,24 @@ grep -qxF 'Peers (mention to reach them): dong <@900>, junyong <@901>' <<<"$ctx"
 grep -qxF 'Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; after each iteration post one short report.' <<<"$ctx" || { echo "FAIL: the dev-manager line is missing: $ctx"; exit 1; }
 out=$(DISCORD_STATE_DIR="$R4/plain" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g3","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"556\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'Peers\|Dev manager' <<<"$out" && { echo "FAIL: a plain bot must not get the dev-manager context"; exit 1; }
+REASON_B='You are answering junyong; mention it as <@901> or it never sees this.'
 out=$(guard '{"session_id":"g2","tool_input":{"chat_id":"42","text":"thanks, merged"}}')
-[ "$(reason <<<"$out")" = 'You are answering junyong; mention it as <@901> or it never sees this.' ] || { echo "FAIL: answering a peer-triggered turn without its mention must be denied: $out"; exit 1; }
+[ "$(reason <<<"$out")" = "$REASON_B" ] || { echo "FAIL: answering a peer-triggered turn without its mention must be denied: $out"; exit 1; }
 out=$(guard '{"session_id":"g2","tool_input":{"chat_id":"42","text":"<@901> thanks, merged"}}')
 [ -z "$out" ] || { echo "FAIL: answering a peer with its mention must pass: $out"; exit 1; }
+# One prompt, two queued messages: the peer's, then the human's. Rule B
+# follows reply_to when it is set, else the turn's LAST message only.
+DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g4","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"557\" user=\"junyong\" user_id=\"901\" ts=\"t\">\nlooks good\n</channel>\n<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"558\" user=\"u\" user_id=\"111\" ts=\"t\">\nship it?\n</channel>"}' >/dev/null
+[ "$(cat "$R4/mgr/turns/g4")" = "$(printf '42 557 901\n42 558 111')" ] || { echo "FAIL: both queued messages of one prompt must be recorded"; exit 1; }
+out=$(guard '{"session_id":"g4","tool_input":{"chat_id":"42","text":"yes, shipping"}}')
+[ -z "$out" ] || { echo "FAIL: a reply to the human (the last message) must not be held to the peer's mention: $out"; exit 1; }
+out=$(guard '{"session_id":"g4","tool_input":{"chat_id":"42","reply_to":"558","text":"yes, shipping"}}')
+[ -z "$out" ] || { echo "FAIL: a reply_to the human's message must not be held to the peer's mention: $out"; exit 1; }
+out=$(guard '{"session_id":"g4","tool_input":{"chat_id":"42","reply_to":"557","text":"thanks"}}')
+[ "$(reason <<<"$out")" = "$REASON_B" ] || { echo "FAIL: a reply_to the peer's message without its mention must be denied: $out"; exit 1; }
 out=$(printf 'not json' | DISCORD_STATE_DIR="$R4/mgr" bash "$G/mention-guard" 2>&1) || { echo "FAIL: mention-guard must exit 0 on invalid JSON"; exit 1; }
 [ -z "$out" ] || { echo "FAIL: mention-guard must print nothing on invalid JSON"; exit 1; }
-echo "ok: mention-guard denies a named peer without its mention and an unmentioned answer to a peer-triggered turn; passes with the mention, for self, for a non-dev-manager, and on invalid JSON; on-prompt adds the peers context for a dev-manager only"
+echo "ok: mention-guard denies a named peer (word boundaries, Korean suffix ok) without its <@id> or <@!id>, and an unmentioned answer to the peer that reply_to or else the turn's last message names; passes for self, a non-dev-manager, dongyong22, a reply to a human, and invalid JSON; on-prompt adds the peers context for a dev-manager only"
 
 checkin() { DISCORD_STATE_DIR="$R4/mgr" CLAUDE_PROJECT_DIR="$P4" bash "$G/checkin" <<<"$1"; }
 out=$(checkin '{"session_id":"c1","tool_input":{"text":"no mention here"}}')
@@ -544,19 +596,28 @@ checkin '{"session_id":"c2","tool_input":{"text":"<@902> note to self"}}' >/dev/
 [ ! -e "$R4/checkin/c2" ] || { echo "FAIL: mentioning yourself is no check-in"; exit 1; }
 out=$(checkin '{"session_id":"c1","tool_input":{"text":"<@901> I will change on-prompt"}}')
 [ -z "$out" ] && [ -f "$R4/checkin/c1" ] || { echo "FAIL: a reply mentioning a peer must touch checkin/<session_id>, silently"; exit 1; }
-echo "ok: checkin touches checkin/<session_id> only for a reply that mentions a peer, and prints nothing"
+checkin '{"session_id":"c3","tool_input":{"text":"<@!900> I will change on-stop"}}' >/dev/null
+[ -f "$R4/checkin/c3" ] || { echo "FAIL: a <@!id> mention of a peer is a check-in too"; exit 1; }
+echo "ok: checkin touches checkin/<session_id> only for a reply that mentions a peer (<@id> or <@!id>), and prints nothing"
 
-CD="$HOME/src/claude-discord"; mkdir -p "$CD" "$HOME/src/other"; : > "$CD/x.sh"; : > "$HOME/src/other/x.sh"; ln -s "$CD" "$HOME/src/link"
+# edit-gate, against a claude-discord checkout that is a git repo with the
+# gitignored bot state inside it (the refresh handoff is written there).
+CD="$HOME/src/claude-discord"; mkdir -p "$CD/.claude/discord-agents" "$HOME/src/other"; git init -q "$CD"
+: > "$CD/x.sh"; : > "$HOME/src/other/x.sh"; ln -s "$CD" "$HOME/src/link"
+printf '*\n' > "$CD/.claude/discord-agents/.gitignore"
+: > "$CD/.claude/discord-agents/tracked.md"; git -C "$CD" add x.sh; git -C "$CD" add -f .claude/discord-agents/tracked.md
 gate() { DISCORD_STATE_DIR="$R4/${3:-mgr}" CLAUDE_PROJECT_DIR="$P4" bash "$G/edit-gate" <<<"{\"session_id\":\"$1\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$2\"}}"; }
 mtime() { perl -e 'print +(stat $ARGV[0])[9]' "$1"; }
 age() { perl -e 'utime time - $ARGV[0], time - $ARGV[0], $ARGV[1]' "$1" "$2"; }
 GATE_REASON='Before changing claude-discord, announce on Discord what you will change (mention <@900> <@901>); you do not need to wait for an answer.'
-for f in "$CD/x.sh" "$HOME/src/link/x.sh" "$CD/new-file.sh"; do
+for f in "$CD/x.sh" "$HOME/src/link/x.sh" "$CD/new-file.sh" "$CD/.claude/discord-agents/tracked.md"; do
   out=$(gate e1 "$f")
   [ "$(reason <<<"$out")" = "$GATE_REASON" ] || { echo "FAIL: editing $f without a check-in must be denied: $out"; exit 1; }
 done
-out=$(gate e1 "$HOME/src/other/x.sh")
-[ -z "$out" ] && [ ! -e "$R4/checkin/e1" ] || { echo "FAIL: an edit outside claude-discord must pass silently and touch nothing"; exit 1; }
+for f in "$CD/.claude/discord-agents/mgr/handoff.md" "$HOME/src/other/x.sh"; do
+  out=$(gate e1 "$f")
+  [ -z "$out" ] && [ ! -e "$R4/checkin/e1" ] || { echo "FAIL: $f (gitignored, or outside claude-discord) must pass silently and touch nothing: $out"; exit 1; }
+done
 out=$(gate e1 "$CD/x.sh" plain)
 [ -z "$out" ] || { echo "FAIL: edit-gate must be a no-op for a bot that is not a dev-manager"; exit 1; }
 : > "$R4/checkin/e1"; age 1800 "$R4/checkin/e1"; before=$(mtime "$R4/checkin/e1")
@@ -566,33 +627,31 @@ out=$(gate e1 "$CD/x.sh")
 age 3700 "$R4/checkin/e1"
 out=$(gate e1 "$CD/x.sh")
 [ "$(reason <<<"$out")" = "$GATE_REASON" ] || { echo "FAIL: a check-in older than 60 minutes must be denied: $out"; exit 1; }
-echo "ok: edit-gate denies claude-discord edits (via a symlink, and a new file) without a check-in or with a stale one, passes with a fresh one and re-touches it, passes outside claude-discord and for a non-dev-manager"
+echo "ok: edit-gate denies claude-discord edits (tracked or untracked, via a symlink, a new file) without a check-in or with a stale one; passes with a fresh one and re-touches it, for gitignored bot state (a handoff.md in a dir not created yet), outside claude-discord and for a non-dev-manager"
 
 # Switching mgr to none (by number): no bot is a dev-manager any more. A
 # user's own hook inside our edit-gate group must survive the cleanup.
-jq '(.hooks.PreToolUse[] | select(.matcher == "Edit|Write|MultiEdit") | .hooks) += [{"type":"command","command":"mine-in-group"}]' "$P4/.claude/settings.json" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$P4/.claude/settings.json" && rm -f "$P4/s.tmp"
+jq '(.hooks.PreToolUse[] | select(.matcher == "Edit|Write|MultiEdit") | .hooks) += [{"type":"command","command":"mine-in-group"}]' "$SL" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SL" && rm -f "$P4/s.tmp"
+cp "$SJ" "$P4/settings.before"
 printf '\nn\n1\n' | bash "$S" setup mgr >/dev/null
-SJ="$P4/.claude/settings.json"
 [ "$(cat "$R4/mgr/mode")" = none ] || { echo "FAIL: mode none by number"; exit 1; }
 [ ! -e "$RULE" ] || { echo "FAIL: switching to none must remove the dev-manager rule"; exit 1; }
 [ "$(cat "$P4/.claude/rules/other.md")" = mine ] || { echo "FAIL: a foreign .claude/rules file must survive"; exit 1; }
-! grep -q 'hooks/peers/' "$SJ" || { echo "FAIL: switching to none must remove every peers hook entry: $(cat "$SJ")"; exit 1; }
-has_hooks "$SJ" || { echo "FAIL: the turn hooks must survive"; exit 1; }
-[ "$(jq -c '.permissions' "$SJ")" = '{"allow":["Bash(ls)"]}' ] && has_cmd PostToolUse my-own-hook "$SJ" || { echo "FAIL: unrelated keys and the user's own hook must survive"; exit 1; }
-[ "$(jq -c '.hooks.PreToolUse' "$SJ")" = '[{"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":"mine-in-group"}]}]' ] || { echo "FAIL: only our entries go; a group left empty goes, a group still holding a user hook stays: $(jq -c '.hooks.PreToolUse' "$SJ")"; exit 1; }
-[ "$(jq '.hooks.PostToolUse | length' "$SJ")" = 2 ] || { echo "FAIL: the checkin group must be dropped once empty"; exit 1; }
-echo "ok: switching to none removes the rule file and every peers hook entry (empty groups dropped), keeps the turn hooks, unrelated keys, a user's own hooks and a foreign rule file"
+! grep -q 'hooks/peers/' "$SL" || { echo "FAIL: switching to none must remove every peers hook entry: $(cat "$SL")"; exit 1; }
+cmp -s "$SJ" "$P4/settings.before" || { echo "FAIL: settings.json (turn hooks, unrelated keys, the user's own hook) must be untouched"; exit 1; }
+[ "$(jq -c '.permissions' "$SL")" = '{"allow":["Bash(git status)"]}' ] || { echo "FAIL: settings.local.json's permission grants must survive"; exit 1; }
+[ "$(jq -c '.hooks.PreToolUse' "$SL")" = '[{"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":"mine-in-group"}]}]' ] || { echo "FAIL: only our entries go; a group left empty goes, a group still holding a user hook stays: $(jq -c '.hooks.PreToolUse' "$SL")"; exit 1; }
+[ "$(jq '.hooks | has("PostToolUse")' "$SL")" = false ] || { echo "FAIL: an event left with no groups must be dropped: $(jq -c . "$SL")"; exit 1; }
+echo "ok: switching to none removes the rule file and every peers hook entry (empty groups and events dropped), keeps settings.json, the permission grants, a user's own hooks and a foreign rule file"
 
-# Back to dev-manager, then autoresearchclaw with no user hook under PreToolUse:
-# the event is dropped once empty, and autoresearchclaw drops nothing.
+# Back to dev-manager, then autoresearchclaw: it drops nothing.
 printf '\nn\n2\n' | bash "$S" setup mgr >/dev/null   # EOF at the peers prompt: same as empty
-has_peers_hooks "$SJ" && [ -f "$RULE" ] || { echo "FAIL: back to dev-manager must restore its drops"; exit 1; }
-jq 'del(.hooks.PreToolUse[] | select(.hooks | any(.command == "mine-in-group")))' "$SJ" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SJ" && rm -f "$P4/s.tmp"
+has_peers_hooks "$SL" && [ -f "$RULE" ] || { echo "FAIL: back to dev-manager must restore its drops"; exit 1; }
 printf '\nn\nautoresearchclaw\n' | bash "$S" setup mgr >/dev/null
 [ "$(cat "$R4/mgr/mode")" = autoresearchclaw ] || { echo "FAIL: mode autoresearchclaw"; exit 1; }
 [ -z "$(find "$P4/.claude/rules" -name 'claude-discord-*')" ] || { echo "FAIL: autoresearchclaw must drop no rule file"; exit 1; }
-! grep -q 'hooks/peers/' "$SJ" && [ "$(jq '.hooks | has("PreToolUse")' "$SJ")" = false ] || { echo "FAIL: an event left with no groups must be dropped: $(jq -c . "$SJ")"; exit 1; }
+! grep -q 'hooks/peers/' "$SL" "$SJ" || { echo "FAIL: autoresearchclaw must register no peers hook"; exit 1; }
 has_hooks "$SJ" || { echo "FAIL: the turn hooks must survive"; exit 1; }
-echo "ok: autoresearchclaw drops nothing; an event left empty by the cleanup is dropped"
+echo "ok: autoresearchclaw drops nothing"
 
 echo "ALL PASS"
