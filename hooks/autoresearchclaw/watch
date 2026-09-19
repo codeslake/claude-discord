@@ -24,6 +24,7 @@ case $worker in ''|*[!0-9]*) exit 0;; esac
 [ -n "$bot_name" ] || exit 0
 project=${DISCORD_STATE_DIR%/.claude/discord-agents/*}
 posted=$DISCORD_STATE_DIR/arc-posted
+stamp=$DISCORD_STATE_DIR/arc-stamp
 pidfile=$DISCORD_STATE_DIR/arc-watch.pid
 tab=$(printf '\t')
 
@@ -55,8 +56,14 @@ rec(.since; "wait \(.stage | key) \(.since // "" | key)"; "gate waiting: " + sta
 poll() {  # $1 = 1: record, post nothing
   local run name new f sent=0
   [ -e "$posted" ] || : 2>/dev/null > "$posted"
+  # A run dir with nothing modified since the previous poll's start (arc-stamp)
+  # is not read again: old runs cost one find, not a jq per stage file. A
+  # file's mtime changes when it is written, a directory's when an entry comes
+  # or goes (waiting.json). The first pass reads everything.
+  : 2>/dev/null > "$stamp.new"
   for run in "$project"/artifacts/rc-*/; do
     [ -d "$run" ] || continue
+    [ "$1" = 1 ] || [ ! -e "$stamp" ] || [ -n "$(find "$run" -newer "$stamp" -print -quit 2>/dev/null)" ] || continue
     name=$(basename "$run")
     new=$(
       {
@@ -70,14 +77,16 @@ poll() {  # $1 = 1: record, post nothing
     )
     [ -n "$new" ] || continue
     # Recorded before posting: an event that cannot be recorded would be
-    # posted again every minute.
-    printf '%s\n' "$new" | cut -f2 2>/dev/null >> "$posted" || continue
+    # posted again every minute. Nor may the stamp move past it, or it would
+    # never be read again.
+    printf '%s\n' "$new" | cut -f2 2>/dev/null >> "$posted" || { rm -f "$stamp.new"; continue; }
     [ "$1" = 1 ] && continue
     # Discord allows 5 messages per 5 s in a channel, and a rejected post is lost.
     [ "$sent" = 0 ] || sleep 1
     post "$bot_channel" "$(printf '%s\n' "$new" | cut -f3)"
     sent=1
   done
+  mv -f "$stamp.new" "$stamp" 2>/dev/null
 }
 
 [ -e "$posted" ] && first=0 || first=1

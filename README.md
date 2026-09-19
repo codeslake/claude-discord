@@ -2,7 +2,7 @@
 
 Run a Claude Code session behind its own Discord bot, so several sessions can
 sit in one Discord channel. The human talks to each session by @mentioning its
-bot. It is a 100-line bash wrapper around the official
+bot. It is a bash wrapper around the official
 `discord@claude-plugins-official` channel plugin; the session is an ordinary
 `claude` REPL with a Discord channel attached, so `--resume`, `/rename`, your
 settings, hooks and skills all work as usual.
@@ -15,7 +15,7 @@ Origin: written by d.kim4, extended here.
 |---|---|
 | Claude Code 2.1.x with channels support | `--channels` flag |
 | `bun` | the plugin's runtime (`curl -fsSL https://bun.sh/install \| bash`) |
-| `jq` | writes `access.json` and reads the plugin's install path |
+| `jq` | writes `access.json` and the settings files, reads the plugin's install path; every hook and the `autoresearchclaw` watcher need it too, and without it they silently do nothing |
 | the plugin | `claude plugin install discord@claude-plugins-official` then `claude plugin disable discord@claude-plugins-official` (see below) |
 | `curl` (optional) | the ✅ reaction on a finished reply and the `autoresearchclaw` progress posts; without it, neither is sent, everything else still works |
 | `perl` | patches the plugin at every start, and starts the `autoresearchclaw` watcher in its own session (macOS has no `setsid`) |
@@ -106,7 +106,7 @@ empty for the default (the current mode on a re-run).
 |---|---|
 | `none` | nothing beyond the Discord-turn hooks every bot gets |
 | `dev-manager` | for bots that change claude-discord together with peer bots on other machines: the rule `.claude/rules/claude-discord-dev-manager.md` (from `rules/dev-manager.md`) and the three peers hooks below |
-| `autoresearchclaw` | for a bot next to AutoResearchClaw runs in the project: the `autoresearchclaw/on-start` hook, which posts run progress to the channel (see AutoResearchClaw progress below). No rule file: every session under the project loads one, the pipeline's own agent sessions included |
+| `autoresearchclaw` | for a bot next to AutoResearchClaw runs in the project: the `autoresearchclaw/on-start` hook, which posts run progress to the channel (see AutoResearchClaw progress below). No rule file: every session under the project loads one, the pipeline's own agent sessions included. Give it to one bot per project: two such bots each post every event |
 
 A dev-manager's setup also asks for its peers as
 `name:bot_id:owner_id:machine`, comma-separated. They are merged by `bot_id`
@@ -165,12 +165,18 @@ watcher ran. `<bot>/arc-watch.pid` holds `<watcher pid> <session pid>`; a
 second start of the same session leaves the running watcher alone, and so
 does a session started under it (a `claude -p` from its Bash inherits the
 bot's state directory and runs `on-start` too). A resumed session gets its
-own watcher and the old one exits at its next wake.
+own watcher and the old one exits at its next wake. So does any other
+session started in the project with the bot's environment (its
+`DISCORD_STATE_DIR`) that is not under the bot's session: it takes the
+watcher over, and when it ends nothing watches until the bot's next start.
 
 The same mode also gives the session, once per session, the format for a
 cross-machine digest (hypothesis ids, config commit hash, a metrics table,
 what failed and why, lessons, commit links) and the list of what never
-leaves the machine.
+leaves the machine. That list (with "never touch the SCOP tunnel, never kill
+a Claude process" and "gates are answered in the run's terminal") is also
+in the system prompt of every launch through the wrapper, so a refreshed
+session, whose first turn is a CLI prompt, has it before it answers anyone.
 
 ## Resuming by name
 
@@ -209,7 +215,7 @@ under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
 | UserPromptSubmit | | `turn/on-prompt` | On a Discord turn, records the message's chat_id/message_id for `on-stop` and, once per session (see below), adds an additionalContext entry with the bot's identity and the mention rule; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply. |
 | Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it; always clears the per-turn files either way. |
-| SessionStart | `compact\|clear` | `turn/on-compact` | Clears the per-session "primed" flag, so the next Discord turn injects the identity context again. |
+| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | After a compact or `/clear`, clears the per-session "primed" flag, so the next Discord turn injects the identity context again. At a startup or resume, clears the per-turn files a turn whose Stop never ran (an interrupt, a kill) left behind, keeping the primed flag (a resumed conversation still holds that context). An `on-compact` entry an earlier version registered is replaced. |
 | PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/mention-guard` | dev-manager only. Denies a reply that names a peer (a whole word, case-insensitive) without its `<@bot_id>` or `<@!bot_id>`, or that answers a peer without mentioning it: the author of the message in `reply_to` when that is set, else of the turn's last message. A bot only receives messages that mention it. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `peers/checkin` | dev-manager only. A reply that mentions a peer (`<@bot_id>` or `<@!bot_id>`) touches `.claude/discord-agents/checkin/<session_id>`. |
 | PreToolUse | `Edit\|Write\|MultiEdit` | `peers/edit-gate` | dev-manager only. Denies an edit under a path whose realpath contains `/claude-discord/` unless the session checked in within the last 60 minutes; an allowed edit renews the check-in. Paths git ignores (a bot's state such as the refresh `handoff.md`, `.superpowers/`) pass. Bash and git edits are not seen; the rule asks for the same announcement by hand. |
@@ -243,9 +249,10 @@ a restart. To remove them, delete their entries from `.hooks` in those
 files.
 
 The identity/mention-rule context is long, so `on-prompt` injects it once per
-session (a `turns/<session_id>.primed` marker), not on every turn -- a
-compaction or `/clear` drops it from the transcript, which is what
-`on-compact` is for. The "refresh" handoff still fires on every matching
+session (a `turns/<session_id>.primed` marker holding the bot's mode), not on
+every turn -- a compaction or `/clear` drops it from the transcript, which is
+what `on-session-start` is for, and a changed mode injects it again with the
+new mode's rules. The "refresh" handoff still fires on every matching
 message regardless of the primed state, since it is a specific command, not
 boilerplate.
 
@@ -286,7 +293,7 @@ the session under Claude's background daemon; the bot stays online and
 flags alone and drops the shell environment, so the wrapper passes the state
 directory (where the token lives) inside `--settings` as well as in the
 environment; measured 2026-09-18, a fork made by `/bg` had no
-`DISCORD_STATE_DIR` and its plugin server died silently. Two things to know:
+`DISCORD_STATE_DIR` and its plugin server died silently. Three things to know:
 
 - The `/bg` fork does not carry `--append-system-prompt`, so the identity
   paragraph from the system prompt is gone after `/bg`. `on-prompt` re-adds
@@ -330,7 +337,9 @@ it can still choose well:
    project directory (a background one through `claude stop`, a foreground one
    with SIGTERM), waits until its process is gone and a moment more for the
    token to be released, and starts a fresh `--bg` session with a first turn
-   that tells it to catch up. That launch folds `handoff.md` into the system
+   that tells it to catch up. A prompt given to `refresh` (a bare word after
+   the name, as in `claude-discord refresh alpha "summarize the last hour"`)
+   is that first turn instead of the default one; claude flags pass through. That launch folds `handoff.md` into the system
    prompt and moves the file to `handoff.prev.md`, so a later start through the
    wrapper does not resume a conversation that has moved on. (A crash respawn
    by Claude's daemon reuses the flags of the launch, handoff included.)

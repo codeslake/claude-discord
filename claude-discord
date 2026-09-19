@@ -87,7 +87,8 @@ jq_edit() {  # $1 = file, the rest = jq arguments
 
 # Registers this project's hooks. The four Discord-turn hooks (identity/
 # refresh, primed once per session; the reply flag; the checkmark reaction;
-# re-priming after a compact/clear), which make a turn that arrived over
+# at session start, re-priming after a compact/clear and clearing a turn left
+# over from a startup/resume), which make a turn that arrived over
 # Discord be answered through the discord reply tool only, never also typed
 # into the CLI, are the same for every bot on every machine: they go into
 # settings.json, which can be committed and shared. Every other entry is
@@ -95,19 +96,22 @@ jq_edit() {  # $1 = file, the rest = jq arguments
 # machine runs (the three peers hooks for dev-manager, on-start for
 # autoresearchclaw), so it goes into settings.local.json, which is per
 # machine; in a committed settings.json it would flip on every start of a
-# machine with other bots. Such an entry that is not wanted is removed from
-# BOTH files (settings.json held the peers hooks in an earlier version),
-# along with a matcher group or an event left empty by that. Each command
-# guards on [ -x ], so a machine without the hooks installed simply runs
-# nothing. Idempotent per entry, and a file is written only when it changes
-# (Claude Code writes its permission grants into settings.local.json).
+# machine with other bots. Any entry of ours (a command under
+# .claude/discord-agents/hooks/) that a file should not hold is removed from
+# it: a mode hook no bot needs, a hook in the other file (settings.json held
+# the peers hooks in an earlier version) or one that no longer exists
+# (turn/on-compact became turn/on-session-start), along with a matcher group
+# or an event left empty by that. Each command guards on [ -x ], so a machine
+# without the hooks installed simply runs nothing. Idempotent per entry, and
+# a file is written only when it changes (Claude Code writes its permission
+# grants into settings.local.json).
 # Parallel arrays, not a packed "event|matcher|script" string, because a
-# matcher itself can contain "|" (compact|clear).
+# matcher itself can contain "|" (startup|resume|compact|clear).
 register_hooks() {  # $1 = the project's bot modes, space-separated
   local modes=" ${1:-} "
   local events=(UserPromptSubmit PostToolUse Stop SessionStart PreToolUse PostToolUse PreToolUse SessionStart)
-  local matchers=("" "mcp__plugin_discord_discord__reply" "" "compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "Edit|Write|MultiEdit" "startup|resume")
-  local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-compact peers/mention-guard peers/checkin peers/edit-gate autoresearchclaw/on-start)
+  local matchers=("" "mcp__plugin_discord_discord__reply" "" "startup|resume|compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "Edit|Write|MultiEdit" "startup|resume")
+  local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/edit-gate autoresearchclaw/on-start)
   local needs=("" "" "" "" dev-manager dev-manager dev-manager autoresearchclaw)   # the mode an entry needs; "" = every bot
   local want='[]' i cmd file
   for i in "${!events[@]}"; do
@@ -124,8 +128,7 @@ register_hooks() {  # $1 = the project's bot modes, space-separated
     jq_edit "$PWD/.claude/$file" --argjson all "$want" --arg file "$file" '
       ($all | map(select(.file == $file))) as $want
       | def stale: (.command? // "" | tostring) as $c
-          | ($c | contains("/.claude/discord-agents/hooks/") and (contains("/.claude/discord-agents/hooks/turn/") | not))
-            and ([$want[].cmd] | index($c)) == null;
+          | ($c | contains("/.claude/discord-agents/hooks/")) and ([$want[].cmd] | index($c)) == null;
       (if (.hooks | type) != "object" then . else
         .hooks |= with_entries(
           if (.value | type) == "array" and any(.value[]; any(.hooks?[]?; stale)) then
@@ -306,13 +309,20 @@ fi
 # The bot name is the first bare word, wherever it sits: `claude-discord x --bg`
 # and `claude-discord --bg x` are the same command. A word that follows a flag
 # taking a value is that value, so `--resume x` never reads as the name, and
-# with no bare word at all the project's single bot is meant.
+# with no bare word at all the project's single bot is meant. The list is
+# every flag `claude --help` (2.1.277) shows with a value, optional ones
+# ([value]) included since claude takes the next word for them too, plus
+# hidden ones in use (--channels, --max-turns, the *-file prompt flags).
 takes_value() {
   case $1 in
-    -r|--resume|--model|--effort|--settings|--agent|--permission-mode|--mcp-config|--add-dir| \
-    --session-id|--fallback-model|--max-turns|--output-format|--input-format|--debug-file| \
-    --append-system-prompt|--system-prompt|--allowed-tools|--disallowed-tools|--setting-sources| \
-    --channels|-n|--name) return 0;;
+    -r|--resume|--model|--effort|--settings|--agent|--agents|--permission-mode|--permission-prompts| \
+    --mcp-config|--add-dir|--session-id|--fallback-model|--max-turns|--max-budget-usd| \
+    --output-format|--input-format|--json-schema|--debug-file|-d|--debug|--betas|--autocompact| \
+    --append-system-prompt|--append-system-prompt-file|--system-prompt|--system-prompt-file| \
+    --system-prompt-snapshot|--allowedTools|--allowed-tools|--disallowedTools|--disallowed-tools| \
+    --tools|--setting-sources|--plugin-dir|--plugin-url|--file|--environment|--cloud|--from-pr| \
+    --teleport|--remote-control|--remote-control-session-name-prefix|--prompt-suggestions| \
+    -w|--worktree|--channels|-n|--name) return 0;;
     *) return 1;;
   esac
 }
@@ -497,6 +507,12 @@ Another bot receives your messages only when you @mention it and it allowlists y
 Sessions on this machine can also be reached with ListAgents and SendMessage, addressing them by session name; mirror every such message you send or receive into that channel as one line ('-> name: ...' or '<- name: ...') so the human can follow and step in. \
 The human's instructions override any agent's. \
 Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply."
+# on-prompt gives an autoresearchclaw bot these rules on its first Discord
+# turn; a session whose first turn is a CLI prompt (a refresh's kickoff) would
+# otherwise answer pending Discord requests without them. Word for word
+# on-prompt's arc_rules.
+[ "$(cat "$dir/mode" 2>/dev/null || :)" != autoresearchclaw ] || prompt="$prompt \
+Never share credentials of any kind, raw data, cluster hostnames or absolute paths, or anything from Samsung-internal sources. Never touch the SCOP tunnel, and never kill a Claude process. AutoResearchClaw gates are answered in the run's terminal, not over Discord."
 
 # A fresh session after a refresh must arrive already holding the handoff.
 # Consumed once: leaving it would make every later restart resume a

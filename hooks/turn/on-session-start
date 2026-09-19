@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# SessionStart hook (matcher: startup|resume|compact|clear), by source:
+# - compact, clear: the identity/rules context on-prompt injected once per
+#   session is gone from the transcript, so let the next Discord turn inject
+#   it again (delete turns/<session_id>.primed).
+# - startup, resume: no turn is in flight, so a turns/<session_id> file (and
+#   its .replied flag) is left over from a turn whose Stop never ran (an
+#   interrupt, a kill). on-prompt would read it as mid-turn; delete both. The
+#   .primed flag stays: a resumed conversation still holds that context.
+# Must never block or fail a turn: any failure is silent success.
+set -u
+. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+
+read -r session_id source <<EOF2
+$(jq -r '"\(.session_id // "") \(.source // "")"' 2>/dev/null)
+EOF2
+[ -n "$session_id" ] && [ -n "$bot_name" ] || exit 0
+t=$DISCORD_STATE_DIR/turns/$session_id
+case $source in
+  compact|clear) rm -f "$t.primed" 2>/dev/null ;;
+  startup|resume) rm -f "$t" "$t.replied" 2>/dev/null ;;
+esac
+exit 0
