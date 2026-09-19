@@ -1,5 +1,5 @@
-# Sourced by hooks/turn/on-prompt, on-reply and on-stop; never registered
-# on its own. Resolves the current bot's identity from $DISCORD_STATE_DIR
+# Sourced by hooks/turn/on-prompt, on-reply, on-stop and on-compact; never
+# registered on its own. Resolves the current bot's identity from $DISCORD_STATE_DIR
 # and provides `react` to add a reaction. No `set -e`: a caller under
 # `set -u` must survive every file here being missing.
 

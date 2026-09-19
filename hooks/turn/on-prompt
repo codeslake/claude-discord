@@ -18,24 +18,44 @@ esac
 
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
 
-# ids come from the opening tag ONLY -- everything up to its closing '>' --
-# never from the free-form message body that follows. A message can contain
-# literal text that looks like an attribute (a path-traversal payload
-# disguised as a message_id), and scanning the whole prompt would pick that
-# up too. Digits only, on top of that; react() also refuses a non-numeric id.
-tag=${prompt%%>*}
-pair=$(printf '%s' "$tag" | grep -oE 'chat_id="[0-9]+" message_id="[0-9]+"' | head -1)
-chat_id="" message_id=""
-if [ -n "$pair" ]; then
-  chat_id=$(printf '%s' "$pair" | sed -E 's/chat_id="([0-9]+)".*/\1/')
-  message_id=$(printf '%s' "$pair" | sed -E 's/.*message_id="([0-9]+)"/\1/')
-fi
-if [ -n "$chat_id" ] && [ -n "$message_id" ] && [ -n "$session_id" ] && mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; then
+# ids come from an OPENING tag ONLY -- everything from the start of the
+# prompt, or the previous tag's closing </channel>, up to this tag's own
+# '>' -- never from a message body, which can contain literal text that
+# looks like an attribute (a path-traversal payload disguised as a
+# message_id). Several queued Discord messages can share one prompt, each
+# with its own tag, so every opening tag is recorded, not only the first;
+# the loop walks tag-boundary to tag-boundary so a body can never be
+# mistaken for one. Digits only, on top of that; react() also refuses a
+# non-numeric id.
+pairs=""
+rest=$prompt
+while :; do
+  head=${rest%%>*}
+  [ "$head" != "$rest" ] || break
+  seg=$(printf '%s' "$head" | grep -oE 'chat_id="[0-9]+" message_id="[0-9]+"' | head -1)
+  [ -n "$seg" ] && pairs="$pairs$seg
+"
+  after=${rest#*</channel>}
+  [ "$after" != "$rest" ] || break
+  rest=$after
+done
+
+if [ -n "$pairs" ] && [ -n "$session_id" ] && mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; then
   # A turn that is only just starting hasn't replied yet; a stale flag here
   # means an earlier on-stop never ran.
   rm -f "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
-  printf '%s %s\n' "$chat_id" "$message_id" >> "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null || :
-  printf '%s\n' "$message_id" > "$DISCORD_STATE_DIR/last-message-id" 2>/dev/null || :
+  last_message_id=""
+  while IFS= read -r seg; do
+    [ -n "$seg" ] || continue
+    chat_id=$(printf '%s' "$seg" | sed -E 's/chat_id="([0-9]+)".*/\1/')
+    message_id=$(printf '%s' "$seg" | sed -E 's/.*message_id="([0-9]+)"/\1/')
+    [ -n "$chat_id" ] && [ -n "$message_id" ] || continue
+    printf '%s %s\n' "$chat_id" "$message_id" >> "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null || :
+    last_message_id=$message_id
+  done <<PAIRS
+$pairs
+PAIRS
+  [ -n "$last_message_id" ] && { printf '%s\n' "$last_message_id" > "$DISCORD_STATE_DIR/last-message-id" 2>/dev/null || :; }
 fi
 
 # The identity/rules preamble is injected once per session, not on every

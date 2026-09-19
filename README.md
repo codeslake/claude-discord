@@ -129,7 +129,7 @@ under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
 | UserPromptSubmit | | `turn/on-prompt` | On a Discord turn, records the message's chat_id/message_id for `on-stop` and, once per session (see below), adds an additionalContext entry with the bot's identity and the mention rule; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply. |
 | Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it; always clears the per-turn files either way. |
-| SessionStart | `compact|clear` | `turn/on-compact` | Clears the per-session "primed" flag, so the next Discord turn injects the identity context again. |
+| SessionStart | `compact\|clear` | `turn/on-compact` | Clears the per-session "primed" flag, so the next Discord turn injects the identity context again. |
 
 Both `setup` and the start path register all four, so a bot set up before
 this existed gets them on its next start too. Registration is idempotent per

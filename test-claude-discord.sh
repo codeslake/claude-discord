@@ -38,15 +38,19 @@ printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(ms
 printf '#!/bin/bash\necho "LAUNCHER $*"\n' > "$HOME/bin/claude-launcher"; chmod +x "$HOME/bin/claude-launcher"
 printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
 CURL_LOG="$HOME/curl.log"; : > "$CURL_LOG"
+CURL_STDIN_LOG="$HOME/curl.stdin.log"; : > "$CURL_STDIN_LOG"
 cat > "$HOME/bin/curl" <<'EOF'
 #!/bin/bash
 # Logs its args to CURL_LOG instead of stdout, since the caller redirects
-# stdout/stderr to /dev/null for the real, detached curl call.
+# stdout/stderr to /dev/null for the real, detached curl call. Also drains
+# stdin to CURL_STDIN_LOG, since the real call sends the auth header there
+# (-H @-), never in argv.
 printf '%s\n' "$*" >> "$CURL_LOG"
+cat >> "$CURL_STDIN_LOG" 2>/dev/null
 EOF
 chmod +x "$HOME/bin/curl"
 export PATH="$HOME/bin:$PATH"
-export CURL_LOG
+export CURL_LOG CURL_STDIN_LOG
 export CLAUDE_DISCORD_LAUNCHER=claude-launcher
 mkdir -p "$HOME/.claude-discord"; : > "$HOME/.claude-discord/discord-proxy.ts"
 cp -r "$D/hooks" "$HOME/.claude-discord/hooks"   # stand-in for install.sh, not exercised here
@@ -115,6 +119,20 @@ grep -q 'channels/111/messages/222/reactions/%E2%9C%85/@me' "$CURL_LOG" || { ech
 grep -q 'guilds\|bans' "$CURL_LOG" && { echo "FAIL: curl was asked to hit the injected path-traversal URL"; exit 1; }
 echo "ok: chat_id/message_id come only from the opening tag, never the message body; an injected path-traversal payload is not recorded and curl never sees it"
 
+# Several queued Discord messages can share one prompt, each with its own
+# opening tag; every one of them must be recorded and reacted to, not only
+# the first.
+rm -rf "$DSD/turns/sMulti"; : > "$CURL_LOG"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"sMulti","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"10\" user=\"u\" user_id=\"9\" ts=\"t\">\nfirst\n</channel>\n<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"11\" user=\"u\" user_id=\"9\" ts=\"t\">\nsecond\n</channel>"}' >/dev/null
+[ "$(cat "$DSD/turns/sMulti")" = "$(printf '1 10\n1 11')" ] || { echo "FAIL: both queued messages must be recorded, one line each"; exit 1; }
+[ "$(cat "$DSD/last-message-id")" = "11" ] || { echo "FAIL: last-message-id must be the most recently queued message"; exit 1; }
+: > "$DSD/turns/sMulti.replied"; : > "$CURL_LOG"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"sMulti"}'
+n=0; while [ "$(wc -l < "$CURL_LOG" 2>/dev/null || echo 0)" -lt 2 ] && [ "$n" -lt 20 ]; do sleep 0.1; n=$((n+1)); done
+grep -q 'channels/1/messages/10/reactions/%E2%9C%85/@me' "$CURL_LOG" || { echo "FAIL: the first queued message did not get reacted to"; exit 1; }
+grep -q 'channels/1/messages/11/reactions/%E2%9C%85/@me' "$CURL_LOG" || { echo "FAIL: the second queued message did not get reacted to"; exit 1; }
+echo "ok: several queued Discord messages in one prompt each get their own opening tag recorded and reacted to"
+
 # The identity/rules context is injected once per session, not every turn.
 rm -f "$DSD/turns/sPrime.primed"; rm -rf "$DSD/turns/sPrime"
 PP='{"session_id":"sPrime","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}'
@@ -166,15 +184,17 @@ echo "ok: a missing lib/discord.sh makes every hook exit 0 with no output, never
 
 rm -rf "$DSD/turns"; mkdir -p "$DSD/turns"
 printf '111 222\n' > "$DSD/turns/s5"
-: > "$CURL_LOG"
+: > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
 DISCORD_STATE_DIR="$DSD" bash "$H/on-reply" <<<'{"session_id":"s5"}'
 [ -f "$DSD/turns/s5.replied" ] || { echo "FAIL: on-reply must set the .replied flag"; exit 1; }
 DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s5"}'
 wait_for_file "$CURL_LOG"
+wait_for_file "$CURL_STDIN_LOG"
 grep -q 'channels/111/messages/222/reactions/%E2%9C%85/@me' "$CURL_LOG" || { echo "FAIL: on-stop must react with the checkmark on the recorded message"; exit 1; }
 grep -q 'tokA2' "$CURL_LOG" && { echo "FAIL: the bot token appeared in curl's argv (visible in ps/cmdline)"; exit 1; }
+grep -qF 'Authorization: Bot tokA2' "$CURL_STDIN_LOG" || { echo "FAIL: the token must reach curl via stdin (-H @-), so dropping that would break the real call"; exit 1; }
 [ ! -e "$DSD/turns/s5" ] && [ ! -e "$DSD/turns/s5.replied" ] || { echo "FAIL: on-stop must remove both per-turn files"; exit 1; }
-echo "ok: on-stop reacts with a checkmark only after on-reply, removes both per-turn files, and never puts the token in curl's argv"
+echo "ok: on-stop reacts with a checkmark only after on-reply, removes both per-turn files, keeps the token out of curl's argv, and sends it correctly via stdin"
 
 mkdir -p "$DSD/turns"
 printf '111 222\n' > "$DSD/turns/s6"
@@ -207,9 +227,13 @@ printf '' | bash "$S" setup .. --reset >/dev/null 2>&1 && { echo "FAIL: setup ..
 [ -f "$P/.claude/MARKER" ] || { echo "FAIL: '..' as bot name escaped root and wiped the project .claude"; exit 1; }
 echo "ok: setup rejects '..' as bot name, project .claude untouched"
 
-printf '' | bash "$S" setup hooks >/dev/null 2>&1 && { echo "FAIL: setup hooks should be refused, it collides with the hooks symlink"; exit 1; }
-bash "$S" hooks >/dev/null 2>&1 && { echo "FAIL: starting a bot named hooks should be refused"; exit 1; }
-echo "ok: the bot name 'hooks' is reserved and rejected by both setup and start"
+out=$(printf '' | bash "$S" setup hooks 2>&1) && { echo "FAIL: setup hooks should have been refused, it collides with the hooks symlink"; exit 1; }
+rc=$?
+[ "$rc" -eq 2 ] && grep -qF "bot name 'hooks' is reserved for the hooks directory" <<<"$out" || { echo "FAIL: setup hooks must be refused by the reserved-name guard specifically (exit 2, its own message), got rc=$rc: $out"; exit 1; }
+out=$(bash "$S" hooks 2>&1) && { echo "FAIL: starting a bot named hooks should have been refused"; exit 1; }
+rc=$?
+[ "$rc" -eq 2 ] && grep -qF "bot name 'hooks' is reserved for the hooks directory" <<<"$out" || { echo "FAIL: starting a bot named hooks must be refused by the reserved-name guard specifically (exit 2, its own message), got rc=$rc: $out"; exit 1; }
+echo "ok: the bot name 'hooks' is reserved and rejected by both setup and start, by the reserved-name guard specifically"
 
 bash "$S" gamma >/dev/null 2>&1 && { echo "FAIL: run without setup should refuse"; exit 1; }
 echo "ok: run refuses without setup"
