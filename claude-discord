@@ -651,6 +651,16 @@ run=("$bin")
 # which is this start's to remove. The session this very start is resuming is
 # kept too ($resume_id, see above): --resume resolves a name to exactly such a
 # done row, and reaping it would delete what the start is reopening.
+# `claude rm <id>` takes the record's own `.id`, an 8-character job id, not
+# `.sessionId` (a full transcript-basename UUID): measured 2026-09-19 on an
+# owner's machine, `claude rm <sessionId>` answered "No job matching" while
+# `claude rm <job id>` removed it, and `claude rm --help` says `Usage: claude
+# rm <id>`. Most rows' `.id` equals `.sessionId`'s first 8 characters, but not
+# all: a resumed session gets a new sessionId while the job id stays, so the
+# two must not be conflated. $resume_id is still a full sessionId (a --resume
+# value resolves to a transcript basename), so the exclusion still compares
+# .sessionId != $keep; a row's .id is also compared to $keep in case a short
+# id, rather than a name, was passed to --resume.
 # Both calls go to "$bin", never "$run": they are local daemon bookkeeping and
 # start no session, so a process wrapper (a proxy chain, a version pin) has
 # nothing to wrap here and would only add a process per call.
@@ -669,14 +679,16 @@ prune_dead_sessions() {
     if type != "array" then empty else
       [ .[] | select(.name == $n and .cwd == $cwd
                      and (.state == "stopped" or .state == "done")
-                     and (.sessionId // "") != "" and .sessionId != $keep) ]
-      | sort_by(.startedAt) | .[0:20][] | .sessionId end' 2>/dev/null) || return 0
+                     and (.id // "") != "" and .sessionId != $keep and .id != $keep) ]
+      | sort_by(.startedAt) | .[0:20][] | .id end' 2>/dev/null) || return 0
   [ -n "$ids" ] || return 0
   while IFS= read -r id; do
-    # A daemon session id is hex digits and dashes. Anything else is not one,
-    # and a crafted id must not become an argument to a delete: a leading dash
-    # would read as a flag, and a newline in it arrives here as two lines.
-    [[ $id =~ ^[0-9a-fA-F][0-9a-fA-F-]{7,}$ ]] || continue
+    # A job id is exactly 8 hex characters, no dashes: unlike a sessionId
+    # (a UUID, hex and dashes), a job id could never be mistaken for one by
+    # this shape, and a crafted id must not become an argument to a delete --
+    # a leading dash would read as a flag, and a newline in it arrives here
+    # as two lines, both of which this shape also rejects.
+    [[ $id =~ ^[0-9a-fA-F]{8}$ ]] || continue
     "$bin" rm "$id" >/dev/null 2>&1 || failed=$((failed + 1))
   done <<<"$ids"
   [ "$failed" = 0 ] || echo "claude-discord: could not remove $failed dead session(s) of $name from the agent view" >&2

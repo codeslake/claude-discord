@@ -624,25 +624,32 @@ case "$1" in
 esac
 STUB
 chmod +x "$HOME/bin/claude"
-# Three dead sessions of this bot here: dead-0001 (whose id is NOT its
-# sessionId, so the removal must use sessionId), dead-0002, and fade-0001 with
-# no startedAt at all, which must neither break the sort nor escape selection.
-# Left alone: one live entry per live state (11fe-0001..0005, in the order
-# idle, busy, waiting, working, blocked), an interactive entry with no state,
-# a dead one of another bot, a dead one of this bot in another project, and two
-# whose sessionId is not a daemon id -- one starting with a dash, which `rm`
-# would read as a flag, and one holding a newline, which arrives as two lines.
+# Dead sessions of this bot here, each with an `.id` that does NOT share its
+# `.sessionId`'s first 8 characters -- exactly like a resumed session on a
+# real daemon (measured 2026-09-19: 3 of 17 rows this way) -- so the removal
+# must reach `rm` by `.id` alone and the sessionId must never appear there:
+# "8705916e" (sessionId "ed0dd12f..."), "d0000002" (sessionId "dead-0002",
+# also the row a later --resume test points at), and "f96ea453" (sessionId
+# "60568320...", and no startedAt at all, which must neither break the sort
+# nor escape selection). "no-id" has no `.id` field at all and must be
+# skipped without breaking anything else. Left alone: one live entry per live
+# state (11fe0001..0005, in the order idle, busy, waiting, working, blocked),
+# an interactive entry with neither `.id` nor `.state`, a dead one of another
+# bot, a dead one of this bot in another project, and two whose `.id` is not
+# a job id -- one starting with a dash, which `rm` would read as a flag, and
+# one holding a newline, which arrives as two lines.
 jq -n --arg cwd "$PDP" '
-  [{id:"d0000001", sessionId:"dead-0001", kind:"background", name:"dead", cwd:$cwd, state:"stopped", startedAt:1758240000000},
-   {id:"dead-0002", sessionId:"dead-0002", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758243600000},
-   {id:"fade-0001", sessionId:"fade-0001", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:null},
-   {id:"facade-01", sessionId:"facade-01", kind:"interactive", name:"dead", cwd:$cwd, startedAt:1758247200000},
-   {id:"beef-0001", sessionId:"beef-0001", kind:"background", name:"beta", cwd:$cwd, state:"stopped", startedAt:1758236400000},
-   {id:"cafe-0001", sessionId:"cafe-0001", kind:"background", name:"dead", cwd:"/elsewhere", state:"done", startedAt:1758236400000},
-   {id:"bad-dash", sessionId:"-force-0001", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758236400000},
-   {id:"bad-nl", sessionId:"nope-0001\n-rf", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758236400000}]
+  [{id:"8705916e", sessionId:"ed0dd12f-0000-4000-8000-000000000001", kind:"background", name:"dead", cwd:$cwd, state:"stopped", startedAt:1758240000000},
+   {id:"d0000002", sessionId:"dead-0002", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758243600000},
+   {id:"f96ea453", sessionId:"60568320-0000-4000-8000-000000000002", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:null},
+   {sessionId:"99999999-0000-4000-8000-000000000003", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758244000000},
+   {sessionId:"facade01-0000-4000-8000-00000000face", kind:"interactive", name:"dead", cwd:$cwd, startedAt:1758247200000},
+   {id:"beef0001", sessionId:"beef0001-0000-4000-8000-000000000004", kind:"background", name:"beta", cwd:$cwd, state:"stopped", startedAt:1758236400000},
+   {id:"cafe0001", sessionId:"cafe0001-0000-4000-8000-000000000005", kind:"background", name:"dead", cwd:"/elsewhere", state:"done", startedAt:1758236400000},
+   {id:"-abc1234", sessionId:"baddash1-0000-4000-8000-000000000006", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758236400000},
+   {id:"nope-0001\n-rf", sessionId:"badnl0001-0000-4000-8000-00000000007", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758236400000}]
   + (["idle","busy","waiting","working","blocked"] | to_entries
-     | map({id:("11fe-000" + (.key + 1 | tostring)), sessionId:("11fe-000" + (.key + 1 | tostring)),
+     | map({id:("11fe000" + (.key + 1 | tostring)), sessionId:("11fe0001-0000-4000-8000-00000000000" + (.key + 1 | tostring)),
             kind:"background", name:"dead", cwd:$cwd, state:.value, startedAt:1758250000000}))' \
   > "$HOME/agents.full.json"
 start_dead() {  # $out = the start's output; a start that FAILS must say so, not die silently under set -e
@@ -652,9 +659,40 @@ cp "$HOME/agents.full.json" "$HOME/agents.json"
 : > "$HOME/agents.rc"; : > "$HOME/rm.rc"; : > "$HOME/rm.log"; : > "$HOME/agents.calls"
 start_dead
 grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" && grep -q -- "-n dead" <<<"$out" || { echo "FAIL: the start must reach the exec with its usual arguments: $out"; exit 1; }
-[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "dead-0001 dead-0002 fade-0001 " ] || { echo "FAIL: exactly this bot's dead sessions must be removed, by sessionId, and no implausible id: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "8705916e d0000002 f96ea453 " ] || { echo "FAIL: exactly this bot's dead sessions must be removed, by job id, and no implausible id: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+! grep -qF "ed0dd12f" "$HOME/rm.log" && ! grep -qF "60568320" "$HOME/rm.log" && ! grep -qx "dead-0002" "$HOME/rm.log" || { echo "FAIL: the sessionId must never reach rm, only the job id: $(cat "$HOME/rm.log")"; exit 1; }
 grep -qx -- "agents --json --all" "$HOME/agents.calls" || { echo "FAIL: the listing must ask for --all, or a retired session is not even listed: $(cat "$HOME/agents.calls")"; exit 1; }
-echo "ok: a start removes this bot's dead sessions in this project (by sessionId, startedAt or none) and leaves live, stateless, other-name, other-project and implausible-id entries alone"
+echo "ok: a start removes this bot's dead sessions in this project by job id (startedAt or none), never by sessionId, and leaves live, stateless, other-name, other-project, no-id and implausible-id entries alone"
+
+# An id-less row must never take a cap slot from a real, removable one: if it
+# did, sorting 20 real rows plus one id-less row (given the oldest startedAt,
+# so it would sort first) would push the newest real row out of the top 20,
+# even though the id-less row itself never reaches `rm` (its emitted id is
+# not a job id, so the shape check below skips it either way).
+jq -n --arg cwd "$PDP" '[range(20) | (2000 + .) as $n
+   | {id:("d00d" + ($n | tostring)), sessionId:("noid-cap-session-" + ($n | tostring)), kind:"background", name:"dead", cwd:$cwd,
+      state:"done", startedAt:(1758260000000 + . * 60000)}]
+  + [{sessionId:"noid-oldest-0000-4000-8000-000000000009", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1}]' \
+  > "$HOME/agents.json"
+: > "$HOME/rm.log"
+start_dead
+grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: a start with an id-less phantom row must still reach the exec: $out"; exit 1; }
+[ "$(wc -l < "$HOME/rm.log")" -eq 20 ] || { echo "FAIL: an id-less row must never take a cap slot from a real one: got $(wc -l < "$HOME/rm.log") removed"; exit 1; }
+grep -qx d00d2019 "$HOME/rm.log" || { echo "FAIL: the newest real row must not be pushed out of the cap by an id-less phantom: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+echo "ok: a dead row with no job id at all is excluded before the cap, so it never displaces a real removal"
+
+# If a missing `.id` ever fell back to `.sessionId`, an id-less row whose
+# sessionId happens to look like a job id (8 hex characters, no dashes) would
+# slip past the shape check too. It must not: an id-less row is skipped
+# outright, with no fallback to any other field.
+jq -n --arg cwd "$PDP" '[{sessionId:"deadbeef", kind:"background", name:"dead", cwd:$cwd, state:"done", startedAt:1758261000000}]' \
+  > "$HOME/agents.json"
+: > "$HOME/rm.log"
+start_dead
+grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: a start with only an id-less row must still reach the exec: $out"; exit 1; }
+[ ! -s "$HOME/rm.log" ] || { echo "FAIL: an id-less row must never be removed via a fallback to a sessionId that happens to look like a job id: $(cat "$HOME/rm.log")"; exit 1; }
+echo "ok: a dead row with no job id is never removed by falling back to a sessionId that happens to look like one"
+cp "$HOME/agents.full.json" "$HOME/agents.json"
 
 # The session the start is RESUMING is dead by the daemon's reckoning and in
 # this bot's project, so it is exactly what the reaping selects -- and deleting
@@ -665,30 +703,30 @@ printf '{"type":"custom-title","customTitle":"my-dead-bot"}\n' > "$PROJD/dead-00
 : > "$HOME/rm.log"
 start_dead --resume my-dead-bot
 grep -q -- "--resume dead-0002" <<<"$out" || { echo "FAIL: the resumed name must still resolve to its session id: $out"; exit 1; }
-[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "dead-0001 fade-0001 " ] || { echo "FAIL: the session being resumed must not be removed: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "8705916e f96ea453 " ] || { echo "FAIL: the session being resumed must not be removed: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
 : > "$HOME/rm.log"
 start_dead --resume dead-0002
-grep -q -- "--resume dead-0002" <<<"$out" && [ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "dead-0001 fade-0001 " ] || { echo "FAIL: a --resume passed through untouched must not be removed either: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+grep -q -- "--resume dead-0002" <<<"$out" && [ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "8705916e f96ea453 " ] || { echo "FAIL: a --resume passed through untouched must not be removed either: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
 rm -f "$PROJD/dead-0002.jsonl"
-echo "ok: the session a start is resuming is never removed, whether --resume named it or gave its id, and the exec still carries it"
+echo "ok: the session a start is resuming is never removed by its job id either, whether --resume named it or gave its full session id, and the exec still carries it"
 
 # The cap: 20 removals per start, the oldest first, so a long-neglected daemon
 # cannot stall a start; the five newest are left for the next one.
-jq -n --arg cwd "$PDP" '[range(25) | ((100 + .) | tostring | .[1:]) as $n
-  | {id:("cab0-00" + $n), sessionId:("cab0-00" + $n), kind:"background", name:"dead", cwd:$cwd,
+jq -n --arg cwd "$PDP" '[range(25) | (1000 + .) as $n
+  | {id:("c0ff" + ($n | tostring)), sessionId:("cap-session-" + ($n | tostring)), kind:"background", name:"dead", cwd:$cwd,
      state:"stopped", startedAt:(1758240000000 + . * 60000)}]' > "$HOME/agents.json"
 : > "$HOME/rm.log"
 start_dead
 grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: the capped start must still reach the exec: $out"; exit 1; }
 [ "$(wc -l < "$HOME/rm.log")" -eq 20 ] || { echo "FAIL: at most 20 removals per start, got $(wc -l < "$HOME/rm.log")"; exit 1; }
-grep -qx cab0-0000 "$HOME/rm.log" && grep -qx cab0-0019 "$HOME/rm.log" && ! grep -qE '^cab0-002[0-4]$' "$HOME/rm.log" || { echo "FAIL: the 20 removed must be the oldest by startedAt: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
-echo "ok: a start removes at most 20 dead sessions, the oldest by startedAt (epoch ms) first"
+grep -qx c0ff1000 "$HOME/rm.log" && grep -qx c0ff1019 "$HOME/rm.log" && ! grep -qE '^c0ff102[0-4]$' "$HOME/rm.log" || { echo "FAIL: the 20 removed must be the oldest by startedAt: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+echo "ok: a start removes at most 20 dead sessions, the oldest by startedAt (epoch ms) first, by job id"
 
 # A removal that fails is reported once, on stderr, and the start goes on.
 cp "$HOME/agents.full.json" "$HOME/agents.json"; echo 1 > "$HOME/rm.rc"; : > "$HOME/rm.log"
 start_dead
 grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: a failing rm must never abort the start: $out"; exit 1; }
-[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "dead-0001 dead-0002 fade-0001 " ] || { echo "FAIL: one failing rm must not stop the others: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+[ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "8705916e d0000002 f96ea453 " ] || { echo "FAIL: one failing rm must not stop the others: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
 [ "$(grep -cF 'could not remove 3 dead session(s) of dead' <<<"$out")" -eq 1 ] || { echo "FAIL: failed removals must be reported in exactly one line: $out"; exit 1; }
 : > "$HOME/rm.rc"
 echo "ok: removals that fail are counted into one stderr line and the start still execs"
