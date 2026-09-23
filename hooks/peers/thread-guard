@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# PreToolUse hook (matcher: mcp__plugin_discord_discord__reply), dev-manager
-# bots only: one item lives in one thread, so the CHANNEL carries two short
-# lines per item (one when it starts, one when it lands) and the long text
-# goes inside the thread. A thread has a chat_id of its own, so a reply whose
-# chat_id is the bot's channel is a channel message: deny it once it is over
-# 500 characters. Characters, not bytes -- the channel's lines are Korean, and
-# jq's `length` counts codepoints whatever the locale says. Prints nothing
-# unless it denies; a no-op without a channel. Must never fail a turn.
+# PreToolUse hook (matcher: mcp__plugin_discord_discord__reply), every bot
+# but autoresearchclaw (it reads no peer): one request lives in one thread, so
+# the CHANNEL carries two short lines per request (one when it starts, one
+# when it lands) and the long text goes inside the thread. A thread has a
+# chat_id of its own, so a reply whose chat_id is the bot's channel is a
+# channel message: deny it once it is over 500 characters. Characters, not
+# bytes -- the channel's lines are often Korean, and jq's `length` counts
+# codepoints whatever the locale says. Prints nothing unless it denies; a
+# no-op without a channel, and for an autoresearchclaw bot, whose rule posts
+# one report per iteration in the channel: the thread rule covers requests,
+# not those reports. Must never fail a turn.
 set -u
 . "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
 
-[ "$bot_mode" = dev-manager ] && [ -n "$bot_channel" ] || exit 0
+[ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ] || exit 0
 input=$(cat 2>/dev/null) || exit 0
 over=$(printf '%s' "$input" | jq -r --arg ch "$bot_channel" '
   select((.tool_input.chat_id // "" | tostring) == $ch

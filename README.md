@@ -110,8 +110,8 @@ empty for the default (the current mode on a re-run).
 
 | Mode | What it installs |
 |---|---|
-| `none` | nothing beyond the Discord-turn hooks every bot gets |
-| `dev-manager` | for bots that change claude-discord together with peer bots on other machines: the rule `.claude/rules/claude-discord-dev-manager.md` (from `rules/dev-manager.md`) and the four peers hooks below |
+| `none` | nothing beyond the hooks every bot gets (the Discord-turn hooks and `thread-guard`) |
+| `dev-manager` | for bots that change claude-discord together with peer bots on other machines: the rule `.claude/rules/claude-discord-dev-manager.md` (from `rules/dev-manager.md`) and the three dev-manager peers hooks below |
 | `autoresearchclaw` | for a bot next to AutoResearchClaw runs in the project: the `autoresearchclaw/on-start` hook, which gives the bot's session `rules/autoresearchclaw.md`, so it reports each research iteration to the channel (see AutoResearchClaw reports below). No rule file in the project: every session under the project loads one, the pipeline's own agent sessions included. Give it to one bot per project: two such bots each report every iteration |
 
 A dev-manager's setup also asks for its peers as
@@ -136,17 +136,11 @@ sessions and plain `claude` sessions included), so it opens by telling a
 session to ignore it unless its Discord-turn context has the `Dev manager:`
 line, which `on-prompt` adds for a dev-manager bot only.
 
-That rule gives a dev-manager one item -- a defect, a feature, a measurement,
-a review -- per Discord thread. `~/.claude-discord/hooks/tools/thread start
-"[<area>] <short title>"` posts that one short line in the channel, opens a
-thread on it (`auto_archive_duration` 1440) and prints the thread id; the
-full answer, the diff summary and the back-and-forth go inside, with that id
-as `chat_id`. The line comes first on purpose: Discord opens a thread only
-from a message already in the channel, so starting one from the long answer
-would leave the long answer in the channel. `thread close <thread_id>`
-archives a finished thread, which takes it out of the sidebar. The helper
-needs `DISCORD_STATE_DIR` (every hook and the bot's own session have it);
-`thread-guard` below keeps the channel to short lines. Scratch files belong
+Every bot keeps one request per Discord thread (see Expected behaviour
+below). The dev-manager rule adds what is its own: an item is a defect, a
+feature, a measurement or a review, its back-and-forth with peers goes inside
+its thread, and a decision only a human can make is one channel line naming
+the thread. Scratch files belong
 under `~/.claude-discord/scratch/<bot name>/` when they must survive, in
 `/tmp` under a session-unique name when they need not -- never under
 `~/.claude`, and `$CLAUDE_JOB_DIR` exists only in a background session.
@@ -249,6 +243,25 @@ session.
 - With several bots in one channel, keep the default mention policy: with
   "respond without mention" on every bot, one human message gets one reply
   per bot.
+- One request, one thread, for every bot whatever its mode. The session
+  prompt (and `on-prompt`'s context, which survives `/bg`) tells it:
+  `~/.claude-discord/hooks/tools/thread start "[<area>] <short title>"` posts
+  that one short line in the channel, opens a thread on it
+  (`auto_archive_duration` 1440) and prints the thread id; the full answer
+  goes inside, with that id as `chat_id`. The line comes first on purpose:
+  Discord opens a thread only from a message already in the channel, so
+  starting one from the long answer would leave the long answer in the
+  channel. When the request lands, one closing line goes in the channel and
+  `thread close <thread_id>` archives the thread, which takes it out of the
+  sidebar. The helper needs `DISCORD_STATE_DIR` (every hook and the bot's own
+  session have it); `thread-guard` (see Hooks) keeps the channel to short
+  lines.
+- The session is an orchestrator, unless its mode's rules say otherwise:
+  it answers a quick request itself and dispatches one that needs more than
+  a few tool calls to a background subagent whose brief names the request's
+  thread id, then posts the subagent's result in that thread. The session
+  stays free for the next message, and requests from different people never
+  share a context.
 
 ## Hooks
 
@@ -262,25 +275,26 @@ so a machine without the hooks installed simply runs nothing. Scripts live
 under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
 `lib/discord.sh` and `tools/thread`/`tools/local-bots` are not registered:
 the first is sourced by every script below, the other two are run by the
-session (see Modes above).
+session (see Modes and Expected behaviour above).
 
 | Event | Matcher | Script | What |
 |---|---|---|---|
-| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn (a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag), records that tag's chat_id/message_id/user_id for `on-stop` and `mention-guard` (only the leading tag is trusted: the plugin does not escape `<` in message text, so anything after it could be forged; a message arriving mid-turn comes as a prompt of its own and is appended) and, once per session (see below), adds an additionalContext entry with the bot's identity and the mention rule; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
+| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn (a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag), records that tag's chat_id/message_id/user_id for `on-stop` and `mention-guard` (only the leading tag is trusted: the plugin does not escape `<` in message text, so anything after it could be forged; a message arriving mid-turn comes as a prompt of its own and is appended) and, once per session (see below), adds an additionalContext entry with the bot's identity, the mention rule, the thread rule and the orchestrator rule; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply. |
 | Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it; always clears the per-turn files either way. |
 | SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | After a compact or `/clear`, clears the per-session "primed" flag, so the next Discord turn injects the identity context again. At a startup or resume, clears the per-turn files a turn whose Stop never ran (an interrupt, a kill) left behind, keeping the primed flag (a resumed conversation still holds that context), then pins a background session's job (see Background sessions below). An `on-compact` entry an earlier version registered is replaced. |
 | PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/mention-guard` | dev-manager only. Denies a reply that names a peer (a whole word, case-insensitive) without its `<@bot_id>` or `<@!bot_id>`, or that answers a peer without mentioning it: the author of the message in `reply_to` when that is set, else of the turn's last message. A bot only receives messages that mention it. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `peers/checkin` | dev-manager only. A reply that mentions a peer (`<@bot_id>` or `<@!bot_id>`) touches `.claude/discord-agents/checkin/<session_id>`. |
-| PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/thread-guard` | dev-manager only. Denies a reply to the CHANNEL (a `chat_id` equal to the bot's channel; a thread has an id of its own) longer than 500 characters, counted in characters and not bytes, so the long text goes in the item's thread and the channel keeps one line. |
+| PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/thread-guard` | Every bot but autoresearchclaw, whose rule posts one report per iteration in the channel (it reads no peer). Denies a reply to the CHANNEL (a `chat_id` equal to the bot's channel; a thread has an id of its own) longer than 500 characters, counted in characters and not bytes, so the long text goes in the request's thread and the channel keeps one line. |
 | PreToolUse | `Edit\|Write\|MultiEdit` | `peers/edit-gate` | dev-manager only. Denies an edit under a path whose realpath contains `/claude-discord/` unless the session checked in within the last 60 minutes; an allowed edit renews the check-in. Paths git ignores (a bot's state such as the refresh `handoff.md`, `.superpowers/`) pass. Bash and git edits are not seen; the rule asks for the same announcement by hand. |
 | SessionStart | `startup\|resume\|compact\|clear` | `autoresearchclaw/on-start` | autoresearchclaw only. Prints the installed `rules/autoresearchclaw.md` as the session's additionalContext (nothing when the file is missing); starts no process. An entry an earlier version registered with `startup\|resume` is replaced. See AutoResearchClaw reports above. |
 
 Which file holds what:
 
-- The four `turn/` hooks go into `.claude/settings.json`. Every bot on every
-  machine gets the same four, so this file can be committed and shared.
-- Every mode hook (the four `peers/` hooks while some bot in the project is
+- The four `turn/` hooks and `peers/thread-guard` go into
+  `.claude/settings.json`. Every bot on every machine gets the same five, so
+  this file can be committed and shared.
+- Every mode hook (the other three `peers/` hooks while some bot in the project is
   a dev-manager, `autoresearchclaw/on-start` while one is autoresearchclaw;
   see Modes) goes into
   `.claude/settings.local.json`. Which modes a project has depends on the
@@ -288,12 +302,13 @@ Which file holds what:
   flip on every start of a machine with other bots. `settings.local.json`
   is Claude Code's per-machine settings file; keep it out of git. Cleanup
   removes stale mode entries from both files, so the ones an earlier
-  version put into `settings.json` move over on the next start.
+  version put into `settings.json` move over on the next start, and a
+  `thread-guard` entry in `settings.local.json` moves to `settings.json`.
 
 Both `setup` and the start path register them, so a bot set up before this
-existed gets them on its next start too. The `peers/` hooks do nothing in a
-session whose bot is not a dev-manager, and all but `thread-guard` (which
-reads no peer) also do nothing without `peers.json`;
+existed gets them on its next start too. `mention-guard`, `checkin` and
+`edit-gate` do nothing in a session whose bot is not a dev-manager, and also
+nothing without `peers.json`; `thread-guard` guards every channel reply but an autoresearchclaw bot's;
 `autoresearchclaw/on-start` does nothing for a bot in another mode. `on-prompt`
 also records each message's sender (`user_id`) for `mention-guard`, and
 gives a dev-manager its peers' mentions and the working rule once per
@@ -305,10 +320,14 @@ a restart. To remove them, delete their entries from `.hooks` in those
 files.
 
 The identity/mention-rule context is long, so `on-prompt` injects it once per
-session (a `turns/<session_id>.primed` marker holding the bot's mode), not on
-every turn -- a compaction or `/clear` drops it from the transcript, which is
-what `on-session-start` is for, and a changed mode injects it again with the
-new mode's rules. The "refresh" handoff still fires on every matching
+session (a `turns/<session_id>.primed` marker holding the bot's mode and a
+checksum of the context text), not on every turn -- a compaction or `/clear`
+drops it from the transcript, which is what `on-session-start` is for, and a
+changed mode or a changed text injects it again. So after `./install.sh`
+changes the context, a running bot re-primes by itself on its next Discord
+turn, once. The session prompt (`--append-system-prompt`) is fixed when the
+session starts and still needs a restart (`claude-discord refresh <bot>`, or
+stop and start). The "refresh" handoff still fires on every matching
 message regardless of the primed state, since it is a specific command, not
 boilerplate.
 
@@ -353,7 +372,8 @@ environment; measured 2026-09-18, a fork made by `/bg` had no
 
 - The `/bg` fork does not carry `--append-system-prompt`, so the identity
   paragraph from the system prompt is gone after `/bg`. `on-prompt` re-adds
-  identity and the mention rule on the next Discord turn regardless (once per
+  identity, the mention rule and the thread and orchestrator rules on the
+  next Discord turn regardless (once per
   session, see Hooks above), so this only matters for a turn typed straight
   into the CLI after `/bg`. The transcript still holds everything said so far.
 - One token, one session. After `/bg` the foreground REPL exits; do not start
@@ -479,7 +499,7 @@ rest of Claude Code.
 | `bot name must be a plain directory name` | the name contained `/`, or was `.`/`..` |
 | `bot name 'hooks'` (or `'checkin'`) `is reserved` | those names are claude-discord's own directories under `.claude/discord-agents/`; pick another |
 | Two bots answer each other forever | the mention policy is off on both; turn it back on for at least one |
-| `Over 500 characters in the channel: start a thread ...` | a dev-manager tried to put a long answer in the channel; `thread start "[<area>] <short title>"`, then post it inside the thread |
+| `Over 500 characters in the channel: start a thread ...` | the bot tried to put a long answer in the channel; `thread start "[<area>] <short title>"`, then post it inside the thread |
 | `Before changing claude-discord, announce on Discord ...` | a dev-manager edited claude-discord without mentioning a peer in the last 60 minutes; announce the change, then edit |
 | `claude-discord: ~/.claude-discord/rules/dev-manager.md is missing` | wrapper newer than the installed helpers; re-run `./install.sh` |
 | `refresh` says `handoff.md is missing or empty` | the session did not write it; ask it to, or pass `--force` |

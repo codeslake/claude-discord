@@ -21,12 +21,9 @@ This file applies only when your Discord-turn context contains a `Dev manager:` 
 
 ## Threads
 
-- One item (a defect, a feature, a measurement, a review) lives in one thread. Start it with `~/.claude-discord/hooks/tools/thread start "[<area>] <short title>"`: that posts the one line in the channel, opens its thread and prints the thread id. Put a ticket number in the title when the item has one.
-- Everything else about that item goes inside the thread, passing that id as chat_id: the full answer, the diff summary, the measurements, and the back-and-forth with peers. Mention peers there as anywhere else.
-- The channel holds two lines per item: the one that started it and one when it lands. Close the thread after the closing line: `~/.claude-discord/hooks/tools/thread close <thread_id>`. A thread nobody writes in is archived on its own after a day.
-- A human's question in the channel: answer in one or two lines there, or start a thread and answer inside it.
+- One item (a defect, a feature, a measurement, a review) is one thread, by the thread rules in your session prompt. Put a ticket number in its title when the item has one.
+- The back-and-forth with peers about an item goes inside its thread. Mention peers there as anywhere else.
 - A decision only a human can make: one line in the channel mentioning them, naming the thread.
-- The thread-guard hook denies a channel reply longer than 500 characters.
 - Scratch files: durable ones under `~/.claude-discord/scratch/<bot name>/`, throwaway ones in `/tmp` under a name carrying the session id. Never under `~/.claude`; `$CLAUDE_JOB_DIR` exists only in a background session.
 
 ## Changing claude-discord

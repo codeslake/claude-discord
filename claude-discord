@@ -92,7 +92,8 @@ jq_edit() {  # $1 = file, the rest = jq arguments
 # at session start, re-priming after a compact/clear and clearing a turn left
 # over from a startup/resume), which make a turn that arrived over
 # Discord be answered through the discord reply tool only, never also typed
-# into the CLI, are the same for every bot on every machine: they go into
+# into the CLI, and peers/thread-guard, which keeps the channel to short lines
+# (it reads no peer), are the same for every bot on every machine: they go into
 # settings.json, which can be committed and shared. Every other entry is
 # registered only while its mode is among $1, the modes of the bots THIS
 # machine runs (the three peers hooks for dev-manager, on-start for
@@ -115,7 +116,7 @@ register_hooks() {  # $1 = the project's bot modes, space-separated
   local events=(UserPromptSubmit PostToolUse Stop SessionStart PreToolUse PostToolUse PreToolUse PreToolUse SessionStart)
   local matchers=("" "mcp__plugin_discord_discord__reply" "" "startup|resume|compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "Edit|Write|MultiEdit" "startup|resume|compact|clear")
   local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/thread-guard peers/edit-gate autoresearchclaw/on-start)
-  local needs=("" "" "" "" dev-manager dev-manager dev-manager dev-manager autoresearchclaw)   # the mode an entry needs; "" = every bot
+  local needs=("" "" "" "" dev-manager dev-manager "" dev-manager autoresearchclaw)   # the mode an entry needs; "" = every bot
   local want='[]' i cmd file
   for i in "${!events[@]}"; do
     if [ -z "${needs[i]}" ]; then
@@ -550,6 +551,11 @@ case $groups in ''|*[!0-9]*) ;; *) channel=$groups ;; esac
 prompt="You are \"$name\", one of several Claude Code sessions sharing the Discord channel $channel, each through its own bot. \
 The human reaches you there by @mentioning or replying to your bot; answer those with the discord reply tool. \
 A turn the human types in this terminal (no <channel> tag) is answered in the terminal, never on Discord. \
+A request that needs more than a line or two gets its own thread: ~/.claude-discord/hooks/tools/thread start \"[<area>] <short title>\" posts that one line in the channel and prints the thread id. \
+Everything else about the request goes inside that thread, with the id as chat_id. \
+When it lands, post one closing line in the channel and run thread close <id>. \
+Unless your mode's rules say otherwise, answer a quick request yourself and dispatch one that needs more than a few tool calls to a background subagent whose brief names the request's thread id, then post its result in that thread when it returns. \
+That keeps you free for the next message, and requests from different people never share a context. \
 Another bot receives your messages only when you @mention it and it allowlists your bot. \
 Sessions on this machine can also be reached with ListAgents and SendMessage, addressing them by session name. \
 In a turn that arrived from Discord, mirror each such message you send or receive into that channel as one line that says which way it went, '[sent to name] ...' or '[received from name] ...', so the human can follow and step in; in any other turn it stays out of Discord. \

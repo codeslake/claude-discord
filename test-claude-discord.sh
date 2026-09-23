@@ -16,15 +16,18 @@ CMD_REPLY='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/turn/on-reply"; [
 CMD_STOP='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/turn/on-stop"; [ ! -x "$h" ] || "$h"'
 CMD_SESSION='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/turn/on-session-start"; [ ! -x "$h" ] || "$h"'
 CMD_COMPACT_OLD='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/turn/on-compact"; [ ! -x "$h" ] || "$h"'   # an earlier version's entry
+CMD_TGUARD='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/thread-guard"; [ ! -x "$h" ] || "$h"'
 has_cmd() { jq -e --arg ev "$1" --arg cmd "$2" '[.hooks[$ev][]?.hooks[]?.command] | index($cmd) != null' "$3" >/dev/null 2>&1; }
 has_matcher() { jq -e --arg ev "$1" --arg m "$2" --arg cmd "$3" '[.hooks[$ev][]? | select(.matcher == $m) | .hooks[]?.command] | index($cmd) != null' "$4" >/dev/null 2>&1; }
-has_hooks() {  # $1 = settings.json path; all four entries present
+has_hooks() {  # $1 = settings.json path; all five every-bot entries present
   has_cmd UserPromptSubmit "$CMD_PROMPT" "$1" &&
   has_matcher PostToolUse mcp__plugin_discord_discord__reply "$CMD_REPLY" "$1" &&
   has_cmd Stop "$CMD_STOP" "$1" &&
   has_matcher SessionStart 'startup|resume|compact|clear' "$CMD_SESSION" "$1" &&
+  has_matcher PreToolUse mcp__plugin_discord_discord__reply "$CMD_TGUARD" "$1" &&
   ! grep -q 'hooks/turn/on-compact' "$1"
 }
+mode_peers() { grep -h 'hooks/peers/' "$@" 2>/dev/null | grep -v 'hooks/peers/thread-guard'; }   # the dev-manager-only peers entries in these files
 wait_for_file() {  # $1 = path; up to 2s in 0.1s steps, for an async write to land
   local n=0
   while [ ! -s "$1" ] && [ "$n" -lt 20 ]; do sleep 0.1; n=$((n+1)); done
@@ -187,7 +190,7 @@ H="$R/hooks/turn"
 rm -rf "$DSD/turns" "$DSD/last-message-id"; : > "$CURL_LOG"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"222\" user=\"u\" user_id=\"9\" ts=\"t\">\nhello\n</channel>"}')
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
-[ "$ctx" = 'Discord turn. You are alpha, the Claude Code session behind the Discord bot alpha in channel 999. Answer only with the discord reply tool and write no CLI text. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically.' ] || { echo "FAIL: on-prompt context text wrong: $ctx"; exit 1; }
+[ "$ctx" = 'Discord turn. You are alpha, the Claude Code session behind the Discord bot alpha in channel 999. Answer only with the discord reply tool and write no CLI text. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically. One request, one thread: ~/.claude-discord/hooks/tools/thread start "[<area>] <short title>" posts its channel line and prints the thread id, thread close <id> ends it; the channel holds one line when a request starts and one when it lands. Unless your mode'"'"'s rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id.' ] || { echo "FAIL: on-prompt context text wrong: $ctx"; exit 1; }
 [ "$(cat "$DSD/turns/s1")" = "111 222 9" ] || { echo "FAIL: turns file wrong (chat_id message_id user_id)"; exit 1; }
 [ "$(cat "$DSD/last-message-id")" = "222" ] || { echo "FAIL: last-message-id wrong"; exit 1; }
 [ ! -s "$CURL_LOG" ] || { echo "FAIL: on-prompt must never call curl"; exit 1; }
@@ -280,6 +283,15 @@ out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$PP")
 [ -f "$DSD/turns/sPrime.primed" ] || { echo "FAIL: the first turn must create the primed flag"; exit 1; }
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$PP")
 [ -z "$out" ] || { echo "FAIL: a second turn in the same session must print nothing"; exit 1; }
+# A session primed under an older context text: the mode alone (what a
+# version without the checksum wrote), or the same mode with another checksum.
+for stale in none 'none 1 1'; do
+  printf '%s\n' "$stale" > "$DSD/turns/sPrime.primed"
+  out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$PP")
+  [ -n "$out" ] || { echo "FAIL: a session primed under '$stale' must get the context again"; exit 1; }
+  out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$PP")
+  [ -z "$out" ] || { echo "FAIL: re-primed once after '$stale', the next turn must print nothing: $out"; exit 1; }
+done
 printf '111 222\n' > "$DSD/turns/sPrime"; : > "$DSD/turns/sPrime.replied"
 for src in startup resume; do
   DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<"{\"session_id\":\"sPrime\",\"source\":\"$src\"}"
@@ -294,7 +306,7 @@ out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$PP")
 RP='{"session_id":"sPrime","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\" user=\"u\" user_id=\"9\" ts=\"t\">\nrefresh\n</channel>"}'
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$RP" | jq -r '.hookSpecificOutput.additionalContext')
 grep -q "handoff.md" <<<"$out" || { echo "FAIL: refresh must still fire on an already-primed session"; exit 1; }
-echo "ok: the identity context is injected once per session, on-session-start re-primes after a compaction/clear and clears a leftover turn (not the primed flag) at a startup/resume, and refresh still fires while primed"
+echo "ok: the identity context is injected once per session and once more after its text changed, on-session-start re-primes after a compaction/clear and clears a leftover turn (not the primed flag) at a startup/resume, and refresh still fires while primed"
 
 # The pin: on-session-start adds this background job's id (CLAUDE_JOB_DIR's
 # basename) to <jobs root>/pins.json under the CLI's lock (mkdir pins.json.lock)
@@ -476,6 +488,7 @@ grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out
 ! grep -q "Other bots in the channel can hear you." <<<"$out" || { echo "FAIL: the system prompt must not claim other bots hear every message"; exit 1; }
 grep -qF "Another bot receives your messages only when you @mention it and it allowlists your bot." <<<"$out" || { echo "FAIL: the system prompt must say how bots reach each other now"; exit 1; }
 grep -qF "Sessions on this machine can also be reached with ListAgents and SendMessage" <<<"$out" || { echo "FAIL: the system prompt must keep SendMessage for same-machine sessions"; exit 1; }
+grep -qF 'thread start "[<area>] <short title>" posts that one line in the channel' <<<"$out" && grep -qF "dispatch one that needs more than a few tool calls to a background subagent whose brief names the request's thread id" <<<"$out" || { echo "FAIL: the system prompt must carry the thread and orchestrator rules for every bot"; exit 1; }
 ! grep -q "Bots cannot hear each other" <<<"$out" || { echo "FAIL: the stale 'Bots cannot hear each other' claim is still in the system prompt"; exit 1; }
 grep -q "Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply." <<<"$out"
 ! grep -q "never @mention it" <<<"$out"
@@ -589,6 +602,7 @@ has_hooks "$P2/.claude/settings.json"
 [ "$(jq '.hooks.PostToolUse | length' "$P2/.claude/settings.json")" = 1 ]
 [ "$(jq '.hooks.Stop | length' "$P2/.claude/settings.json")" = 1 ]
 [ "$(jq '.hooks.SessionStart | length' "$P2/.claude/settings.json")" = 1 ]
+[ "$(jq '.hooks.PreToolUse | length' "$P2/.claude/settings.json")" = 1 ]
 [ "$(jq -r '.hooks.PostToolUse[0].matcher' "$P2/.claude/settings.json")" = mcp__plugin_discord_discord__reply ]
 [ "$(jq -r '.hooks.SessionStart[0].matcher' "$P2/.claude/settings.json")" = 'startup|resume|compact|clear' ]
 [ "$(jq -r '.ackReaction' "$P2/.claude/discord-agents/gamma/access.json")" = "👀" ]
@@ -941,9 +955,9 @@ printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bi
 # PostToolUse hook in settings.json and Claude Code's own permission grants in
 # settings.local.json; mgr is a dev-manager. peers.json lists mgr itself too
 # (one list shared across machines), which every consumer must skip by name.
-# The turn hooks live in settings.json (the same on every machine); the peers
-# hooks in settings.local.json, since they depend on which bots this machine
-# runs.
+# The turn hooks and thread-guard live in settings.json (the same on every
+# machine); the other peers hooks in settings.local.json, since they depend
+# on which bots this machine runs.
 P4="$HOME/project4"; mkdir -p "$P4/.claude/rules"; cd "$P4"
 R4="$P4/.claude/discord-agents"
 RULE="$P4/.claude/rules/claude-discord-dev-manager.md"
@@ -952,11 +966,9 @@ SL="$P4/.claude/settings.local.json"
 CMD_GUARD='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/mention-guard"; [ ! -x "$h" ] || "$h"'
 CMD_CHECKIN='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/checkin"; [ ! -x "$h" ] || "$h"'
 CMD_GATE='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/edit-gate"; [ ! -x "$h" ] || "$h"'
-CMD_TGUARD='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/thread-guard"; [ ! -x "$h" ] || "$h"'
 has_peers_hooks() {
   has_matcher PreToolUse mcp__plugin_discord_discord__reply "$CMD_GUARD" "$1" &&
   has_matcher PostToolUse mcp__plugin_discord_discord__reply "$CMD_CHECKIN" "$1" &&
-  has_matcher PreToolUse mcp__plugin_discord_discord__reply "$CMD_TGUARD" "$1" &&
   has_matcher PreToolUse 'Edit|Write|MultiEdit' "$CMD_GATE" "$1"
 }
 echo mine > "$P4/.claude/rules/other.md"
@@ -972,11 +984,11 @@ grep -qF "Ask each peer's owner to add this bot's id to their allowFrom; both di
 cmp -s "$D/rules/dev-manager.md" "$RULE" || { echo "FAIL: the dev-manager rule was not dropped into .claude/rules"; exit 1; }
 sed -n 3p "$RULE" | grep -qF 'only when your Discord-turn context contains a `Dev manager:` line' || { echo "FAIL: the rule must open with its condition, since every session in the project loads it"; exit 1; }
 [ "$(grep -c 'Dev manager:' "$RULE")" = 1 ] || { echo "FAIL: only the conditional line may contain the 'Dev manager:' marker (not the heading)"; exit 1; }
-has_hooks "$SJ" && ! grep -q 'hooks/peers/' "$SJ" || { echo "FAIL: settings.json must hold the turn hooks and no peers hook: $(cat "$SJ")"; exit 1; }
-has_peers_hooks "$SL" && ! grep -q 'hooks/turn/' "$SL" || { echo "FAIL: settings.local.json must hold the four peers hooks and no turn hook: $(cat "$SL")"; exit 1; }
+has_hooks "$SJ" && [ -z "$(mode_peers "$SJ")" ] || { echo "FAIL: settings.json must hold the turn hooks and thread-guard and no other peers hook: $(cat "$SJ")"; exit 1; }
+has_peers_hooks "$SL" && ! grep -q 'hooks/turn/\|peers/thread-guard' "$SL" || { echo "FAIL: settings.local.json must hold the three dev-manager peers hooks, no turn hook and no thread-guard: $(cat "$SL")"; exit 1; }
 [ "$(jq -c '.permissions' "$SJ")" = '{"allow":["Bash(ls)"]}' ] && has_cmd PostToolUse my-own-hook "$SJ" || { echo "FAIL: unrelated settings keys and the user's own hook must survive"; exit 1; }
 [ "$(jq -c '.permissions' "$SL")" = '{"allow":["Bash(git status)"]}' ] || { echo "FAIL: settings.local.json's permission grants must survive"; exit 1; }
-echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned), the group allowFrom, the rule file (conditional first line), the turn hooks in settings.json and the peers hooks in settings.local.json"
+echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned), the group allowFrom, the rule file (conditional first line), the turn hooks and thread-guard in settings.json and the other peers hooks in settings.local.json"
 
 cp "$R4/peers.json" "$P4/peers.before"; cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
 printf '\nn\n2\n\n' | bash "$S" setup mgr >/dev/null
@@ -1011,14 +1023,19 @@ bash "$S" mgr >/dev/null 2>&1
 cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" && cmp -s "$RULE" "$P4/rule.before" || { echo "FAIL: a second start must change nothing"; exit 1; }
 echo "ok: the drops are the union over the project's bots; start restores the rule, removes a stale claude-discord-*.md, and is idempotent"
 
-# Migration: an earlier version registered the peers hooks in settings.json.
-# A start moves them: gone from settings.json (PreToolUse, then empty, goes
-# too), kept once in settings.local.json.
+# Migration: earlier versions registered the peers hooks in settings.json,
+# and thread-guard, as a dev-manager hook, in settings.local.json. A start
+# moves them: the dev-manager peers hooks out of settings.json, kept once in
+# settings.local.json; thread-guard out of settings.local.json, once in
+# settings.json.
 jq --arg g "$CMD_GUARD" --arg c "$CMD_CHECKIN" --arg e "$CMD_GATE" '.hooks.PreToolUse = [{matcher: "mcp__plugin_discord_discord__reply", hooks: [{type: "command", command: $g}]}, {matcher: "Edit|Write|MultiEdit", hooks: [{type: "command", command: $e}]}] | .hooks.PostToolUse += [{matcher: "mcp__plugin_discord_discord__reply", hooks: [{type: "command", command: $c}]}]' "$SJ" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SJ" && rm -f "$P4/s.tmp"
+jq --arg t "$CMD_TGUARD" '.hooks.PreToolUse += [{matcher: "mcp__plugin_discord_discord__reply", hooks: [{type: "command", command: $t}]}]' "$SL" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SL" && rm -f "$P4/s.tmp"
+has_matcher PreToolUse mcp__plugin_discord_discord__reply "$CMD_TGUARD" "$SL" || { echo "FAIL: the old thread-guard entry was not planted"; exit 1; }
 bash "$S" mgr >/dev/null 2>&1
-! grep -q 'hooks/peers/' "$SJ" && [ "$(jq '.hooks | has("PreToolUse")' "$SJ")" = false ] || { echo "FAIL: start must move the peers hooks out of settings.json: $(jq -c . "$SJ")"; exit 1; }
-cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: after the migration both files must be as before, the peers hooks only in settings.local.json"; exit 1; }
-echo "ok: peers hooks an earlier version left in settings.json are removed from it (an event left empty goes), settings.local.json keeps its single copy"
+tguard_entries() { jq --arg c "$CMD_TGUARD" '[.hooks[]?[]?.hooks[]? | select(.command == $c)] | length' "$1"; }
+[ -z "$(mode_peers "$SJ")" ] && [ "$(tguard_entries "$SJ")" = 1 ] && [ "$(tguard_entries "$SL")" = 0 ] || { echo "FAIL: start must move the peers hooks out of settings.json and thread-guard into it, once: $(jq -c . "$SJ" "$SL")"; exit 1; }
+cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: after the migration both files must be as before: $(jq -c . "$SJ" "$SL")"; exit 1; }
+echo "ok: a start moves the peers hooks an earlier version left in settings.json to settings.local.json, and thread-guard left in settings.local.json to settings.json, once each"
 
 # Peers hooks, through the project's symlinked copy.
 G="$R4/hooks/peers"
@@ -1043,7 +1060,7 @@ out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_
 [ "$(cat "$R4/mgr/turns/g2")" = "42 555 901" ] || { echo "FAIL: on-prompt must record the triggering user_id"; exit 1; }
 ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")
 grep -qxF 'Peers (mention to reach them): dong <@900>, junyong <@901>' <<<"$ctx" || { echo "FAIL: a dev-manager's context must list its peers, self excluded: $ctx"; exit 1; }
-grep -qxF 'Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; after each iteration post one short report. Threads: one item per thread (thread start prints its id; thread close ends it); the channel holds one line when an item starts and one when it lands.' <<<"$ctx" || { echo "FAIL: the dev-manager line is missing: $ctx"; exit 1; }
+grep -qxF 'Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; after each iteration post one short report.' <<<"$ctx" || { echo "FAIL: the dev-manager line is missing: $ctx"; exit 1; }
 out=$(DISCORD_STATE_DIR="$R4/plain" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g3","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"556\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'Peers\|Dev manager' <<<"$out" && { echo "FAIL: a plain bot must not get the dev-manager context"; exit 1; }
 REASON_B='You are answering junyong; mention it as <@901> or it never sees this.'
@@ -1134,13 +1151,21 @@ out=$(tguard "$(body 42 "$KO200")")
 out=$(tguard "$(body 43 "$A501")")   # 43: a thread of channel 42, not the channel
 [ -z "$out" ] || { echo "FAIL: the same long text sent to a thread id must pass: $out"; exit 1; }
 out=$(tguard "$(body 42 "$A501")" plain)
-[ -z "$out" ] || { echo "FAIL: thread-guard must be a no-op for a bot that is not a dev-manager: $out"; exit 1; }
+[ "$(reason <<<"$out")" = "$TG_REASON" ] || { echo "FAIL: thread-guard must deny for a mode-none bot too: $out"; exit 1; }
+mkdir -p "$HOME/arcbot/bot"; echo autoresearchclaw > "$HOME/arcbot/bot/mode"; cp "$R4/plain/access.json" "$HOME/arcbot/bot/"   # channel 42
+out=$(tguard "$(body 42 "$A501")" '' "$HOME/arcbot/bot")
+[ -z "$out" ] || { echo "FAIL: an autoresearchclaw bot's channel report must pass thread-guard: $out"; exit 1; }
+mkdir -p "$HOME/nomode/bot"; cp "$R4/plain/access.json" "$HOME/nomode/bot/"   # channel 42, no mode file at all
+out=$(tguard "$(body 42 "$A501")" '' "$HOME/nomode/bot")
+[ "$(reason <<<"$out")" = "$TG_REASON" ] || { echo "FAIL: a bot with no mode file must be denied like mode none: $out"; exit 1; }
+out=$(DISCORD_STATE_DIR="$HOME/nomode/bot" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"nm1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"557\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
+grep -qF 'One request, one thread' <<<"$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")" && [ -s "$HOME/nomode/bot/turns/nm1.primed" ] || { echo "FAIL: a bot with no mode file must be primed normally: $out"; exit 1; }
 mkdir -p "$HOME/nochan/bot"; echo dev-manager > "$HOME/nochan/bot/mode"   # no access.json, no config.env: no channel
 out=$(tguard "$(body 42 "$A501")" '' "$HOME/nochan/bot")
 [ -z "$out" ] || { echo "FAIL: thread-guard must be silent when the bot has no channel: $out"; exit 1; }
 out=$(printf 'not json' | DISCORD_STATE_DIR="$R4/mgr" bash "$G/thread-guard" 2>&1) || { echo "FAIL: thread-guard must exit 0 on invalid JSON"; exit 1; }
 [ -z "$out" ] || { echo "FAIL: thread-guard must print nothing on invalid JSON"; exit 1; }
-echo "ok: thread-guard denies a channel reply over 500 characters and passes 500, 200 Korean characters (600 bytes), the same text in a thread, a non-dev-manager, a bot without a channel and invalid JSON"
+echo "ok: thread-guard denies a channel reply over 500 characters and passes 500, 200 Korean characters (600 bytes), the same text in a thread, a bot without a channel and invalid JSON, and denies for a mode-none bot and a bot with no mode file (primed normally too) but not for an autoresearchclaw bot"
 
 # The thread helper, against the stubbed curl: each call takes the next
 # queued "<status> <body>" line.
@@ -1222,7 +1247,7 @@ has_peers_hooks "$SL" && [ -f "$RULE" ] || { echo "FAIL: back to dev-manager mus
 printf '\nn\nautoresearchclaw\n' | bash "$S" setup mgr >/dev/null
 [ "$(cat "$R4/mgr/mode")" = autoresearchclaw ] || { echo "FAIL: mode autoresearchclaw"; exit 1; }
 [ -z "$(find "$P4/.claude/rules" -name 'claude-discord-*')" ] || { echo "FAIL: autoresearchclaw must drop no rule file"; exit 1; }
-! grep -q 'hooks/peers/' "$SL" "$SJ" || { echo "FAIL: autoresearchclaw must register no peers hook"; exit 1; }
+[ -z "$(mode_peers "$SL" "$SJ")" ] || { echo "FAIL: autoresearchclaw must register no dev-manager peers hook"; exit 1; }
 has_matcher SessionStart 'startup|resume|compact|clear' "$CMD_ARC" "$SL" && [ "$(arc_entries "$SL")" = 1 ] && ! grep -q 'hooks/autoresearchclaw/' "$SJ" || { echo "FAIL: on-start (startup|resume|compact|clear) belongs in settings.local.json only, once: $(cat "$SL")"; exit 1; }
 has_hooks "$SJ" || { echo "FAIL: the turn hooks must survive"; exit 1; }
 cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
@@ -1243,10 +1268,11 @@ echo "ok: autoresearchclaw drops no rule and no peers hook, only on-start (start
 AP='{"session_id":"a1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"700\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}'
 echo none > "$R4/mgr/mode"
 plain_out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")
-[ -n "$plain_out" ] && [ "$(cat "$R4/mgr/turns/a1.primed")" = none ] || { echo "FAIL: priming under mode none must record it: $plain_out"; exit 1; }
+primed_mode() { local k; k=$(cat "$1" 2>/dev/null); printf '%s' "${k%% *}"; }   # the key is "<mode> <cksum of the context>"
+[ -n "$plain_out" ] && [ "$(primed_mode "$R4/mgr/turns/a1.primed")" = none ] || { echo "FAIL: priming under mode none must record it: $plain_out"; exit 1; }
 echo autoresearchclaw > "$R4/mgr/mode"
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")
-[ "$out" = "$plain_out" ] && [ "$(cat "$R4/mgr/turns/a1.primed")" = autoresearchclaw ] || { echo "FAIL: an autoresearchclaw bot must get a plain bot's identity context, re-primed after the mode change: $out"; exit 1; }
+[ "$out" = "$plain_out" ] && [ "$(primed_mode "$R4/mgr/turns/a1.primed")" = autoresearchclaw ] || { echo "FAIL: an autoresearchclaw bot must get a plain bot's identity context, re-primed after the mode change: $out"; exit 1; }
 ! grep -qE 'AutoResearchClaw|\[arc\]' <<<"$out" || { echo "FAIL: no AutoResearchClaw text in on-prompt's context: $out"; exit 1; }
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")
 [ -z "$out" ] || { echo "FAIL: primed under the same mode: nothing more: $out"; exit 1; }
