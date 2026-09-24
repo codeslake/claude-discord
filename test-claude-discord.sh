@@ -1167,27 +1167,45 @@ out=$(printf 'not json' | DISCORD_STATE_DIR="$R4/mgr" bash "$G/thread-guard" 2>&
 [ -z "$out" ] || { echo "FAIL: thread-guard must print nothing on invalid JSON"; exit 1; }
 echo "ok: thread-guard denies a channel reply over 500 characters and passes 500, 200 Korean characters (600 bytes), the same text in a thread, a bot without a channel and invalid JSON, and denies for a mode-none bot and a bot with no mode file (primed normally too) but not for an autoresearchclaw bot"
 
-# Tables: Discord renders none, so a separator row outside a code block is
-# denied in every chat and for every mode, autoresearchclaw included.
-TB_REASON='Discord does not render markdown tables: rewrite it as a list, or put the table inside a ``` code block.'
+# Tables: Discord renders none, so a table outside a code block is rewritten
+# into an aligned one and sent through updatedInput, in every chat and for
+# every mode, autoresearchclaw included. The rest of the input is kept.
+TB_REASON='Discord does not render markdown tables: rewrite it as a list, or put the table inside a ``` code block, and close every ``` fence.'
+newtext() { jq -r 'select(.hookSpecificOutput.permissionDecision == null) | .hookSpecificOutput.updatedInput.text'; }
 TBL=$'결과\n| a | b |\n|---|---|\n| 1 | 2 |'
-out=$(tguard "$(body 43 "$TBL")")   # a thread: short, so only the table check can deny
-[ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: a table in a thread must be denied: $out"; exit 1; }
+TBL_OUT=$'결과\n```\na | b\n--+--\n1 | 2\n```'
+out=$(tguard "$(jq -nc --arg t "$TBL" '{session_id: "t1", tool_input: {chat_id: "43", text: $t, reply_to: "77"}}')")   # a thread: short, so only the table check acts
+[ "$(newtext <<<"$out")" = "$TBL_OUT" ] || { echo "FAIL: a table in a thread must become an aligned code block, the prose above kept: $out"; exit 1; }
+jq -e '.hookSpecificOutput.updatedInput | keys == ["chat_id", "reply_to", "text"] and .chat_id == "43" and .reply_to == "77"' <<<"$out" >/dev/null || { echo "FAIL: updatedInput must be the whole input, chat_id and reply_to kept: $out"; exit 1; }
+out=$(tguard "$(body 43 $'| 이름 | 점수 | 비고 |\n|:--|--:|:-:|\n| **김철수** | `90` | __A__ |\n| Bob | 100 | 합격 |\n끝')")
+[ "$(newtext <<<"$out")" = $'```\n이름   | 점수 | 비고\n-------+------+-----\n김철수 |   90 |  A\nBob    |  100 | 합격\n```\n끝' ] || { echo "FAIL: Korean cells must align by display width, **, __ and backticks go, colons right-align and center, the prose below kept: $(newtext <<<"$out")"; exit 1; }
+out=$(tguard "$(body 43 $'| 담당 | 상태 |\n|---|---|\n| <@123> | 진행 |\n| <@456> <@123> | 대기 |')")   # a mention in a code block pings nobody
+[ "$(newtext <<<"$out")" = $'<@123> <@456>\n```\n담당          | 상태\n--------------+-----\n<@123>        | 진행\n<@456> <@123> | 대기\n```' ] || { echo "FAIL: mentions in a table must be hoisted above the code block, once each, in order: $(newtext <<<"$out")"; exit 1; }
 out=$(tguard "$(body 42 "$TBL")" '' "$HOME/arcbot/bot")
-[ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: an autoresearchclaw bot's table must be denied too: $out"; exit 1; }
-out=$(tguard "$(body 42 "$TBL")" '' "$HOME/nochan/bot")
-[ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: a bot without a channel must be denied a table too: $out"; exit 1; }
-for sep in '---|---' ':---|---:' '|:---|---:|' '|-|-|' '|:-:|:-:|'; do   # no outer pipes, aligned, both, one hyphen a column
-  out=$(tguard "$(body 43 $'항목 | 값\n'"$sep"$'\na | 1')")
-  [ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: separator '$sep' is a table: $out"; exit 1; }
-done
+[ "$(newtext <<<"$out")" = "$TBL_OUT" ] || { echo "FAIL: an autoresearchclaw bot's table must be converted too: $out"; exit 1; }
+seps=""; for sep in '---|---' ':---|---:' '|:---|---:|' '|-|-|' '|:-:|:-:|'; do seps+=$'항목 | 값\n'"$sep"$'\na | 1\n\n'; done   # no outer pipes, aligned, both, one hyphen a column
+out=$(tguard "$(body 43 "$seps")")
+[ "$(newtext <<<"$out" | grep -c '^```$')" = 10 ] || { echo "FAIL: each of the five separators must make a table: $(newtext <<<"$out")"; exit 1; }
 out=$(tguard "$(body 43 $'표:\n```\n| a | b |\n|---|---|\n```\n끝')")
-[ -z "$out" ] || { echo "FAIL: a table inside a code block must pass: $out"; exit 1; }
+[ -z "$out" ] || { echo "FAIL: a table inside a code block must pass untouched: $out"; exit 1; }
 out=$(tguard "$(body 43 $'```\ncode\n```\n말\n```\n| a | b |\n|---|---|')")   # the third fence never closes
-[ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: a table after an unclosed fence renders raw and must be denied: $out"; exit 1; }
+[ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: a table with unpaired fences must be denied, not rewritten: $out"; exit 1; }
+out=$(tguard "$(body 43 $'설명 ``` 참고\n| a | b |\n|---|---|\n| 1 | 2 |')")   # a lone ``` in prose, which a rewrite would drop
+[ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: a lone fence mark in prose must deny the table, not be dropped: $out"; exit 1; }
+out=$(tguard "$(body 43 $'| 식 | 값 |\n|---|---|\n| x \\| y | 2 |')")   # GFM keeps an escaped pipe in its cell
+[ "$(newtext <<<"$out")" = $'```\n식    | 값\n------+---\nx | y | 2\n```' ] || { echo "FAIL: an escaped pipe must stay in its cell, unescaped: $(newtext <<<"$out")"; exit 1; }
+out=$(tguard "$(body 43 $'| name | description |\n|---|---|\n| x | '"$(printf 'y%.0s' $(seq 70))"$' |\n| z | w |')")
+[ "$(newtext <<<"$out")" = $'name: x · description: '"$(printf 'y%.0s' $(seq 70))"$'\nname: z · description: w' ] || { echo "FAIL: a table wider than 72 columns must become header: value lines: $out"; exit 1; }
+LONG=$'| hhhhhhhhhhhhhhhhhhhh | b |\n|-|-|'; for _ in $(seq 25); do LONG+=$'\n|1|2|'; done   # 184 characters, 682 once padded
+[ "${#LONG}" -le 500 ] || { echo "FAIL: the sample must be within 500 characters before conversion"; exit 1; }
+out=$(tguard "$(body 42 "$LONG")")
+[ "$(reason <<<"$out")" = "$TG_REASON" ] && ! grep -q updatedInput <<<"$out" || { echo "FAIL: a channel reply over 500 characters once converted must be denied, without updatedInput: $out"; exit 1; }
+mkdir -p "$HOME/nopy"; for c in jq grep head cat basename dirname; do ln -sf "$(command -v "$c")" "$HOME/nopy/$c"; done
+out=$(DISCORD_STATE_DIR="$R4/mgr" CLAUDE_PROJECT_DIR="$P4" PATH="$HOME/nopy" "$BASH" "$G/thread-guard" <<<"$(body 43 "$TBL")")
+[ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: without python3 a table must be denied as before: $out"; exit 1; }
 out=$(tguard "$(body 43 $'a | b\n---\n|---|')")   # a pipe in prose, a rule, a one-column bar
 [ -z "$out" ] || { echo "FAIL: a rule or a single bar is not a table: $out"; exit 1; }
-echo "ok: thread-guard denies a markdown table in a thread, for an autoresearchclaw bot and for a bot without a channel, with or without outer pipes and alignment colons, with one hyphen a column, after an unclosed fence, and passes one inside a code block, a horizontal rule and a one-column bar"
+echo "ok: thread-guard converts a markdown table into an aligned code block (Korean by display width, markup stripped, alignment colons, mentions hoisted above it, prose kept, the whole input kept) in a thread and for an autoresearchclaw bot, with or without outer pipes and alignment colons, with one hyphen a column, an escaped pipe kept in its cell; a too-wide one into header: value lines; denies a table with unpaired fence marks (a lone one in prose, a fence that never closes), a channel reply over 500 once converted and a table without python3; and passes one inside a code block, a horizontal rule and a one-column bar"
 
 # The thread helper, against the stubbed curl: each call takes the next
 # queued "<status> <body>" line.
