@@ -1167,6 +1167,28 @@ out=$(printf 'not json' | DISCORD_STATE_DIR="$R4/mgr" bash "$G/thread-guard" 2>&
 [ -z "$out" ] || { echo "FAIL: thread-guard must print nothing on invalid JSON"; exit 1; }
 echo "ok: thread-guard denies a channel reply over 500 characters and passes 500, 200 Korean characters (600 bytes), the same text in a thread, a bot without a channel and invalid JSON, and denies for a mode-none bot and a bot with no mode file (primed normally too) but not for an autoresearchclaw bot"
 
+# Tables: Discord renders none, so a separator row outside a code block is
+# denied in every chat and for every mode, autoresearchclaw included.
+TB_REASON='Discord does not render markdown tables: rewrite it as a list, or put the table inside a ``` code block.'
+TBL=$'결과\n| a | b |\n|---|---|\n| 1 | 2 |'
+out=$(tguard "$(body 43 "$TBL")")   # a thread: short, so only the table check can deny
+[ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: a table in a thread must be denied: $out"; exit 1; }
+out=$(tguard "$(body 42 "$TBL")" '' "$HOME/arcbot/bot")
+[ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: an autoresearchclaw bot's table must be denied too: $out"; exit 1; }
+out=$(tguard "$(body 42 "$TBL")" '' "$HOME/nochan/bot")
+[ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: a bot without a channel must be denied a table too: $out"; exit 1; }
+for sep in '---|---' ':---|---:' '|:---|---:|' '|-|-|' '|:-:|:-:|'; do   # no outer pipes, aligned, both, one hyphen a column
+  out=$(tguard "$(body 43 $'항목 | 값\n'"$sep"$'\na | 1')")
+  [ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: separator '$sep' is a table: $out"; exit 1; }
+done
+out=$(tguard "$(body 43 $'표:\n```\n| a | b |\n|---|---|\n```\n끝')")
+[ -z "$out" ] || { echo "FAIL: a table inside a code block must pass: $out"; exit 1; }
+out=$(tguard "$(body 43 $'```\ncode\n```\n말\n```\n| a | b |\n|---|---|')")   # the third fence never closes
+[ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: a table after an unclosed fence renders raw and must be denied: $out"; exit 1; }
+out=$(tguard "$(body 43 $'a | b\n---\n|---|')")   # a pipe in prose, a rule, a one-column bar
+[ -z "$out" ] || { echo "FAIL: a rule or a single bar is not a table: $out"; exit 1; }
+echo "ok: thread-guard denies a markdown table in a thread, for an autoresearchclaw bot and for a bot without a channel, with or without outer pipes and alignment colons, with one hyphen a column, after an unclosed fence, and passes one inside a code block, a horizontal rule and a one-column bar"
+
 # The thread helper, against the stubbed curl: each call takes the next
 # queued "<status> <body>" line.
 T="$R4/hooks/tools/thread"

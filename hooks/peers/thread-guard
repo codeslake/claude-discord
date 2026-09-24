@@ -1,24 +1,47 @@
 #!/usr/bin/env bash
-# PreToolUse hook (matcher: mcp__plugin_discord_discord__reply), every bot
-# but autoresearchclaw (it reads no peer): one request lives in one thread, so
-# the CHANNEL carries two short lines per request (one when it starts, one
-# when it lands) and the long text goes inside the thread. A thread has a
-# chat_id of its own, so a reply whose chat_id is the bot's channel is a
-# channel message: deny it once it is over 500 characters. Characters, not
-# bytes -- the channel's lines are often Korean, and jq's `length` counts
-# codepoints whatever the locale says. Prints nothing unless it denies; a
-# no-op without a channel, and for an autoresearchclaw bot, whose rule posts
-# one report per iteration in the channel: the thread rule covers requests,
-# not those reports. Must never fail a turn.
+# PreToolUse hook (matcher: mcp__plugin_discord_discord__reply): channel length
+# and table format, every bot (it reads no peer). Two checks, and prints
+# nothing unless one denies:
+#
+# 1. Tables, every bot and every chat. Discord renders no GFM table: its rows
+#    arrive as raw pipes. A reply with a table's separator row (|-|-|: two
+#    columns or more, a hyphen or more each, as GFM allows) outside a ```
+#    code block is denied; one inside a code block renders as fixed-width
+#    text and passes.
+# 2. Length, in the channel, every bot but autoresearchclaw: one request lives
+#    in one thread, so the CHANNEL carries two short lines per request (one
+#    when it starts, one when it lands) and the long text goes inside the
+#    thread. A thread has a chat_id of its own, so a reply whose chat_id is
+#    the bot's channel is a channel message: deny it once it is over 500
+#    characters. Characters, not bytes -- the channel's lines are often
+#    Korean, and jq's `length` counts codepoints whatever the locale says. A
+#    no-op without a channel, and for an autoresearchclaw bot, whose rule
+#    posts one report per iteration in the channel: the thread rule covers
+#    requests, not those reports.
+#
+# Must never fail a turn.
 set -u
 . "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
 
-[ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ] || exit 0
+deny() {
+  jq -nc --arg r "$1" \
+    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}' 2>/dev/null
+  exit 0
+}
+
 input=$(cat 2>/dev/null) || exit 0
+# Even pieces of a split on ``` are outside every code block, and so is the
+# last piece after an unclosed fence, which Discord renders as plain text.
+table=$(printf '%s' "$input" | jq -r '
+  [(.tool_input.text // "" | tostring) | splits("```")] as $p | $p | to_entries
+  | map(select(.key % 2 == 0 or (.key == ($p | length) - 1 and ($p | length) % 2 == 0)).value)
+  | join("\n") | split("\n")
+  | if any(test("^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)+\\|?\\s*$")) then "table" else empty end' 2>/dev/null) || exit 0
+[ "$table" != table ] || deny 'Discord does not render markdown tables: rewrite it as a list, or put the table inside a ``` code block.'
+
+[ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ] || exit 0
 over=$(printf '%s' "$input" | jq -r --arg ch "$bot_channel" '
   select((.tool_input.chat_id // "" | tostring) == $ch
     and ((.tool_input.text // "" | tostring) | length) > 500) | "over"' 2>/dev/null) || exit 0
 [ "$over" = over ] || exit 0
-jq -nc --arg r 'Over 500 characters in the channel: start a thread (~/.claude-discord/hooks/tools/thread start "[<area>] <short title>") and post this inside it, leaving one line here.' \
-  '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}' 2>/dev/null
-exit 0
+deny 'Over 500 characters in the channel: start a thread (~/.claude-discord/hooks/tools/thread start "[<area>] <short title>") and post this inside it, leaving one line here.'
