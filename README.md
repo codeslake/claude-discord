@@ -244,6 +244,27 @@ session.
 - With several bots in one channel, keep the default mention policy: with
   "respond without mention" on every bot, one human message gets one reply
   per bot.
+- Discord hears only what came from Discord. A turn with no Discord message
+  in it (typed in the terminal, or woken by a peer, a timer or a watch) posts
+  nothing to Discord: `thread-guard` denies the reply and the answer stays in
+  the terminal. A Discord message that arrives while you are talking to the
+  session in the terminal is answered on Discord, and your question in the
+  terminal, each where it came from; a turn that ends with its Discord
+  message unanswered is sent back once to answer it. The exceptions are
+  threads: one that `thread start` opened in a Discord turn takes posts from
+  any turn until `thread close` (`open-threads` lists them), so the
+  background subagent working that request, and the turn its result wakes,
+  report there and land it (`open-threads` drops what is over a week old,
+  since a thread left to archive itself is never closed); and one listed in
+  the bot's `report-threads` file
+  (one id a line), for a report a timer posts. A turn interrupted with Esc never reaches its Stop,
+  so the next prompt typed in the terminal drops what it left when the
+  transcript shows the interrupt came after its last Discord message (and
+  over 3 s before the prompt: a prompt submitted while a turn runs writes
+  the same marker just before itself).
+  `thread start` itself refuses
+  a session turn with no Discord message. An autoresearchclaw bot's reports
+  are exempt from all of this.
 - One request, one thread, for every bot whatever its mode. The session
   prompt (and `on-prompt`'s context, which survives `/bg`) tells it:
   `~/.claude-discord/hooks/tools/thread start "[<area>] <short title>"` posts
@@ -252,9 +273,11 @@ session.
   goes inside, with that id as `chat_id`. The line comes first on purpose:
   Discord opens a thread only from a message already in the channel, so
   starting one from the long answer would leave the long answer in the
-  channel. When the request lands, one closing line goes in the channel and
-  `thread close <thread_id>` archives the thread, which takes it out of the
-  sidebar. The helper needs `DISCORD_STATE_DIR` (every hook and the bot's own
+  channel. When the request lands, `thread close <thread_id> "<closing
+  line>"` posts that one line (no newline, 500 characters at most) in the channel and
+  archives the thread, which takes it out of the sidebar. A thread started,
+  or a closing line posted, in a Discord turn answers its message as a reply
+  would. The helper needs `DISCORD_STATE_DIR` (every hook and the bot's own
   session have it); `thread-guard` (see Hooks) keeps the channel to short
   lines.
 - The session is an orchestrator, unless its mode's rules say otherwise:
@@ -280,13 +303,13 @@ session (see Modes and Expected behaviour above).
 
 | Event | Matcher | Script | What |
 |---|---|---|---|
-| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn (a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag), records that tag's chat_id/message_id/user_id for `on-stop` and `mention-guard` (only the leading tag is trusted: the plugin does not escape `<` in message text, so anything after it could be forged; a message arriving mid-turn comes as a prompt of its own and is appended) and, once per session (see below), adds an additionalContext entry with the bot's identity, the mention rule, the thread rule and the orchestrator rule; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
-| PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply. |
-| Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it; always clears the per-turn files either way. |
+| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn (a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag), records that tag's chat_id/message_id/user_id for `on-stop` and `mention-guard` and marks the message pending until a reply (`turns/<session_id>.pending`) (only the leading tag is trusted: the plugin does not escape `<` in message text, so anything after it could be forged; a message arriving mid-turn comes as a prompt of its own and is appended) and, once per session (see below), adds an additionalContext entry with the bot's identity, the mention rule, the thread rule and the orchestrator rule; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
+| PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply, and clears the pending mark. |
+| Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it. If a Discord message is still pending (no reply, `thread start` or closing line came after it), sends the turn back once (`decision: block`) so the answer reaches Discord and not only the terminal; the second stop (`stop_hook_active`) closes it, which is also how a mention that asked nothing ends. Clears the per-turn files whenever it closes a turn. |
 | SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | After a compact or `/clear`, clears the per-session "primed" flag, so the next Discord turn injects the identity context again. At a startup or resume, clears the per-turn files a turn whose Stop never ran (an interrupt, a kill) left behind, keeping the primed flag (a resumed conversation still holds that context), then pins a background session's job (see Background sessions below). An `on-compact` entry an earlier version registered is replaced. |
 | PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/mention-guard` | dev-manager only. Denies a reply that names a peer (a whole word, case-insensitive) without its `<@bot_id>` or `<@!bot_id>`, or that answers a peer without mentioning it: the author of the message in `reply_to` when that is set, else of the turn's last message. A bot only receives messages that mention it. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `peers/checkin` | dev-manager only. A reply that mentions a peer (`<@bot_id>` or `<@!bot_id>`) touches `.claude/discord-agents/checkin/<session_id>`. |
-| PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/thread-guard` | Every bot (it reads no peer). Discord renders no markdown table, so a table outside a fenced code block is rewritten into a fenced code block with its columns aligned by display width (a Korean character counts 2), alignment colons honoured and `**`, `__` and backticks stripped from the cells; a table with a line over 72 columns (a guess at a phone's code-block width) becomes one `header: value · ...` line per row instead. The reply goes out through `updatedInput`, the whole input with only `text` changed. Then, for every bot but autoresearchclaw, whose rule posts one report per iteration in the channel: denies a reply to the CHANNEL (a `chat_id` equal to the bot's channel; a thread has an id of its own) longer than 500 characters once converted, counted in characters and not bytes, so the long text goes in the request's thread and the channel keeps one line. |
+| PreToolUse | `mcp__plugin_discord_discord__reply\|mcp__plugin_discord_discord__edit_message` | `peers/thread-guard` | Every bot (it reads no peer); an edit is checked like a reply, since it puts text in Discord too. First, for every bot but autoresearchclaw: denies any reply from a turn with no Discord message in it (no `turns/<session_id>`), in the channel and in threads, unless its `chat_id` is a line of the bot's `open-threads` (what `thread start` opened, until `thread close`) or `report-threads`; this holds a session whose prompt predates the rule, since the prompt survives restarts. Then denies a mirror line that opens with an arrow and a session or bot name (`-> name:`, `<- name:`; a Korean label such as `-> 수정:` is prose), every bot: it says `[sent to name]` or `[received from name]`. Discord renders no markdown table, so a table outside a fenced code block is rewritten into a fenced code block with its columns aligned by display width (a Korean character counts 2), alignment colons honoured and `**`, `__` and backticks stripped from the cells; a table with a line over 72 columns (a guess at a phone's code-block width) becomes one `header: value · ...` line per row instead. The reply goes out through `updatedInput`, the whole input with only `text` changed. Then, for every bot but autoresearchclaw, whose rule posts one report per iteration in the channel: denies a reply to the CHANNEL (a `chat_id` equal to the bot's channel; a thread has an id of its own) longer than 500 characters once converted, counted in characters and not bytes, so the long text goes in the request's thread and the channel keeps one line. |
 | PreToolUse | `Edit\|Write\|MultiEdit` | `peers/edit-gate` | dev-manager only. Denies an edit under a path whose realpath contains `/claude-discord/` unless the session checked in within the last 60 minutes; an allowed edit renews the check-in. Paths git ignores (a bot's state such as the refresh `handoff.md`, `.superpowers/`) pass. Bash and git edits are not seen; the rule asks for the same announcement by hand. |
 | SessionStart | `startup\|resume\|compact\|clear` | `autoresearchclaw/on-start` | autoresearchclaw only. Prints the installed `rules/autoresearchclaw.md` as the session's additionalContext (nothing when the file is missing); starts no process. An entry an earlier version registered with `startup\|resume` is replaced. See AutoResearchClaw reports above. |
 
@@ -501,6 +524,8 @@ rest of Claude Code.
 | `bot name 'hooks'` (or `'checkin'`) `is reserved` | those names are claude-discord's own directories under `.claude/discord-agents/`; pick another |
 | Two bots answer each other forever | the mention policy is off on both; turn it back on for at least one |
 | `Over 500 characters in the channel: start a thread ...` | the bot tried to put a long answer in the channel; `thread start "[<area>] <short title>"`, then post it inside the thread |
+| `This turn has no Discord message in it: answer in the terminal ...` (or `thread: this turn has no Discord message in it ...`) | the bot tried to post, or to start a thread, from a terminal turn, or from one a peer, a timer or a watch woke; the answer belongs in the terminal. A request's thread takes posts once `thread start` opened it, and lands with `thread close <id> "<line>"`; a thread a timer reports to goes on a line of its own in `<state dir>/report-threads` |
+| `A mirror line says which way it went ...` | a line opens with `->` or `<-`; write `[sent to name] ...` or `[received from name] ...` |
 | `Discord does not render markdown tables: rewrite it as a list, ...` | `thread-guard` found a table it would not rewrite: the reply has an odd number of ``` marks (a lone ``` in prose, or a fence that never closes), or `python3` is missing or failed. Close every fence or drop the stray mark; put `python3` on the bot's PATH |
 | After Claude Code upgraded itself, a bot breaks its rules: long answers or raw tables in the channel, no thread, no reactions | the worker that came up after the daemon's self-restart for the upgrade runs no hooks at all, the user's own included, with no error (Claude Code, seen on 2.1.280 → 2.1.281, a respawned worker; an adopted one was fine). Check: the bot's `last-message-id` is older than its last Discord turn, and no `Discord turn.` context arrived. Fix: `claude-discord refresh <bot>` |
 | `Before changing claude-discord, announce on Discord ...` | a dev-manager edited claude-discord without mentioning a peer in the last 60 minutes; announce the change, then edit |

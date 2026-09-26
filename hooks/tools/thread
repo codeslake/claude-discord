@@ -5,10 +5,21 @@
 # behind. `thread start` therefore posts the short title ITSELF and opens the
 # thread on it, and everything else about the item is written inside, under
 # the id this prints (a message-started thread's id is that message's id).
-# `thread close` archives a finished thread so it leaves the sidebar.
+# `thread close` posts the item's closing line in the channel and archives
+# the thread so it leaves the sidebar.
 #
-#   thread start "[<area>] <short title>"   prints the thread id
-#   thread close <thread_id>                silent on success
+#   thread start "[<area>] <short title>"          prints the thread id
+#   thread close <thread_id> ["<closing line>"]    silent on success
+#
+# Discord hears only Discord-origin work (see peers/thread-guard). A session
+# (CLAUDE_CODE_SESSION_ID) starts a thread only in a turn with a Discord
+# message in it, every bot but autoresearchclaw. A thread it started is listed
+# in open-threads until it is closed, and takes posts from any turn meanwhile,
+# so the background subagent that works the request, and the turn its result
+# wakes, report there; that turn lands it with a closing line through close.
+# A thread started, or a closing line posted, in a Discord turn answers that
+# turn's message as a reply would. Entries older than a week go at each start:
+# a thread left to archive itself is never closed.
 #
 # Run by the session, not registered as a hook. Exit 2: no bot to speak as,
 # or a bad argument. Exit 1: Discord refused, named by HTTP status and error
@@ -46,10 +57,30 @@ if [ -z "${bot_token:-}" ] || ! is_id "${bot_channel:-}"; then
   exit 2
 fi
 
+open=$DISCORD_STATE_DIR/open-threads
+turn=$DISCORD_STATE_DIR/turns/${CLAUDE_CODE_SESSION_ID:-none}
+discord_turn() {
+  [ -z "${CLAUDE_CODE_SESSION_ID:-}" ] || [ "$bot_mode" = autoresearchclaw ] || [ -e "$turn" ]
+}
+answered() {  # what on-reply does for a reply
+  [ -e "$turn" ] || return 0
+  : >> "$turn.replied"; rm -f "$turn.pending"
+}
+# keep <awk condition on $1> [id]: keeps the open-threads lines it holds for,
+# through a temp file.
+keep() {
+  [ -f "$open" ] || return 0
+  awk -v now="$(date +%s)" -v id="${2:-}" "$1" "$open" > "$open.$$" && mv -f "$open.$$" "$open"
+}
+
 case ${1:-} in
   start)
     title=${2:-}
     [ -n "$title" ] || { echo "thread: usage: thread start \"[<area>] <short title>\"" >&2; exit 2; }
+    discord_turn || { echo "thread: this turn has no Discord message in it, so no thread: answer in the terminal" >&2; exit 2; }
+    # A snowflake's top bits are its time in ms since 2015; awk's doubles lose
+    # only low bits.
+    keep '(int($1 / 4194304) + 1420070400000) / 1000 > now - 604800'
     api POST "channels/$bot_channel/messages" "$(jq -nc --arg c "$title" '{content: $c}')"
     case $status in 2*) ;; *) fail "posting the channel line";; esac
     mid=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null)
@@ -63,17 +94,30 @@ case ${1:-} in
     case $status in
       2*) tid=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null)
           is_id "$tid" || fail "opening the thread"
+          printf '%s\n' "$tid" >> "$open"; answered
           printf '%s\n' "$tid" ;;
       # 160004: a thread is already open on that message. Its id IS the
       # message id, so the caller gets what it came for instead of an error.
       *) [ "$(err_code)" = 160004 ] || fail "opening the thread"
+         printf '%s\n' "$mid" >> "$open"; answered
          printf '%s\n' "$mid" ;;
     esac ;;
   close)
-    is_id "${2:-}" || { echo "thread: usage: thread close <thread_id> (digits only)" >&2; exit 2; }
+    is_id "${2:-}" || { echo "thread: usage: thread close <thread_id> (digits only) [\"<closing line>\"]" >&2; exit 2; }
+    if [ -n "${3:-}" ]; then
+      discord_turn || grep -qxF -- "$2" "$open" 2>/dev/null \
+        || { echo "thread: this turn has no Discord message in it and thread start did not open $2, so no closing line: answer in the terminal" >&2; exit 2; }
+      # thread-guard never sees this post, so its channel limit is kept here.
+      case $3 in *$'\n'*) false ;; esac && [ "$(printf '%s' "$3" | jq -Rrs length)" -le 500 ] \
+        || { echo "thread: a closing line is one line in the channel: no newline, 500 characters at most" >&2; exit 2; }
+      api POST "channels/$bot_channel/messages" "$(jq -nc --arg c "$3" '{content: $c}')"
+      case $status in 2*) ;; *) fail "posting the closing line";; esac
+      answered
+    fi
     api PATCH "channels/$2" "$(jq -nc '{archived: true}')"
-    case $status in 2*) ;; *) fail "archiving the thread";; esac ;;
+    case $status in 2*) ;; *) fail "archiving the thread";; esac
+    keep '($1 "") != (id "")' "$2" ;;   # as strings: two snowflakes can be one double
   *)
-    echo "thread: usage: thread start \"[<area>] <short title>\" | thread close <thread_id>" >&2
+    echo "thread: usage: thread start \"[<area>] <short title>\" | thread close <thread_id> [\"<closing line>\"]" >&2
     exit 2 ;;
 esac

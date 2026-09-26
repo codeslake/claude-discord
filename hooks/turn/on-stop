@@ -1,20 +1,34 @@
 #!/usr/bin/env bash
 # Stop hook: if this turn recorded any Discord messages and actually sent a
-# reply, reacts ✅ on each of them, then always clears the per-turn files.
-# Must never block or fail a turn.
+# reply, reacts ✅ on each of them, then clears the per-turn files.
+#
+# A turn with a Discord message that no reply came after (.pending: on-prompt
+# sets it, on-reply and the thread tool clear it) is sent back once
+# ("block"), so an answer written only in the terminal reaches the person who
+# asked on Discord; a terminal question in the same turn keeps its terminal
+# answer. Only once: on the second stop (stop_hook_active) it closes as
+# before, which is also how a turn that was mentioned with nothing asked of
+# it ends. Otherwise never blocks, and must never fail a turn.
 set -u
 . "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
 
-session_id=$(jq -r '.session_id // empty' 2>/dev/null) || exit 0
+input=$(cat 2>/dev/null) || exit 0
+session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
 if [ -n "$session_id" ] && [ -n "$bot_name" ]; then
   turns="$DISCORD_STATE_DIR/turns/$session_id"
   replied="$turns.replied"
+  if [ -f "$turns.pending" ] \
+     && [ "$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null)" != true ]; then
+    jq -nc --arg r 'A Discord message in this turn got no reply: answer it with the discord reply tool (a terminal question keeps its terminal answer). If nothing was asked of you, just end the turn again.' \
+      '{decision: "block", reason: $r}' 2>/dev/null
+    exit 0
+  fi
   if [ -f "$turns" ] && [ -f "$replied" ]; then
     while IFS=' ' read -r chat_id message_id _; do
       [ -n "$chat_id" ] && [ -n "$message_id" ] || continue
       react "$chat_id" "$message_id" '%E2%9C%85'
     done < "$turns"
   fi
-  rm -f "$turns" "$replied" 2>/dev/null
+  rm -f "$turns" "$replied" "$turns.pending" 2>/dev/null
 fi
 exit 0

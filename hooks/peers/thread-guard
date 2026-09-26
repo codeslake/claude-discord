@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# PreToolUse hook (matcher: mcp__plugin_discord_discord__reply): table format
-# and channel length, every bot (it reads no peer). Prints nothing unless it
-# rewrites a table or denies:
+# PreToolUse hook (matcher: mcp__plugin_discord_discord__reply|
+# mcp__plugin_discord_discord__edit_message: an edit puts text in Discord
+# too): Discord turns only, mirror lines, table format and channel length,
+# every bot (it reads no peer). Prints nothing unless it rewrites a table or
+# denies:
 #
+# 0. Turns and arrows: see the two checks right after the input is read.
 # 1. Tables, every bot and every chat. Discord renders no GFM table: its rows
 #    arrive as raw pipes. A table (a separator row |-|-|: two columns or more,
 #    a hyphen or more each, as GFM allows; the header row just above it; the
@@ -39,6 +42,40 @@ deny() {
 }
 
 input=$(cat 2>/dev/null) || exit 0
+
+# Discord takes a reply only in a turn that has a Discord message in it,
+# every bot but autoresearchclaw (its rule posts iteration reports from turns
+# a watch wakes). on-prompt opens turns/<session_id> for each Discord message
+# (a message arriving in the middle of a terminal turn opens it too, so that
+# message can be answered where it came from) and on-stop removes it when the
+# turn ends. Without it the turn was typed in the terminal, or woken by a
+# peer, a timer or a watch, and its answer belongs in the terminal. The
+# session prompt says so, but a session started before it said so keeps its
+# old prompt across restarts: this is what holds them. The exceptions are
+# threads: one `thread start` opened in a Discord turn (open-threads, until
+# `thread close`), where the background subagent working that request and the
+# turn its result wakes report, and one listed in report-threads, for a
+# report a timer posts (one id a line in each).
+#
+# One jq read for this check and the next, a line each (a tab would let an
+# empty field collapse into its neighbour): the session, the chat, and
+# whether a line of the text opens with an arrow.
+{ read -r turn; read -r chat; read -r arrow; } < <(printf '%s' "$input" | jq -r '
+  .session_id // "", (.tool_input.chat_id // "" | tostring),
+  ((.tool_input.text // "" | tostring) | test("(^|\n)\\s*(->|<-) [A-Za-z0-9._-]+:"))' 2>/dev/null) || :
+if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ]; then
+  case ${turn:-} in ''|*/*) ;; *)
+    [ -e "${DISCORD_STATE_DIR:-}/turns/$turn" ] \
+      || grep -qxF -- "${chat:-}" "${DISCORD_STATE_DIR:-}/open-threads" "${DISCORD_STATE_DIR:-}/report-threads" 2>/dev/null \
+      || deny 'This turn has no Discord message in it: answer in the terminal. From such a turn Discord takes only a post in a thread that thread start opened (or one listed in report-threads), and a closing line through thread close <id> "<line>".' ;;
+  esac
+fi
+
+# Mirror lines say which way they went in words. The old arrows ("-> name:",
+# "<- name:", a session or bot name) told a reader neither direction nor that
+# the line was a copy. A Korean label ("-> 수정: ...") is prose, not a name.
+[ "${arrow:-}" != true ] || deny 'A mirror line says which way it went: "[sent to name] ..." or "[received from name] ...", not an arrow.'
+
 # Even pieces of a split on ``` are outside every code block. The last piece
 # after an unclosed fence is looked at too, so a table there is denied below.
 table=$(printf '%s' "$input" | jq -r '
