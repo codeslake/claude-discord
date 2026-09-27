@@ -1771,6 +1771,542 @@ rm -f "$R/alpha/handoff.prev.md"
 echo "ok: a failed refresh with no handoff of its own leaves an older handoff.prev.md alone"
 
 
+# --- health ----------------------------------------------------------------
+# `health` checks EVERY bot in the project in one run, so these cases are
+# packed: one bot per scenario, one invocation, every verdict asserted from
+# the same --json. Started as one case per invocation, which cost 37 runs at
+# ~260 ms -- most of the section's wall time, against a 30 s budget for the
+# whole suite on the slowest host.
+HP="$HOME/health-project"; mkdir -p "$HP"; cd "$HP"
+HR="$HP/.claude/discord-agents"
+# A Discord id is a snowflake -- milliseconds since 2015-01-01 shifted left
+# 22 -- so an age is chosen and the id computed from the CLOCK. Hard-coded
+# ids would silently drift: one written as "30 minutes old" becomes days old
+# as the suite ages, and past the 4 h ceiling on holding an alert the cases
+# that expect a held alert would start failing.
+snowflake_for() {  # $1 = minutes ago
+  printf '%s' $(( ( ($(date +%s) - $1 * 60) * 1000 - 1420070400000 ) << 22 ))
+}
+ID_SEEN=$(snowflake_for 40)     # already answered: the hooks recorded it
+ID_STALE=$(snowflake_for 30)    # newer than that, and past the 15 min threshold
+ID_ANCIENT=$(snowflake_for 400) # past the 4 h ceiling, so no hold survives it
+me_json='{"id":"777"}'
+
+# A bot's own user id never changes, so health asks once and keeps it in
+# <state dir>/bot-id. Seeding it here means `users/@me` is never called, so
+# the queued replies below stay in step whichever case ran first; the
+# uncached path has its own case.
+seed_id() { printf '777\n' > "$1/bot-id"; }
+# The guild a channel belongs to cannot change either, so health keeps it in
+# <state dir>/channel-guild beside the channel it was learned for, and stops
+# asking. 900 is the channel every bot in these fixtures is set up with; a
+# cache written for a DIFFERENT channel must be ignored, which has its own
+# case below.
+seed_guild() { printf '900 5\n' > "$1/channel-guild"; }
+
+# The bots. Names are chosen so the glob order health walks them in is the
+# order their answers are queued below. allowFrom is 111 and 222 (from
+# config.env); 999 is outside it.
+printf '900\n111\n222\ntokH\nn\n' | bash "$S" setup b1ok >/dev/null
+for b in b2stale b3down b4busy b6dup b7reply b8cap; do
+  printf 'tok%s\nn\n' "$b" | bash "$S" setup "$b" >/dev/null
+done
+printf 'tokb5all\ny\n' | bash "$S" setup b5all >/dev/null   # requireMention false
+for b in b1ok b2stale b3down b4busy b5all b6dup b7reply; do
+  echo "$ID_SEEN" > "$HR/$b/last-message-id"; seed_id "$HR/$b"; seed_guild "$HR/$b"
+done
+seed_id "$HR/b8cap"; seed_guild "$HR/b8cap"
+# b8cap's case is a message older than the 4 h ceiling, so what its hooks
+# last recorded must be older still -- otherwise that message is one they
+# already answered, and correctly ignored.
+snowflake_for 500 > "$HR/b8cap/last-message-id"
+HD="$HR/b1ok"   # the bot the single-bot cases below drive
+
+# Every health run begins with ONE unauthenticated GET /gateway, to tell "the
+# network is blocked" from "this bot's token was refused" -- indistinguishable
+# otherwise, and a run with no proxy once blamed every bot's token. Then each
+# bot in turn asks four things: who am I, the channel's messages, the channel
+# (for its guild id) and that guild's active threads.
+# CURL_REPLIES is one reply per LINE, so a queued value must not contain a
+# newline: one that does becomes several replies and every later call reads
+# the wrong one -- silently, as a confident wrong verdict. Caught here.
+queue_line() {
+  case $1 in *$'\n'*) echo "FAIL: a queued curl reply must be one line: $1"; exit 1;; esac
+  printf '%s\n' "$1" >> "$CURL_REPLIES"
+}
+queue() { printf '200 {"url":"wss://x"}\n' > "$CURL_REPLIES"; for l in "$@"; do queue_line "$l"; done; }
+queue_unreachable() { printf '403 {"message":"blocked"}\n' > "$CURL_REPLIES"; }
+# Two replies, not four: a bot's own user id and its channel's guild never
+# change, so both are kept in the state dir and asked for once -- two fewer
+# HTTP calls and two fewer jq per bot per run on a five-minute timer. Every
+# bot here is seeded with both, so neither `users/@me` nor `channels/<id>` is
+# called; each uncached path has its own case.
+qbot() {  # $1 = the messages array this bot's channel read returns
+  queue_line "200 $1"
+  queue_line '200 {"threads":[]}'
+}
+NONE='[]'
+MENTION="[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"111\"},\"mentions\":[{\"id\":\"777\"}]}]"
+verdict_of() { jq -r --arg b "$1" '.[] | select(.bot == $b) | .verdict' <<<"$2"; }
+detail_of()  { jq -r --arg b "$1" '.[] | select(.bot == $b) | .detail'  <<<"$2"; }
+
+# A stand-in for a bot's plugin server, so "is this bot up" has something
+# real to find. health matches argv FIRST -- argv[0] is bun, an argument
+# under a .../discord/ directory, last argument "start" -- and only then
+# reads that pid's environ for the bot it serves. That order is the point:
+# every child of a bot session inherits DISCORD_STATE_DIR (this very test
+# script does), so matching on the environment alone would count them all
+# and call a healthy bot a duplicate. A real `bun run` is used rather than a
+# renamed process, so the argv the check looks for is the argv bun produces.
+FAKE_PLUGIN="$HOME/fake-servers/discord/0.0.4"; mkdir -p "$FAKE_PLUGIN"
+printf '{"name":"fake-discord","scripts":{"start":"sleep 300"}}\n' > "$FAKE_PLUGIN/package.json"
+SERVERS=""
+count_fake_servers() {  # $1 = state dir; the same argv-then-environ order health uses
+  local n=0 c a p hit x cands
+  # The same narrowing the product uses: `pgrep -x bun` cuts the candidates
+  # from every process on the machine to the handful that could be a server
+  # (4 of 792 measured). This is polled in a loop, so the full walk was paid
+  # dozens of times a run.
+  if cands=$(pgrep -x bun 2>/dev/null); then
+    cands=$(printf '/proc/%s/cmdline ' $cands)
+  else
+    cands=$(printf '%s ' /proc/[0-9]*/cmdline)
+  fi
+  for c in $cands; do
+    { mapfile -d '' -t a < "$c"; } 2>/dev/null || continue
+    [ "${#a[@]}" -ge 2 ] || continue
+    [ "${a[0]##*/}" = bun ] || continue
+    [ "${a[${#a[@]}-1]}" = start ] || continue
+    hit=no; for x in "${a[@]}"; do case $x in */discord/*) hit=yes; break;; esac; done
+    [ "$hit" = yes ] || continue
+    p=${c#/proc/}; p=${p%/cmdline}
+    grep -qzxF "DISCORD_STATE_DIR=$1" "/proc/$p/environ" 2>/dev/null && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+start_server() {  # $1 = the bot state dir this server serves
+  local want=$(( $(count_fake_servers "$1") + 1 ))
+  # setsid, and kill -PGID below: `bun run start` runs the script as a CHILD
+  # process, so signalling bun's own pid leaves that child orphaned --
+  # measured, the `sleep` outlived its bun, and a run on another machine left
+  # 11 behind. perl's setsid rather than setsid(1), as the wrapper does, so
+  # this works where only perl is present.
+  DISCORD_STATE_DIR="$1" perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- \
+    bun run --cwd "$FAKE_PLUGIN" --shell=bun --silent start >/dev/null 2>&1 &
+  SERVERS="$SERVERS $!"; KILL_AT_EXIT="$KILL_AT_EXIT $!"
+  # Polled through /proc, never through health: health drains CURL_REPLIES.
+  for _ in $(seq 100); do
+    [ "$(count_fake_servers "$1")" -ge "$want" ] && return 0
+    sleep 0.05
+  done
+  echo "FAIL: the stand-in plugin server for $1 never appeared"; exit 1
+}
+stop_servers() {
+  local p
+  for p in $SERVERS; do kill -TERM -"$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || :; done
+  for p in $SERVERS; do wait "$p" 2>/dev/null || :; done
+  SERVERS=""
+}
+# Stops the most recently started server and waits for the count to drop.
+# Starting and stopping these dominates this section's wall time, so a case
+# needing one fewer takes this rather than a full teardown and rebuild.
+stop_one_server() {  # $1 = the state dir, for the wait
+  local last=${SERVERS##* } want
+  [ -n "$last" ] || return 0
+  want=$(( $(count_fake_servers "$1") - 1 ))
+  kill -TERM -"$last" 2>/dev/null || kill -TERM "$last" 2>/dev/null || :
+  wait "$last" 2>/dev/null || :
+  SERVERS=${SERVERS% *}
+  for _ in $(seq 100); do
+    [ "$(count_fake_servers "$1")" -le "$want" ] && return 0
+    sleep 0.05
+  done
+}
+
+# b1ok and b2stale are up, b6dup has two (one token, two sessions), b3down
+# has none. The rest need none: their verdict is decided before the server
+# count is consulted.
+start_server "$HR/b1ok"; start_server "$HR/b2stale"
+start_server "$HR/b6dup"; start_server "$HR/b6dup"
+# b2stale's hooks died mid-turn, leaving the marker behind for ever; b4busy
+# is answering right now.
+mkdir -p "$HR/b2stale/turns" "$HR/b4busy/turns" "$HR/b8cap/turns"
+: > "$HR/b2stale/turns/s1"; touch -d '3 hours ago' "$HR/b2stale/turns/s1"
+: > "$HR/b4busy/turns/s1"
+: > "$HR/b8cap/turns/s1"
+
+# ONE run, eight bots, every verdict and every filter at once.
+#   b1ok    three messages that must all be ignored: the bot's own, one from
+#           an author outside allowFrom (the plugin drops those before any
+#           hook runs, so last-message-id could never catch up and an alert
+#           would never clear), and one from an allowed author mentioning
+#           nobody while requireMention is true
+#   b2stale an old mention, server UP and turn file stale: the hooks or the
+#           turn are stuck -- the failure no process check can see
+#   b3down  the same, with no server: same verdict, different cause
+#   b4busy  the same, but a turn is genuinely in flight: held
+#   b5all   requireMention false, so an unmentioned message from an allowed
+#           author counts
+#   b6dup   answering fine, but two servers share its token
+#   b7reply no mention at all, a reply to one of the bot's own messages
+#   b8cap   past the 4 h ceiling, so even a fresh turn stops holding it
+queue
+qbot "[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"777\"},\"mentions\":[{\"id\":\"777\"}]},{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"999\"},\"mentions\":[{\"id\":\"777\"}]},{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"111\"},\"mentions\":[]}]"
+qbot "$MENTION"
+qbot "$MENTION"
+qbot "$MENTION"
+qbot "[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"111\"},\"mentions\":[]}]"
+qbot "$NONE"
+qbot "[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"111\"},\"mentions\":[],\"referenced_message\":{\"author\":{\"id\":\"777\"}}}]"
+qbot "[{\"id\":\"$ID_ANCIENT\",\"author\":{\"id\":\"111\"},\"mentions\":[{\"id\":\"777\"}]}]"
+out=$(bash "$S" health --json 2>/dev/null) && { echo "FAIL: health must exit non-zero when any bot has a finding"; exit 1; }
+[ "$(verdict_of b1ok "$out")" = ok ] || { echo "FAIL: the bot's own messages, an author outside allowFrom and an unmentioned one must all be ignored: $(jq -c '.[0]' <<<"$out")"; exit 1; }
+[ "$(verdict_of b2stale "$out")" = stale ] || { echo "FAIL: an old unanswered mention must be stale: $out"; exit 1; }
+case $(detail_of b2stale "$out") in
+  *'hooks or its turn are stuck'*) ;;
+  *) echo "FAIL: with the server up the cause must be the hooks, not a dead process: $(detail_of b2stale "$out")"; exit 1;;
+esac
+case $(detail_of b2stale "$out") in
+  *'unanswered for'*'turn file has sat there'*) ;;
+  *) echo "FAIL: the finding must say how long, and name the stale turn file: $(detail_of b2stale "$out")"; exit 1;;
+esac
+[ "$(verdict_of b3down "$out")" = stale ] || { echo "FAIL: a down bot's unanswered mention is still stale: $out"; exit 1; }
+case $(detail_of b3down "$out") in
+  *'the bot is down'*) ;;
+  *) echo "FAIL: with no plugin server the cause must be named: $(detail_of b3down "$out")"; exit 1;;
+esac
+[ "$(verdict_of b4busy "$out")" = busy ] || { echo "FAIL: a turn in flight must hold the alert: $out"; exit 1; }
+[ "$(verdict_of b5all "$out")" = stale ] || { echo "FAIL: with requireMention false an unmentioned message must count: $out"; exit 1; }
+[ "$(verdict_of b6dup "$out")" = duplicate ] || { echo "FAIL: two servers on one token must read as duplicate even while the bot answers: $out"; exit 1; }
+case $(detail_of b6dup "$out") in
+  *'2 plugin servers'*) ;;
+  *) echo "FAIL: the duplicate finding must count them: $(detail_of b6dup "$out")"; exit 1;;
+esac
+[ "$(verdict_of b7reply "$out")" = stale ] || { echo "FAIL: a mention-less reply to the bot's own message must count as addressing it: $out"; exit 1; }
+[ "$(verdict_of b8cap "$out")" = stale ] || { echo "FAIL: past the 4 h ceiling a fresh turn file must stop holding the alert: $(jq -c '.[] | select(.bot=="b8cap")' <<<"$out")"; exit 1; }
+case $(detail_of b8cap "$out") in
+  *'unanswered for 4'*'a turn file has sat there 0m'*) ;;
+  *) echo "FAIL: the finding should show both the age past the ceiling and the fresh turn file it overrode: $(detail_of b8cap "$out")"; exit 1;;
+esac
+jq -e '.[0] | has("unanswered_min") and has("oldest_unanswered") and has("servers")' <<<"$out" >/dev/null ||
+  { echo "FAIL: --json must carry the age, the message it is about and the server count: $out"; exit 1; }
+[ "$(jq -r '.[] | select(.bot == "b2stale") | .unanswered_min > 0' <<<"$out")" = true ] ||
+  { echo "FAIL: --json must carry a real age: $out"; exit 1; }
+echo "ok: one health run judges every bot in the project -- ok (own messages, an author outside allowFrom and an unmentioned one all ignored), stale with the hooks blamed while the server is up, stale with the bot down, held while a turn is in flight, counted without a mention where requireMention is false, duplicate on two servers, counted for a mention-less reply, and unheld past the 4 h ceiling"
+
+# The remaining cases each concern ONE bot, so they run against a project
+# holding one: driving them through the eight-bot fixture meant queueing
+# eight bots' worth of replies for one bot's worth of assertion, and the
+# padding cost more than the case did. The multi-bot fixture above stays for
+# what it is actually for -- proving that one run judges every bot at once.
+SP="$HOME/single-project"; mkdir -p "$SP"; cd "$SP"
+printf '900\n111\n222\ntokS\nn\n' | bash "$S" setup sbot >/dev/null
+SD="$SP/.claude/discord-agents/sbot"
+echo "$ID_SEEN" > "$SD/last-message-id"; seed_id "$SD"; seed_guild "$SD"
+start_server "$SD"
+
+# The bot id cache: asked for once, kept, and reused. A cached value is
+# trusted only if it looks like an id, so a truncated or garbage file costs
+# one call and heals itself rather than poisoning every later run.
+rm -f "$SD/bot-id"
+queue "200 $me_json" "200 $NONE" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: the first run must ask for the bot id and carry on: $out"; exit 1; }
+[ "$(cat "$SD/bot-id")" = 777 ] || { echo "FAIL: the bot id must be kept: $(cat "$SD/bot-id" 2>&1)"; exit 1; }
+queue "200 $NONE" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: a later run must use the cached id and make no users/@me call: $out"; exit 1; }
+[ ! -s "$CURL_REPLIES" ] || { echo "FAIL: a cached id must cost no extra call: $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
+printf 'not-an-id\n' > "$SD/bot-id"
+queue "200 $me_json" "200 $NONE" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = ok ] && [ "$(cat "$SD/bot-id")" = 777 ] ||
+  { echo "FAIL: a cached value that is not an id must be re-fetched and replaced: $out"; exit 1; }
+echo "ok: health asks for a bot's own id once, keeps it, reuses it without another call, and re-fetches a cached value that is not an id"
+
+# The channel's guild, cached the same way and for the same reason: that
+# request exists only to learn one immutable fact (a channel is created in a
+# guild and deleted, never moved), and it ran once per bot per run forever.
+# The CHANNEL is stored with it because a bot's channel CAN change -- its
+# access.json is edited to move it -- and a cache that answered for the old
+# channel would send health looking for threads in the wrong guild, quietly
+# missing every unanswered mention in a thread.
+rm -f "$SD/channel-guild"
+queue "200 $NONE" '200 {"guild_id":"5"}' '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: the first run must ask for the guild and carry on: $out"; exit 1; }
+[ "$(cat "$SD/channel-guild")" = "900 5" ] || { echo "FAIL: the guild must be kept with its channel: $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
+queue "200 $NONE" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: a later run must use the cached guild and make no channels/<id> call: $out"; exit 1; }
+[ ! -s "$CURL_REPLIES" ] || { echo "FAIL: a cached guild must cost no extra call: $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
+# Cached for another channel, and a cached guild that is not an id: both must
+# be re-fetched rather than used.
+for bad in '901 5' '900 not-an-id'; do
+  printf '%s\n' "$bad" > "$SD/channel-guild"
+  queue "200 $NONE" '200 {"guild_id":"5"}' '200 {"threads":[]}'
+  out=$(bash "$S" health --json 2>/dev/null) || :
+  [ "$(verdict_of sbot "$out")" = ok ] && [ "$(cat "$SD/channel-guild")" = "900 5" ] ||
+    { echo "FAIL: a cache reading '"'"'$bad'"'"' must be re-fetched and replaced: $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
+  [ ! -s "$CURL_REPLIES" ] || { echo "FAIL: '"'"'$bad'"'"' must cost exactly the one re-fetch: $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
+done
+echo "ok: health asks for a channel's guild once, keeps it with the channel it was learned for, reuses it without another call, and re-fetches it for another channel or a value that is not an id"
+
+# The age is measured from the OLDEST unanswered message, not the newest:
+# with the newest, every fresh message resets the clock, and a wedged bot is
+# exactly one people keep calling -- so the bots this exists for would never
+# be reported. Here a 30-minute-old mention is followed by a brand-new one.
+queue
+qbot "[{\"id\":\"$(snowflake_for 0)\",\"author\":{\"id\":\"111\"},\"mentions\":[{\"id\":\"777\"}]},{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"111\"},\"mentions\":[{\"id\":\"777\"}]}]"
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = stale ] || { echo "FAIL: a fresh message must not reset the clock on an older unanswered one: $out"; exit 1; }
+[ "$(jq -r '.[0].unanswered_min >= 25' <<<"$out")" = true ] ||
+  { echo "FAIL: the age must come from the OLDEST unanswered message: $out"; exit 1; }
+echo "ok: health measures how long a bot has been failing to answer from the oldest unanswered message, so a bot people keep calling is still reported"
+
+# Ids are compared as strings, never as jq numbers: jq 1.6 holds numbers as
+# doubles and a 19-digit snowflake does not fit, so "...025049" comes back
+# as "...025200" -- LARGER than the original, which sails past
+# last-message-id and invents a finding for a bot that is perfectly idle.
+BIG=$(snowflake_for 300)
+printf '%s\n' "$BIG" > "$SD/last-message-id"
+queue
+qbot "[{\"id\":\"$(( BIG - 8 ))\",\"author\":{\"id\":\"111\"},\"mentions\":[{\"id\":\"777\"}]}]"
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = ok ] ||
+  { echo "FAIL: an id 8 below last-message-id must not read as newer -- the jq-1.6 double rounding: $(jq -c '.[0]' <<<"$out")"; exit 1; }
+echo "ok: an id a few counts BELOW the last one the hooks recorded is not treated as newer, so a bot that is idle is not reported on a rounding error"
+echo "$ID_SEEN" > "$SD/last-message-id"
+
+# A machine that cannot reach Discord at all must NOT blame any token:
+# measured, a run with no HTTPS_PROXY got 403 on every call and reported
+# every bot's credential as refused, which would send every owner to check
+# something that was fine. The unauthenticated probe separates the two, and
+# no alert is attempted (the POST would fail the same way) nor recorded (it
+# would suppress the real recovery line later).
+: > "$CURL_LOG"; rm -f "$SD/health-alert"
+queue_unreachable
+out=$(bash "$S" health --notify 2>&1) && { echo "FAIL: an unreachable network must be a finding: $out"; exit 1; }
+grep -q 'sbot noreach' <<<"$out" || { echo "FAIL: the bot must read as noreach: $out"; exit 1; }
+grep -q 'unreachable' <<<"$out" && { echo "FAIL: no token may be blamed when the network is down: $out"; exit 1; }
+grep -q 'HTTPS_PROXY' <<<"$out" || { echo "FAIL: the finding should name the likely cause: $out"; exit 1; }
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 0 ] || { echo "FAIL: no alert may be attempted while Discord is unreachable: $(cat "$CURL_LOG")"; exit 1; }
+[ ! -f "$SD/health-alert" ] || { echo "FAIL: noreach must not be recorded as an alert state, or the real recovery line is suppressed"; exit 1; }
+echo "ok: health tells an unreachable network from a refused token, blames no credential, and neither posts nor records an alert"
+
+# 401 and 403 mean the credential was refused. Anything else -- a timeout, a
+# rate limit, an outage -- is not the token's fault, and saying it is sends
+# someone to rotate a credential that was fine.
+for pair in '401 unreachable' '429 throttled' '500 apierror'; do
+  queue "${pair%% *} {\"message\":\"x\"}"
+  out=$(bash "$S" health --json 2>/dev/null) && { echo "FAIL: HTTP ${pair%% *} must be a finding: $out"; exit 1; }
+  [ "$(verdict_of sbot "$out")" = "${pair##* }" ] ||
+    { echo "FAIL: HTTP ${pair%% *} must read as ${pair##* }: $out"; exit 1; }
+done
+echo "ok: health reports a refused token (401) as unreachable but a rate limit (429) or an outage (5xx) as itself, blaming no credential"
+
+# Threads carry their own messages. One request for the guild's active
+# threads answers with every thread's last_message_id, so a thread is read
+# only when it holds something newer than the hooks recorded -- the usual
+# run costs two calls, not one per thread.
+queue "200 $NONE" \
+      "200 {\"threads\":[{\"id\":\"31\",\"parent_id\":\"900\",\"last_message_id\":\"$ID_SEEN\"},{\"id\":\"32\",\"parent_id\":\"901\",\"last_message_id\":\"$ID_STALE\"},{\"id\":\"33\",\"parent_id\":\"900\",\"last_message_id\":\"$ID_STALE\"}]}" \
+      "200 $MENTION"
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = stale ] || { echo "FAIL: an unanswered mention inside a thread must be found: $out"; exit 1; }
+[ ! -s "$CURL_REPLIES" ] ||
+  { echo "FAIL: only the thread holding something new may be read (31 has nothing new, 32 belongs to another channel): $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
+echo "ok: health reads a thread only when its last_message_id is newer than the hooks recorded, skips another channel's, and finds a mention inside one"
+stop_servers
+cd "$HP"
+
+# A turn in flight holds the alert, but only while the daemon agrees a turn
+# is running: on-prompt touches the turn file when a MESSAGE arrives, so a
+# turn running for hours off a single message looks stale while it works --
+# measured, a live mid-turn session was reported stale with a --force
+# refresh as the suggested fix. Unknown counts as working, the quiet
+# direction, but that hold is capped: `claude agents` failing run after run
+# means the daemon is unwell, which is exactly when a bot breaks.
+# The working-hold rules get a project of their own, with one bot: each of
+# these five cases needs a different `claude agents` answer, so driving them
+# through the eight-bot fixture meant eight bots' worth of queued replies per
+# case for one bot's worth of assertion.
+WP="$HOME/working-project"; mkdir -p "$WP"; cd "$WP"
+printf '900\n111\n222\ntokW\nn\n' | bash "$S" setup wbot >/dev/null
+WD="$WP/.claude/discord-agents/wbot"
+echo "$ID_SEEN" > "$WD/last-message-id"; seed_id "$WD"; seed_guild "$WD"
+start_server "$WD"
+mkdir -p "$WD/turns"; : > "$WD/turns/s1"; touch -d '3 hours ago' "$WD/turns/s1"
+agents_say() { cat > "$HOME/bin/claude" <<STUB
+#!/usr/bin/env bash
+[ "\$1" = agents ] && echo '$1'
+STUB
+chmod +x "$HOME/bin/claude"; }
+WORKING="[{\"id\":\"aa111111\",\"pid\":41,\"name\":\"wbot\",\"cwd\":\"$WP\",\"state\":\"working\",\"status\":\"busy\"}]"
+stale_one() { queue; qbot "$MENTION"; }
+agents_say "$WORKING"
+stale_one
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of wbot "$out")" = busy ] || { echo "FAIL: a session the daemon calls working must hold the alert however old its turn file: $out"; exit 1; }
+case $(detail_of wbot "$out") in *'running one now'*) ;; *) echo "FAIL: the held line should say the session is working: $(detail_of wbot "$out")"; exit 1;; esac
+# Another bot's working session, or one in another project, is not this
+# bot's turn.
+agents_say "[{\"id\":\"bb222222\",\"pid\":42,\"name\":\"other\",\"cwd\":\"$WP\",\"state\":\"working\",\"status\":\"busy\"},{\"id\":\"cc333333\",\"pid\":43,\"name\":\"wbot\",\"cwd\":\"/elsewhere\",\"state\":\"working\",\"status\":\"busy\"},{\"id\":\"dd444444\",\"pid\":44,\"name\":\"wbot\",\"cwd\":\"$WP\",\"state\":\"done\",\"status\":\"idle\"}]"
+stale_one
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of wbot "$out")" = stale ] || { echo "FAIL: only this bot in this project counts as working: $out"; exit 1; }
+# Nothing can be learned from the daemon: hold, and count it.
+printf '#!/usr/bin/env bash\nexit 1\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
+rm -f "$WD/health-unknown"
+stale_one
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of wbot "$out")" = busy ] || { echo "FAIL: an unknown session state must count as working: $out"; exit 1; }
+case $(detail_of wbot "$out") in *"no answer from 'claude agents'"*) ;; *) echo "FAIL: the held line should say the state is unknown: $(detail_of wbot "$out")"; exit 1;; esac
+[ "$(cat "$WD/health-unknown")" = 1 ] || { echo "FAIL: an unknown must be counted: $(cat "$WD/health-unknown")"; exit 1; }
+# Seeded to one short of the cap rather than looped there: the count is read
+# from this file and written back, so the next run is the one that crosses.
+printf '%s\n' 5 > "$WD/health-unknown"
+stale_one
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of wbot "$out")" = nostate ] || { echo "FAIL: past the cap the not-knowing is itself the finding: $out"; exit 1; }
+case $(detail_of wbot "$out") in *'daemon itself may be unwell'*) ;; *) echo "FAIL: the finding should name the likely cause: $(detail_of wbot "$out")"; exit 1;; esac
+# A run that CAN tell resets the count, so a single hiccup never accumulates.
+agents_say "$WORKING"
+stale_one
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ ! -f "$WD/health-unknown" ] || { echo "FAIL: a run that could tell must reset the unknown count"; exit 1; }
+printf '#!/usr/bin/env bash\n[ "$1" = agents ] && echo "[]"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
+stop_servers
+cd "$HP"
+echo "ok: a session the daemon calls working holds the alert whatever the turn file's age, another bot's or another project's does not, an unusable listing counts as working but only to a cap, and a run that can tell resets that count"
+
+# --notify posts one message per state CHANGE, not one per run -- a
+# five-minute timer would otherwise repeat the same line 288 times a day --
+# on the affected bot's OWN token over REST, never through another bot on
+# the machine: a peer there shares the daemon and the upgrade that killed
+# this one, so it would be gone too. The token goes over stdin, never argv.
+# --notify gets a project of its OWN, with one bot. The eight-bot fixture
+# above is the wrong shape for it: every bot there is in some state, several
+# are findings, and each finding posts its own alert -- so "exactly one
+# alert" could only be asserted by first quieting seven bots, and each one's
+# four queued replies would have to stay in step with a POST that happens
+# inside the per-bot loop. One bot makes the queue four lines and the
+# assertions mean what they say.
+NP="$HOME/notify-project"; mkdir -p "$NP"; cd "$NP"
+printf '900\n111\n222\ntokN\nn\n' | bash "$S" setup nbot >/dev/null
+ND="$NP/.claude/discord-agents/nbot"
+echo "$ID_SEEN" > "$ND/last-message-id"; seed_id "$ND"; seed_guild "$ND"
+start_server "$ND"
+mkdir -p "$ND/turns"; : > "$ND/turns/s1"; touch -d '3 hours ago' "$ND/turns/s1"
+printf '#!/usr/bin/env bash\n[ "$1" = agents ] && echo "[]"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
+# stale, then the reply to the alert POST that follows it.
+notify_run() {  # $1 = the POST's reply, if one is expected
+  queue; qbot "$MENTION"
+  [ $# -eq 0 ] || queue_line "$1"
+}
+# --notify posts one message per state CHANGE, not one per run -- a
+# five-minute timer would otherwise repeat the same line 288 times a day --
+# on the affected bot's OWN token over REST, never through another bot on
+# the machine: a peer there shares the daemon and the upgrade that killed
+# this one, so it would be gone too. The token goes over stdin, never argv.
+: > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
+notify_run '200 {"id":"9001"}'
+bash "$S" health --notify >/dev/null 2>&1 || :
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] || { echo "FAIL: --notify must post exactly one alert: $(cat "$CURL_LOG")"; exit 1; }
+grep -q 'channels/900/messages' "$CURL_LOG" || { echo "FAIL: the alert must go to the bot's own channel: $(cat "$CURL_LOG")"; exit 1; }
+grep -q 'refresh nbot' "$CURL_LOG" || { echo "FAIL: the alert must carry the command that fixes it: $(cat "$CURL_LOG")"; exit 1; }
+grep -q 'refresh nbot --force' "$CURL_LOG" && { echo "FAIL: an alert must not hand over --force by default: it replaces the session with no handoff: $(cat "$CURL_LOG")"; exit 1; }
+grep -q 'only if it cannot write a handoff' "$CURL_LOG" || { echo "FAIL: the alert should say when --force is the right call: $(cat "$CURL_LOG")"; exit 1; }
+grep -q 'tokN' "$CURL_LOG" && { echo "FAIL: the token must never reach argv"; exit 1; }
+grep -q 'tokN' "$CURL_STDIN_LOG" || { echo "FAIL: the token must go over stdin"; exit 1; }
+: > "$CURL_LOG"
+notify_run
+bash "$S" health --notify >/dev/null 2>&1 || :
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 0 ] || { echo "FAIL: the same state must not be alerted twice: $(cat "$CURL_LOG")"; exit 1; }
+# A POST that failed must NOT count as sent: recording it regardless meant a
+# send that failed was never retried, and the bot stayed down and silent.
+rm -f "$ND/health-alert"; : > "$CURL_LOG"
+notify_run '500 {"message":"nope"}'
+bash "$S" health --notify >/dev/null 2>&1 || :
+[ -f "$ND/health-alert" ] && { echo "FAIL: an alert Discord did not accept must not be recorded as sent"; exit 1; }
+: > "$CURL_LOG"
+notify_run '200 {"id":"9002"}'
+bash "$S" health --notify >/dev/null 2>&1 || :
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] || { echo "FAIL: an alert that failed to send must be retried next run: $(cat "$CURL_LOG")"; exit 1; }
+# Recovery: announced, and only then is the state cleared.
+: > "$CURL_LOG"
+queue; qbot "$NONE"; queue_line '200 {"id":"9003"}'
+bash "$S" health --notify >/dev/null 2>&1 || :
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] || { echo "FAIL: a recovery must be announced: $(cat "$CURL_LOG")"; exit 1; }
+[ ! -f "$ND/health-alert" ] || { echo "FAIL: the recovery must clear the alert state"; exit 1; }
+grep -q 'health' "$ND/health.log" || { echo "FAIL: every run must leave a local log line, since nobody may be watching the channel"; exit 1; }
+echo "ok: health --notify posts one alert per state change on the bot's own token over stdin, records it only once Discord accepted it (retrying otherwise), announces the recovery, always logs locally, and never offers --force except to a bot with no session left to lose a handoff from"
+
+# Without --notify nothing is posted at all: a human running it by hand must
+# not wake the channel.
+: > "$CURL_LOG"
+notify_run
+bash "$S" health >/dev/null 2>&1 || :
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 0 ] || { echo "FAIL: health without --notify must post nothing: $(cat "$CURL_LOG")"; exit 1; }
+echo "ok: health posts nothing without --notify"
+stop_servers
+cd "$HP"
+
+# 10. The timer is explicit, never wired into setup, and one per project.
+grep -q 'health --install-timer' "$P/.claude/settings.json" && { echo "FAIL: the timer must not be registered as a hook"; exit 1; }
+UD="$HOME/.config/systemd/user"
+cat > "$HOME/bin/systemctl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$HOME/systemctl.calls"
+STUB
+chmod +x "$HOME/bin/systemctl"
+rm -f "$HOME/systemctl.calls"
+bash "$S" health --install-timer >/dev/null
+[ -f "$UD/claude-discord-health-health-project.timer" ] || { echo "FAIL: --install-timer must write a timer unit named after the project"; exit 1; }
+grep -q "WorkingDirectory=$HP" "$UD/claude-discord-health-health-project.service" || { echo "FAIL: the unit must run in the project directory"; exit 1; }
+grep -q 'health --notify' "$UD/claude-discord-health-health-project.service" || { echo "FAIL: the unit must run the check with --notify"; exit 1; }
+grep -q 'OnUnitActiveSec=5min' "$UD/claude-discord-health-health-project.timer" || { echo "FAIL: the timer must fire five minutes after the last run ended"; exit 1; }
+grep -q 'enable --now' "$HOME/systemctl.calls" || { echo "FAIL: --install-timer must enable the timer: $(cat "$HOME/systemctl.calls")"; exit 1; }
+# A systemd unit inherits nothing from the installing shell, so behind a
+# corporate proxy the timer reached Discord unproxied and read every bot as
+# having a refused token (measured). But the installing shell's proxy is the
+# WRONG one to bake in: a bot session's shell usually points at a
+# session-scoped helper that restarts often, and a timer that inherits it
+# reports noreach whenever it bounces -- suppressing real alerts meanwhile.
+# So the proxy is named explicitly, and inherited only when asked for.
+UNIT_SVC="$UD/claude-discord-health-health-project.service"
+rm -f "$UNIT_SVC" "$UD/claude-discord-health-health-project.timer"
+PROXY_ENV=(env -u HTTP_PROXY -u http_proxy -u https_proxy -u no_proxy -u ALL_PROXY -u all_proxy -u NO_PROXY)
+"${PROXY_ENV[@]}" HTTPS_PROXY=http://127.0.0.1:9 bash "$S" health --install-timer >/dev/null
+grep -q 'Environment=' "$UNIT_SVC" && { echo "FAIL: the installing shell's proxy must NOT be baked in by default: $(cat "$UNIT_SVC")"; exit 1; }
+rm -f "$UNIT_SVC"
+"${PROXY_ENV[@]}" bash "$S" health --install-timer --proxy http://127.0.0.1:8118 >/dev/null 2>&1
+grep -q '^Environment=HTTPS_PROXY=http://127.0.0.1:8118$' "$UNIT_SVC" || { echo "FAIL: --proxy must be written into the unit: $(cat "$UNIT_SVC")"; exit 1; }
+grep -q '^Environment=HTTP_PROXY=http://127.0.0.1:8118$' "$UNIT_SVC" || { echo "FAIL: --proxy must cover both schemes"; exit 1; }
+grep -q '^Environment=NO_PROXY=127.0.0.1,localhost,::1$' "$UNIT_SVC" || { echo "FAIL: the loopback exclusions must be kept, or the check proxies its own localhost calls"; exit 1; }
+grep -q '^ExecStart=' "$UNIT_SVC" || { echo "FAIL: the Environment lines must not displace ExecStart"; exit 1; }
+rm -f "$UNIT_SVC"
+"${PROXY_ENV[@]}" HTTPS_PROXY=http://127.0.0.1:9 NO_PROXY=localhost bash "$S" health --install-timer --proxy inherit >/dev/null 2>&1
+grep -q '^Environment=HTTPS_PROXY=http://127.0.0.1:9$' "$UNIT_SVC" || { echo "FAIL: --proxy inherit must take the shell's: $(cat "$UNIT_SVC")"; exit 1; }
+grep -q '^Environment=NO_PROXY=localhost$' "$UNIT_SVC" || { echo "FAIL: --proxy inherit must take NO_PROXY too"; exit 1; }
+grep -q 'Environment=HTTP_PROXY' "$UNIT_SVC" && { echo "FAIL: an unset variable must not be written"; exit 1; }
+# A value that is not a URL, or that could open a second unit line and
+# inject a directive, is refused before anything is written.
+rm -f "$UNIT_SVC"
+"${PROXY_ENV[@]}" bash "$S" health --install-timer --proxy not-a-url >/dev/null 2>&1 && { echo "FAIL: a non-URL proxy must be refused"; exit 1; }
+"${PROXY_ENV[@]}" bash "$S" health --install-timer --proxy "$(printf 'http://x\nExecStart=/bin/false')" >/dev/null 2>&1 && { echo "FAIL: a multi-line proxy value must be refused"; exit 1; }
+[ ! -f "$UNIT_SVC" ] || { echo "FAIL: a refused --proxy must write no unit: $(cat "$UNIT_SVC")"; exit 1; }
+"${PROXY_ENV[@]}" bash "$S" health --install-timer --proxy >/dev/null 2>&1 && { echo "FAIL: --proxy with no value must be refused"; exit 1; }
+"${PROXY_ENV[@]}" bash "$S" health --proxy http://x >/dev/null 2>&1 && { echo "FAIL: --proxy without --install-timer must be refused"; exit 1; }
+"${PROXY_ENV[@]}" bash "$S" health --install-timer --proxy http://127.0.0.1:8118 >/dev/null 2>&1
+bash "$S" health --uninstall-timer >/dev/null
+[ ! -f "$UD/claude-discord-health-health-project.timer" ] && [ ! -f "$UD/claude-discord-health-health-project.service" ] || { echo "FAIL: --uninstall-timer must remove both units"; exit 1; }
+grep -q 'disable --now' "$HOME/systemctl.calls" || { echo "FAIL: --uninstall-timer must disable the timer: $(cat "$HOME/systemctl.calls")"; exit 1; }
+rm -f "$HOME/bin/systemctl"
+echo "ok: health --install-timer writes one enabled unit per project running the check with --notify in that directory, bakes in no proxy unless --proxy says which (refusing a non-URL or multi-line one, or inheriting on request), and --uninstall-timer removes it"
+
+stop_servers
+cd "$P"
 
 # install.sh under a HOME of its own: every shipped hook and rule lands, and
 # a file an earlier version installed that the repo no longer ships (the

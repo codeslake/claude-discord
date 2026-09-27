@@ -17,6 +17,19 @@
 #   claude-discord refresh <name> [--force] [claude args]
 #                                        replace the running session with a fresh
 #                                        one that starts from its handoff
+#   claude-discord health [--notify] [--json]
+#                                        is every bot in this project still
+#                                        answering? --notify posts an alert to
+#                                        the bot's own channel; exit 1 on a
+#                                        finding
+#   claude-discord health --install-timer [--proxy <url>|inherit]
+#   claude-discord health --uninstall-timer
+#                                        run that check every five minutes
+#                                        (systemd --user), with --notify. A
+#                                        unit inherits no environment, so
+#                                        behind a proxy name it with --proxy;
+#                                        point it at the machine's stable
+#                                        egress, not a per-session helper
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
@@ -363,6 +376,734 @@ takes_value() {
     *) return 1;;
   esac
 }
+
+# A bot can stop answering without anything failing loudly: measured on this
+# machine, a worker that came back from a Claude Code self-upgrade ran no
+# hooks at all for 21 hours, and a `refresh` whose `--bg` start hit the
+# workspace-trust gate left the bot down for 22 -- neither reported anywhere.
+# `health` is the outside check for exactly that, run by a timer (see
+# --install-timer) rather than by a session, so it still speaks when the
+# session is the thing that died.
+#
+#   claude-discord health [--notify] [--json]
+#   claude-discord health --install-timer | --uninstall-timer
+#
+# What it judges by, and why not the obvious thing: `claude agents`' `.state`
+# is NOT a liveness signal. Measured on two machines, a fully live bot shows
+# `state: done, status: idle` while its pid and its gateway connection are
+# both up; `state` tracks whether a turn is running. Counting processes is no
+# better on its own -- the upgrade failure above kept server, gateway and
+# session alive and killed only the hooks, so every process check said
+# "fine". So the PRIMARY signal is behavioural:
+#
+#   a message that addressed this bot, newer than the last one its hooks
+#   recorded ($dir/last-message-id, written by turn/on-prompt), and older
+#   than $stale_min minutes
+#
+# which catches a dead process, dead hooks and a wedged turn alike. The
+# process count is then used only to NAME the cause (none = down, several =
+# two sessions on one token). Three things would otherwise make that signal
+# cry wolf, and each is filtered:
+#   - the plugin drops a message from an author outside access.json's
+#     allowFrom before any hook runs, so last-message-id can never catch up
+#     to it; health applies the same allowFrom (empty = everyone, as there).
+#   - a long turn legitimately takes minutes, so a turn in flight
+#     (turns/<session id>, written by on-prompt and removed by on-stop)
+#     holds the alert back -- but only while that file is younger than
+#     $turn_max_min, since a turn whose hooks died leaves it behind for ever
+#     and would otherwise silence the very failure this exists to catch.
+#   - a human reaches a bot by replying to it, with no mention at all, so a
+#     reply whose referenced_message is this bot's counts as addressing it.
+# Known gap: the plugin also treats a mention of the bot's managed ROLE as
+# addressing it, and the REST payload carries those in `mention_roles`, not
+# in `mentions`. Such a message is not counted, so health under-reports
+# there rather than crying wolf -- the safe direction for a thing that wakes
+# a human.
+# Never restarts anything and never stops anything: a misjudged restart is
+# what puts two sessions on one token, and this is the tool most likely to
+# misjudge. It reports, and a human decides.
+if [ "${1:-}" = health ]; then
+  shift
+  stale_min=15        # an addressed message older than this with no hook record is an alert
+  turn_max_min=60     # a turns/<sid> file older than this is a wedged turn, not a live one
+  unknown_cap=6       # runs in a row (30 min at 5 min) that could not tell before saying so
+  # However long a turn claims to be running, a message left unanswered this
+  # long is worth saying out loud. `working` is a claim by the daemon, and a
+  # session can sit in that state wedged on a tool call or a prompt that
+  # never returns; without a ceiling the hold is unbounded and a bot can be
+  # silent for days with nobody told. Deliberately generous -- well past any
+  # honest turn -- so it only fires when something is really wrong.
+  busy_cap_min=240    # 4 h unanswered ends the hold whatever the session says
+  notify=no as_json=no timer="" proxy="" want_proxy=0
+  for a in "$@"; do
+    if [ "$want_proxy" = 1 ]; then proxy=$a; want_proxy=0; continue; fi
+    case $a in
+      --notify) notify=yes;;
+      --json) as_json=yes;;
+      --install-timer) timer=install;;
+      --uninstall-timer) timer=uninstall;;
+      --proxy) want_proxy=1;;
+      --proxy=*) proxy=${a#--proxy=};;
+      *) echo "usage: claude-discord health [--notify] [--json] | health --install-timer [--proxy <url>|inherit] | --uninstall-timer" >&2; exit 2;;
+    esac
+  done
+  [ "$want_proxy" = 0 ] || { echo "claude-discord: --proxy needs a URL, or the word inherit" >&2; exit 2; }
+  [ -z "$proxy" ] || [ "$timer" = install ] || { echo "claude-discord: --proxy only means anything with --install-timer" >&2; exit 2; }
+  case $0 in /*) self=$0;; *) self=$PWD/$0;; esac
+  # The working directory decides, and only when it holds no bots does the
+  # environment stand in. `refresh` leans on DISCORD_STATE_DIR because a
+  # session refreshes ITSELF, but `health` is about a project: measured,
+  # running it from another project's directory inside a bot session
+  # reported that session's bots instead -- a confident answer about the
+  # wrong project. A session whose shell has wandered off its own project
+  # still gets the fallback.
+  if [ ! -d "$root" ] && [ -n "${DISCORD_STATE_DIR:-}" ]; then
+    cd "$(dirname "$(dirname "$(dirname "$DISCORD_STATE_DIR")")")"
+    root=$PWD/.claude/discord-agents
+  fi
+
+  # One timer per PROJECT, not per bot and not per machine: the unit carries
+  # this project's directory, and `health` walks every bot in it. A machine
+  # with bots in two projects installs two, whose names differ by the
+  # project's basename. Deliberately NOT wired into `setup`: setup only ever
+  # writes inside the project, and a unit is user-wide state.
+  if [ -n "$timer" ]; then
+    command -v systemctl >/dev/null 2>&1 || { echo "claude-discord: no systemctl on this machine; run '$self health --notify' from a cron entry or launchd job in $PWD instead" >&2; exit 1; }
+    slug=$(basename "$PWD" | tr -cd 'A-Za-z0-9_-'); slug=${slug:-project}
+    unit=claude-discord-health-$slug
+    ud=$HOME/.config/systemd/user
+    if [ "$timer" = uninstall ]; then
+      systemctl --user disable --now "$unit.timer" >/dev/null 2>&1 || :
+      # Both paths are built from $HOME and a slug of $PWD's basename, and
+      # the slug falls back to "project", so neither can be empty; unlink
+      # rather than rm, since it can only ever remove one plain file.
+      [ -f "$ud/$unit.timer" ] && unlink "$ud/$unit.timer"
+      [ -f "$ud/$unit.service" ] && unlink "$ud/$unit.service"
+      systemctl --user daemon-reload >/dev/null 2>&1 || :
+      echo "claude-discord: removed $unit.timer"
+      exit 0
+    fi
+    [ -d "$root" ] || { echo "claude-discord: no bot set up in $root; run 'claude-discord setup <name>' here first" >&2; exit 1; }
+    mkdir -p "$ud"
+    # A systemd unit inherits nothing from the shell that installed it, and
+    # behind a corporate proxy that breaks everything: measured 2026-09-25,
+    # the first timer run reached Discord with no HTTPS_PROXY, got 403 on
+    # every call and concluded that every bot's token had been refused.
+    # So the unit needs a proxy -- but NOT, by default, the installing
+    # shell's. A bot session's shell usually points at a session-scoped
+    # helper that restarts often (on this machine 127.0.0.1:9801 is
+    # claude-code-cache-fix's node proxy, up 9 days but tied to the session
+    # manager; on another, a pin proxy whose restarts already produced two
+    # false DOWN reports in someone else's monitor). A timer that inherits
+    # such a proxy reports noreach whenever it bounces, and a real alert is
+    # suppressed for as long as that lasts. So the proxy is named
+    # explicitly, with --proxy, and otherwise left out; the timer then uses
+    # whatever the user manager has, or nothing. --proxy inherit asks for
+    # the old behaviour knowingly.
+    case ${proxy:-} in
+      "")  envlines="";;
+      inherit)
+        envlines=""
+        for v in HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NO_PROXY no_proxy; do
+          [ -n "${!v:-}" ] || continue
+          envlines="${envlines}Environment=$v=${!v}
+"
+        done
+        [ -n "$envlines" ] || echo "claude-discord: --proxy inherit, but this shell has no proxy variables, so none were written" >&2
+        ;;
+      *)
+        # A value goes into the unit verbatim, so it must not be able to
+        # open a second line and inject a directive of its own.
+        # An allowlist, not a search for bad characters: a blocklist let a
+        # space, a tab or a systemd %-specifier through, and a unit file
+        # takes `Environment=` values with spaces, so anything after one
+        # could become a second assignment -- and systemd expands
+        # %-specifiers in unit files besides. So the value must be exactly
+        # scheme://host[:port], with host and port from a fixed character
+        # set. Nothing else can reach the file.
+        case $proxy in
+          http://*|https://*|socks5://*|socks5h://*) ;;
+          *) echo "claude-discord: --proxy wants a URL like http://127.0.0.1:8118, got '$proxy'" >&2; exit 2;;
+        esac
+        # bash's own =~, not `grep -qE`: grep matches LINE BY LINE, so a
+        # value whose first line is a valid URL passes however many lines
+        # follow -- measured, "http://x\nExecStart=/bin/false" was accepted,
+        # which is exactly the unit-file injection this check exists to
+        # stop. bash anchors ^ and $ to the whole string.
+        if ! [[ $proxy =~ ^(https?|socks5h?)://[A-Za-z0-9._:-]*[A-Za-z0-9.]$ ]]; then
+          echo "claude-discord: --proxy must be scheme://host[:port] with host letters, digits, dots and dashes, got '$proxy'" >&2
+          exit 2
+        fi
+        # Checked now rather than at the first run 5 minutes later: a
+        # mistyped proxy would otherwise look exactly like Discord being
+        # down. A failure is reported and the install goes ahead, since the
+        # proxy may simply not be up yet.
+        if command -v curl >/dev/null 2>&1; then
+          st=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --proxy "$proxy" \
+            https://discord.com/api/v10/gateway 2>/dev/null) || st=000
+          case $st in 2*) echo "claude-discord: $proxy reaches Discord (HTTP $st)";;
+                       *) echo "claude-discord: warning: $proxy did not reach Discord (HTTP $st); the timer will report noreach until it does" >&2;; esac
+        fi
+        envlines="Environment=HTTPS_PROXY=$proxy
+Environment=HTTP_PROXY=$proxy
+Environment=NO_PROXY=127.0.0.1,localhost,::1
+"
+        ;;
+    esac
+    # Type=oneshot: the timer waits for the check to finish, so a slow
+    # Discord call cannot overlap two runs. OnUnitActiveSec, not
+    # OnCalendar: five minutes after the last run ENDED, whatever the clock
+    # did.
+    cat > "$ud/$unit.service" <<EOS
+[Unit]
+Description=claude-discord bot health check ($PWD)
+
+[Service]
+Type=oneshot
+WorkingDirectory=$PWD
+${envlines}ExecStart=$self health --notify
+EOS
+    cat > "$ud/$unit.timer" <<EOS
+[Unit]
+Description=Run the claude-discord bot health check every 5 minutes ($PWD)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=$unit.service
+
+[Install]
+WantedBy=timers.target
+EOS
+    systemctl --user daemon-reload >/dev/null 2>&1 || :
+    systemctl --user enable --now "$unit.timer" >/dev/null 2>&1 || { echo "claude-discord: wrote $ud/$unit.timer but could not enable it; 'systemctl --user enable --now $unit.timer' says why" >&2; exit 1; }
+    echo "claude-discord: $unit.timer enabled, every 5 minutes, checking the bots in $PWD"
+    echo "claude-discord: alerts go to each bot's own channel; 'claude-discord health --uninstall-timer' stops it"
+    exit 0
+  fi
+
+  [ -d "$root" ] || { echo "claude-discord: no bot set up in $root" >&2; exit 1; }
+  command -v jq >/dev/null 2>&1 || { echo "claude-discord: health needs jq" >&2; exit 1; }
+  command -v curl >/dev/null 2>&1 || { echo "claude-discord: health needs curl" >&2; exit 1; }
+  [ ! -f "$root/config.env" ] || . "$root/config.env"
+
+  now_s=$(date +%s)
+  # A Discord id is a snowflake: its top 42 bits are milliseconds since
+  # 2015-01-01, so an id alone gives both an age and an ordering with no API
+  # call. Ids are ~1.5e18 and bash arithmetic is 64-bit, so this cannot
+  # overflow.
+  # The id arrives as a decimal STRING (see addressed_ids). Bash arithmetic
+  # is 64-bit and a snowflake is ~1.5e18, so this is exact -- unlike jq 1.6,
+  # whose doubles are not. A leading zero would be read as octal, so it is
+  # stripped; ids never have one, but the guard costs nothing.
+  snowflake_s() { local i=${1#"${1%%[!0]*}"}; printf '%s' $(( ((${i:-0} >> 22) + 1420070400000) / 1000 )); }
+  is_id() { case ${1:-} in ''|*[!0-9]*) return 1;; esac; return 0; }
+
+  # Counts the plugin servers belonging to one bot. argv FIRST, environ
+  # second, and that order is the whole point: every child of a bot session
+  # (its shells, its subagents, its hooks) inherits DISCORD_STATE_DIR, so
+  # matching on the environment alone counts them all and reports a healthy
+  # bot as a duplicate. A server is `bun run --cwd <plugin>/discord/<ver>
+  # ... start`, so the argv test is: argv[0] is bun, some argument sits
+  # under a .../discord/ directory, and the last argument is `start`. Only
+  # then is that pid's environ read, to see WHICH bot it serves. Prints
+  # "unknown" where there is no /proc to read (macOS), which the caller
+  # treats as "cannot tell", never as zero.
+  # The candidate pids, found ONCE per run rather than once per bot.
+  # Walking every /proc entry cost ~85 ms per call here (805 processes) and
+  # ~300 ms on a busier machine. `pgrep -x bun` narrows it to the handful of
+  # processes that could possibly be a plugin server (6 of 820 here) using
+  # one C program instead of hundreds of shell reads. Without pgrep, or if it
+  # errors, fall back to the full walk -- correctness must not depend on an
+  # optional tool.
+  # Per RUN, not per bot: the list is a property of the machine, not of a
+  # bot, and calling it per bot cost 8 forks where 1 does (measured here:
+  # 0.15 s for 8, 0.02 s for 1). It also makes the run self-consistent --
+  # every bot is judged against the same instant -- where a per-bot list
+  # could count a server for one bot that had already exited for the next.
+  # A health run is a snapshot either way; this makes it one snapshot.
+  server_cands=""
+  if [ -d /proc ]; then
+    if command -v pgrep >/dev/null 2>&1 && server_cands=$(pgrep -x bun 2>/dev/null); then
+      server_cands=$(printf '/proc/%s/cmdline ' $server_cands)
+    else
+      server_cands=$(printf '%s ' /proc/[0-9]*/cmdline)
+    fi
+  fi
+
+  count_servers() {  # $1 = bot state dir
+    local n=0 c pid args a hit
+    [ -d /proc ] || { printf 'unknown'; return 0; }
+    for c in $server_cands; do
+      # Braces around the read, not `2>/dev/null` on mapfile alone: a
+      # process that exits between the glob and the read makes the SHELL
+      # report the failed redirect, which mapfile's own redirection does not
+      # silence, and this must print nothing but a number. No `basename`
+      # either -- one fork per process on a machine with 800 of them cost
+      # 281 ms a scan, against 83 ms for the expansion (measured).
+      { mapfile -d '' -t args < "$c"; } 2>/dev/null || continue
+      [ "${#args[@]}" -ge 2 ] || continue
+      [ "${args[0]##*/}" = bun ] || continue
+      [ "${args[${#args[@]}-1]}" = start ] || continue
+      hit=no
+      for a in "${args[@]}"; do case $a in */discord/*) hit=yes; break;; esac; done
+      [ "$hit" = yes ] || continue
+      pid=${c#/proc/}; pid=${pid%/cmdline}
+      # -x: without it this is a SUBSTRING test, so a bot named "hbot"
+      # counts "hbot2"'s server too (measured) -- the shorter-named bot then
+      # reads as a duplicate and the longer-named one, when down, does not
+      # read as down at all. -z makes each NUL-separated entry a line, and
+      # -x anchors the whole entry.
+      grep -qzxF "DISCORD_STATE_DIR=$1" "/proc/$pid/environ" 2>/dev/null && n=$((n + 1))
+    done
+    printf '%s' "$n"
+  }
+
+  # The age in minutes of the youngest turn in flight, or "" when none.
+  # on-prompt creates turns/<session id> and appends a line for every
+  # further message of the same turn, so a busy long turn keeps its mtime
+  # fresh; on-stop removes it. The .primed and .replied neighbours are not
+  # turn markers. The youngest, not the oldest: one wedged leftover must not
+  # make a bot that is answering right now look wedged.
+  turn_age_min() {  # $1 = bot state dir
+    local f best="" age mt
+    for f in "$1"/turns/*; do
+      case $f in *.primed|*.replied|*'/*') continue;; esac
+      [ -f "$f" ] || continue
+      mt=$(date -r "$f" +%s 2>/dev/null) || continue
+      age=$(( (now_s - mt) / 60 ))
+      if [ -z "$best" ] || [ "$age" -lt "$best" ]; then best=$age; fi
+    done
+    printf '%s' "$best"
+  }
+
+  # Is a session of this bot, in this project, running a turn right now?
+  # `.state` is useless as a LIVENESS signal (a live bot sits at `done`), but
+  # this is the one thing it does measure, and the turn file's mtime cannot
+  # tell a long working turn from a wedged one: on-prompt only touches that
+  # file when a MESSAGE arrives, so a turn that runs for hours off a single
+  # message goes stale-looking while it works. Measured 2026-09-25: this very
+  # session was reported stale, with a --force refresh as the suggested fix,
+  # while it was mid-turn. So the turn-file cap is only believed when the
+  # daemon also says nothing is running. Unknown (no jq, no claude, a listing
+  # that fails or is not a list) counts as WORKING, the quiet direction: a
+  # missed alert is recoverable, an alert telling someone to force-refresh a
+  # session that is busy is not.
+  # Exit 0 = working, 1 = not working, 2 = could not tell. The caller treats
+  # 2 like 0 (hold the alert) but counts how many runs in a row said so: a
+  # daemon that keeps failing to answer is itself a sign something is wrong,
+  # and holding for ever would hide it. See $unknown_cap below.
+  session_working() {
+    local list t=()
+    command -v jq >/dev/null 2>&1 || return 2
+    command -v claude >/dev/null 2>&1 || return 2
+    command -v timeout >/dev/null 2>&1 && t=(timeout 5)
+    list=$(${t[@]+"${t[@]}"} claude agents --json 2>/dev/null) || return 2
+    printf '%s' "${list:-null}" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
+    printf '%s' "$list" | jq -e --arg n "$1" --arg cwd "$(pwd -P)" '
+      any(.[]; (.name? // "") == $n and (.cwd? // "") == $cwd
+               and ((.state? // "") == "working" or (.status? // "") == "busy"))' \
+      >/dev/null 2>&1
+  }
+
+  # Posts one line to $ch as this bot; sets $post_status and returns 0 only
+  # on a 2xx. Token on stdin (-H @-), never argv.
+  post_message() {  # $1 = content
+    local out
+    out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 10 -w '\n%{http_code}' \
+      -X POST -H @- -H 'Content-Type: application/json' \
+      --data-raw "$(jq -nc --arg m "$1" '{content: $m}')" \
+      "https://discord.com/api/v10/channels/$ch/messages" 2>/dev/null) || out=""
+    post_status=${out##*$'\n'}
+    case $post_status in ''|*[!0-9]*) post_status=000;; esac
+    case $post_status in 2*) return 0;; *) return 1;; esac
+  }
+
+  api() {  # $1 = path; sets $status and $resp. Token on stdin, never argv.
+    local out
+    out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 10 -w '\n%{http_code}' -H @- \
+      "https://discord.com/api/v10/$1" 2>/dev/null) || out=""
+    status=${out##*$'\n'} resp=${out%$'\n'*}
+    case $status in ''|*[!0-9]*) status=000;; esac
+  }
+
+  # The ids in a messages array that addressed this bot. An author
+  # outside allowFrom is dropped exactly as the plugin drops it, so
+  # last-message-id's inability to ever reach such a message cannot become
+  # an alert; an EMPTY allowFrom allows everyone, as it does there. With
+  # requireMention false every allowed author's message counts; with it
+  # true, a mention of this bot or a reply to one of its own messages does.
+  # `.mentions` excludes @everyone, which the start patches the plugin to
+  # ignore too, so the two agree.
+  # The author id is bound to $aid before the allowFrom test: inside
+  # `$allow | index(...)` the input is the allow ARRAY, so reaching for
+  # `.author` there indexes an array with a string and the whole filter dies
+  # (measured: every message dropped, so a dead bot read as healthy).
+  # An id is never turned into a jq NUMBER. jq 1.6 -- still /usr/bin/jq on
+  # this machine -- holds every number as an IEEE double, and a 19-digit
+  # snowflake does not fit in 53 bits of mantissa: measured,
+  # "1553056881315025049"|tonumber|tostring gives 1553056881315025200, which
+  # is LARGER than the original, so it sails past last-message-id and invents
+  # a stale verdict for a bot that is perfectly idle; two ids one apart also
+  # compare equal. Ids therefore stay strings, compared by (length, then
+  # lexically) -- exact for fixed-width decimals, and Discord ids are 18-19
+  # digits and will not reach 20 this century.
+  #
+  # OLDEST unanswered, not newest: the age being measured is how long the bot
+  # has been failing to answer, so it must start at the FIRST message it did
+  # not answer. With the newest, every fresh message resets the clock -- and
+  # a wedged bot is exactly one people keep calling, so the bots this is for
+  # would never be reported. The set is bounded below by last-message-id, so
+  # something answered long ago cannot drag the age back.
+  id_newer() {  # $1 > $2, as ids
+    [ "${#1}" -gt "${#2}" ] && return 0
+    [ "${#1}" -lt "${#2}" ] && return 1
+    [[ $1 > $2 ]]
+  }
+  addressed_ids() {  # $1 = messages JSON; ids newer than $last_seen, oldest first
+    printf '%s' "$1" | jq -r --arg me "$me" --argjson allow "$allow" \
+      --argjson mention "$mention" --arg seen "$last_seen" '
+      if type != "array" then empty else
+        [ .[]
+          | (.author.id? // "") as $aid
+          | select($aid != $me)
+          | select(($allow | length) == 0 or ($allow | index($aid)) != null)
+          | select($mention == false
+                   or ((.mentions // []) | any((.id? // "") == $me))
+                   or ((.referenced_message.author.id? // "") == $me))
+          | .id
+          | select(type == "string" and test("^[0-9]{17,20}$"))
+          | select((. | length) > ($seen | length)
+                   or ((. | length) == ($seen | length) and . > $seen)) ]
+        | sort | .[]
+      end' 2>/dev/null || :
+  }
+  # The oldest of $oldest and every id read from $1, kept in $oldest.
+  note_oldest() {  # $1 = messages JSON
+    local id
+    while IFS= read -r id; do
+      case $id in ''|*[!0-9]*) continue;; esac
+      # `cond && oldest=$id` alone would be FATAL here: under `set -e` a
+      # loop body whose last command returns non-zero aborts the script, and
+      # that is precisely the ordinary case -- the second id not being older
+      # than the first. Measured: two unanswered messages made the whole
+      # check die mid-run with no output and no error. The else branch keeps
+      # the body's status zero. (Same trap as `session_working; x=$?`.)
+      if [ -z "$oldest" ] || id_newer "$oldest" "$id"; then oldest=$id; fi
+    done < <(addressed_ids "$1")
+  }
+
+  # Can this machine reach Discord at all? `GET /gateway` needs no token, so
+  # its answer separates "the network is blocked" from "this bot's token was
+  # refused" -- and without that separation the two are indistinguishable:
+  # measured 2026-09-25, a run with no HTTPS_PROXY got 403 on every call and
+  # blamed every bot's token, which would have sent every owner to check a
+  # credential that was perfectly fine. So when the network is down, that is
+  # the single finding, no token is blamed, and no alert is attempted (the
+  # POST would fail by the same route). The wording names the likely cause,
+  # since a missing proxy is what produced it here.
+  # Same `-w '\n%{http_code}'` shape as api() below rather than
+  # `-o /dev/null -w '%{http_code}'`: the status must be taken from the LAST
+  # line, since a body is written whatever -o says.
+  net_status=$(curl -s --max-time 10 -w '\n%{http_code}' \
+    https://discord.com/api/v10/gateway </dev/null 2>/dev/null) || net_status=""
+  net_status=${net_status##*$'\n'}
+  case $net_status in ''|*[!0-9]*) net_status=000;; esac
+  case $net_status in 2*) net=ok;; *) net=down;; esac
+
+  # A project fact, not a per-bot one, so it is read once rather than once
+  # per bot. An explicit null test, not `// "unknown"`: jq's `//` treats
+  # FALSE as empty, so the untrusted case -- the one worth reporting -- would
+  # read as "unknown" and the hint would be lost.
+  trusted=$(jq -r --arg p "$PWD" '.projects[$p].hasTrustDialogAccepted | if . == null then "unknown" else tostring end' "$HOME/.claude.json" 2>/dev/null) || trusted=unknown
+  [ -n "$trusted" ] || trusted=unknown
+
+  # Fields are collected separated by US (0x1f) and turned into JSON once,
+  # after the loop -- one jq for the whole run instead of one per bot. A
+  # variable rather than a temp file: the loop is no subshell, so it
+  # survives, and a machine whose TMPDIR is unwritable still works
+  # (measured: with mktemp failing, the file version printed two errors and
+  # no result at all). US is chosen because no bot name, verdict, detail or
+  # line of refresh.log can contain it; a bash variable could not hold NUL.
+  rows=""
+  for d in "$root"/*/; do
+    d=${d%/}
+    [ -f "$d/.env" ] || continue
+    # Shell expansion, not `basename`: one fork per bot per run, five minutes
+    # apart forever, for a string operation bash already does. $d has had its
+    # trailing slash stripped just above, so ${d##*/} is the directory name.
+    bot=${d##*/}
+    tok=$(grep '^DISCORD_BOT_TOKEN=' "$d/.env" 2>/dev/null | head -1) || tok=""
+    tok=${tok#DISCORD_BOT_TOKEN=}
+    servers=$(count_servers "$d")
+    turn=$(turn_age_min "$d")
+    last_seen=$(cat "$d/last-message-id" 2>/dev/null) || last_seen=0
+    is_id "$last_seen" || last_seen=0
+    refresh_tail=$(tail -1 "$d/refresh.log" 2>/dev/null) || refresh_tail=""
+
+    # The channel is the single numeric group key in access.json (where a bot
+    # is moved), config.env's otherwise: the same rule as the start path and
+    # hooks/lib/discord.sh. Two keys are as ambiguous as none.
+    # requireMention and allowFrom come from that same group, so all three
+    # are read in ONE jq: a fork per field per bot per run is pure waste, and
+    # it showed up in the suite's wall time.
+    # Note the explicit null tests rather than `//`: jq's `//` treats FALSE
+    # as empty, so `requireMention // true` read an owner's deliberate
+    # "answer everything" (false) as true and dropped every message there as
+    # unaddressed -- a wedged bot in such a channel was undetectable. Third
+    # place that operator bit here; false is a meaningful value in all of
+    # them, so `//` is never right for one.
+    cfg=$(jq -r --arg fb "${DISCORD_CHANNEL_ID:-}" '
+      (.groups | objects | keys) as $k
+      | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) as $ch
+      | [ $ch,
+          (.groups[$ch].requireMention | if . == null then true else . end | tostring),
+          ((.groups[$ch].allowFrom // []) | map(tostring) | unique | @json) ]
+      | @tsv' "$d/access.json" 2>/dev/null) || cfg=""
+    IFS=$'\t' read -r ch mention allow <<<"$cfg"
+    case ${ch:-} in ''|*[!0-9]*) ch=${DISCORD_CHANNEL_ID:-};; esac
+    case ${mention:-} in true|false) ;; *) mention=true;; esac
+    case ${allow:-} in '['*) ;; *) allow='[]';; esac
+
+    verdict=ok detail="" oldest="" age=0 me="" status=000 resp=""
+    if [ "$net" = down ]; then
+      verdict=noreach detail="this machine cannot reach Discord (HTTP $net_status on the unauthenticated /gateway), so nothing can be said about any bot; behind a proxy, check HTTPS_PROXY"
+    elif [ -z "$tok" ] || ! is_id "$ch"; then
+      verdict=unknown detail="no token or channel in $d"
+    else
+      # A bot's own user id never changes, so it is asked for once and kept
+      # in the state dir: on a five-minute timer that is one fewer HTTP call
+      # AND one fewer jq per bot per run, for a fact that was already known.
+      # A cached value is trusted only if it looks like an id.
+      me=$(cat "$d/bot-id" 2>/dev/null) || me=""
+      if ! is_id "$me"; then
+        api users/@me
+        me=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null) || me=""
+        ! is_id "$me" || printf '%s\n' "$me" > "$d/bot-id" 2>/dev/null || :
+      fi
+      if ! is_id "$me"; then
+        # 401 and 403 mean the credential itself was refused. Anything else
+        # -- a timeout or DNS failure (000), a rate limit (429), a Discord
+        # outage (5xx) -- is not the token's fault, and saying it is sends
+        # someone to rotate a credential that was fine. Those are reported
+        # as what they are and no bot is blamed.
+        case $status in
+          401|403) verdict=unreachable detail="Discord refused this bot's token (HTTP $status)";;
+          429)     verdict=throttled detail="Discord is rate-limiting this bot (HTTP 429); nothing can be said about it this run";;
+          *)       verdict=apierror detail="Discord did not answer for this bot (HTTP $status); the token was not rejected, so this is Discord's side or the network";;
+        esac
+      else
+        api "channels/$ch/messages?limit=50"
+        case $status in
+          2*)      note_oldest "$resp";;
+          401|403) verdict=unreachable detail="cannot read the channel (HTTP $status): the bot's channel permissions or its token";;
+          429)     verdict=throttled detail="Discord is rate-limiting this bot (HTTP 429); nothing can be said about it this run";;
+          *)       verdict=apierror detail="cannot read the channel (HTTP $status); the token was not rejected, so this is Discord's side or the network";;
+        esac
+        # Threads carry their own messages, and one request for the guild's
+        # active threads answers with every thread's last_message_id, so a
+        # thread is only READ when something in it is newer than the last id
+        # the hooks recorded. Normally that is nothing at all. The
+        # last_message_id comparison is done in the shell, on strings, for
+        # the jq-1.6 precision reason above.
+        if [ "$verdict" = ok ]; then
+          # The guild a channel belongs to cannot change -- a channel is
+          # created inside one guild and is deleted, not moved -- so this
+          # whole request exists to learn one immutable fact. It is kept in
+          # the state dir like bot-id, which is one fewer HTTP call AND one
+          # fewer jq per bot per run, 288 runs a day on the timer.
+          # The CHANNEL is stored beside the guild because the bot's channel
+          # CAN change (access.json is edited to move it), and a cache keyed
+          # on nothing would then answer for the old channel. A cached line
+          # is used only when its channel is still this one and the guild
+          # still looks like an id; anything else re-fetches and rewrites it.
+          gid="" cached=$(cat "$d/channel-guild" 2>/dev/null) || cached=""
+          case $cached in "$ch "*) gid=${cached#* };; esac
+          if ! is_id "$gid"; then
+            api "channels/$ch"
+            gid=$(printf '%s' "$resp" | jq -r '.guild_id // empty' 2>/dev/null) || gid=""
+            ! is_id "$gid" || printf '%s %s\n' "$ch" "$gid" > "$d/channel-guild" 2>/dev/null || :
+          fi
+          if is_id "$gid"; then
+            api "guilds/$gid/threads/active"
+            for t in $(printf '%s' "$resp" | jq -r --arg c "$ch" '
+                  (.threads // []) | .[] | select((.parent_id // "") == $c)
+                  | [(.id // ""), (.last_message_id // "0")] | @tsv' 2>/dev/null |
+                  while IFS=$'\t' read -r tid tlast; do
+                    is_id "$tid" || continue
+                    case $tlast in ''|*[!0-9]*) tlast=0;; esac
+                    id_newer "$tlast" "$last_seen" && printf '%s\n' "$tid"
+                  done); do
+              api "channels/$t/messages?limit=50"
+              case $status in 2*) note_oldest "$resp";; *) continue;; esac
+            done
+          fi
+        fi
+      fi
+    fi
+
+    # $oldest is already known to be newer than last-message-id (both the
+    # channel and the thread filters require it), so there is nothing left
+    # to compare here.
+    if [ "$verdict" = ok ] && [ -n "$oldest" ]; then
+      age=$(( (now_s - $(snowflake_s "$oldest")) / 60 ))
+      if [ "$age" -ge "$stale_min" ]; then
+        # `session_working; working=$?` would be fatal: the script runs under
+        # `set -e`, and a non-zero exit from a command that is neither last
+        # nor in a condition aborts it -- silently, since health prints as it
+        # goes (measured: the whole check died with no output). `&&`/`||`
+        # makes it a tested command, which set -e allows.
+        working=1
+        [ -z "$turn" ] || { session_working "$bot" && working=0 || working=$?; }
+        # A run that could not tell is counted; a run that could resets the
+        # count. Past the cap the hold is given up and the not-knowing is
+        # itself the finding: `claude agents` failing repeatedly means the
+        # daemon is unwell, which is exactly when a bot breaks.
+        if [ "$working" = 2 ]; then
+          unknowns=$(( $(cat "$d/health-unknown" 2>/dev/null || echo 0) + 1 ))
+          case $unknowns in ''|*[!0-9]*) unknowns=1;; esac
+          printf '%s\n' "$unknowns" > "$d/health-unknown" 2>/dev/null || :
+        else
+          unknowns=0
+          [ ! -f "$d/health-unknown" ] || unlink "$d/health-unknown" 2>/dev/null || :
+        fi
+        if [ "$working" = 2 ] && [ "$unknowns" -ge "$unknown_cap" ]; then
+          verdict=nostate detail="unanswered for ${age}m and 'claude agents' has not answered for $unknowns runs, so whether a turn is running cannot be told; the daemon itself may be unwell"
+        elif [ -n "$turn" ] && { [ "$turn" -lt "$turn_max_min" ] || [ "$working" != 1 ]; } &&
+             [ "$age" -lt "$busy_cap_min" ]; then
+          verdict=busy detail="a turn has been in flight ${turn}m; holding the alert"
+          case $working in
+            0) detail="$detail (the session is running one now)";;
+            2) detail="$detail (run $unknowns of $unknown_cap with no answer from 'claude agents')";;
+          esac
+        else
+          verdict=stale
+          case $servers in
+            0)       detail="no plugin server: the bot is down";;
+            1)       detail="the plugin server is up, so its hooks or its turn are stuck";;
+            unknown) detail="cannot count plugin servers on this machine";;
+            *)       detail="$servers plugin servers: two sessions share this bot's token";;
+          esac
+          detail="unanswered for ${age}m -- $detail"
+          [ -z "$turn" ] || detail="$detail; a turn file has sat there ${turn}m"
+          [ "$age" -lt "$busy_cap_min" ] || [ "$working" = 1 ] ||
+            detail="$detail; the session still claims to be working, but ${busy_cap_min}m unanswered is too long to keep holding"
+        fi
+      fi
+    fi
+    # A duplicate is worth saying even when the bot is answering: both
+    # sessions answer, so the channel gets every reply twice.
+    if [ "$verdict" = ok ] && [ "$servers" != unknown ] && [ "$servers" -gt 1 ]; then
+      verdict=duplicate detail="$servers plugin servers share this bot's token"
+    fi
+    # No server and nothing waiting to be answered: still down, and worth
+    # naming before someone writes into a channel nobody is listening on.
+    if [ "$verdict" = ok ] && [ "$servers" = 0 ]; then
+      verdict=down detail="no plugin server for this bot"
+      case $refresh_tail in *'not trusted'*) detail="$detail; its last refresh failed on workspace trust";; esac
+      [ "$trusted" != false ] || detail="$detail; this project is not trusted, so a --bg start will refuse"
+    fi
+
+    rows=$rows$bot$'\x1f'$verdict$'\x1f'$detail$'\x1f'$servers$'\x1f'${turn:-}$'\x1f'
+    rows=$rows${oldest:-}$'\x1f'$last_seen$'\x1f'${age:-0}$'\x1f'$refresh_tail$'\x1f'$trusted$'\x1f'
+
+
+    line="claude-discord health: $bot $verdict${detail:+ -- $detail}"
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line" >> "$d/health.log" 2>/dev/null || :
+    # journal too, because the log above lives in the state dir of a bot
+    # whose whole problem may be that nobody is looking at it.
+    ! command -v logger >/dev/null 2>&1 || logger -t claude-discord-health -- "$line" 2>/dev/null || :
+
+    # One alert per state change, not one per run: a five-minute timer would
+    # otherwise repeat the same line 288 times a day. The recovery line is
+    # worth its own message -- someone who saw the alert needs to be told it
+    # is over. The alert goes out on the DOWN bot's own token over REST,
+    # never through another bot on this machine: a peer there shares the
+    # daemon and the upgrade that killed this one, so it would be gone too.
+    # `$net` is in the condition because a POST would fail by the same route
+    # the checks just failed on, and because the state file must not record
+    # `noreach` -- otherwise the real recovery line would be suppressed as a
+    # repeat once the network came back.
+    if [ "$notify" = yes ] && [ "$net" = ok ] && [ -n "$tok" ] && is_id "$ch"; then
+      # The state file holds "<verdict> <oldest unanswered id>", not just the
+      # verdict. With the verdict alone, a bot that was refreshed but never
+      # answered the message that triggered the alert keeps its old
+      # last-message-id, so the finding never clears -- and because the
+      # verdict then never CHANGES, no later outage is ever announced
+      # either: one stuck alert silences the channel for good. Including the
+      # id means a finding about a different message is a new finding, and
+      # the bot answering anything moves last-message-id past it, which ends
+      # the old one and posts the recovery.
+      prev=$(cat "$d/health-alert" 2>/dev/null) || prev=""
+      now_state="$verdict ${oldest:-none}"
+      if [ "$verdict" != ok ] && [ "$verdict" != busy ]; then
+        if [ "$now_state" != "$prev" ]; then
+          # Never `--force` by default. It replaces the session WITHOUT a
+          # handoff, throwing away everything that session knew, and a plain
+          # `refresh` is what is wanted whenever the session can still write
+          # one. The alert says so rather than handing over the destructive
+          # form: the false alert this check sent on its first live run told
+          # its reader to force-refresh a session that was working fine.
+          fix="claude-discord refresh $bot   # --force only if it cannot write a handoff"
+          case $verdict in
+            down)        fix="claude-discord refresh $bot --force   # nothing is running, so there is no handoff to lose";;
+            duplicate)   fix="claude agents   # stop whichever session is not $bot's";;
+            unreachable) fix="check DISCORD_BOT_TOKEN in $d/.env";;
+            unknown)     fix="claude-discord setup $bot";;
+            noreach)     fix="check this machine's network and HTTPS_PROXY";;
+            nostate)     fix="claude agents   # see whether the daemon answers at all";;
+          esac
+          # The state is written only when the POST actually succeeded.
+          # Recording it regardless meant a send that failed (a rate limit,
+          # a dropped connection) counted as "already told them", and the
+          # alert was never retried -- the bot stayed down and silent, which
+          # is the exact failure this exists to report. On a failure nothing
+          # is recorded, so the next run tries again.
+          if post_message "[health] $bot: $verdict — ${detail:-no detail}. 조치: \`$fix\`"; then
+            printf '%s\n' "$now_state" > "$d/health-alert" 2>/dev/null || :
+          else
+            echo "claude-discord health: could not post $bot's alert to Discord (HTTP $post_status); will try again next run" >&2
+          fi
+        fi
+      elif [ -n "$prev" ] && [ "$verdict" = ok ]; then
+        # Same rule for the recovery line: clear the state only once it has
+        # been delivered, or the recovery is never announced.
+        if post_message "[health] $bot: 복구됐습니다 (이전 상태 ${prev%% *})."; then
+          [ ! -f "$d/health-alert" ] || unlink "$d/health-alert" 2>/dev/null || :
+        else
+          echo "claude-discord health: could not post $bot's recovery to Discord (HTTP $post_status); will try again next run" >&2
+        fi
+      fi
+    fi
+    [ "$as_json" = yes ] || echo "$line"
+  done
+  # One jq for the whole run: it reads the NUL-separated fields, groups them
+  # ten at a time into objects, prints them when asked, and reports through
+  # its exit status whether anything needs a human -- so a cron entry that
+  # mails non-zero output says so without parsing anything. `busy` is not a
+  # finding. No bots at all is an empty list, which is "nothing wrong".
+  # The findings flag goes on its own LAST line, so what precedes it stays
+  # exactly the JSON a caller would parse; the shell strips that line off
+  # before printing. A marker merged into the document would corrupt the one
+  # thing --json exists to produce.
+  rows=$(printf '%s' "$rows" | jq -rRs --argjson show "$([ "$as_json" = yes ] && echo true || echo false)" '
+    [ splits("\u001f") ] | .[:-1]
+    | [ range(0; length; 10) as $i
+        | { bot: .[$i], verdict: .[$i+1], detail: .[$i+2], servers: .[$i+3],
+            turn_min: .[$i+4], oldest_unanswered: .[$i+5], last_seen: .[$i+6],
+            unanswered_min: (.[$i+7] | tonumber? // 0), refresh_tail: .[$i+8],
+            trusted: .[$i+9] } ]
+    | (if $show then (tojson + "\n") else "" end)
+      + (if all(.[]; .verdict == "ok" or .verdict == "busy") then "ok" else "finding" end)
+    ' 2>/dev/null) || rows=finding
+  verdicts=${rows##*$'\n'}
+  if [ "$as_json" = yes ] && [ "$rows" != "$verdicts" ]; then
+    printf '%s' "${rows%$'\n'*}" | jq .
+  fi
+  [ "$verdicts" = ok ] || exit 1
+  exit 0
+fi
 
 # A long-running session answers worse as its context fills, and the automatic
 # compaction near the limit summarises at the point the model is least able to

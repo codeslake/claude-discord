@@ -84,6 +84,8 @@ claude-discord alpha --resume my-bot  # a session NAME or a short id also works,
 claude-discord setup alpha --reset    # forget alpha's token and policy AND the shared IDs; ask everything again
 claude-discord setup alpha --mode     # change only alpha's mode (and, for dev-manager, its peers); needs alpha already set up
 claude-discord refresh alpha          # replace the running session with a fresh one, from its handoff
+claude-discord health                 # is every bot in this project still answering? see below
+claude-discord health --install-timer # check every five minutes and alert the channel
 ```
 
 The setup prompts:
@@ -493,6 +495,147 @@ its flags), not by the wrapper, so the plugin patches the wrapper applies at
 launch are not re-applied there. After a plugin update, start the session
 through the wrapper once more.
 
+## Is the bot still there?
+
+A bot can stop answering with nothing failing loudly, and twice here nobody
+found out for most of a day:
+
+- A worker that came back from a Claude Code self-upgrade ran **no hooks at
+  all** for 21 hours — the project's and the user's own — with no error
+  anywhere. Its session, its plugin server and its gateway connection were
+  all up, so every process-level check said "fine".
+- A `refresh` stopped the old session and its `--bg` start then failed on
+  workspace trust, leaving the bot down for 22 hours with the error only in
+  `refresh.log`.
+
+`claude-discord health` is the outside check for exactly this. It is run by a
+timer rather than by a session, so it still speaks when the session is the
+thing that died.
+
+```
+claude-discord health                  # one line per bot; exit 1 if anything needs a human
+claude-discord health --json           # the same as data, for a script
+claude-discord health --notify         # also post an alert to the bot's own channel
+claude-discord health --install-timer  # a systemd --user timer, every five minutes, with --notify
+claude-discord health --uninstall-timer
+```
+
+**What it judges by.** Not `claude agents`' `.state`: measured on two
+machines, a fully live bot shows `state: done, status: idle` while its pid and
+its gateway are both up — `state` tracks whether a turn is running. Not the
+process count either, on its own, for the upgrade reason above. The primary
+signal is behavioural:
+
+> the **oldest** message that addressed this bot, newer than the last one its
+> hooks recorded in `last-message-id`, and more than 15 minutes old
+
+Oldest, not newest: the age being measured is how long the bot has been
+failing to answer, and with the newest every fresh message resets the clock —
+so a wedged bot that people keep calling, which is exactly the case this is
+for, would never be reported.
+
+Ids are compared as strings throughout, never converted to numbers. jq 1.6
+(still `/usr/bin/jq` on some machines) holds numbers as doubles, and a
+19-digit snowflake does not fit: `"1553056881315025049"` comes back as
+`1553056881315025200` — *larger* than the original, which sails past
+`last-message-id` and invents a finding for a bot that is perfectly idle.
+
+which catches a dead process, dead hooks and a wedged turn alike. The process
+count only names the cause afterwards: none means the bot is down, more than
+one means two sessions share its token.
+
+Three things would make that signal cry wolf, and each is filtered:
+
+- An author outside the channel's `allowFrom` is dropped by the plugin before
+  any hook runs, so `last-message-id` could never catch up to such a message.
+  `health` applies the same `allowFrom` and the same `requireMention`, and
+  counts a reply to one of the bot's own messages as addressing it, exactly as
+  the plugin does.
+- A long turn legitimately takes minutes, so a turn in flight (`turns/<session
+  id>`, written by `on-prompt` and removed by `on-stop`) holds the alert back
+  — but only while that file is under an hour old, because a turn whose hooks
+  died leaves it behind for ever and would otherwise silence the very failure
+  this exists to catch. Past the hour the daemon gets the last word: if it
+  says a session of this bot in this project is `working`, the turn is
+  running, not wedged. That check is needed because `on-prompt` touches the
+  turn file only when a *message* arrives, so a turn that runs for hours off
+  a single message looks stale while it works — measured, a live mid-turn
+  session was reported stale with a `--force` refresh as the suggested fix.
+  Anything unknown there (no `claude`, a listing that fails) counts as
+  working: a missed alert is recoverable, an alert telling someone to
+  force-refresh a busy session is not. That hold is capped at six runs in a
+  row (half an hour), because `claude agents` failing repeatedly means the
+  daemon itself is unwell — exactly when a bot breaks — and holding for ever
+  would hide it; past the cap the not-knowing is reported as `nostate`. One
+  run that *can* tell resets the count.
+- Threads carry their own messages. One request for the guild's active threads
+  answers with every thread's `last_message_id`, so a thread is read only when
+  it holds something newer than the hooks recorded; the usual run is two calls.
+
+Known gap: the plugin also treats a mention of the bot's managed **role** as
+addressing it, and the REST payload carries those separately from user
+mentions. Such a message is not counted, so `health` under-reports there
+rather than crying wolf.
+
+`health` also asks Discord one unauthenticated question first (`GET
+/gateway`). Without it, a machine that cannot reach Discord at all looks
+exactly like every bot's token having been refused — measured, a run with no
+`HTTPS_PROXY` reported precisely that, which would have sent every owner to
+check a credential that was fine. When the network is down that is the single
+finding (`noreach`), no token is blamed, and no alert is attempted or
+recorded.
+
+An alert is recorded as sent only once Discord has accepted it, and the record
+carries the id it was about, not just the verdict. Both matter: a POST that
+failed but counted as sent is never retried, and a verdict alone would stay
+stuck on a bot whose `last-message-id` never caught up — and a stuck verdict
+never *changes*, so no later outage would be announced either.
+
+Two facts that cannot change are asked for once and kept in the bot's state
+dir rather than fetched every run: its own user id (`bot-id`) and its
+channel's guild (`channel-guild`, stored with the channel it was learned for,
+since a bot's channel *can* be moved by editing its `access.json`). On a
+five-minute timer that is two fewer HTTP calls and two fewer `jq` per bot per
+run, 288 runs a day. A cached value that does not look like an id is
+re-fetched, so a truncated file heals itself instead of poisoning every later
+run.
+
+**It never restarts and never stops anything.** A misjudged restart is what
+puts two sessions on one token, and a health check is the thing most likely to
+misjudge; every alert instead carries the command that fixes it. Alerts go out
+on the affected bot's **own** token over REST, never through another bot on
+the machine — a peer there shares the daemon and the upgrade that killed this
+one, so it would be gone too. One message per state change, not one per run,
+and a line when the bot recovers. Every run also appends to
+`<bot>/health.log` and to the journal, since the whole problem may be that
+nobody is watching the channel.
+
+**The timer is deliberately not part of `setup`.** `setup` only ever writes
+inside the project, while a unit is user-wide state; and a machine with
+several bots in one project needs one timer, not one per bot. `--install-timer`
+writes `~/.config/systemd/user/claude-discord-health-<project>.timer` and
+enables it.
+
+A unit inherits nothing from the shell that installed it, so behind a proxy
+the check cannot reach Discord at all — the first real timer run here did
+exactly that and called every bot unreachable. Name the proxy explicitly:
+
+```
+claude-discord health --install-timer --proxy http://127.0.0.1:8118
+```
+
+It is checked against Discord at install time, so a mistyped one is caught
+now rather than looking like an outage five minutes later. Point it at the
+machine's **stable** egress (a privoxy or squid daemon), not at a
+session-scoped helper: a bot session's shell often has `HTTPS_PROXY` set to a
+short-lived per-session proxy, and a timer that follows it reports `noreach`
+every time that bounces — suppressing real alerts meanwhile. `--proxy
+inherit` takes the installing shell's variables anyway, if that is really what
+you want. With no `--proxy` the unit carries none and uses whatever the user
+manager has. On a machine with no `systemctl` it says so and prints the command
+to put in `cron` or a launchd job instead. Keep `loginctl enable-linger` on,
+or the timer stops when you log out.
+
 ## Behind a corporate proxy
 
 bun's `fetch` honours `HTTPS_PROXY`; bun's `WebSocket` does not, so the Discord
@@ -540,6 +683,13 @@ rest of Claude Code.
 | `refresh` says `handoff.md is missing or empty` | the session did not write it; ask it to, or pass `--force` |
 | `refresh` says `<dir> is not a trusted workspace` | `claude --bg` refuses to start in a workspace whose trust was never accepted, and the foreground path does not, so a bot moved to the background with `/bg` can run for weeks without meeting that gate. Run `claude` in the project once and accept the prompt, then retry; `--force` refreshes anyway. The check reads `hasTrustDialogAccepted` and fails **open**, so anything but an explicit `false` proceeds |
 | `refresh` says `start failed, so <bot>'s handoff was put back` | the fresh session did not come up (the line above it says why). The launch consumes `handoff.md` before starting claude, so it is moved back and the retry is not refused for want of one |
+| `[health] <bot>: stale — ... hooks or its turn are stuck` | the plugin server is up and the bot still is not answering: the hooks died (see the upgrade row above) or a turn is wedged. `claude-discord refresh <bot> --force` |
+| `[health] <bot>: duplicate` | two plugin servers share one token, so every reply is sent twice. `/bg` from a foreground session and a fleet spare both respawn a session without going through the wrapper. `claude agents` lists them; stop the one that is not the bot's |
+| `[health] <bot>: unreachable` | Discord answered 401 or 403: the token was refused, or the bot cannot read the channel. Check `DISCORD_BOT_TOKEN` in `<bot>/.env` and the bot's channel permissions |
+| `[health] <bot>: throttled` / `apierror` | Discord rate-limited (429) or did not answer (000, 5xx). The token was *not* rejected, so nothing is said about the bot this run — these are deliberately not reported as a credential problem |
+| `health` says `noreach` for every bot | this machine cannot reach Discord at all (the unauthenticated `/gateway` probe failed), so nothing is said about any bot and no token is blamed. Behind a proxy, `HTTPS_PROXY` is missing from the shell — or from the timer unit, if this came from the timer: re-run `--install-timer` from a shell that has it |
+| `health` says `cannot count plugin servers on this machine` | no `/proc` (macOS); the behavioural signal still works, only the cause cannot be named |
+| `[health] <bot>: nostate` | `claude agents` has not answered for six runs, so whether a turn is running cannot be told, and the unanswered message is no longer being held. The daemon is probably unwell: run `claude agents` by hand |
 | `refresh` says `no running session named <name> started in <dir>` | the session was renamed (`/rename`) or started elsewhere; `claude agents` shows it, stop it by hand, then `refresh --force` |
 | The agent view still lists dead sessions of my bot | a start removes only its own (the session and, if it had one, its worktree): another name's, another project's and the one a `--resume` names are left alone on purpose, and only 20 go per start (oldest first), so start again for the next 20. Otherwise the wrapper predates 2026-09-19 (reinstall), or `claude agents --json --all` is not answering: run it by hand |
 | No report after an iteration | the bot's `mode` is not `autoresearchclaw`; the session has no standing watch running `events` (ask it to start one); the session started before the mode was set (the rules arrive at session start: restart or `/clear` it); or the runs are not under `artifacts/rc-*/` of the project the bot was set up in. `<bot>/arc-seen` lists what `events` has already reported (running `events` by hand records what it prints, so the watch will not see it again) |
