@@ -47,6 +47,6 @@ if [ ${#files[@]} -gt 0 ]; then
   fi
 fi
 # Written even when empty: a project with no runs yet must not stay "first".
-printf '%s' "$keys" >> "$seen" 2>/dev/null || exit 0
+{ printf '%s' "$keys" >> "$seen"; } 2>/dev/null || exit 0
 [ "$first" = 1 ] || printf '%s' "$lines"
 exit 0

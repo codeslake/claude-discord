@@ -413,6 +413,27 @@ if [ "${1:-}" = refresh ]; then
     echo "claude-discord: $dir/handoff.md is missing or empty; write it first, or pass --force to replace the session without one" >&2
     exit 1
   fi
+  # `claude --bg` refuses to start in a workspace whose trust has never been
+  # accepted, and the foreground path does not: measured 2026-09-25, a --bg
+  # start in an unregistered directory exits 1 with "Workspace not trusted".
+  # A bot started in a terminal and moved to the background with /bg
+  # therefore never meets that gate, and can run for weeks with the trust
+  # unaccepted -- until a refresh stops it and cannot start its replacement.
+  # That is how a bot here was down for 22 hours. So the trust flag is read
+  # BEFORE anything is stopped. Fail-OPEN on purpose: anything but an
+  # explicit `false` (no file, no jq, no such project key, a future Claude
+  # Code that keeps trust elsewhere) proceeds exactly as before, because a
+  # check that misreads would otherwise block a refresh that would have
+  # worked. --force says "do it anyway", here as everywhere else.
+  # `// "unset"` would be wrong here: jq's `//` treats FALSE as empty, so
+  # `false // "unset"` is "unset" and the one value this checks for could
+  # never be seen (measured). An explicit null test is the only correct form.
+  if [ "$force" = no ] && command -v jq >/dev/null 2>&1 &&
+     [ "$(jq -r --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted | if . == null then "unset" else tostring end' "$HOME/.claude.json" 2>/dev/null)" = false ]; then
+    echo "claude-discord: $PWD is not a trusted workspace, so the fresh --bg session would refuse to start and $name would be left down." >&2
+    echo "claude-discord: run 'claude' here once and accept the trust prompt, then retry; --force refreshes anyway." >&2
+    exit 1
+  fi
   if [ "${CLAUDE_DISCORD_REFRESH_CHILD:-}" != 1 ]; then
     # Re-run this same command detached: `claude stop` below kills the session
     # that is very likely running us, and its whole process group with it.
@@ -485,7 +506,27 @@ if [ "${1:-}" = refresh ]; then
     if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) continue;; esac; fi
     case $a in -*) takes_value "$a" && skip=1 || :;; *) kickoff=();; esac
   done
-  exec "$self" --bg "$name" ${fresh[@]+"${fresh[@]}"} ${kickoff[@]+"${kickoff[@]}"}
+  # NOT exec: the launch path below consumes handoff.md (it folds it into the
+  # system prompt and renames it handoff.prev.md) BEFORE it starts claude, so
+  # a start that fails leaves the handoff gone from the path a retry looks at
+  # -- and a retry without --force then refuses because handoff.md is
+  # missing. That happened here: a --bg start refused on workspace trust and
+  # took the handoff with it. Running it as a child instead means there is
+  # still a shell to put the file back. `claude --bg` returns as soon as the
+  # session is backgrounded (measured: 0 s), so waiting for it costs nothing
+  # and a non-zero status is a real launch failure.
+  # Whether THIS refresh had a handoff to consume, recorded before the start.
+  # Without it, a --force refresh of a bot with no handoff.md would "restore"
+  # whatever handoff.prev.md an EARLIER refresh left behind, handing the next
+  # session a stale handoff -- worse than none.
+  had_handoff=no; [ ! -s "$dir/handoff.md" ] || had_handoff=yes
+  "$self" --bg "$name" ${fresh[@]+"${fresh[@]}"} ${kickoff[@]+"${kickoff[@]}"} && exit 0
+  rc=$?
+  if [ "$had_handoff" = yes ] && [ ! -s "$dir/handoff.md" ] && [ -s "$dir/handoff.prev.md" ]; then
+    mv "$dir/handoff.prev.md" "$dir/handoff.md" &&
+      echo "claude-discord: start failed, so $name's handoff was put back; fix the error above and run 'claude-discord refresh $name'" >&2
+  fi
+  exit "$rc"
 fi
 
 args=() name="" skip=0

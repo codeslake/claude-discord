@@ -1685,6 +1685,92 @@ DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh al
 for _ in $(seq 200); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.05; done
 grep -q -- '--debug --model opus ' "$HOME/claude.calls" && grep -q 'Catch up on the channel and continue from your handoff. $' "$HOME/claude.calls" || { echo "FAIL: --debug (optional value) must not swallow --model, whose value is no prompt: $(cat "$HOME/claude.calls")"; exit 1; }
 echo "ok: refresh keeps the default kickoff past a value-taking flag (--allowedTools Bash) and past an optional-value one before another flag (--debug --model opus), and an autoresearchclaw bot's launch carries no never-share sentence in its system prompt"
+# --- refresh: the workspace-trust pre-check ---------------------------------
+# `claude --bg` refuses to start in a workspace whose trust was never
+# accepted, and the foreground path does not, so a bot moved to the
+# background with /bg can run for weeks and only discover it when a refresh
+# has already stopped it. refresh reads the flag BEFORE stopping anything.
+# The rest of this suite runs with no ~/.claude.json at all, which is the
+# fail-open case and is asserted last.
+cat > "$HOME/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  agents) echo '[{"id":"live1111","pid":41,"name":"alpha","cwd":"'"$PWD"'"}]';;
+  stop)   echo "STOP $2" >> "$HOME/claude.calls";;
+  *)      printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
+esac
+STUB
+chmod +x "$HOME/bin/claude"
+rm -f "$HOME/claude.calls"
+printf 'x\n' > "$R/alpha/handoff.md"
+jq -n --arg p "$P" '{projects: {($p): {hasTrustDialogAccepted: false}}}' > "$HOME/.claude.json"
+out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha 2>&1) && { echo "FAIL: refresh must refuse in an untrusted workspace"; exit 1; }
+grep -q 'not a trusted workspace' <<<"$out" || { echo "FAIL: wrong error for an untrusted workspace: $out"; exit 1; }
+[ ! -f "$HOME/claude.calls" ] || { echo "FAIL: the trust check must run before anything is stopped: $(cat "$HOME/claude.calls")"; exit 1; }
+[ -f "$R/alpha/handoff.md" ] || { echo "FAIL: a refusal must leave the handoff alone"; exit 1; }
+echo "ok: refresh refuses in an untrusted workspace, before stopping anything, and keeps the handoff"
+
+# --force overrides it, like every other refusal here.
+rm -f "$HOME/claude.calls"
+env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force >/dev/null
+for _ in $(seq 200); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.05; done
+grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: --force must refresh an untrusted workspace anyway; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+echo "ok: refresh --force starts anyway in an untrusted workspace"
+
+# Fail-open: anything but an explicit false proceeds, so a future Claude Code
+# that keeps trust elsewhere cannot block every refresh on this machine.
+# One case is enough, and it is this one: a file jq cannot parse is the only
+# input that makes jq EXIT NON-ZERO and print nothing, so the check compares
+# the empty string. Every other non-false input (no file, no project key, no
+# key, true) either takes that same empty-output path (no file: jq exits 2) or
+# leaves jq printing a non-false word, and that a non-false word proceeds
+# while `false` refuses is what the two tests above already assert -- the
+# refusal test is also what would catch a regression to `// "unset"`, since
+# false would then read as "unset" and the refusal would not happen.
+printf 'not json at all\n' > "$HOME/.claude.json"
+rm -f "$HOME/claude.calls"
+printf 'x\n' > "$R/alpha/handoff.md"
+env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null 2>&1
+for _ in $(seq 200); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.05; done
+grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: the trust check must fail open when jq cannot parse the file; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+rm -f "$HOME/.claude.json"
+echo "ok: the trust check fails open on a file that is not JSON (jq exits non-zero and prints nothing)"
+
+# --- refresh: a failed launch puts the handoff back ------------------------
+# The launch path consumes handoff.md (folding it into the system prompt and
+# renaming it handoff.prev.md) BEFORE starting claude, so a start that fails
+# used to leave the handoff gone from the path a retry looks at -- and the
+# retry then refused for want of a handoff. That is what happened when a
+# --bg start hit the trust gate.
+cat > "$HOME/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  agents) echo '[{"id":"live1111","pid":41,"name":"alpha","cwd":"'"$PWD"'"}]';;
+  stop)   echo "STOP $2" >> "$HOME/claude.calls";;
+  *)      echo "Workspace not trusted." >&2; exit 1;;
+esac
+STUB
+rm -f "$HOME/claude.calls" "$R/alpha/handoff.prev.md"
+printf '# handoff\nRESTORE_ME\n' > "$R/alpha/handoff.md"
+env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null 2>&1
+for _ in $(seq 300); do grep -q 'put back' "$R/alpha/refresh.log" 2>/dev/null && break; sleep 0.05; done
+grep -q 'put back' "$R/alpha/refresh.log" || { echo "FAIL: a failed start must report the restored handoff; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+grep -q RESTORE_ME "$R/alpha/handoff.md" || { echo "FAIL: a failed start must put handoff.md back"; exit 1; }
+[ ! -f "$R/alpha/handoff.prev.md" ] || { echo "FAIL: the restore must move the file, not copy it"; exit 1; }
+echo "ok: a refresh whose start fails puts the consumed handoff back, so the retry is not refused for want of one"
+
+# --force with no handoff of its own must NOT resurrect an older
+# handoff.prev.md: a stale handoff is worse than none.
+rm -f "$R/alpha/handoff.md"
+printf '# stale\nSTALE_ONE\n' > "$R/alpha/handoff.prev.md"
+env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force >/dev/null 2>&1
+sleep 0.5
+[ ! -f "$R/alpha/handoff.md" ] || { echo "FAIL: a failed --force refresh with no handoff must not resurrect an older one: $(cat "$R/alpha/handoff.md")"; exit 1; }
+grep -q STALE_ONE "$R/alpha/handoff.prev.md" || { echo "FAIL: the older handoff.prev.md must be left where it was"; exit 1; }
+rm -f "$R/alpha/handoff.prev.md"
+echo "ok: a failed refresh with no handoff of its own leaves an older handoff.prev.md alone"
+
+
 
 # install.sh under a HOME of its own: every shipped hook and rule lands, and
 # a file an earlier version installed that the repo no longer ships (the
