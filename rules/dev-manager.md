@@ -1,6 +1,6 @@
 # Working on claude-discord with peer bots (dev-manager bots)
 
-This file applies only when your Discord-turn context contains a `Dev manager:` line; otherwise ignore it entirely. Every session in this project loads it, not only dev-manager bots. If it applies: you are one of several dev-manager bots that change claude-discord together, each run by its own owner on its own machine. Your peers and their `<@bot_id>` are in `.claude/discord-agents/peers.json` and in your Discord-turn context.
+This file applies only to a dev-manager bot: a session whose Discord-turn context contains a `Dev manager:` line, or whose session prompt names it as a bot sharing a Discord channel (`You are "<name>", one of several Claude Code sessions sharing the Discord channel`) while `.claude/discord-agents/<name>/mode` reads `dev-manager`. Otherwise ignore it entirely. Every session in this project loads it, not only dev-manager bots. If it applies: you are one of several dev-manager bots that change claude-discord together, each run by its own owner on its own machine. Your peers and their `<@bot_id>` are in `.claude/discord-agents/peers.json` and in your Discord-turn context.
 
 ## One session, one task, end to end
 
@@ -10,7 +10,14 @@ This file applies only when your Discord-turn context contains a `Dev manager:` 
   - a test on its machine;
   - an R&R split or a hand-off;
   - a heads-up before you change shared files.
-- After each finished iteration, post one short report to the channel: what changed, how it was verified, what is next.
+- Discord carries only what a peer must act on, or needs before acting: those pings, the diff summary before a push, and one closing line when an item a peer took part in lands. No progress narration, no report nobody is waiting for, no copy of the terminal conversation.
+
+## Terminal turns
+
+- A turn typed in your terminal is answered in the terminal. From it, Discord takes only a reply addressed to a peer, opening with its `<@bot_id>` (thread-guard allows a dev-manager exactly that), and `thread start` for an item a peer must act on. A thread started that way takes, from a terminal turn, only replies addressed to a peer.
+- No echo either way. What you post on Discord is not repeated in the terminal (one line naming the thread, at most), and the terminal conversation is not copied to Discord.
+- A peer's answer arrives as a Discord turn of its own and is answered on Discord.
+- Land an item as every bot does, with `thread close <thread_id> "<closing line>"`: it takes the line from a terminal turn for a thread you opened, and pings nobody.
 
 ## Talking to peers and humans
 
@@ -28,9 +35,9 @@ This file applies only when your Discord-turn context contains a `Dev manager:` 
 
 ## Changing claude-discord
 
-- Before you edit, announce on Discord what you will change, mentioning your peers. You do not need to wait for an answer. The edit-gate hook denies Edit, Write and MultiEdit under claude-discord without such an announcement in the last 60 minutes.
+- Before you edit, announce on Discord what you will change, addressed to your peers, in the item's thread; a terminal turn may, since it opens with their mention. You do not need to wait for an answer. The edit-gate hook denies Edit, Write and MultiEdit under claude-discord without such an announcement in the last 60 minutes.
 - The hook does not see Bash or git. A change made through Bash (sed, a heredoc, git apply, git checkout) follows the same announce rule, by hand.
-- Before pushing to main, share the diff summary in the channel.
+- Before pushing to main, share the diff summary in the item's thread, addressed to your peers.
 - Tell the machine's other claude-discord sessions only after the change is on main AND installed here, once per deployment, and only when it changes something they see: a hook, the rule text, or the wrapper's behaviour. A test-only or README-only change is not worth a message. `~/.claude-discord/hooks/tools/local-bots` prints their names and projects. Send each one a short message: what changed, and whether it must act. Hooks and rule text reach a running session without a restart; a new hook entry or a mode drop needs `claude-discord setup <bot> --mode` in that project, which touches neither the token nor access.json.
 - Those sessions are not your peers: they are the machine's other bots. Tell them, do not ask them to work.
 

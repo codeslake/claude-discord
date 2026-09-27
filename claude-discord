@@ -88,26 +88,25 @@ jq_edit() {  # $1 = file, the rest = jq arguments
 }
 
 # Registers this project's hooks. The four Discord-turn hooks (identity/
-# refresh, primed once per session; the reply flag; the checkmark reaction;
-# at session start, re-priming after a compact/clear and clearing a turn left
-# over from a startup/resume), which make a turn that arrived over
-# Discord be answered through the discord reply tool only, never also typed
-# into the CLI, and peers/thread-guard, which keeps Discord to Discord turns
-# and the channel to short lines, on a reply and on an edit alike (it reads
-# no peer), are the same for every bot on every machine: they go into
-# settings.json, which can be committed and shared. Every other entry is
-# registered only while its mode is among $1, the modes of the bots THIS
-# machine runs (the three peers hooks for dev-manager, on-start for
-# autoresearchclaw), so it goes into settings.local.json, which is per
-# machine; in a committed settings.json it would flip on every start of a
-# machine with other bots. Any entry of ours (a command under
+# refresh, primed once per session; the reply flag; the checkmark reaction; at
+# session start, re-priming after a compact/clear and clearing a turn left
+# over from a startup/resume), which make a turn that arrived over Discord be
+# answered through the discord reply tool only, never also typed into the CLI,
+# and peers/thread-guard, which keeps Discord to Discord turns and the channel
+# to short lines, on a reply and on an edit alike, are the same for every bot
+# on every machine: they go into settings.json, which can be committed and
+# shared. Every other entry is registered only while its mode is among $1, the
+# modes of the bots THIS machine runs (the three peers hooks for dev-manager,
+# on-start for autoresearchclaw), so it goes into settings.local.json, which
+# is per machine; in a committed settings.json it would flip on every start of
+# a machine with other bots. Any entry of ours (a command under
 # .claude/discord-agents/hooks/) that a file should not hold is removed from
 # it: a mode hook no bot needs, a hook in the other file (settings.json held
 # the peers hooks in an earlier version), one that no longer exists
-# (turn/on-compact became turn/on-session-start) or one under another event
-# or matcher (autoresearchclaw/on-start was startup|resume), along with a
-# matcher group or an event left empty by that. Each command guards on
-# [ -x ], so a machine without the hooks installed simply runs nothing.
+# (turn/on-compact became turn/on-session-start) or one under another event or
+# matcher (autoresearchclaw/on-start was startup|resume), along with a matcher
+# group or an event left empty by that. Each command guards on [ -x ], so a
+# machine without the hooks installed simply runs nothing.
 # Idempotent per entry, and a file is written only when it changes (Claude
 # Code writes its permission grants into settings.local.json).
 # Parallel arrays, not a packed "event|matcher|script" string, because a
@@ -551,7 +550,7 @@ groups=$(jq -r '.groups | objects | keys[]' "$dir/access.json" 2>/dev/null) || g
 case $groups in ''|*[!0-9]*) ;; *) channel=$groups ;; esac
 prompt="You are \"$name\", one of several Claude Code sessions sharing the Discord channel $channel, each through its own bot. \
 The human reaches you there by @mentioning or replying to your bot; answer those with the discord reply tool. \
-A turn the human types in this terminal (no <channel> tag) is answered in the terminal, never on Discord. \
+A turn the human types in this terminal (no <channel> tag) is answered in the terminal; it posts nothing to Discord but what your mode's rules allow. \
 When both arrive in one turn, answer each where it came from. \
 A request that needs more than a line or two gets its own thread: ~/.claude-discord/hooks/tools/thread start \"[<area>] <short title>\" posts that one line in the channel and prints the thread id. \
 Everything else about the request goes inside that thread, with the id as chat_id. \

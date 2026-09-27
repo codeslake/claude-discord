@@ -2,8 +2,8 @@
 # PreToolUse hook (matcher: mcp__plugin_discord_discord__reply|
 # mcp__plugin_discord_discord__edit_message: an edit puts text in Discord
 # too): Discord turns only, mirror lines, table format and channel length,
-# every bot (it reads no peer). Prints nothing unless it rewrites a table or
-# denies:
+# every bot (a dev-manager's peers are read only for the turn check). Prints
+# nothing unless it rewrites a table or denies:
 #
 # 0. Turns and arrows: see the two checks right after the input is read.
 # 1. Tables, every bot and every chat. Discord renders no GFM table: its rows
@@ -55,19 +55,34 @@ input=$(cat 2>/dev/null) || exit 0
 # threads: one `thread start` opened in a Discord turn (open-threads, until
 # `thread close`), where the background subagent working that request and the
 # turn its result wakes report, and one listed in report-threads, for a
-# report a timer posts (one id a line in each).
+# report a timer posts (one id a line in each). And a dev-manager's reply
+# that opens with a peer's <@bot_id>: a review, a test on its machine, a
+# split, a heads-up before a shared change, which its rule allows from any
+# turn. It is addressed to a bot that must act on it, not an echo of terminal
+# work; a mention further down would let any echo through with a "cc". Not an
+# edit: the plugin delivers only new messages, so a peer never sees one.
 #
-# One jq read for this check and the next, a line each (a tab would let an
-# empty field collapse into its neighbour): the session, the chat, and
-# whether a line of the text opens with an arrow.
-{ read -r turn; read -r chat; read -r arrow; } < <(printf '%s' "$input" | jq -r '
-  .session_id // "", (.tool_input.chat_id // "" | tostring),
-  ((.tool_input.text // "" | tostring) | test("(^|\n)\\s*(->|<-) [A-Za-z0-9._-]+:"))' 2>/dev/null) || :
+# One jq read for this check and the two after it, a line each (a tab would
+# let an empty field collapse into its neighbour): the session, the chat,
+# whether a line of the text opens with an arrow, and whether a table's
+# separator row sits outside every code block. Even pieces of a split on ```
+# are outside every code block; the last piece after an unclosed fence is
+# looked at too, so a table there is denied below.
+{ read -r turn; read -r chat; read -r arrow; read -r table; } < <(printf '%s' "$input" | jq -r '
+  (.tool_input.text // "" | tostring) as $t
+  | .session_id // "", (.tool_input.chat_id // "" | tostring),
+    ($t | test("(^|\n)\\s*(->|<-) [A-Za-z0-9._-]+:")),
+    ([$t | splits("```")] as $p | $p | to_entries
+     | map(select(.key % 2 == 0 or (.key == ($p | length) - 1 and ($p | length) % 2 == 0)).value)
+     | join("\n") | split("\n")
+     | any(test("^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)+\\|?\\s*$")))' 2>/dev/null) || :
 if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ]; then
   case ${turn:-} in ''|*/*) ;; *)
     [ -e "${DISCORD_STATE_DIR:-}/turns/$turn" ] \
       || grep -qxF -- "${chat:-}" "${DISCORD_STATE_DIR:-}/open-threads" "${DISCORD_STATE_DIR:-}/report-threads" 2>/dev/null \
-      || deny 'This turn has no Discord message in it: answer in the terminal. From such a turn Discord takes only a post in a thread that thread start opened (or one listed in report-threads), and a closing line through thread close <id> "<line>".' ;;
+      || { p=$(peers) && [ -n "$p" ] && printf '%s' "$input" | jq -e --argjson p "$p" '.tool_name == "mcp__plugin_discord_discord__reply"
+           and (.tool_input.text // "" | tostring | test("^\\s*<@!?(" + ($p | map(.bot_id) | join("|")) + ")>"))' >/dev/null 2>&1; } \
+      || deny 'This turn has no Discord message in it: answer in the terminal. From such a turn Discord takes only a post in a thread that thread start opened (or one listed in report-threads), a closing line through thread close <id> "<line>", and, from a dev-manager, a reply that opens with a peer mention.' ;;
   esac
 fi
 
@@ -76,20 +91,12 @@ fi
 # the line was a copy. A Korean label ("-> 수정: ...") is prose, not a name.
 [ "${arrow:-}" != true ] || deny 'A mirror line says which way it went: "[sent to name] ..." or "[received from name] ...", not an arrow.'
 
-# Even pieces of a split on ``` are outside every code block. The last piece
-# after an unclosed fence is looked at too, so a table there is denied below.
-table=$(printf '%s' "$input" | jq -r '
-  [(.tool_input.text // "" | tostring) | splits("```")] as $p | $p | to_entries
-  | map(select(.key % 2 == 0 or (.key == ($p | length) - 1 and ($p | length) % 2 == 0)).value)
-  | join("\n") | split("\n")
-  | if any(test("^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)+\\|?\\s*$")) then "table" else empty end' 2>/dev/null) || exit 0
-
 # The same pieces and the same separator row, in python3: prints the hook
 # input with each table rewritten, or nothing when no separator has a header
 # row above it (then the reply is not a table after all and goes out as is).
 # It exits 1, and the reply is denied, when the ``` marks do not pair up.
 converted=""
-if [ "$table" = table ]; then
+if [ "${table:-}" = true ]; then
   converted=$(printf '%s' "$input" | python3 -c '
 import json, re, sys, unicodedata
 

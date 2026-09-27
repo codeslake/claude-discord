@@ -89,7 +89,7 @@ if [ -n "$session_id" ]; then
   if p=$(peers) && [ -n "$p" ]; then
     identity="$identity
 Peers (mention to reach them): $(printf '%s' "$p" | jq -r 'map("\(.name) <@\(.bot_id)>") | join(", ")' 2>/dev/null)
-Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; after each iteration post one short report."
+Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; Discord carries only what a peer must act on, and from a terminal turn only a reply that opens with a peer's mention; echo nothing either way."
   fi
   key="$bot_mode $(printf '%s' "$identity" | cksum)"
   if [ "$(cat "$primed" 2>/dev/null)" != "$key" ]; then

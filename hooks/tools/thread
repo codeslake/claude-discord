@@ -13,7 +13,12 @@
 #
 # Discord hears only Discord-origin work (see peers/thread-guard). A session
 # (CLAUDE_CODE_SESSION_ID) starts a thread only in a turn with a Discord
-# message in it, every bot but autoresearchclaw. A thread it started is listed
+# message in it, every bot but autoresearchclaw, and a dev-manager from any
+# turn, for an item a peer must act on (its rule). Such a thread is listed as
+# "<id> terminal": close takes its closing line, but thread-guard, which
+# matches whole lines, does not open it to posts, so every post there from a
+# terminal turn must open with a peer's mention. A thread started in a
+# Discord turn is listed
 # in open-threads until it is closed, and takes posts from any turn meanwhile,
 # so the background subagent that works the request, and the turn its result
 # wakes, report there; that turn lands it with a closing line through close.
@@ -62,6 +67,12 @@ turn=$DISCORD_STATE_DIR/turns/${CLAUDE_CODE_SESSION_ID:-none}
 discord_turn() {
   [ -z "${CLAUDE_CODE_SESSION_ID:-}" ] || [ "$bot_mode" = autoresearchclaw ] || [ -e "$turn" ]
 }
+# thread-guard never sees a title or a closing line, so its channel limit is
+# kept here.
+one_line() {  # $1 = text, $2 = what it is
+  case $1 in *$'\n'*) false ;; esac && [ "$(printf '%s' "$1" | jq -Rrs length)" -le 500 ] \
+    || { echo "thread: $2 is one line in the channel: no newline, 500 characters at most" >&2; exit 2; }
+}
 answered() {  # what on-reply does for a reply
   [ -e "$turn" ] || return 0
   : >> "$turn.replied"; rm -f "$turn.pending"
@@ -77,7 +88,11 @@ case ${1:-} in
   start)
     title=${2:-}
     [ -n "$title" ] || { echo "thread: usage: thread start \"[<area>] <short title>\"" >&2; exit 2; }
-    discord_turn || { echo "thread: this turn has no Discord message in it, so no thread: answer in the terminal" >&2; exit 2; }
+    one_line "$title" "a title"
+    from_discord=""
+    if discord_turn; then from_discord=1
+    elif [ "$bot_mode" != dev-manager ]; then echo "thread: this turn has no Discord message in it, so no thread: answer in the terminal" >&2; exit 2
+    fi
     # A snowflake's top bits are its time in ms since 2015; awk's doubles lose
     # only low bits.
     keep '(int($1 / 4194304) + 1420070400000) / 1000 > now - 604800'
@@ -94,22 +109,20 @@ case ${1:-} in
     case $status in
       2*) tid=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null)
           is_id "$tid" || fail "opening the thread"
-          printf '%s\n' "$tid" >> "$open"; answered
+          if [ -n "$from_discord" ]; then printf '%s\n' "$tid" >> "$open"; answered; else printf '%s terminal\n' "$tid" >> "$open"; fi
           printf '%s\n' "$tid" ;;
       # 160004: a thread is already open on that message. Its id IS the
       # message id, so the caller gets what it came for instead of an error.
       *) [ "$(err_code)" = 160004 ] || fail "opening the thread"
-         printf '%s\n' "$mid" >> "$open"; answered
+         if [ -n "$from_discord" ]; then printf '%s\n' "$mid" >> "$open"; answered; else printf '%s terminal\n' "$mid" >> "$open"; fi
          printf '%s\n' "$mid" ;;
     esac ;;
   close)
     is_id "${2:-}" || { echo "thread: usage: thread close <thread_id> (digits only) [\"<closing line>\"]" >&2; exit 2; }
     if [ -n "${3:-}" ]; then
-      discord_turn || grep -qxF -- "$2" "$open" 2>/dev/null \
-        || { echo "thread: this turn has no Discord message in it and thread start did not open $2, so no closing line: answer in the terminal" >&2; exit 2; }
-      # thread-guard never sees this post, so its channel limit is kept here.
-      case $3 in *$'\n'*) false ;; esac && [ "$(printf '%s' "$3" | jq -Rrs length)" -le 500 ] \
-        || { echo "thread: a closing line is one line in the channel: no newline, 500 characters at most" >&2; exit 2; }
+      discord_turn || grep -qE "^$2( terminal)?\$" "$open" 2>/dev/null \
+        || { echo "thread: this turn has no Discord message in it and $2 is not a thread this bot opened, so no closing line: answer in the terminal" >&2; exit 2; }
+      one_line "$3" "a closing line"
       api POST "channels/$bot_channel/messages" "$(jq -nc --arg c "$3" '{content: $c}')"
       case $status in 2*) ;; *) fail "posting the closing line";; esac
       answered
