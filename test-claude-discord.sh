@@ -79,7 +79,7 @@ if [ -n "$line" ]; then
 fi
 EOF
 chmod +x "$HOME/bin/curl"
-# `sleep`, stubbed by duration so the suite stays inside its 30 s budget
+# `sleep`, stubbed by duration so the suite stays inside its 40 s budget
 # (CLAUDE.md) without dropping an assertion; any other duration is real:
 #   0.5  refresh's wait for the old session to exit (20 rounds): 0.05 s.
 #   3    refresh's pause for the old gateway to let go: not slept.
