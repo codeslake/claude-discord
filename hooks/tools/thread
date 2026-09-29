@@ -30,7 +30,8 @@
 # or a bad argument. Exit 1: Discord refused, named by HTTP status and error
 # code only -- never the token, never the response body.
 set -u
-. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || :
+. "${0%/*}/../lib/discord.sh" 2>/dev/null || :
+[ -z "${bot_name:-}" ] || { resolve_channel; load_token; }
 
 status=000 resp=""
 

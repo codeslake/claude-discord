@@ -10,15 +10,18 @@
 # before, which is also how a turn that was mentioned with nothing asked of
 # it ends. Otherwise never blocks, and must never fail a turn.
 set -u
-. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+. "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 
+[ -n "$bot_name" ] || exit 0
+any=""; for f in "$DISCORD_STATE_DIR"/turns/*; do case $f in *.primed) ;; *) [ ! -e "$f" ] || any=1;; esac; done
+[ -n "$any" ] || exit 0
 input=$(cat 2>/dev/null) || exit 0
-session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
+read -r session_id active < <(printf '%s' "$input" | jq -r '"\(.session_id // "") \(.stop_hook_active // false)"' 2>/dev/null) || exit 0
 if [ -n "$session_id" ] && [ -n "$bot_name" ]; then
   turns="$DISCORD_STATE_DIR/turns/$session_id"
   replied="$turns.replied"
   if [ -f "$turns.pending" ] \
-     && [ "$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null)" != true ]; then
+     && [ "$active" != true ]; then
     jq -nc --arg r 'A Discord message in this turn got no reply: answer it with the discord reply tool (a terminal question keeps its terminal answer). If nothing was asked of you, just end the turn again.' \
       '{decision: "block", reason: $r}' 2>/dev/null
     exit 0

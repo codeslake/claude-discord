@@ -8,34 +8,34 @@
 # "chat_id message_id user_id"). Prints nothing unless it denies; a no-op
 # without peers.json. Must never fail a turn.
 set -u
-. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+. "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 
-p=$(peers) && [ -n "$p" ] || exit 0
+[ "$bot_mode" = dev-manager ] && [ -f "$DISCORD_STATE_DIR/../peers.json" ] || exit 0
 input=$(cat 2>/dev/null) || exit 0
-text=$(printf '%s' "$input" | jq -r '.tool_input.text // empty' 2>/dev/null) || exit 0
-session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
-reply_to=$(printf '%s' "$input" | jq -r '.tool_input.reply_to // empty' 2>/dev/null) || exit 0
+# session_id and reply_to without jq would need a JSON parser; one jq reads them.
+out=$(printf '%s' "$input" | jq -r '"\(.session_id // "") \(.tool_input.reply_to // "")"' 2>/dev/null) || exit 0
+session_id=${out%% *} reply_to=${out#* }
 from=""
 case $session_id in
   ''|*[!A-Za-z0-9_-]*) ;;
   *) turns="$DISCORD_STATE_DIR/turns/$session_id"
-     if [ -n "$reply_to" ]; then
-       # $2"" and m"": a string compare; as numbers, 19-digit snowflakes collide.
-       from=$(awk -v m="$reply_to" '$2"" == m"" { u = $3 } END { print u }' "$turns" 2>/dev/null)
-     else
-       from=$(tail -n 1 "$turns" 2>/dev/null | cut -d' ' -f3)
+     if [ -f "$turns" ]; then
+       while read -r _ m u _ || [ -n "$m" ]; do
+         if [ -n "$reply_to" ]; then [ "$m" != "$reply_to" ] || from=$u; else from=$u; fi
+       done < "$turns"
      fi ;;
 esac
-# A name counts only as a whole word: not directly preceded or followed by
-# [a-z0-9_-] (so dong is not in dongyong22, but is in "dong에게").
-reason=$(printf '%s' "$p" | jq -r --arg text "$text" --arg from "$from" '
-  def mentioned: . as $p | $text | contains("<@\($p.bot_id)>") or contains("<@!\($p.bot_id)>");
+reason=$(printf '%s' "$input" | jq -r --arg self "$bot_name" --arg from "$from" --slurpfile pf "$DISCORD_STATE_DIR/../peers.json" '
+  (.tool_input.text // "" | tostring) as $text
+  | [$pf[0].peers[]? | {name: (.name // "" | tostring), bot_id: (.bot_id // "" | tostring)}
+     | select(.name != "" and (.bot_id | test("^[0-9]+$")) and (.name | ascii_downcase) != ($self | ascii_downcase))]
+  | def mentioned: . as $p | $text | contains("<@\($p.bot_id)>") or contains("<@!\($p.bot_id)>");
   def named: . as $p | ($text | ascii_downcase | split($p.name | ascii_downcase)) as $s
     | any(range(1; $s | length); ($s[. - 1] | test("[a-z0-9_-]$") | not) and ($s[.] | test("^[a-z0-9_-]") | not));
-  ([.[] | select(.bot_id == $from and (mentioned | not))][0] // empty
+  first(([.[] | select(.bot_id == $from and (mentioned | not))][0] // empty
     | "You are answering \(.name); mention it as <@\(.bot_id)> or it never sees this."),
   ([.[] | select(named and (mentioned | not))][0] // empty
-    | "Mention \(.name) as <@\(.bot_id)>; a bot only receives messages that mention it.")' 2>/dev/null | head -1)
+    | "Mention \(.name) as <@\(.bot_id)>; a bot only receives messages that mention it."))' 2>/dev/null)
 [ -n "$reason" ] || exit 0
 jq -nc --arg r "$reason" '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}' 2>/dev/null
 exit 0

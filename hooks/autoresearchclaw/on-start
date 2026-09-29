@@ -15,7 +15,7 @@
 # Prints nothing without DISCORD_STATE_DIR, for a bot in another mode or
 # without the rule file. Starts no process; never fails.
 set -u
-. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+. "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 [ "$bot_mode" = autoresearchclaw ] || exit 0
 rule=$HOME/.claude-discord/rules/autoresearchclaw.md
 [ -f "$rule" ] || exit 0

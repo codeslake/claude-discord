@@ -4,10 +4,11 @@
 # it, and that no Discord message is left unanswered (.pending). Must never
 # block or fail a turn.
 set -u
-. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+. "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 
+[ -n "$bot_name" ] || exit 0
 session_id=$(jq -r '.session_id // empty' 2>/dev/null) || exit 0
 [ -n "$session_id" ] && [ -n "$bot_name" ] || exit 0
-mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null && : >> "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
-rm -f "$DISCORD_STATE_DIR/turns/$session_id.pending" 2>/dev/null
+{ [ -d "$DISCORD_STATE_DIR/turns" ] || mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; } && : >> "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
+[ ! -e "$DISCORD_STATE_DIR/turns/$session_id.pending" ] || rm -f "$DISCORD_STATE_DIR/turns/$session_id.pending" 2>/dev/null
 exit 0

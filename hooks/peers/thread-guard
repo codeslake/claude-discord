@@ -33,7 +33,7 @@
 #
 # Must never fail a turn.
 set -u
-. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+. "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 
 deny() {
   jq -nc --arg r "$1" \
@@ -41,6 +41,7 @@ deny() {
   exit 0
 }
 
+[ -z "$bot_name" ] || resolve_channel
 input=$(cat 2>/dev/null) || exit 0
 
 # Discord takes a reply only in a turn that has a Discord message in it,
@@ -68,14 +69,15 @@ input=$(cat 2>/dev/null) || exit 0
 # separator row sits outside every code block. Even pieces of a split on ```
 # are outside every code block; the last piece after an unclosed fence is
 # looked at too, so a table there is denied below.
-{ read -r turn; read -r chat; read -r arrow; read -r table; } < <(printf '%s' "$input" | jq -r '
+{ read -r turn; read -r chat; read -r arrow; read -r table; read -r over; } < <(printf '%s' "$input" | jq -r --arg ch "$bot_channel" '
   (.tool_input.text // "" | tostring) as $t
   | .session_id // "", (.tool_input.chat_id // "" | tostring),
     ($t | test("(^|\n)\\s*(->|<-) [A-Za-z0-9._-]+:")),
     ([$t | splits("```")] as $p | $p | to_entries
      | map(select(.key % 2 == 0 or (.key == ($p | length) - 1 and ($p | length) % 2 == 0)).value)
      | join("\n") | split("\n")
-     | any(test("^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)+\\|?\\s*$")))' 2>/dev/null) || :
+     | any(test("^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)+\\|?\\s*$"))),
+    (if (.tool_input.chat_id // "" | tostring) == $ch and ($t | length) > 500 then "over" else "" end)' 2>/dev/null) || :
 if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ]; then
   case ${turn:-} in ''|*/*) ;; *)
     [ -e "${DISCORD_STATE_DIR:-}/turns/$turn" ] \
@@ -156,11 +158,13 @@ if new != p:
   [ -z "$converted" ] || input=$converted
 fi
 
-if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ]; then
+if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ] && [ -n "$converted" ]; then
   over=$(printf '%s' "$input" | jq -r --arg ch "$bot_channel" '
     select((.tool_input.chat_id // "" | tostring) == $ch
       and ((.tool_input.text // "" | tostring) | length) > 500) | "over"' 2>/dev/null) || exit 0
-  [ "$over" != over ] || deny 'Over 500 characters in the channel: start a thread (~/.claude-discord/hooks/tools/thread start "[<area>] <short title>") and post this inside it, leaving one line here.'
+fi
+if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ]; then
+  [ "${over:-}" != over ] || deny 'Over 500 characters in the channel: start a thread (~/.claude-discord/hooks/tools/thread start "[<area>] <short title>") and post this inside it, leaving one line here.'
 fi
 
 [ -n "$converted" ] || exit 0

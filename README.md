@@ -351,8 +351,8 @@ a restart. To remove them, delete their entries from `.hooks` in those
 files.
 
 The identity/mention-rule context is long, so `on-prompt` injects it once per
-session (a `turns/<session_id>.primed` marker holding the bot's mode and a
-checksum of the context text), not on every turn -- a compaction or `/clear`
+session (a `turns/<session_id>.primed` marker holding the bot's mode and
+the context text), not on every turn -- a compaction or `/clear`
 drops it from the transcript, which is what `on-session-start` is for, and a
 changed mode or a changed text injects it again. So after `./install.sh`
 changes the context, a running bot re-primes by itself on its next Discord

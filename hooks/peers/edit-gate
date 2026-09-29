@@ -7,13 +7,12 @@
 # it, so the window slides. Prints nothing unless it denies; a no-op without
 # peers.json. Must never fail a turn.
 set -u
-. "$(dirname "$0")/../lib/discord.sh" 2>/dev/null || exit 0
+. "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 
-p=$(peers) && [ -n "$p" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
-input=$(cat 2>/dev/null) || exit 0
-f=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null) || exit 0
-session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
-[ -n "$f" ] || exit 0
+[ "$bot_mode" = dev-manager ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
+out=$(jq -r '(.session_id // ""), (.tool_input.file_path // "")' 2>/dev/null) || exit 0
+session_id=${out%%$'\n'*}; f=${out#*$'\n'}
+[ "$out" != "$session_id" ] && [ -n "$f" ] || exit 0
 case $session_id in ''|*[!A-Za-z0-9_-]*) exit 0 ;; esac
 r=$(realpath "$f" 2>/dev/null) || { d=$(cd "$(dirname "$f")" 2>/dev/null && pwd -P) && r=$d/${f##*/}; } || r=$f
 case $r/ in */claude-discord/*) ;; *) exit 0 ;; esac
@@ -23,6 +22,7 @@ case $r/ in */claude-discord/*) ;; *) exit 0 ;; esac
 d=$(dirname "$r")
 while [ ! -d "$d" ]; do d=$(dirname "$d"); done
 git -C "$d" check-ignore -q "$r" 2>/dev/null && exit 0
+p=$(peers) && [ -n "$p" ] || exit 0
 ci="$CLAUDE_PROJECT_DIR/.claude/discord-agents/checkin/$session_id"
 if [ -n "$(find "$ci" -mmin -60 2>/dev/null)" ]; then
   touch "$ci" 2>/dev/null

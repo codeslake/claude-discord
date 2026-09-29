@@ -1421,7 +1421,7 @@ echo "ok: autoresearchclaw drops no rule and no peers hook, only on-start (start
 AP='{"session_id":"a1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"700\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}'
 echo none > "$R4/mgr/mode"
 plain_out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")
-primed_mode() { local k; k=$(cat "$1" 2>/dev/null); printf '%s' "${k%% *}"; }   # the key is "<mode> <cksum of the context>"
+primed_mode() { local k; k=$(cat "$1" 2>/dev/null); printf '%s' "${k%% *}"; }   # the key is "<mode> <the context text>"
 [ -n "$plain_out" ] && [ "$(primed_mode "$R4/mgr/turns/a1.primed")" = none ] || { echo "FAIL: priming under mode none must record it: $plain_out"; exit 1; }
 echo autoresearchclaw > "$R4/mgr/mode"
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")

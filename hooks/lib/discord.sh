@@ -18,11 +18,12 @@ bot_mode=""
 # several) it is config.env's DISCORD_CHANNEL_ID. The start path in
 # claude-discord applies the same rule.
 resolve_channel() {
-  local config="$DISCORD_STATE_DIR/../config.env" groups
+  local config="$DISCORD_STATE_DIR/../config.env" groups line
   bot_channel=""
   if [ -f "$config" ]; then
-    bot_channel=$(grep '^DISCORD_CHANNEL_ID=' "$config" | head -1)
-    bot_channel=${bot_channel#DISCORD_CHANNEL_ID=}
+    while IFS= read -r line || [ -n "$line" ]; do
+      case $line in DISCORD_CHANNEL_ID=*) bot_channel=${line#DISCORD_CHANNEL_ID=}; break;; esac
+    done < "$config"
     bot_channel=${bot_channel#\'}
     bot_channel=${bot_channel%\'}
   fi
@@ -34,15 +35,17 @@ resolve_channel() {
 }
 
 if [ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ]; then
-  bot_name=$(basename "$DISCORD_STATE_DIR")
-  resolve_channel
-  env_file="$DISCORD_STATE_DIR/.env"
-  if [ -f "$env_file" ]; then
-    bot_token=$(grep '^DISCORD_BOT_TOKEN=' "$env_file" | head -1)
-    bot_token=${bot_token#DISCORD_BOT_TOKEN=}
-  fi
-  bot_mode=$(cat "$DISCORD_STATE_DIR/mode" 2>/dev/null) || bot_mode=""
+  bot_name=${DISCORD_STATE_DIR%/}; bot_name=${bot_name##*/}
+  IFS= read -r bot_mode 2>/dev/null < "$DISCORD_STATE_DIR/mode" || :
 fi
+# bot_token: read by react() and tools/thread only, on demand.
+load_token() {
+  local line
+  [ -f "$DISCORD_STATE_DIR/.env" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in DISCORD_BOT_TOKEN=*) bot_token=${line#DISCORD_BOT_TOKEN=}; return 0;; esac
+  done < "$DISCORD_STATE_DIR/.env"
+}
 
 # react <chat_id> <message_id> <url-encoded emoji>
 # PUTs the reaction via curl, fully detached (stdout/stderr redirected,
@@ -56,6 +59,7 @@ fi
 react() {
   case $1 in ''|*[!0-9]*) return 0;; esac
   case $2 in ''|*[!0-9]*) return 0;; esac
+  [ -n "$bot_token" ] || load_token
   [ -n "$bot_token" ] || return 0
   command -v curl >/dev/null 2>&1 || return 0
   printf 'Authorization: Bot %s\n' "$bot_token" | curl -s -m 5 -X PUT -H @- \

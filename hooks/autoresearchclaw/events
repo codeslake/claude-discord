@@ -16,26 +16,36 @@
 # printed, so an event is printed at most once; one that cannot be recorded
 # is not printed at all. An empty file, or one written less than 2 s ago, is
 # left for a later call: AutoResearchClaw writes both files with one
-# non-atomic write, and a half-written file would be reported twice. Exits 0,
-# except 2 (with a line on stderr) without DISCORD_STATE_DIR: it only means
-# something inside a bot session.
+# non-atomic write, and a half-written file would be reported twice. The
+# watch calls this every minute, so a call costs one perl (the ages; macOS
+# has no GNU stat), one cksum and one grep whatever the number of files.
+# Exits 0, except 2 (with a line on stderr) without DISCORD_STATE_DIR: it
+# only means something inside a bot session.
 set -u
 [ -n "${DISCORD_STATE_DIR:-}" ] || { echo "events: DISCORD_STATE_DIR is unset; run this inside a claude-discord bot session" >&2; exit 2; }
 seen=$DISCORD_STATE_DIR/arc-seen
 cd "$DISCORD_STATE_DIR/../../.." 2>/dev/null || exit 0
 [ -e "$seen" ] && first=0 || first=1
+files=()
+for f in artifacts/rc-*/stage-15/decision.md artifacts/rc-*/pipeline_summary.json; do [ -s "$f" ] && files+=("$f"); done
 keys="" lines=""
-for f in artifacts/rc-*/stage-15/decision.md artifacts/rc-*/pipeline_summary.json; do
-  [ -s "$f" ] || continue
-  perl -e 'exit((time - (stat $ARGV[0])[9]) < 2)' "$f" 2>/dev/null || continue   # perl: macOS has no GNU stat
-  k="$f $(cksum < "$f" 2>/dev/null)" || continue
-  grep -qxF -- "$k" "$seen" 2>/dev/null && continue
-  keys="$keys$k"$'\n'
-  case $f in
-    */pipeline_summary.json) lines="${lines}run-end $f"$'\n' ;;
-    *) lines="${lines}iteration-end $f"$'\n' ;;
-  esac
-done
+if [ ${#files[@]} -gt 0 ]; then
+  ready=()
+  while IFS= read -r f; do ready+=("$f"); done < <(perl -e 'for (@ARGV) { print "$_\n" if time - (stat)[9] >= 2 }' "${files[@]}" 2>/dev/null)
+  if [ ${#ready[@]} -gt 0 ]; then
+    all=""
+    while read -r c s f; do all="$all$f $c $s"$'\n'; done < <(cksum -- "${ready[@]}" 2>/dev/null)
+    if [ "$first" = 1 ]; then keys=$all
+    else keys=$(printf '%s' "$all" | grep -vxFf "$seen" 2>/dev/null); [ -z "$keys" ] || keys="$keys"$'\n'
+    fi
+    # A key is "<path> <crc> <size>"; the path may hold spaces.
+    while IFS= read -r k; do
+      [ -n "$k" ] || continue
+      f=${k% * *}
+      case $f in */pipeline_summary.json) lines="${lines}run-end $f"$'\n' ;; *) lines="${lines}iteration-end $f"$'\n' ;; esac
+    done <<<"$keys"
+  fi
+fi
 # Written even when empty: a project with no runs yet must not stay "first".
 printf '%s' "$keys" >> "$seen" 2>/dev/null || exit 0
 [ "$first" = 1 ] || printf '%s' "$lines"
