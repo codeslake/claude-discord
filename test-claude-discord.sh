@@ -166,7 +166,6 @@ echo "ok: dev-manager peers leave an 'all' group alone and are still added to a 
 # "all" is one answer or the other, never a list containing it: guessing either
 # way is wrong (the wide reading opens the channel on a typo, the narrow one
 # stores a literal "all" as an ID).
-printf 'ALL\n' > /dev/null   # case is ignored, checked below through a fresh project
 PU="$HOME/project-upper"; mkdir -p "$PU"; cd "$PU"
 printf '999\n111\nALL\ntokU\nn\n' | bash "$S" setup upper >/dev/null
 [ "$(jq -c '.groups["999"].allowFrom' "$PU/.claude/discord-agents/upper/access.json")" = '[]' ] || { echo "FAIL: 'ALL' must be read as 'all'"; exit 1; }
@@ -179,14 +178,20 @@ echo "ok: 'all' is case-insensitive and refuses to be mixed with IDs"
 
 # The run path writes a missing access.json with TWO arguments (no "all"
 # answer to pass), so the stored IDs must still be honoured when the third is
-# absent -- the fallback for bot dirs predating access.json.
+# absent -- the fallback for bot dirs predating access.json. And a hand-written
+# DISCORD_ALLOW_IDS=all in the shared config.env must NOT open that bot: "all"
+# is honoured only from the live third argument, never from config.env.
 PR2="$HOME/project-runpath"; mkdir -p "$PR2"; cd "$PR2"
 RR="$PR2/.claude/discord-agents"
 printf '999\n111\n222,333\ntokR\nn\n' | bash "$S" setup runner >/dev/null
 rm -f "$RR/runner/access.json"
 bash "$S" runner >/dev/null 2>&1 || :   # the run path rewrites it before anything else
 [ "$(jq -c '.groups["999"].allowFrom' "$RR/runner/access.json" 2>/dev/null)" = '["111","222","333"]' ] || { echo "FAIL: the run path must rebuild access.json from the stored IDs: $(jq -c . "$RR/runner/access.json" 2>/dev/null)"; exit 1; }
-echo "ok: the run path rebuilds a missing access.json from config.env's IDs (write_access without the third argument)"
+sed -i "s/^DISCORD_ALLOW_IDS=.*/DISCORD_ALLOW_IDS='all'/" "$RR/config.env"
+rm -f "$RR/runner/access.json"
+bash "$S" runner >/dev/null 2>&1 || :
+[ "$(jq -c '.groups["999"].allowFrom' "$RR/runner/access.json" 2>/dev/null)" = '["111","all"]' ] || { echo "FAIL: config.env's 'all' must be read as a literal ID, never as open-channel: $(jq -c . "$RR/runner/access.json" 2>/dev/null)"; exit 1; }
+echo "ok: the run path rebuilds access.json from config.env's IDs, and config.env can never spell open-channel"
 
 cd "$P"
 

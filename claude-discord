@@ -64,16 +64,22 @@ plugin=discord@claude-plugins-official
 # access.json is written at setup time, so every answer lives in the file the
 # plugin reads and nothing else needs persisting. The run path below keeps a
 # fallback for bot dirs set up before this existed.
-write_access() {  # $1 = bot dir, $2 = requireMention (true|false), $3 = allowed ids or "all"
+write_access() {  # $1 = bot dir, $2 = requireMention (true|false), $3 = "all" for this bot only
   # An EMPTY group allowFrom lets everyone in that channel through (the plugin
   # only filters when the list is non-empty), which is what "all" answers.
   # dmPolicy stays an allowlist of the owner either way: "all" opens the
   # channel, never DMs.
+  #
+  # "all" is honoured ONLY from $3 (the live answer for this one bot), never
+  # from config.env: that file is shared, so a hand-written DISCORD_ALLOW_IDS=all
+  # must not silently open every bot the run path writes a fresh access.json for.
+  # config.env is always read as an id list.
+  local open=""; [ "$(printf '%s' "${3:-}" | tr '[:upper:]' '[:lower:]')" = all ] && open=yes
   jq -n --arg ch "$DISCORD_CHANNEL_ID" --arg me "$DISCORD_USER_ID" \
-        --arg others "${3:-${DISCORD_ALLOW_IDS:-}}" --argjson mention "$2" \
+        --arg others "${DISCORD_ALLOW_IDS:-}" --argjson mention "$2" --arg open "$open" \
     '{dmPolicy: "allowlist", allowFrom: [$me], ackReaction: "👀",
       groups: {($ch): {requireMention: $mention,
-                       allowFrom: (if ($others | ascii_downcase) == "all" then []
+                       allowFrom: (if $open == "yes" then []
                                    else [$me] + ($others | split(",") | map(gsub("\\s";"")) | map(select(. != ""))) end)}}}' \
     > "$1/access.json"
 }
