@@ -137,6 +137,59 @@ printf 'tokB\nn\n' | bash "$S" setup beta >/dev/null
 [ "$(jq -r '.groups["1550575144320110662"].requireMention' "$R/beta/access.json")" = true ]
 echo "ok: second bot asks only token+mention and reuses shared IDs"
 
+# "all" opens the CHANNEL to everyone by leaving the group's allowFrom empty,
+# which is how the plugin spells "no filter". Its own project: the answer is
+# deliberately not written to the shared config.env, and the suite checks that
+# a later bot there does not inherit it.
+PA="$HOME/project-all"; mkdir -p "$PA"; cd "$PA"
+RA="$PA/.claude/discord-agents"
+printf '999\n111\nall\ntokC\nn\n' | bash "$S" setup gamma >/dev/null
+[ "$(jq -c '.groups["999"].allowFrom' "$RA/gamma/access.json")" = '[]' ] || { echo "FAIL: 'all' must leave the group allowFrom empty: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
+[ "$(jq -c '.allowFrom' "$RA/gamma/access.json")" = '["111"]' ] || { echo "FAIL: 'all' opens the channel, never DMs: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
+grep -q "^DISCORD_ALLOW_IDS=''$" "$RA/config.env" || { echo "FAIL: 'all' must not be stored in the shared config.env: $(grep ALLOW "$RA/config.env")"; exit 1; }
+echo "ok: 'all' empties the group allowFrom (everyone in the channel), keeps DMs owner-only, and is not persisted"
+
+# A later bot in that project inherits config.env's ids, which never carry
+# "all", so it stays closed: the open answer reaches one bot only.
+printf 'tokD\nn\n' | bash "$S" setup delta >/dev/null
+[ "$(jq -c '.groups["999"].allowFrom' "$RA/delta/access.json")" = '["111"]' ] || { echo "FAIL: a later bot must not inherit 'all': $(jq -c . "$RA/delta/access.json")"; exit 1; }
+echo "ok: a bot set up after an 'all' one stays closed -- the answer reaches that one bot only"
+
+# The dev-manager peer merge adds ids to allowFrom; on an "all" group that
+# would silently turn "everyone" into "peers only", so such a group is skipped.
+printf '\nn\ndev-manager\npeerx:4242:111:mach\n' | bash "$S" setup gamma >/dev/null
+[ "$(jq -c '.groups["999"].allowFrom' "$RA/gamma/access.json")" = '[]' ] || { echo "FAIL: peers must not narrow an 'all' group: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
+printf '\nn\ndev-manager\npeery:5151:111:mach\n' | bash "$S" setup delta >/dev/null
+[ "$(jq -c '.groups["999"].allowFrom' "$RA/delta/access.json")" = '["111","4242","5151"]' ] || { echo "FAIL: peers must still be added to a normal group: $(jq -c . "$RA/delta/access.json")"; exit 1; }
+echo "ok: dev-manager peers leave an 'all' group alone and are still added to a normal one"
+
+# "all" is one answer or the other, never a list containing it: guessing either
+# way is wrong (the wide reading opens the channel on a typo, the narrow one
+# stores a literal "all" as an ID).
+printf 'ALL\n' > /dev/null   # case is ignored, checked below through a fresh project
+PU="$HOME/project-upper"; mkdir -p "$PU"; cd "$PU"
+printf '999\n111\nALL\ntokU\nn\n' | bash "$S" setup upper >/dev/null
+[ "$(jq -c '.groups["999"].allowFrom' "$PU/.claude/discord-agents/upper/access.json")" = '[]' ] || { echo "FAIL: 'ALL' must be read as 'all'"; exit 1; }
+PX="$HOME/project-mixed"; mkdir -p "$PX"; cd "$PX"
+if printf '999\n111\nall,123\ntokX\nn\n' | bash "$S" setup mixed >/dev/null 2>&1; then
+  echo "FAIL: 'all' mixed with IDs must be refused"; exit 1
+fi
+[ ! -f "$PX/.claude/discord-agents/mixed/access.json" ] || { echo "FAIL: a refused answer must not write access.json"; exit 1; }
+echo "ok: 'all' is case-insensitive and refuses to be mixed with IDs"
+
+# The run path writes a missing access.json with TWO arguments (no "all"
+# answer to pass), so the stored IDs must still be honoured when the third is
+# absent -- the fallback for bot dirs predating access.json.
+PR2="$HOME/project-runpath"; mkdir -p "$PR2"; cd "$PR2"
+RR="$PR2/.claude/discord-agents"
+printf '999\n111\n222,333\ntokR\nn\n' | bash "$S" setup runner >/dev/null
+rm -f "$RR/runner/access.json"
+bash "$S" runner >/dev/null 2>&1 || :   # the run path rewrites it before anything else
+[ "$(jq -c '.groups["999"].allowFrom' "$RR/runner/access.json" 2>/dev/null)" = '["111","222","333"]' ] || { echo "FAIL: the run path must rebuild access.json from the stored IDs: $(jq -c . "$RR/runner/access.json" 2>/dev/null)"; exit 1; }
+echo "ok: the run path rebuilds a missing access.json from config.env's IDs (write_access without the third argument)"
+
+cd "$P"
+
 # Its own throwaway project, so the bot-count assumptions the rest of this
 # suite makes about $P (project) are untouched.
 PM="$HOME/project-moved"; mkdir -p "$PM"; cd "$PM"

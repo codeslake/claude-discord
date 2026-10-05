@@ -64,12 +64,17 @@ plugin=discord@claude-plugins-official
 # access.json is written at setup time, so every answer lives in the file the
 # plugin reads and nothing else needs persisting. The run path below keeps a
 # fallback for bot dirs set up before this existed.
-write_access() {  # $1 = bot dir, $2 = requireMention (true|false)
+write_access() {  # $1 = bot dir, $2 = requireMention (true|false), $3 = allowed ids or "all"
+  # An EMPTY group allowFrom lets everyone in that channel through (the plugin
+  # only filters when the list is non-empty), which is what "all" answers.
+  # dmPolicy stays an allowlist of the owner either way: "all" opens the
+  # channel, never DMs.
   jq -n --arg ch "$DISCORD_CHANNEL_ID" --arg me "$DISCORD_USER_ID" \
-        --arg others "${DISCORD_ALLOW_IDS:-}" --argjson mention "$2" \
+        --arg others "${3:-${DISCORD_ALLOW_IDS:-}}" --argjson mention "$2" \
     '{dmPolicy: "allowlist", allowFrom: [$me], ackReaction: "👀",
       groups: {($ch): {requireMention: $mention,
-                       allowFrom: ([$me] + ($others | split(",") | map(gsub("\\s";"")) | map(select(. != ""))))}}}' \
+                       allowFrom: (if ($others | ascii_downcase) == "all" then []
+                                   else [$me] + ($others | split(",") | map(gsub("\\s";"")) | map(select(. != ""))) end)}}}' \
     > "$1/access.json"
 }
 
@@ -291,8 +296,21 @@ if [ "${1:-}" = setup ]; then
     if [ ! -f "$root/config.env" ]; then
       read -rp "Discord channel ID: " channel
       read -rp "Your Discord user ID: " user
-      read -rp "Other user or bot IDs allowed to trigger bots there (comma-separated, empty for none): " others
+      echo "Other user or bot IDs allowed to trigger bots there: comma-separated, empty for none," >&2
+      echo "or 'all' for everyone in the channel -- anyone who can post there could then drive this" >&2
+      echo "session, which runs with shell access on this machine." >&2
+      read -rp "IDs: " others
       others=${others//[[:space:]]/}   # the file is sourced: a stray space would run an ID as a command
+      # "all" applies to THIS bot only and is not persisted: config.env is
+      # shared by every bot in the project, so storing it would quietly open
+      # up each bot set up here later. Mixing it with ids is refused rather
+      # than guessed: taking the wider reading would open the channel on a
+      # typo, and the narrower one would store a literal "all" as an ID.
+      case ${others,,} in
+        all) allow_all=yes; others=;;
+        *,all|all,*|*,all,*)
+          echo "claude-discord: answer either 'all' or a list of IDs, not both" >&2; exit 2;;
+      esac
       printf "DISCORD_CHANNEL_ID='%s'\nDISCORD_USER_ID='%s'\nDISCORD_ALLOW_IDS='%s'\n" "$channel" "$user" "$others" > "$root/config.env"
     fi
   fi
@@ -316,7 +334,11 @@ if [ "${1:-}" = setup ]; then
       jq_edit "$root/$name/access.json" --argjson mention "$mention" \
         'if (.groups | type) == "object" then .groups |= map_values(.requireMention = $mention) else . end'
     else
-      write_access "$root/$name" "$mention"
+      # allow_all is set only by the answer above, so it reaches this bot and
+      # no other: a bot set up later in the same project inherits config.env's
+      # ids, which never carry "all", and stays closed unless asked again with
+      # --reset.
+      write_access "$root/$name" "$mention" "${allow_all:+all}"
     fi
   fi
   mode=$(cat "$root/$name/mode" 2>/dev/null) || mode=none
@@ -340,9 +362,14 @@ if [ "${1:-}" = setup ]; then
     # is, not only the one keyed by config.env's channel; this bot itself is
     # skipped by name, and $a + ($ids - $a) keeps it additive, as before.
     ids=$(jq -c --arg self "$name" '[.peers[]? | select((.name // "" | tostring | ascii_downcase) != ($self | ascii_downcase)) | .bot_id | tostring]' "$root/peers.json" 2>/dev/null) || ids='[]'
+    # An EMPTY allowFrom already lets every author through, peers included, and
+    # adding ids to it would narrow the group to just those ids -- turning
+    # "everyone" into "peers only" without saying so. Such a group is left as
+    # it is.
     jq_edit "$root/$name/access.json" --argjson ids "${ids:-[]}" \
       'if (.groups | type) == "object"
-       then .groups |= map_values(.allowFrom = ((.allowFrom // []) as $a | $a + ($ids - $a)))
+       then .groups |= map_values(if (.allowFrom // []) == [] then .
+                                  else .allowFrom = (.allowFrom as $a | $a + ($ids - $a)) end)
        else . end'
     echo "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed."
   fi
