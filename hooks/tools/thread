@@ -8,7 +8,7 @@
 # `thread close` posts the item's closing line in the channel and archives
 # the thread so it leaves the sidebar.
 #
-#   thread start "[<area>] <short title>"          prints the thread id
+#   thread start "[<area>] <short title>"          prints the thread id (cite it as <#id>)
 #   thread close <thread_id> ["<closing line>"]    silent on success
 #
 # Discord hears only Discord-origin work (see peers/thread-guard). A session

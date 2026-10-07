@@ -72,6 +72,18 @@ input=$(cat 2>/dev/null) || exit 0
 # the line was a copy. A Korean label ("-> 수정: ...") is prose, not a name.
 [ "${arrow:-}" != true ] || deny 'A mirror line says which way it went: "[sent to name] ..." or "[received from name] ...", not an arrow.'
 
+# A thread named by its bare id ("thread 1557...") reads as a number; <#id>
+# shows its name, as a link (owner, 2026-10-07). The word before the id says it
+# is a thread, so only "thread", "쓰레드" and "스레드" ids are rewritten, outside
+# every ``` block, and the reply goes out through updatedInput like a table.
+linked=$(printf '%s' "$input" | jq -c '
+  (.tool_input.text // "" | tostring) as $t
+  | ([$t | splits("```")] | to_entries
+     | map(if .key % 2 == 0 then .value | gsub("(?<w>(?i:thread|쓰레드|스레드)) (?<id>[0-9]{17,20})(?![0-9])"; "\(.w) <#\(.id)>") else .value end)
+     | join("```")) as $n
+  | select($n != $t) | .tool_input.text = $n' 2>/dev/null) || linked=""
+[ -z "$linked" ] || input=$linked
+
 # Answering a bot means mentioning it, every bot: a bot receives only the
 # messages that mention it, so an unmentioned answer never reaches it. A
 # reply_to one of its messages counts as a mention (the plugin's isMentioned),
@@ -170,6 +182,6 @@ if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ]; then
   [ "${over:-}" != over ] || deny 'Over 500 characters in the channel: start a thread (~/.claude-discord/hooks/tools/thread start "[<area>] <short title>") and post this inside it, leaving one line here.'
 fi
 
-[ -n "$converted" ] || exit 0
+[ -n "$converted" ] || [ -n "$linked" ] || exit 0
 printf '%s' "$input" | jq -c '{hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: .tool_input}}' 2>/dev/null
 exit 0
