@@ -1269,6 +1269,34 @@ out=$(tguard "$(body 43 $'hi\n-> RVP: done')")
 [ "$(reason <<<"$out")" = "$AR_REASON" ] || { echo "FAIL: an arrow mirror line must be denied even in a Discord turn: $out"; exit 1; }
 out=$(tguard "$(body 43 $'a -> b in prose\n원인: x\n-> 수정: y')")
 [ -z "$out" ] || { echo "FAIL: an arrow inside prose, or before a Korean label, is not a mirror line: $out"; exit 1; }
+# Answering a bot means mentioning it, for every bot (plain is mode-none, no
+# peers.json): a bot receives only what mentions it. The author is a bot by
+# GET /users/{id}, asked once and cached in user-kinds; a human is not held
+# to it, and an unknown answer (API failure) never blocks.
+MB_REASON='You are answering a bot; mention it as <@555> or it never sees this.'
+replies() { printf '%s\n' "$@" > "$CURL_REPLIES"; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; }   # (redefined, the same, for the thread helper below)
+ans() {  # ans <text> [reply_to]
+  jq -nc --arg t "$1" --arg r "${2:-}" '{tool_name: "mcp__plugin_discord_discord__reply", session_id: "tb", tool_input: ({chat_id: "43", text: $t} + (if $r == "" then {} else {reply_to: $r} end))}'
+}
+printf '42 700 556\n42 701 555\n' > "$R4/plain/turns/tb"; rm -f "$R4/plain/user-kinds"
+replies '200 {"id":"555","bot":true}'
+out=$(tguard "$(ans 'done, see above')" plain)
+[ "$(reason <<<"$out")" = "$MB_REASON" ] || { echo "FAIL: answering a bot without its mention must be denied: $out"; exit 1; }
+grep -qx '555 bot' "$R4/plain/user-kinds" && grep -qF 'users/555' "$CURL_LOG" || { echo "FAIL: the author's kind must be looked up and cached: $(cat "$R4/plain/user-kinds" 2>&1) / $(cat "$CURL_LOG")"; exit 1; }
+replies
+out=$(tguard "$(ans '<@!555> done')" plain)$(tguard "$(ans 'x <@555> done')" plain)
+[ -z "$out" ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: a mention anywhere must pass, from the cache with no call: $out / $(cat "$CURL_LOG")"; exit 1; }
+replies '200 {"id":"556"}'
+out=$(tguard "$(ans 'thanks' 700)" plain)
+[ -z "$out" ] && grep -qx '556 human' "$R4/plain/user-kinds" || { echo "FAIL: answering a human (reply_to picks the author) must pass and cache human: $out"; exit 1; }
+printf '42 702 557\n' > "$R4/plain/turns/tb"; replies '500 {}'
+out=$(tguard "$(ans 'hi')" plain)
+[ -z "$out" ] && ! grep -q '^557 ' "$R4/plain/user-kinds" || { echo "FAIL: an unknown author must not block or be cached: $out"; exit 1; }
+replies
+out=$(jq -nc '{tool_name: "mcp__plugin_discord_discord__edit_message", session_id: "tb", tool_input: {chat_id: "43", message_id: "9", text: "x"}}' | DISCORD_STATE_DIR="$R4/plain" CLAUDE_PROJECT_DIR="$P4" bash "$G/thread-guard")
+[ -z "$out" ] || { echo "FAIL: an edit is not an answer: $out"; exit 1; }
+rm -f "$R4/plain/turns/tb" "$R4/plain/user-kinds"
+echo "ok: thread-guard denies answering a bot without its <@id> (any bot, author by reply_to or the turn's last message, kind from GET /users cached in user-kinds), and passes a mention, a human, an unknown author and an edit"
 echo "ok: thread-guard lets a turn with no Discord message post (channel and threads, dev-manager and mode-none, still under the channel's 500 characters) and denies an arrow mirror line but not an arrow in prose or before a Korean label"
 
 # The thread helper, against the stubbed curl: each call takes the next

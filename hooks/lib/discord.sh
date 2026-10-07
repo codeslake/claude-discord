@@ -68,6 +68,30 @@ react() {
   disown 2>/dev/null || :
 }
 
+# is_bot_user <user id>: succeeds when that Discord user is a bot. A
+# peers.json bot_id is one; any other id is looked up once with GET
+# /users/{id} (its `bot` field) and the answer cached as "<id> bot|human"
+# in <state dir>/user-kinds, since an account never changes kind. Anything
+# unknown -- not an id, no token, no curl, a failed call -- fails: a guard
+# built on this must never block on a guess.
+is_bot_user() {
+  local id=$1 i kind out status k=$DISCORD_STATE_DIR/user-kinds
+  case $id in ''|*[!0-9]*) return 1;; esac
+  jq -e --arg id "$id" 'any(.peers[]?; (.bot_id // "" | tostring) == $id)' "$DISCORD_STATE_DIR/../peers.json" >/dev/null 2>&1 && return 0
+  if [ -f "$k" ]; then
+    while read -r i kind; do [ "$i" != "$id" ] || { [ "$kind" = bot ]; return; }; done < "$k"
+  fi
+  [ -n "$bot_token" ] || load_token
+  [ -n "$bot_token" ] && command -v curl >/dev/null 2>&1 || return 1
+  out=$(printf 'Authorization: Bot %s\n' "$bot_token" | curl -s -m 3 -w '\n%{http_code}' -H @- "https://discord.com/api/v10/users/$id" 2>/dev/null) || return 1
+  status=${out##*$'\n'}
+  [ "$status" = 200 ] || return 1
+  kind=$(printf '%s' "${out%$'\n'*}" | jq -r 'if (.id // "" | tostring) != "" then (if .bot == true then "bot" else "human" end) else empty end' 2>/dev/null)
+  [ -n "$kind" ] || return 1
+  printf '%s %s\n' "$id" "$kind" >> "$k" 2>/dev/null
+  [ "$kind" = bot ]
+}
+
 # peers: prints this bot's peers from the project's peers.json as a JSON
 # array of {name, bot_id}, self excluded by name (case-insensitive), entries
 # without a name or a numeric bot_id dropped. Prints nothing -- the caller's

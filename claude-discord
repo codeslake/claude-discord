@@ -540,7 +540,7 @@ if [ "${1:-}" = health ]; then
         # proxy may simply not be up yet.
         if command -v curl >/dev/null 2>&1; then
           st=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --proxy "$proxy" \
-            https://discord.com/api/v10/gateway 2>/dev/null) || st=000
+            https://discord.com/api/v10/gateway </dev/null 2>/dev/null) || st=000
           case $st in 2*) echo "claude-discord: $proxy reaches Discord (HTTP $st)";;
                        *) echo "claude-discord: warning: $proxy did not reach Discord (HTTP $st); the timer will report noreach until it does" >&2;; esac
         fi
