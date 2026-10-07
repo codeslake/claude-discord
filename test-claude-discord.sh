@@ -1793,6 +1793,11 @@ grep -q 'summarize recent activity $' "$HOME/claude.calls" || { echo "FAIL: the 
 grep -q 'Catch up on the channel' "$HOME/claude.calls" && { echo "FAIL: a given prompt must replace the default kickoff, not join it"; exit 1; }
 echo "ok: refresh --force starts a fresh session with no handoff and no live session to stop, from a relative script path; a given prompt replaces the default kickoff"
 
+# The run before this one is still readable: a second refresh is how an outage
+# is usually met, and it must not erase what the first one reported.
+grep -q "no running session" "$R/alpha/refresh.prev.log" || { echo "FAIL: the previous refresh's log must be kept as refresh.prev.log; got: $(cat "$R/alpha/refresh.prev.log" 2>&1)"; exit 1; }
+echo "ok: a second refresh keeps the previous run's log as refresh.prev.log"
+
 # A flag that takes a value keeps it: `--allowedTools Bash` is no prompt, so
 # the default kickoff stays. alpha in autoresearchclaw mode: its rules reach
 # the session as on-start's SessionStart context, so the launch's system

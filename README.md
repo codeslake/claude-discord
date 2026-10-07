@@ -467,7 +467,10 @@ it can still choose well:
    name may be left out). The wrapper refuses without a handoff (`--force`
    skips that, for a session too wedged to write one), then hands the rest to
    a detached child, because the next step kills the session that ran the
-   command.
+   command. The child's whole output is `refresh.log` in the state directory,
+   and the run before it is kept as `refresh.prev.log`: an outage is usually
+   met with a second refresh minutes after the first, and that run would
+   otherwise erase the only record of what the first one did.
 3. The child stops the live session registered under the bot's name and this
    project directory (a background one through `claude stop`, a foreground one
    with SIGTERM), waits until its process is gone and a moment more for the
