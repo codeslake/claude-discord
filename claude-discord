@@ -1388,7 +1388,10 @@ done
 want=""
 [ "$res_i" -ge 0 ] && want=${args[res_i]:-} && want=${want#"$res_pre"}
 if [ -n "$want" ] && ! printf '%s' "$want" | grep -qE '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'; then
-  proj=$HOME/.claude/projects/$(printf '%s' "$PWD" | tr './' '--')
+  # Claude Code's own transcript-dir naming: EVERY non-alphanumeric character
+  # of the path becomes '-'. A narrower `tr './'` missed '_' and silently left
+  # the name unresolved, and `--bg --resume <name>` then hangs on a picker.
+  proj=$HOME/.claude/projects/$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
   found=""
   if printf '%s' "$want" | grep -qE '^[0-9a-f]{8}$'; then
     found=$(cd "$proj" 2>/dev/null && ls -t "$want"*.jsonl 2>/dev/null | head -1) || :

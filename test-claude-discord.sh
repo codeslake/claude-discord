@@ -557,7 +557,10 @@ echo "ok: state is under the project .claude and git ignores every file in it"
 
 # --resume takes a full id, a short id, or a session NAME resolved from this
 # project's transcripts; an unknown value is passed through for claude to judge.
-PROJ="$HOME/.claude/projects/$(printf '%s' "$P" | tr './' '--')"
+# Claude Code names a project's transcript dir by replacing EVERY
+# non-alphanumeric character of its path with '-' ('_' included), so the
+# test derives it the same way rather than with a narrower tr.
+PROJ="$HOME/.claude/projects/$(printf '%s' "$P" | sed 's/[^A-Za-z0-9]/-/g')"
 mkdir -p "$PROJ"
 printf '{"type":"custom-title","customTitle":"old-name"}\n{"type":"custom-title","customTitle":"my-session"}\n' > "$PROJ/11111111-2222-3333-4444-555555555555.jsonl"
 printf '{"type":"custom-title","customTitle":"other"}\n' > "$PROJ/99999999-8888-7777-6666-555555555555.jsonl"
@@ -750,7 +753,11 @@ echo "ok: an existing real hooks directory is left alone with a warning, not clo
 # before. The fixture's cwd is the project's RESOLVED path, which is what the
 # wrapper compares against (on macOS $HOME here is under a symlinked /tmp), and
 # startedAt is epoch milliseconds, the type the daemon really prints.
-PD="$HOME/project-dead"; mkdir -p "$PD/.claude/discord-agents/dead"; cd "$PD"
+# An '_' in the path: Claude Code maps it to '-' in the transcript dir, and a
+# resolver that maps only '.' and '/' never finds the session (measured
+# 2026-10-07: `--resume cswap` in cswap_cswap_pin_ccf_manager went to claude
+# unresolved, and `--bg` waited silently on a name picker it cannot show).
+PD="$HOME/project_dead"; mkdir -p "$PD/.claude/discord-agents/dead"; cd "$PD"
 PDP=$(pwd -P)
 printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$PD/.claude/discord-agents/config.env"
 printf 'DISCORD_BOT_TOKEN=tokDead\n' > "$PD/.claude/discord-agents/dead/.env"
@@ -880,7 +887,7 @@ cp "$HOME/agents.full.json" "$HOME/agents.json"
 # this bot's project, so it is exactly what the reaping selects -- and deleting
 # it would delete what the start is reopening. It must survive, resolved from a
 # name (a transcript's basename is the session id) as well as passed through.
-PROJD="$HOME/.claude/projects/$(printf '%s' "$PD" | tr './' '--')"; mkdir -p "$PROJD"
+PROJD="$HOME/.claude/projects/$(printf '%s' "$PD" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$PROJD"
 printf '{"type":"custom-title","customTitle":"my-dead-bot"}\n' > "$PROJD/dead-0002.jsonl"
 : > "$HOME/rm.log"
 start_dead --resume my-dead-bot
