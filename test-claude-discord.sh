@@ -190,7 +190,7 @@ H="$R/hooks/turn"
 rm -rf "$DSD/turns" "$DSD/last-message-id"; : > "$CURL_LOG"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"222\" user=\"u\" user_id=\"9\" ts=\"t\">\nhello\n</channel>"}')
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
-[ "$ctx" = 'Discord turn. You are alpha, the Claude Code session behind the Discord bot alpha in channel 999. Answer a Discord message with the discord reply tool; a question typed in the terminal in the same turn is answered in the terminal. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically. One request, one thread: ~/.claude-discord/hooks/tools/thread start "[<area>] <short title>" posts its channel line and prints the thread id (name a thread in a message as <#id>, which Discord shows as its name, linked), thread close <id> "<closing line>" posts the line it lands with and ends it; the channel holds those two lines. Unless your mode'"'"'s rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id.' ] || { echo "FAIL: on-prompt context text wrong: $ctx"; exit 1; }
+[ "$ctx" = 'Discord turn. You are alpha, the Claude Code session behind the Discord bot alpha in channel 999. Answer a Discord message with the discord reply tool; a question typed in the terminal in the same turn is answered in the terminal. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically. One request, one thread: ~/.claude-discord/hooks/tools/thread start "[<area>] <short title>" posts its channel line and prints the thread id (a bare channel, thread, user or bot id in a message is shown as its name, a channel or thread as a link; put an id in backticks to show the number), thread close <id> "<closing line>" posts the line it lands with and ends it; the channel holds those two lines. Unless your mode'"'"'s rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id.' ] || { echo "FAIL: on-prompt context text wrong: $ctx"; exit 1; }
 [ "$(cat "$DSD/turns/s1")" = "111 222 9" ] || { echo "FAIL: turns file wrong (chat_id message_id user_id)"; exit 1; }
 [ "$(cat "$DSD/last-message-id")" = "222" ] || { echo "FAIL: last-message-id wrong"; exit 1; }
 [ ! -s "$CURL_LOG" ] || { echo "FAIL: on-prompt must never call curl"; exit 1; }
@@ -1275,7 +1275,7 @@ printf '42 700 556\n42 701 555\n' > "$R4/plain/turns/tb"; rm -f "$R4/plain/user-
 replies '200 {"id":"555","bot":true}'
 out=$(tguard "$(ans 'done, see above')" plain)
 [ "$(reason <<<"$out")" = "$MB_REASON" ] || { echo "FAIL: answering a bot without its mention must be denied: $out"; exit 1; }
-grep -qx '555 bot' "$R4/plain/user-kinds" && grep -qF 'users/555' "$CURL_LOG" || { echo "FAIL: the author's kind must be looked up and cached: $(cat "$R4/plain/user-kinds" 2>&1) / $(cat "$CURL_LOG")"; exit 1; }
+grep -q '^555 bot' "$R4/plain/user-kinds" && grep -qF 'users/555' "$CURL_LOG" || { echo "FAIL: the author's kind must be looked up and cached: $(cat "$R4/plain/user-kinds" 2>&1) / $(cat "$CURL_LOG")"; exit 1; }
 replies
 out=$(tguard "$(ans '<@!555> done')" plain)$(tguard "$(ans 'x <@555> done')" plain)
 [ -z "$out" ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: a mention anywhere must pass, from the cache with no call: $out / $(cat "$CURL_LOG")"; exit 1; }
@@ -1285,7 +1285,7 @@ out=$(tguard "$(ans 'thanks' 701)" plain)
 [ -z "$out" ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: a reply_to the bot's message reaches it (the plugin counts it as a mention) and must pass unchecked: $out"; exit 1; }
 printf '42 700 556\n' > "$R4/plain/turns/tb"; replies '200 {"id":"556"}'
 out=$(tguard "$(ans 'thanks')" plain)
-[ -z "$out" ] && grep -qx '556 human' "$R4/plain/user-kinds" || { echo "FAIL: answering a human must pass and cache human: $out"; exit 1; }
+[ -z "$out" ] && grep -q '^556 human' "$R4/plain/user-kinds" || { echo "FAIL: answering a human must pass and cache human: $out"; exit 1; }
 printf '42 702 557\n' > "$R4/plain/turns/tb"; replies '500 {}'
 out=$(tguard "$(ans 'hi')" plain)
 [ -z "$out" ] && ! grep -q '^557 ' "$R4/plain/user-kinds" || { echo "FAIL: an unknown author must not block or be cached: $out"; exit 1; }
@@ -1294,11 +1294,32 @@ out=$(jq -nc '{tool_name: "mcp__plugin_discord_discord__edit_message", session_i
 [ -z "$out" ] || { echo "FAIL: an edit is not an answer: $out"; exit 1; }
 rm -f "$R4/plain/turns/tb" "$R4/plain/user-kinds"
 echo "ok: thread-guard denies answering a bot without its <@id> (any bot, author from the turn's last message, kind from GET /users cached in user-kinds), and passes a mention (of it or of anyone else), a reply_to, a human, an unknown author and an edit"
-out=$(tguard "$(jq -nc --arg t $'see thread 1557489868416884740, 스레드 1557489868416884740에서\n```\nthread 1557489868416884740\n```\nthread <#1557489868416884740> 15574898684168847401' '{tool_name: "mcp__plugin_discord_discord__reply", tool_input: {chat_id: "43", text: $t}}')" plain)
-[ "$(jq -r '.hookSpecificOutput.updatedInput.text' <<<"$out")" = $'see thread <#1557489868416884740>, 스레드 <#1557489868416884740>에서\n```\nthread 1557489868416884740\n```\nthread <#1557489868416884740> 15574898684168847401' ] || { echo "FAIL: a bare thread id after thread/스레드 must become <#id>, outside code blocks only: $out"; exit 1; }
-out=$(tguard '{"tool_name":"mcp__plugin_discord_discord__reply","tool_input":{"chat_id":"43","text":"thread <#1557489868416884740>, id 1557489868416884740"}}' plain)
-[ -z "$out" ] || { echo "FAIL: a linked id, or an id not called a thread, must be left alone: $out"; exit 1; }
-echo "ok: thread-guard turns a bare thread id after thread/쓰레드/스레드 into <#id> outside code blocks, and leaves a linked id or an id not called a thread alone"
+# Which numbers are channels comes from Discord: GET /channels/{id} (stub
+# replies in order of first appearance), cached in channel-ids, plus the
+# thread ids tools/thread opened. No keyword is needed before the id.
+lnk() { jq -nc --arg t "$1" '{tool_name: "mcp__plugin_discord_discord__reply", tool_input: {chat_id: "43", text: $t}}'; }
+rm -f "$R4/plain/channel-ids"; printf '1557489868416884741 channel\n' > "$R4/plain/channel-ids"
+rm -f "$R4/plain/user-kinds"; replies '200 {"id":"1557489868416884740"}' '404 {}' '404 {}'
+out=$(tguard "$(lnk $'see 1557489868416884740 and 1557489868416884741에서, msg 1557489868416884742, <@1557489868416884743> <#1557489868416884740> https://discord.com/channels/1/1557489868416884744 `1557489868416884741` 155748986841688474012345\n```\n1557489868416884741\n```')" plain)
+[ "$(jq -r '.hookSpecificOutput.updatedInput.text' <<<"$out")" = $'see <#1557489868416884740> and <#1557489868416884741>에서, msg 1557489868416884742, <@1557489868416884743> <#1557489868416884740> https://discord.com/channels/1/1557489868416884744 `1557489868416884741` 155748986841688474012345\n```\n1557489868416884741\n```' ] || { echo "FAIL: a bare id Discord calls a channel must become <#id>; a 404, a mention, a link, a URL, code and a longer number must not: $out"; exit 1; }
+[ "$(grep -c 'channels/' "$CURL_LOG")" = 2 ] && grep -qF 'channels/1557489868416884740' "$CURL_LOG" && grep -qF 'channels/1557489868416884742' "$CURL_LOG" || { echo "FAIL: only the two uncached bare ids may be looked up: $(cat "$CURL_LOG")"; exit 1; }
+grep -qx '1557489868416884740 channel' "$R4/plain/channel-ids" && grep -qx '1557489868416884742 other' "$R4/plain/channel-ids" && grep -q '^1557489868416884742 none' "$R4/plain/user-kinds" || { echo "FAIL: both answers must be cached: $(cat "$R4/plain/channel-ids")"; exit 1; }
+replies
+out=$(tguard "$(lnk 'again 1557489868416884740, 1557489868416884742')" plain)
+[ "$(jq -r '.hookSpecificOutput.updatedInput.text' <<<"$out")" = 'again <#1557489868416884740>, 1557489868416884742' ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: cached ids must be judged with no call: $out / $(cat "$CURL_LOG")"; exit 1; }
+replies '500 {}'
+out=$(tguard "$(lnk '1557489868416884745 1557489868416884746')" plain)
+[ -z "$out" ] && [ "$(grep -c 'channels/' "$CURL_LOG")" = 1 ] && ! grep -q '^155748986841688474[56] ' "$R4/plain/channel-ids" || { echo "FAIL: an unanswered lookup must change nothing, cache nothing and end the lookups: $out / $(cat "$CURL_LOG")"; exit 1; }
+# Not a channel: a user or bot becomes plain @name (no ping), a peers.json
+# bot by its name with no user lookup, and an id in backticks stays.
+rm -f "$R4/plain/user-kinds"; replies '404 {}' '200 {"id":"1557489868416884747","username":"someone","global_name":"Some One"}' '404 {}'
+cp "$R4/peers.json" "$R4/peers.mb"; jq '.peers += [{"name":"longpeer","bot_id":"1557489868416884748"}]' "$R4/peers.mb" > "$R4/peers.json"
+out=$(tguard "$(lnk 'from 1557489868416884747, raw `1557489868416884747`, peer 1557489868416884748')" plain)
+[ "$(jq -r '.hookSpecificOutput.updatedInput.text' <<<"$out")" = 'from @Some One, raw `1557489868416884747`, peer @longpeer' ] || { echo "FAIL: a user id must become plain @name, a peers.json bot its name, and a backticked id must stay: $out / $(cat "$CURL_LOG")"; exit 1; }
+grep -qx '1557489868416884747 human Some One' "$R4/plain/user-kinds" && ! grep -qF 'users/1557489868416884748' "$CURL_LOG" || { echo "FAIL: the user's name must be cached, and a peers.json bot needs no user lookup: $(cat "$R4/plain/user-kinds") / $(cat "$CURL_LOG")"; exit 1; }
+mv -f "$R4/peers.mb" "$R4/peers.json"; rm -f "$R4/plain/channel-ids" "$R4/plain/user-kinds"; replies
+echo "ok: thread-guard turns a bare user or bot id into plain @name (GET /users cached in user-kinds, a peers.json bot by name), never <@id>, and leaves a backticked id as written"
+echo "ok: thread-guard turns a bare id Discord calls a channel or thread into <#id> (GET /channels cached in channel-ids, no keyword needed) outside code, mentions and URLs, leaves a 404 id a number, and on an unanswered lookup changes nothing and stops looking"
 echo "ok: thread-guard lets a turn with no Discord message post (channel and threads, dev-manager and mode-none, still under the channel's 500 characters) and denies an arrow mirror line but not an arrow in prose or before a Korean label"
 
 # The thread helper, against the stubbed curl: each call takes the next
@@ -1314,6 +1335,7 @@ grep -qF 'channels/42/messages' <<<"$(call 1)" && ! grep -qF '/threads' <<<"$(ca
 grep -qF 'channels/42/messages/1234/threads' <<<"$(call 2)" || { echo "FAIL: the thread must be opened on the returned message id: $(call 2)"; exit 1; }
 grep -qF '"auto_archive_duration":1440' <<<"$(call 2)" || { echo "FAIL: auto_archive_duration 1440 is missing: $(call 2)"; exit 1; }
 [ "$(wc -l < "$CURL_LOG")" = 2 ] || { echo "FAIL: thread start makes exactly two calls: $(cat "$CURL_LOG")"; exit 1; }
+grep -qx '1234 channel' "$R4/mgr/channel-ids" || { echo "FAIL: thread start must record its thread in channel-ids, so thread-guard links it with no lookup: $(cat "$R4/mgr/channel-ids" 2>&1)"; exit 1; }
 grep -q 'tokM' "$CURL_LOG" && { echo "FAIL: the bot token appeared in curl's argv (visible in ps/cmdline)"; exit 1; }
 [ "$(grep -cF 'Authorization: Bot tokM' "$CURL_STDIN_LOG")" = 2 ] || { echo "FAIL: both calls must send the token via stdin (-H @-): $(cat "$CURL_STDIN_LOG")"; exit 1; }
 [ "$(cat "$R4/mgr/open-threads")" = 1234 ] || { echo "FAIL: thread start must list the thread in open-threads: $(cat "$R4/mgr/open-threads")"; exit 1; }

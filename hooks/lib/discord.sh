@@ -68,28 +68,71 @@ react() {
   disown 2>/dev/null || :
 }
 
-# is_bot_user <user id>: succeeds when that Discord user is a bot. A
-# peers.json bot_id is one; any other id is looked up once with GET
-# /users/{id} (its `bot` field) and the answer cached as "<id> bot|human"
-# in <state dir>/user-kinds, since an account never changes kind. Anything
-# unknown -- not an id, no token, no curl, a failed call -- fails: a guard
-# built on this must never block on a guess.
-is_bot_user() {
-  local id=$1 i kind out status k=$DISCORD_STATE_DIR/user-kinds
+# user_info <id> [name]: looks a Discord user up and sets u_kind (bot, human,
+# or none: no such user) and u_name. Answers are cached as "<id> kind name"
+# in <state dir>/user-kinds, since an account never changes kind; a peers.json
+# bot needs no call. A cached kind is enough unless "name" is asked for and
+# the line has none. Returns 0 for a user, 1 for none or not an id, 2 when
+# it could not tell (no token, no curl, a timeout, another status), uncached.
+user_info() {
+  local id=$1 i kind name out status k=$DISCORD_STATE_DIR/user-kinds
+  u_kind="" u_name=""
   case $id in ''|*[!0-9]*) return 1;; esac
-  jq -e --arg id "$id" 'any(.peers[]?; (.bot_id // "" | tostring) == $id)' "$DISCORD_STATE_DIR/../peers.json" >/dev/null 2>&1 && return 0
+  u_name=$(jq -r --arg id "$id" 'first(.peers[]? | select((.bot_id // "" | tostring) == $id) | .name // "") // empty' "$DISCORD_STATE_DIR/../peers.json" 2>/dev/null) || u_name=""
+  [ -z "$u_name" ] || { u_kind=bot; return 0; }
   if [ -f "$k" ]; then
-    while read -r i kind; do [ "$i" != "$id" ] || { [ "$kind" = bot ]; return; }; done < "$k"
+    while read -r i kind name; do
+      [ "$i" = "$id" ] || continue
+      u_kind=$kind; [ -z "$name" ] || u_name=$name
+    done < "$k"
+  fi
+  [ "$u_kind" != none ] || return 1
+  [ -z "$u_kind" ] || [ -z "${2:-}" ] || [ -n "$u_name" ] || u_kind=""
+  [ -z "$u_kind" ] || return 0
+  [ -n "$bot_token" ] || load_token
+  [ -n "$bot_token" ] && command -v curl >/dev/null 2>&1 || return 2
+  out=$(printf 'Authorization: Bot %s\n' "$bot_token" | curl -s -m 3 -w '\n%{http_code}' -H @- "https://discord.com/api/v10/users/$id" 2>/dev/null) || return 2
+  status=${out##*$'\n'}
+  case $status in
+    200) { read -r kind; IFS= read -r name; } < <(printf '%s' "${out%$'\n'*}" | jq -r 'select((.id // "" | tostring) != "") | (if .bot == true then "bot" else "human" end), ((.global_name // .username // "") | gsub("[\\s]+"; " "))' 2>/dev/null)
+         [ -n "$kind" ] || return 2 ;;
+    404) kind=none name="" ;;
+    *) return 2 ;;
+  esac
+  printf '%s %s %s\n' "$id" "$kind" "$name" >> "$k" 2>/dev/null
+  u_kind=$kind u_name=$name
+  [ "$kind" != none ]
+}
+
+# is_bot_user <user id>: succeeds when that Discord user is a bot (user_info).
+# Anything unknown fails: a guard built on this must never block on a guess.
+is_bot_user() {
+  user_info "$1"
+  [ "$u_kind" = bot ]
+}
+
+# is_channel <id>: succeeds when that id is a Discord channel or thread (a
+# snowflake is unique across Discord, so an id GET /channels answers for is
+# one). The bot's own channel and access.json's group keys are; any other id
+# is looked up in <state dir>/channel-ids ("<id> channel|other", tools/thread
+# adds every thread it opens), else asked once with GET /channels/{id}: 200
+# is a channel, 404 is not, and both are cached. Anything else (no token, no
+# curl, a timeout, another status) returns 2, uncached: unknown, not "no".
+is_channel() {
+  local id=$1 i kind out status k=$DISCORD_STATE_DIR/channel-ids
+  case $id in ''|*[!0-9]*) return 1;; esac
+  [ "$id" != "${bot_channel:-}" ] || return 0
+  jq -e --arg id "$id" '.groups | objects | has($id)' "$DISCORD_STATE_DIR/access.json" >/dev/null 2>&1 && return 0
+  if [ -f "$k" ]; then
+    while read -r i kind; do [ "$i" != "$id" ] || { [ "$kind" = channel ]; return; }; done < "$k"
   fi
   [ -n "$bot_token" ] || load_token
-  [ -n "$bot_token" ] && command -v curl >/dev/null 2>&1 || return 1
-  out=$(printf 'Authorization: Bot %s\n' "$bot_token" | curl -s -m 3 -w '\n%{http_code}' -H @- "https://discord.com/api/v10/users/$id" 2>/dev/null) || return 1
+  [ -n "$bot_token" ] && command -v curl >/dev/null 2>&1 || return 2
+  out=$(printf 'Authorization: Bot %s\n' "$bot_token" | curl -s -m 3 -w '\n%{http_code}' -H @- "https://discord.com/api/v10/channels/$id" 2>/dev/null) || return 2
   status=${out##*$'\n'}
-  [ "$status" = 200 ] || return 1
-  kind=$(printf '%s' "${out%$'\n'*}" | jq -r 'if (.id // "" | tostring) != "" then (if .bot == true then "bot" else "human" end) else empty end' 2>/dev/null)
-  [ -n "$kind" ] || return 1
+  case $status in 200) kind=channel;; 404) kind=other;; *) return 2;; esac
   printf '%s %s\n' "$id" "$kind" >> "$k" 2>/dev/null
-  [ "$kind" = bot ]
+  [ "$kind" = channel ]
 }
 
 # peers: prints this bot's peers from the project's peers.json as a JSON
