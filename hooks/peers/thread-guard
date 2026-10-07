@@ -75,35 +75,35 @@ input=$(cat 2>/dev/null) || exit 0
 # No bare ids: a reader sees a name, never a number (owner, 2026-10-07). What
 # a number is comes from Discord, not from the words around it: every 17-20
 # digit number outside ``` blocks and `inline code`, not already inside a
-# mention or a URL (no @ # ! & / : or digit before it), up to 8 a reply. A
+# mention or a URL (no @ # ! & / : or digit before it), up to 4 a reply. A
 # channel or thread (is_channel) becomes <#id>, its name as a link. A user or
 # bot (user_info) becomes "@name", plain text: <@id> would ping a person and
 # hand the message to a bot. Anything else (a message id) stays a number, and
 # so does one the lookups could not judge; the first such failure ends them,
-# so a Discord that does not answer costs one 3 s timeout, not eight. To show
+# so a Discord that does not answer costs one 2 s timeout, not one each. To show
 # an id itself, put it in `backticks`. The reply goes out through
 # updatedInput like a table.
 BARE='(?<![0-9/@#!&:])(?<id>[0-9]{17,20})(?![0-9])'
 # The text pieces outside ``` and `: odd pieces of either split are code.
 PIECES='[splits("```")] | to_entries | map((.key % 2 == 0) as $o | .value | [splits("`")] | to_entries | map(.value as $v | {v: $v, t: ($o and .key % 2 == 0)}))'
-linked=""; ch="{}"
+linked=""; repl="{}"
 while read -r id; do
   is_channel "$id"
   case $? in
-    0) ch=$(jq -c --arg id "$id" '.[$id] = "<#\($id)>"' <<<"$ch") ;;
+    0) repl=$(jq -c --arg id "$id" '.[$id] = "<#\($id)>"' <<<"$repl") ;;
     1) user_info "$id" name
        case $? in
-         0) [ -z "$u_name" ] || ch=$(jq -c --arg id "$id" --arg n "@$u_name" '.[$id] = $n' <<<"$ch") ;;
+         0) [ -z "$u_name" ] || repl=$(jq -c --arg id "$id" --arg n "@$u_name" '.[$id] = $n' <<<"$repl") ;;
          2) break ;;
        esac ;;
     *) break ;;
   esac
 done < <(printf '%s' "$input" | jq -r --arg re "$BARE" "
-  .tool_input.text // \"\" | tostring | $PIECES | .[][] | select(.t) | .v | [match(\$re; \"g\").captures[0].string] | .[]" 2>/dev/null | awk '!seen[$0]++' | head -n 8)
-if [ "$ch" != "{}" ]; then
-  linked=$(printf '%s' "$input" | jq -c --arg re "$BARE" --argjson ch "$ch" "
+  .tool_input.text // \"\" | tostring | $PIECES | .[][] | select(.t) | .v | [match(\$re; \"g\").captures[0].string] | .[]" 2>/dev/null | awk '!seen[$0]++' | head -n 4)
+if [ "$repl" != "{}" ]; then
+  linked=$(printf '%s' "$input" | jq -c --arg re "$BARE" --argjson repl "$repl" "
     (.tool_input.text // \"\" | tostring) as \$t
-    | (\$t | $PIECES | map(map(if .t then .v | gsub(\$re; .id as \$i | \$ch[\$i] // \$i) else .v end) | join(\"\`\")) | join(\"\`\`\`\")) as \$n
+    | (\$t | $PIECES | map(map(if .t then .v | gsub(\$re; .id as \$i | \$repl[\$i] // \$i) else .v end) | join(\"\`\")) | join(\"\`\`\`\")) as \$n
     | select(\$n != \$t) | .tool_input.text = \$n" 2>/dev/null) || linked=""
 fi
 [ -z "$linked" ] || input=$linked

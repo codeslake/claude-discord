@@ -720,38 +720,27 @@ EOS
     case $post_status in 2*) return 0;; *) return 1;; esac
   }
 
-  post_patch() {  # $1 = path, $2 = JSON; 0 on a 2xx
-    local out
-    out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 10 -w '\n%{http_code}' \
-      -X PATCH -H @- -H 'Content-Type: application/json' --data-raw "$2" \
-      "https://discord.com/api/v10/$1" 2>/dev/null) || out=""
-    case ${out##*$'\n'} in 2*) return 0;; *) return 1;; esac
-  }
-
   # Alerts go into ONE "[health] <bot>" thread under the bot's main channel
   # ($ch: its only group, else the channel setup first registered), never
   # into the channel itself, and mention nobody: in the channel an alert sat
   # with no context in every reader's way (owner, 2026-10-07: "head 쓰레드
-  # 파서 거기에 tagging도 없이"). The thread is opened once, on a one-line
-  # anchor, and its id kept in <bot>/health-thread (setup and refresh leave it).
+  # 파서 거기에 tagging도 없이"). The thread is opened once, with no starter
+  # message (type 11: nothing lands in the channel, so a failed open leaves
+  # no stray line behind), and its id kept in <bot>/health-thread (setup and
+  # refresh leave it).
   health_thread() {  # sets $hth
-    local mid
     hth=$(cat "$d/health-thread" 2>/dev/null) || hth=""
     is_id "$hth" && return 0
-    post "channels/$ch/messages" "$(jq -nc --arg c "[health] $bot" '{content: $c, allowed_mentions: {parse: []}}')" || return 1
-    mid=$(printf '%s' "$post_resp" | jq -r '.id // empty' 2>/dev/null)
-    is_id "$mid" || return 1
-    post "channels/$ch/messages/$mid/threads" "$(jq -nc --arg n "[health] $bot" '{name: $n, auto_archive_duration: 10080}')" || return 1
+    post "channels/$ch/threads" "$(jq -nc --arg n "[health] $bot" '{name: $n, type: 11, auto_archive_duration: 10080}')" || return 1
     hth=$(printf '%s' "$post_resp" | jq -r '.id // empty' 2>/dev/null)
     is_id "$hth" || return 1
     printf '%s\n' "$hth" > "$d/health-thread" 2>/dev/null || :
   }
 
   # Only the alert's own POST counts as delivered (the caller records the
-  # state on it), never the anchor line or the thread's creation. An alert
-  # can come weeks after the last one, by when the thread has archived
-  # itself: an archived thread refusing the post (400/403) is unarchived and
-  # tried once more; a deleted one (404) is opened again. A bot that cannot
+  # state on it), never the thread's creation. A post to an archived thread
+  # reopens it on its own (measured 2026-10-07, unlocked thread: 200); a
+  # deleted one (404) is opened again. A bot that cannot
   # open a thread at all (no Create Public Threads, or a channel that is
   # itself a thread) posts in the channel, saying so: an alert lost there is
   # the silence this check exists to end.
@@ -763,11 +752,9 @@ EOS
       return
     fi
     post "channels/$hth/messages" "$body" && return 0
-    case $post_status in
-      400|403) post_patch "channels/$hth" '{"archived":false}' && post "channels/$hth/messages" "$body" ;;
-      404) rm -f "$d/health-thread"; health_thread && post "channels/$hth/messages" "$body" ;;
-      *) return 1 ;;
-    esac
+    [ "$post_status" = 404 ] || return 1
+    rm -f "$d/health-thread"
+    health_thread && post "channels/$hth/messages" "$body"
   }
 
   api() {  # $1 = path; sets $status and $resp. Token on stdin, never argv.

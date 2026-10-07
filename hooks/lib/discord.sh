@@ -68,6 +68,18 @@ react() {
   disown 2>/dev/null || :
 }
 
+# cache_put <file> <id> <rest of line>: records "<id> <rest>" in a lookup
+# cache, replacing that id's old line, and keeps the newest 500 lines once
+# the file passes 1000, so a cache read on every reply stays small.
+cache_put() {
+  local f=$1 id=$2 tmp
+  shift 2
+  tmp=$f.$$
+  { grep -v "^$id " "$f" 2>/dev/null; printf '%s %s\n' "$id" "$*"; } > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  if [ "$(wc -l < "$tmp")" -gt 1000 ]; then tail -n 500 "$tmp" > "$tmp.t" && mv -f "$tmp.t" "$tmp"; fi
+  mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
+}
+
 # user_info <id> [name]: looks a Discord user up and sets u_kind (bot, human,
 # or none: no such user) and u_name. Answers are cached as "<id> kind name"
 # in <state dir>/user-kinds, since an account never changes kind; a peers.json
@@ -83,7 +95,7 @@ user_info() {
   if [ -f "$k" ]; then
     while read -r i kind name; do
       [ "$i" = "$id" ] || continue
-      u_kind=$kind; [ -z "$name" ] || u_name=$name
+      u_kind=$kind u_name=$name; break   # cache_put keeps one line an id
     done < "$k"
   fi
   [ "$u_kind" != none ] || return 1
@@ -91,7 +103,7 @@ user_info() {
   [ -z "$u_kind" ] || return 0
   [ -n "$bot_token" ] || load_token
   [ -n "$bot_token" ] && command -v curl >/dev/null 2>&1 || return 2
-  out=$(printf 'Authorization: Bot %s\n' "$bot_token" | curl -s -m 3 -w '\n%{http_code}' -H @- "https://discord.com/api/v10/users/$id" 2>/dev/null) || return 2
+  out=$(printf 'Authorization: Bot %s\n' "$bot_token" | curl -s -m 2 -w '\n%{http_code}' -H @- "https://discord.com/api/v10/users/$id" 2>/dev/null) || return 2
   status=${out##*$'\n'}
   case $status in
     200) { read -r kind; IFS= read -r name; } < <(printf '%s' "${out%$'\n'*}" | jq -r 'select((.id // "" | tostring) != "") | (if .bot == true then "bot" else "human" end), ((.global_name // .username // "") | gsub("[\\s]+"; " "))' 2>/dev/null)
@@ -99,7 +111,7 @@ user_info() {
     404) kind=none name="" ;;
     *) return 2 ;;
   esac
-  printf '%s %s %s\n' "$id" "$kind" "$name" >> "$k" 2>/dev/null
+  cache_put "$k" "$id" "$kind" "$name"
   u_kind=$kind u_name=$name
   [ "$kind" != none ]
 }
@@ -128,10 +140,10 @@ is_channel() {
   fi
   [ -n "$bot_token" ] || load_token
   [ -n "$bot_token" ] && command -v curl >/dev/null 2>&1 || return 2
-  out=$(printf 'Authorization: Bot %s\n' "$bot_token" | curl -s -m 3 -w '\n%{http_code}' -H @- "https://discord.com/api/v10/channels/$id" 2>/dev/null) || return 2
+  out=$(printf 'Authorization: Bot %s\n' "$bot_token" | curl -s -m 2 -w '\n%{http_code}' -H @- "https://discord.com/api/v10/channels/$id" 2>/dev/null) || return 2
   status=${out##*$'\n'}
   case $status in 200) kind=channel;; 404) kind=other;; *) return 2;; esac
-  printf '%s %s\n' "$id" "$kind" >> "$k" 2>/dev/null
+  cache_put "$k" "$id" "$kind"
   [ "$kind" = channel ]
 }
 

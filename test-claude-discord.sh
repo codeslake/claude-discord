@@ -1318,6 +1318,13 @@ out=$(tguard "$(lnk 'from 1557489868416884747, raw `1557489868416884747`, peer 1
 [ "$(jq -r '.hookSpecificOutput.updatedInput.text' <<<"$out")" = 'from @Some One, raw `1557489868416884747`, peer @longpeer' ] || { echo "FAIL: a user id must become plain @name, a peers.json bot its name, and a backticked id must stay: $out / $(cat "$CURL_LOG")"; exit 1; }
 grep -qx '1557489868416884747 human Some One' "$R4/plain/user-kinds" && ! grep -qF 'users/1557489868416884748' "$CURL_LOG" || { echo "FAIL: the user's name must be cached, and a peers.json bot needs no user lookup: $(cat "$R4/plain/user-kinds") / $(cat "$CURL_LOG")"; exit 1; }
 mv -f "$R4/peers.mb" "$R4/peers.json"; rm -f "$R4/plain/channel-ids" "$R4/plain/user-kinds"; replies
+# The caches keep one line an id (a fresh answer replaces the old line) and
+# the newest 500 once a file passes 1000.
+( . "$G/../lib/discord.sh"; CF="$R4/plain/cache.t"; printf '1 human\n2 bot\n' > "$CF"; cache_put "$CF" 1 human "One"
+  [ "$(cat "$CF")" = "$(printf '2 bot\n1 human One')" ] || { echo "FAIL: cache_put must replace an id's line: $(cat "$CF")"; exit 1; }
+  seq 1 1000 | sed 's/$/ other/' > "$CF"; cache_put "$CF" 5000 other
+  [ "$(wc -l < "$CF")" = 500 ] && [ "$(tail -n 1 "$CF")" = '5000 other' ] || { echo "FAIL: a cache past 1000 lines must keep the newest 500: $(wc -l < "$CF")"; exit 1; }
+  rm -f "$CF" ) || exit 1
 echo "ok: thread-guard turns a bare user or bot id into plain @name (GET /users cached in user-kinds, a peers.json bot by name), never <@id>, and leaves a backticked id as written"
 echo "ok: thread-guard turns a bare id Discord calls a channel or thread into <#id> (GET /channels cached in channel-ids, no keyword needed) outside code, mentions and URLs, leaves a 404 id a number, and on an unanswered lookup changes nothing and stops looking"
 echo "ok: thread-guard lets a turn with no Discord message post (channel and threads, dev-manager and mode-none, still under the channel's 500 characters) and denies an arrow mirror line but not an arrow in prose or before a Korean label"
@@ -2284,40 +2291,32 @@ bash "$S" health --notify >/dev/null 2>&1 || :
 [ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] || { echo "FAIL: a recovery must be announced: $(cat "$CURL_LOG")"; exit 1; }
 [ ! -f "$ND/health-alert" ] || { echo "FAIL: the recovery must clear the alert state"; exit 1; }
 grep -q 'health' "$ND/health.log" || { echo "FAIL: every run must leave a local log line, since nobody may be watching the channel"; exit 1; }
-# No [health] thread yet: one anchor line in the channel, the thread opened
-# on it and remembered, the alert inside. A deleted thread (404) is opened
-# again and the alert still lands.
+# No [health] thread yet: it is opened with no starter message (nothing in
+# the channel), remembered, and the alert goes inside. The next alert reuses
+# it with one POST. A deleted thread (404) is opened again. A bot that cannot
+# open a thread posts the alert in the channel, saying so, and nothing else
+# lands there. Only the alert's own POST records the state.
 rm -f "$ND/health-thread" "$ND/health-alert"; : > "$CURL_LOG"
-notify_run '200 {"id":"7800"}'; queue_line '201 {"id":"7800"}'; queue_line '200 {"id":"9010"}'
+notify_run '201 {"id":"7800"}'; queue_line '200 {"id":"9010"}'
 bash "$S" health --notify >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 3 ] && grep 'X POST' "$CURL_LOG" | sed -n 1p | grep -qF 'channels/900/messages' && grep -qF '[health] nbot' "$CURL_LOG" \
-  && grep 'X POST' "$CURL_LOG" | sed -n 2p | grep -qF 'channels/900/messages/7800/threads' && grep 'X POST' "$CURL_LOG" | sed -n 3p | grep -qF 'channels/7800/messages' \
-  && [ "$(cat "$ND/health-thread")" = 7800 ] || { echo "FAIL: the first alert must open the [health] thread on one channel line, keep its id and post inside: $(cat "$CURL_LOG")"; exit 1; }
-rm -f "$ND/health-alert"; : > "$CURL_LOG"
-notify_run '404 {"code":10003}'; queue_line '200 {"id":"7900"}'; queue_line '201 {"id":"7900"}'; queue_line '200 {"id":"9011"}'
-bash "$S" health --notify >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 4 ] && [ "$(cat "$ND/health-thread")" = 7900 ] && [ -f "$ND/health-alert" ] \
-  || { echo "FAIL: a deleted [health] thread must be opened again and the alert delivered: $(cat "$CURL_LOG")"; exit 1; }
-# The next alert reuses the kept thread: one POST, no channel line, no new
-# thread. An archived thread refusing the post is unarchived and tried once
-# more. A bot that cannot open a thread posts in the channel, saying so; only
-# the alert's own POST records the state.
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 2 ] && grep 'X POST' "$CURL_LOG" | sed -n 1p | grep -q '"type":11.*channels/900/threads' && grep 'X POST' "$CURL_LOG" | sed -n 2p | grep -qF 'channels/7800/messages' \
+  && ! grep -q 'X POST.*channels/900/messages' "$CURL_LOG" && [ "$(cat "$ND/health-thread")" = 7800 ] || { echo "FAIL: the first alert must open a starter-less [health] thread, keep its id and post inside, with nothing in the channel: $(cat "$CURL_LOG")"; exit 1; }
 rm -f "$ND/health-alert"; : > "$CURL_LOG"
 notify_run '200 {"id":"9012"}'
 bash "$S" health --notify >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] && grep -q 'X POST.*channels/7900/messages' "$CURL_LOG" || { echo "FAIL: a later alert must reuse the kept thread with one POST: $(cat "$CURL_LOG")"; exit 1; }
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] && grep -q 'X POST.*channels/7800/messages' "$CURL_LOG" || { echo "FAIL: a later alert must reuse the kept thread with one POST: $(cat "$CURL_LOG")"; exit 1; }
 rm -f "$ND/health-alert"; : > "$CURL_LOG"
-notify_run '400 {"code":50083}'; queue_line '200 {"id":"7900"}'; queue_line '200 {"id":"9013"}'
+notify_run '404 {"code":10003}'; queue_line '201 {"id":"7900"}'; queue_line '200 {"id":"9011"}'
 bash "$S" health --notify >/dev/null 2>&1 || :
-grep -q 'X PATCH.*"archived":false.*channels/7900' "$CURL_LOG" && [ "$(grep -c 'X POST.*channels/7900/messages' "$CURL_LOG")" = 2 ] && [ -f "$ND/health-alert" ] \
-  || { echo "FAIL: an archived thread must be unarchived and the alert retried once: $(cat "$CURL_LOG")"; exit 1; }
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 3 ] && [ "$(cat "$ND/health-thread")" = 7900 ] && [ -f "$ND/health-alert" ] \
+  || { echo "FAIL: a deleted [health] thread must be opened again and the alert delivered: $(cat "$CURL_LOG")"; exit 1; }
 rm -f "$ND/health-alert" "$ND/health-thread"; : > "$CURL_LOG"
-notify_run '200 {"id":"7990"}'; queue_line '403 {"code":50013}'; queue_line '200 {"id":"9014"}'
+notify_run '403 {"code":50013}'; queue_line '200 {"id":"9014"}'
 bash "$S" health --notify >/dev/null 2>&1 || :
-grep 'X POST' "$CURL_LOG" | sed -n 3p | grep -q 'could not be opened.*channels/900/messages' && [ -f "$ND/health-alert" ] && [ ! -f "$ND/health-thread" ] \
-  || { echo "FAIL: a bot that cannot open a thread must post the alert in its channel, saying so: $(cat "$CURL_LOG")"; exit 1; }
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 2 ] && grep 'X POST' "$CURL_LOG" | sed -n 2p | grep -q 'could not be opened.*channels/900/messages' && [ -f "$ND/health-alert" ] && [ ! -f "$ND/health-thread" ] \
+  || { echo "FAIL: a bot that cannot open a thread must post only the alert in its channel, saying so: $(cat "$CURL_LOG")"; exit 1; }
 echo 7700 > "$ND/health-thread"
-echo "ok: health --notify posts its alerts in one [health] thread per bot (opened once on a channel line and reused, unarchived when archived, reopened when deleted, the channel only when no thread can be opened), pinging nobody"
+echo "ok: health --notify posts its alerts in one [health] thread per bot (opened once with no starter message and reused, reopened when deleted, the channel only when no thread can be opened, and then only the alert), pinging nobody"
 echo "ok: health --notify posts one alert per state change on the bot's own token over stdin, records it only once Discord accepted it (retrying otherwise), announces the recovery, always logs locally, and never offers --force except to a bot with no session left to lose a handoff from"
 
 # Without --notify nothing is posted at all: a human running it by hand must
