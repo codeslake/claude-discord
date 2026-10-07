@@ -1099,7 +1099,7 @@ out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_
 [ "$(cat "$R4/mgr/turns/g2")" = "42 555 901" ] || { echo "FAIL: on-prompt must record the triggering user_id"; exit 1; }
 ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")
 grep -qxF 'Peers (mention to reach them): dong <@900>, junyong <@901>' <<<"$ctx" || { echo "FAIL: a dev-manager's context must list its peers, self excluded: $ctx"; exit 1; }
-grep -qxF "Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; Discord carries only what a peer must act on, and from a terminal turn only a reply that opens with a peer's mention; echo nothing either way." <<<"$ctx" || { echo "FAIL: the dev-manager line is missing: $ctx"; exit 1; }
+grep -qxF "Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; Discord carries only what a peer must act on or the human asks you to send; echo nothing either way." <<<"$ctx" || { echo "FAIL: the dev-manager line is missing: $ctx"; exit 1; }
 out=$(DISCORD_STATE_DIR="$R4/plain" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g3","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"556\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'Peers\|Dev manager' <<<"$out" && { echo "FAIL: a plain bot must not get the dev-manager context"; exit 1; }
 REASON_B='You are answering junyong; mention it as <@901> or it never sees this.'
@@ -1249,37 +1249,19 @@ out=$(tguard "$(body 43 $'a | b\n---\n|---|')")   # a pipe in prose, a rule, a o
 [ -z "$out" ] || { echo "FAIL: a rule or a single bar is not a table: $out"; exit 1; }
 echo "ok: thread-guard converts a markdown table into an aligned code block (Korean by display width, markup stripped, alignment colons, mentions hoisted above it, prose kept, the whole input kept) in a thread and for an autoresearchclaw bot, with or without outer pipes and alignment colons, with one hyphen a column, an escaped pipe kept in its cell; a too-wide one into header: value lines; denies a table with unpaired fence marks (a lone one in prose, a fence that never closes), a channel reply over 500 once converted and a table without python3; and passes one inside a code block, a horizontal rule and a one-column bar"
 
-# Only a turn with a Discord message in it posts to Discord at all: a turn
-# typed in the terminal, or woken by a peer or a watch, has no turns file.
-TT_REASON='This turn has no Discord message in it: answer in the terminal. From such a turn Discord takes only a post in a thread that thread start opened (or one listed in report-threads), a closing line through thread close <id> "<line>", and, from a dev-manager, a reply that opens with a peer mention.'
-cli() { printf '{"session_id":"cli1","tool_input":{"chat_id":"%s","text":"[sent to peer] hi"}}' "$1"; }
-out=$(tguard "$(cli 42)")
-[ "$(reason <<<"$out")" = "$TT_REASON" ] || { echo "FAIL: a terminal turn must not post in the channel: $out"; exit 1; }
-out=$(tguard "$(cli 43)")
-[ "$(reason <<<"$out")" = "$TT_REASON" ] || { echo "FAIL: a terminal turn must not post in a thread either: $out"; exit 1; }
-# A dev-manager (mgr; peers dong 900 and junyong 901, itself 902) coordinates
-# with a peer from any turn by a reply addressed to it. Not an edit (a peer
-# never receives one), not a mention further down (a "cc" on any echo), not
-# itself, and not from a mode-none bot, which has no peers.
-RP='"tool_name":"mcp__plugin_discord_discord__reply","session_id":"cli1"'
-out=$(tguard "{$RP,\"tool_input\":{\"chat_id\":\"43\",\"text\":\" <@!900> review please\"}}")
-[ -z "$out" ] || { echo "FAIL: a dev-manager reply addressed to a peer must pass from a terminal turn: $out"; exit 1; }
-for c in '"tool_name":"mcp__plugin_discord_discord__edit_message","session_id":"cli1","tool_input":{"chat_id":"43","message_id":"7","text":"<@900> x"}' \
-         "$RP"',"tool_input":{"chat_id":"43","text":"all I did today, cc <@900>"}' \
-         "$RP"',"tool_input":{"chat_id":"43","text":"<@902> note to self"}' plain; do
-  if [ "$c" = plain ]; then out=$(tguard "{$RP,\"tool_input\":{\"chat_id\":\"42\",\"text\":\"<@900> hi\"}}" plain); else out=$(tguard "{$c}"); fi
-  [ "$(reason <<<"$out")" = "$TT_REASON" ] || { echo "FAIL: no peer coordination, must be denied ($c): $out"; exit 1; }
+# A turn with no Discord message in it (typed in the terminal, or woken by a
+# peer or a watch) may post: the human in the terminal can ask the session to
+# send something, and a peer may have to act. Denying it outright kept the
+# session from speaking when it had to (owner, 2026-10-07). The channel limit
+# still applies to it.
+cli() { printf '{"session_id":"cli1","tool_input":{"chat_id":"%s","text":"%s"}}' "$1" "${2:-hi}"; }
+for c in "42 mgr" "43 mgr" "42 plain" "43 plain"; do
+  set -- $c
+  out=$(tguard "$(cli "$1")" "$2")
+  [ -z "$out" ] || { echo "FAIL: a terminal turn must be able to post ($c): $out"; exit 1; }
 done
-printf '44\n' > "$R4/mgr/report-threads"; printf '45\n46 terminal\n' > "$R4/mgr/open-threads"
-out=$(tguard "$(cli 44)")$(tguard "$(cli 45)")
-[ -z "$out" ] || { echo "FAIL: a thread listed in report-threads or open-threads takes a post from any turn: $out"; exit 1; }
-# A whole id only: not a prefix, and not a thread a dev-manager opened from
-# a terminal turn ("46 terminal"), where a post needs a peer's mention.
-for c in 4 46; do
-  out=$(tguard "$(cli $c)")
-  [ "$(reason <<<"$out")" = "$TT_REASON" ] || { echo "FAIL: those lists must match a whole id, not a prefix or a terminal thread ($c): $out"; exit 1; }
-done
-rm -f "$R4/mgr/report-threads" "$R4/mgr/open-threads"
+out=$(tguard "$(cli 42 "$A501")" plain)
+[ "$(reason <<<"$out")" = "$TG_REASON" ] || { echo "FAIL: a terminal turn's channel post is still held to 500 characters: $out"; exit 1; }
 out=$(tguard "$(cli 42)" '' "$HOME/arcbot/bot")
 [ -z "$out" ] || { echo "FAIL: an autoresearchclaw report from a non-Discord turn must pass: $out"; exit 1; }
 AR_REASON='A mirror line says which way it went: "[sent to name] ..." or "[received from name] ...", not an arrow.'
@@ -1287,7 +1269,7 @@ out=$(tguard "$(body 43 $'hi\n-> RVP: done')")
 [ "$(reason <<<"$out")" = "$AR_REASON" ] || { echo "FAIL: an arrow mirror line must be denied even in a Discord turn: $out"; exit 1; }
 out=$(tguard "$(body 43 $'a -> b in prose\n원인: x\n-> 수정: y')")
 [ -z "$out" ] || { echo "FAIL: an arrow inside prose, or before a Korean label, is not a mirror line: $out"; exit 1; }
-echo "ok: thread-guard keeps a turn with no Discord message out of Discord (channel and threads) except an open-threads or report-threads id (whole id only, not a terminal thread), a dev-manager reply that opens with a peer mention (not an edit, a later mention, itself, or a mode-none bot) and an autoresearchclaw report, and denies an arrow mirror line but not an arrow in prose or before a Korean label"
+echo "ok: thread-guard lets a turn with no Discord message post (channel and threads, dev-manager and mode-none, still under the channel's 500 characters) and denies an arrow mirror line but not an arrow in prose or before a Korean label"
 
 # The thread helper, against the stubbed curl: each call takes the next
 # queued "<status> <body>" line.
@@ -1305,14 +1287,15 @@ grep -qF '"auto_archive_duration":1440' <<<"$(call 2)" || { echo "FAIL: auto_arc
 grep -q 'tokM' "$CURL_LOG" && { echo "FAIL: the bot token appeared in curl's argv (visible in ps/cmdline)"; exit 1; }
 [ "$(grep -cF 'Authorization: Bot tokM' "$CURL_STDIN_LOG")" = 2 ] || { echo "FAIL: both calls must send the token via stdin (-H @-): $(cat "$CURL_STDIN_LOG")"; exit 1; }
 [ "$(cat "$R4/mgr/open-threads")" = 1234 ] || { echo "FAIL: thread start must list the thread in open-threads: $(cat "$R4/mgr/open-threads")"; exit 1; }
-# A session's thread start needs a Discord message in its turn (plain is a
-# mode-none bot); a dev-manager's does not, for an item a peer must act on,
-# but that thread is not an open thread: terminal posts there need a mention.
+# Any bot starts a thread from a turn with no Discord message in it (plain is
+# a mode-none bot), listed as terminal: no Discord message to answer.
+replies '200 {"id":"6"}' '201 {"id":"6"}'
+out=$(CLAUDE_CODE_SESSION_ID=cli9 DISCORD_STATE_DIR="$R4/plain" bash "$T" start '[guard] from the terminal') && [ "$out" = 6 ] && [ "$(cat "$R4/plain/open-threads")" = '6 terminal' ] \
+  || { echo "FAIL: a mode-none bot opens a thread from a terminal turn, listed as terminal: $out / $(cat "$R4/plain/open-threads" 2>&1)"; exit 1; }
+rm -f "$R4/plain/open-threads"
 replies '200 {"id":"5"}' '201 {"id":"5"}'
-rc=0; out=$(CLAUDE_CODE_SESSION_ID=cli9 DISCORD_STATE_DIR="$R4/plain" bash "$T" start '[guard] from the terminal' 2>&1) || rc=$?
-[ "$rc" = 2 ] && grep -qF 'no Discord message' <<<"$out" && [ ! -s "$CURL_LOG" ] || { echo "FAIL: thread start from a turn with no Discord message must exit 2 before any call: rc=$rc out=$out"; exit 1; }
 out=$(CLAUDE_CODE_SESSION_ID=cli9 thread start '[guard] review') && [ "$out" = 5 ] && [ "$(cat "$R4/mgr/open-threads")" = '5 terminal' ] \
-  || { echo "FAIL: a dev-manager opens a thread from a terminal turn, listed as terminal, not open: $out / $(cat "$R4/mgr/open-threads")"; exit 1; }
+  || { echo "FAIL: a dev-manager opens a thread from a terminal turn, listed as terminal: $out / $(cat "$R4/mgr/open-threads")"; exit 1; }
 replies '200 {"id":"7"}' '200 {"id":"5","archived":true}'
 out=$(CLAUDE_CODE_SESSION_ID=cli9 thread close 5 '[guard] review landed') && [ "$(wc -l < "$CURL_LOG")" = 2 ] && [ ! -s "$R4/mgr/open-threads" ] \
   || { echo "FAIL: a terminal turn lands the thread it opened with a closing line: $out / $(cat "$CURL_LOG")"; exit 1; }
@@ -1377,7 +1360,7 @@ rc=0; out=$(bash "$T" start hi 2>&1) || rc=$?
 rc=0; out=$(thread 2>&1) || rc=$?
 [ "$rc" = 2 ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: no verb must exit 2 before any call: rc=$rc out=$out"; exit 1; }
 : > "$CURL_REPLIES"
-echo "ok: thread start posts the channel line and opens its thread (auto_archive_duration 1440, name cut to 100 characters while the message keeps 120), lists it in open-threads (dropping week-old ones) and answers a Discord turn, refuses a session turn with no Discord message but a dev-manager's (unlisted), prints the message id on 160004, exits 1 with the status and code on another error, closes by PATCH (a closing line of one line and 500 characters at most first, for an open thread or from a Discord turn), and exits 2 on a bad id, no verb or no state -- the token never in argv"
+echo "ok: thread start posts the channel line and opens its thread (auto_archive_duration 1440, name cut to 100 characters while the message keeps 120), lists it in open-threads (dropping week-old ones) and answers a Discord turn, opens one from a turn with no Discord message too (listed as terminal), prints the message id on 160004, exits 1 with the status and code on another error, closes by PATCH (a closing line of one line and 500 characters at most first, for an open thread or from a Discord turn), and exits 2 on a bad id, no verb or no state -- the token never in argv"
 
 # Switching mgr to none (by number): no bot is a dev-manager any more. A
 # user's own hook inside our edit-gate group must survive the cleanup.

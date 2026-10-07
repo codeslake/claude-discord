@@ -101,7 +101,7 @@ if [ -n "$session_id" ]; then
     | select(length > 0) | map("\(.name) <@\(.bot_id)>") | join(", ")' "$DISCORD_STATE_DIR/../peers.json" 2>/dev/null) && [ -n "$p" ]; then
     identity="$identity
 Peers (mention to reach them): $p
-Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; Discord carries only what a peer must act on, and from a terminal turn only a reply that opens with a peer's mention; echo nothing either way."
+Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; Discord carries only what a peer must act on or the human asks you to send; echo nothing either way."
   fi
   key="$bot_mode $identity"
   old=""; IFS= read -rd '' old 2>/dev/null < "$primed" || :

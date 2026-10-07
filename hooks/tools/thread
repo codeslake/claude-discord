@@ -91,9 +91,7 @@ case ${1:-} in
     [ -n "$title" ] || { echo "thread: usage: thread start \"[<area>] <short title>\"" >&2; exit 2; }
     one_line "$title" "a title"
     from_discord=""
-    if discord_turn; then from_discord=1
-    elif [ "$bot_mode" != dev-manager ]; then echo "thread: this turn has no Discord message in it, so no thread: answer in the terminal" >&2; exit 2
-    fi
+    discord_turn && from_discord=1
     # A snowflake's top bits are its time in ms since 2015; awk's doubles lose
     # only low bits.
     keep '(int($1 / 4194304) + 1420070400000) / 1000 > now - 604800'

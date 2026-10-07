@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # PreToolUse hook (matcher: mcp__plugin_discord_discord__reply|
 # mcp__plugin_discord_discord__edit_message: an edit puts text in Discord
-# too): Discord turns only, mirror lines, table format and channel length,
-# every bot (a dev-manager's peers are read only for the turn check). Prints
+# too): mirror lines, table format and channel length,
+# every bot. Prints
 # nothing unless it rewrites a table or denies:
 #
-# 0. Turns and arrows: see the two checks right after the input is read.
+# 0. Arrows: see the check right after the input is read.
 # 1. Tables, every bot and every chat. Discord renders no GFM table: its rows
 #    arrive as raw pipes. A table (a separator row |-|-|: two columns or more,
 #    a hyphen or more each, as GFM allows; the header row just above it; the
@@ -44,28 +44,17 @@ deny() {
 [ -z "$bot_name" ] || resolve_channel
 input=$(cat 2>/dev/null) || exit 0
 
-# Discord takes a reply only in a turn that has a Discord message in it,
-# every bot but autoresearchclaw (its rule posts iteration reports from turns
-# a watch wakes). on-prompt opens turns/<session_id> for each Discord message
-# (a message arriving in the middle of a terminal turn opens it too, so that
-# message can be answered where it came from) and on-stop removes it when the
-# turn ends. Without it the turn was typed in the terminal, or woken by a
-# peer, a timer or a watch, and its answer belongs in the terminal. The
-# session prompt says so, but a session started before it said so keeps its
-# old prompt across restarts: this is what holds them. The exceptions are
-# threads: one `thread start` opened in a Discord turn (open-threads, until
-# `thread close`), where the background subagent working that request and the
-# turn its result wakes report, and one listed in report-threads, for a
-# report a timer posts (one id a line in each). And a dev-manager's reply
-# that opens with a peer's <@bot_id>: a review, a test on its machine, a
-# split, a heads-up before a shared change, which its rule allows from any
-# turn. It is addressed to a bot that must act on it, not an echo of terminal
-# work; a mention further down would let any echo through with a "cc". Not an
-# edit: the plugin delivers only new messages, so a peer never sees one.
+# A turn with no Discord message in it (typed in the terminal, or woken by a
+# peer, a timer or a watch) may post too. It used to be denied outright, which
+# kept terminal work from leaking into the channel but also stopped a session
+# from saying anything when the human in the terminal asked it to, or when a
+# peer had to act. Echo is a rule for the session to follow (its prompt and
+# rules say: no copy of the terminal conversation), not something a hook can
+# tell apart from a message the human wanted sent (owner, 2026-10-07).
 #
-# One jq read for this check and the two after it, a line each (a tab would
-# let an empty field collapse into its neighbour): the session, the chat,
-# whether a line of the text opens with an arrow, and whether a table's
+# One jq read for the checks below, a line each (a tab would let an empty
+# field collapse into its neighbour): the session and the chat (kept for
+# alignment), whether a line of the text opens with an arrow, and whether a table's
 # separator row sits outside every code block. Even pieces of a split on ```
 # are outside every code block; the last piece after an unclosed fence is
 # looked at too, so a table there is denied below.
@@ -78,16 +67,6 @@ input=$(cat 2>/dev/null) || exit 0
      | join("\n") | split("\n")
      | any(test("^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)+\\|?\\s*$"))),
     (if (.tool_input.chat_id // "" | tostring) == $ch and ($t | length) > 500 then "over" else "" end)' 2>/dev/null) || :
-if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ]; then
-  case ${turn:-} in ''|*/*) ;; *)
-    [ -e "${DISCORD_STATE_DIR:-}/turns/$turn" ] \
-      || grep -qxF -- "${chat:-}" "${DISCORD_STATE_DIR:-}/open-threads" "${DISCORD_STATE_DIR:-}/report-threads" 2>/dev/null \
-      || { p=$(peers) && [ -n "$p" ] && printf '%s' "$input" | jq -e --argjson p "$p" '.tool_name == "mcp__plugin_discord_discord__reply"
-           and (.tool_input.text // "" | tostring | test("^\\s*<@!?(" + ($p | map(.bot_id) | join("|")) + ")>"))' >/dev/null 2>&1; } \
-      || deny 'This turn has no Discord message in it: answer in the terminal. From such a turn Discord takes only a post in a thread that thread start opened (or one listed in report-threads), a closing line through thread close <id> "<line>", and, from a dev-manager, a reply that opens with a peer mention.' ;;
-  esac
-fi
-
 # Mirror lines say which way they went in words. The old arrows ("-> name:",
 # "<- name:", a session or bot name) told a reader neither direction nor that
 # the line was a copy. A Korean label ("-> 수정: ...") is prose, not a name.

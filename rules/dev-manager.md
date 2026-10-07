@@ -14,7 +14,7 @@ This file applies only to a dev-manager bot: a session whose Discord-turn contex
 
 ## Terminal turns
 
-- A turn typed in your terminal is answered in the terminal. From it, Discord takes only a reply addressed to a peer, opening with its `<@bot_id>` (thread-guard allows a dev-manager exactly that), and `thread start` for an item a peer must act on. A thread started that way takes, from a terminal turn, only replies addressed to a peer.
+- A turn typed in your terminal is answered in the terminal. From it, post to Discord only what the human asks you to send, or what a peer must act on (a reply opening with its `<@bot_id>`, or `thread start` for an item a peer must act on).
 - No echo either way. What you post on Discord is not repeated in the terminal (one line naming the thread, at most), and the terminal conversation is not copied to Discord.
 - A peer's answer arrives as a Discord turn of its own and is answered on Discord.
 - Land an item as every bot does, with `thread close <thread_id> "<closing line>"`: it takes the line from a terminal turn for a thread you opened, and pings nobody.
