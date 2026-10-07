@@ -3,9 +3,10 @@
 # bots only: a bot only receives messages that mention it (<@bot_id> or
 # <@!bot_id>), so deny a reply that names a peer (as a whole word,
 # case-insensitive) without its mention, or that answers a peer without
-# mentioning it: the author of the message in reply_to when that is set,
-# else of the turn's last recorded message (on-prompt records
-# "chat_id message_id user_id"). Prints nothing unless it denies; a no-op
+# mentioning anyone: the author of the turn's last recorded message (on-prompt
+# records "chat_id message_id user_id"). A reply_to its message counts as a
+# mention (the plugin's isMentioned), so a reply with reply_to is not held to
+# it. Prints nothing unless it denies; a no-op
 # without peers.json. Must never fail a turn.
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
@@ -19,10 +20,8 @@ from=""
 case $session_id in
   ''|*[!A-Za-z0-9_-]*) ;;
   *) turns="$DISCORD_STATE_DIR/turns/$session_id"
-     if [ -f "$turns" ]; then
-       while read -r _ m u _ || [ -n "$m" ]; do
-         if [ -n "$reply_to" ]; then [ "$m" != "$reply_to" ] || from=$u; else from=$u; fi
-       done < "$turns"
+     if [ -f "$turns" ] && [ -z "$reply_to" ]; then
+       while read -r _ m u _ || [ -n "$m" ]; do from=$u; done < "$turns"
      fi ;;
 esac
 reason=$(printf '%s' "$input" | jq -r --arg self "$bot_name" --arg from "$from" --slurpfile pf "$DISCORD_STATE_DIR/../peers.json" '
@@ -32,7 +31,7 @@ reason=$(printf '%s' "$input" | jq -r --arg self "$bot_name" --arg from "$from" 
   | def mentioned: . as $p | $text | contains("<@\($p.bot_id)>") or contains("<@!\($p.bot_id)>");
   def named: . as $p | ($text | ascii_downcase | split($p.name | ascii_downcase)) as $s
     | any(range(1; $s | length); ($s[. - 1] | test("[a-z0-9_-]$") | not) and ($s[.] | test("^[a-z0-9_-]") | not));
-  first(([.[] | select(.bot_id == $from and (mentioned | not))][0] // empty
+  first(([.[] | select(.bot_id == $from and ($text | test("<@[!&]?[0-9]+>") | not))][0] // empty
     | "You are answering \(.name); mention it as <@\(.bot_id)> or it never sees this."),
   ([.[] | select(named and (mentioned | not))][0] // empty
     | "Mention \(.name) as <@\(.bot_id)>; a bot only receives messages that mention it."))' 2>/dev/null)

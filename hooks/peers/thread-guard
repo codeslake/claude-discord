@@ -73,25 +73,26 @@ input=$(cat 2>/dev/null) || exit 0
 [ "${arrow:-}" != true ] || deny 'A mirror line says which way it went: "[sent to name] ..." or "[received from name] ...", not an arrow.'
 
 # Answering a bot means mentioning it, every bot: a bot receives only the
-# messages that mention it, so an unmentioned answer never reaches it. The
-# message answered is the one in reply_to when set, else the turn's last
+# messages that mention it, so an unmentioned answer never reaches it. A
+# reply_to one of its messages counts as a mention (the plugin's isMentioned),
+# so only a reply without reply_to is checked, against the turn's last
 # recorded message (on-prompt writes "chat_id message_id user_id" lines), as
 # in mention-guard; whether its author is a bot comes from is_bot_user. That
 # guard is a dev-manager's and knows only peers.json, so two mode-none bots
 # (one session each in a shared channel) answered each other unmentioned and
 # never heard the answer (owner, 2026-10-07). A human is not held to it, and
 # an edit is no new message, so nobody would receive it either way.
+# A reply that mentions anyone is addressed to them, not an answer: a bot
+# turning from one bot to call another is not held to the first's mention.
 from=""
 case ${turn:-} in ''|*[!A-Za-z0-9_-]*) ;; *)
   if [ -f "${DISCORD_STATE_DIR:-}/turns/$turn" ] && { read -r tool; read -r reply_to; } < <(printf '%s' "$input" | jq -r '.tool_name // "", (.tool_input.reply_to // "" | tostring)' 2>/dev/null) \
-    && [ "$tool" = mcp__plugin_discord_discord__reply ]; then
-    while read -r _ m u _ || [ -n "${m:-}" ]; do
-      if [ -n "$reply_to" ]; then [ "$m" != "$reply_to" ] || from=$u; else from=$u; fi
-    done < "$DISCORD_STATE_DIR/turns/$turn"
+    && [ "$tool" = mcp__plugin_discord_discord__reply ] && [ -z "$reply_to" ]; then
+    while read -r _ m u _ || [ -n "${m:-}" ]; do from=$u; done < "$DISCORD_STATE_DIR/turns/$turn"
   fi ;;
 esac
 if [ -n "$from" ] && is_bot_user "$from" \
-  && ! printf '%s' "$input" | jq -e --arg id "$from" '.tool_input.text // "" | tostring | contains("<@\($id)>") or contains("<@!\($id)>")' >/dev/null 2>&1; then
+  && ! printf '%s' "$input" | jq -e '.tool_input.text // "" | tostring | test("<@[!&]?[0-9]+>")' >/dev/null 2>&1; then
   deny "You are answering a bot; mention it as <@$from> or it never sees this."
 fi
 

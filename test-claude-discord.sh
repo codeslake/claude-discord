@@ -1107,9 +1107,11 @@ out=$(guard '{"session_id":"g2","tool_input":{"chat_id":"42","text":"thanks, mer
 [ "$(reason <<<"$out")" = "$REASON_B" ] || { echo "FAIL: answering a peer-triggered turn without its mention must be denied: $out"; exit 1; }
 out=$(guard '{"session_id":"g2","tool_input":{"chat_id":"42","text":"<@901> thanks, merged"}}')
 [ -z "$out" ] || { echo "FAIL: answering a peer with its mention must pass: $out"; exit 1; }
+out=$(guard '{"session_id":"g2","tool_input":{"chat_id":"42","text":"<@111> over to you"}}')
+[ -z "$out" ] || { echo "FAIL: a message that mentions someone else is addressed to them, not an answer to the peer: $out"; exit 1; }
 # One turn, two messages (the second arrives mid-turn, as a prompt of its
-# own): the peer's, then the human's. Rule B follows reply_to when it is
-# set, else the turn's LAST message only.
+# own): the peer's, then the human's. Rule B looks at the turn's LAST message
+# only, and not at all for a reply_to, which reaches its author unmentioned.
 DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g4","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"557\" user=\"junyong\" user_id=\"901\" ts=\"t\">\nlooks good\n</channel>"}' >/dev/null
 DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g4","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"558\" user=\"u\" user_id=\"111\" ts=\"t\">\nship it?\n</channel>"}' >/dev/null
 [ "$(cat "$R4/mgr/turns/g4")" = "$(printf '42 557 901\n42 558 111')" ] || { echo "FAIL: both messages of one turn must be recorded"; exit 1; }
@@ -1118,19 +1120,10 @@ out=$(guard '{"session_id":"g4","tool_input":{"chat_id":"42","text":"yes, shippi
 out=$(guard '{"session_id":"g4","tool_input":{"chat_id":"42","reply_to":"558","text":"yes, shipping"}}')
 [ -z "$out" ] || { echo "FAIL: a reply_to the human's message must not be held to the peer's mention: $out"; exit 1; }
 out=$(guard '{"session_id":"g4","tool_input":{"chat_id":"42","reply_to":"557","text":"thanks"}}')
-[ "$(reason <<<"$out")" = "$REASON_B" ] || { echo "FAIL: a reply_to the peer's message without its mention must be denied: $out"; exit 1; }
-# Snowflakes past 2^53: the human's id and the peer's differ only in the last
-# digit, the peer's line last. reply_to the human's must not match the peer's
-# (a numeric compare in awk would).
-DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g5","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"1550575144320110000\" user=\"u\" user_id=\"111\" ts=\"t\">\nship it?\n</channel>"}' >/dev/null
-DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g5","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"1550575144320110001\" user=\"junyong\" user_id=\"901\" ts=\"t\">\nlooks good\n</channel>"}' >/dev/null
-out=$(guard '{"session_id":"g5","tool_input":{"chat_id":"42","reply_to":"1550575144320110000","text":"yes, shipping"}}')
-[ -z "$out" ] || { echo "FAIL: reply_to must match its message id exactly, as a string: $out"; exit 1; }
-out=$(guard '{"session_id":"g5","tool_input":{"chat_id":"42","reply_to":"1550575144320110001","text":"thanks"}}')
-[ "$(reason <<<"$out")" = "$REASON_B" ] || { echo "FAIL: reply_to the peer's snowflake without its mention must be denied: $out"; exit 1; }
+[ -z "$out" ] || { echo "FAIL: a reply_to the peer's message reaches it unmentioned and must pass: $out"; exit 1; }
 out=$(printf 'not json' | DISCORD_STATE_DIR="$R4/mgr" bash "$G/mention-guard" 2>&1) || { echo "FAIL: mention-guard must exit 0 on invalid JSON"; exit 1; }
 [ -z "$out" ] || { echo "FAIL: mention-guard must print nothing on invalid JSON"; exit 1; }
-echo "ok: mention-guard denies a named peer (word boundaries, Korean suffix ok) without its <@id> or <@!id>, and an unmentioned answer to the peer that reply_to or else the turn's last message names; passes for self, a non-dev-manager, dongyong22, a reply to a human, and invalid JSON; on-prompt adds the peers context for a dev-manager only"
+echo "ok: mention-guard denies a named peer (word boundaries, Korean suffix ok) without its <@id> or <@!id>, and an answer mentioning nobody to the peer that wrote the turn's last message; passes for self, a non-dev-manager, dongyong22, a reply to a human, a reply_to, and invalid JSON; on-prompt adds the peers context for a dev-manager only"
 
 checkin() { DISCORD_STATE_DIR="$R4/mgr" CLAUDE_PROJECT_DIR="$P4" bash "$G/checkin" <<<"$1"; }
 out=$(checkin '{"session_id":"c1","tool_input":{"text":"no mention here"}}')
@@ -1286,9 +1279,13 @@ grep -qx '555 bot' "$R4/plain/user-kinds" && grep -qF 'users/555' "$CURL_LOG" ||
 replies
 out=$(tguard "$(ans '<@!555> done')" plain)$(tguard "$(ans 'x <@555> done')" plain)
 [ -z "$out" ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: a mention anywhere must pass, from the cache with no call: $out / $(cat "$CURL_LOG")"; exit 1; }
-replies '200 {"id":"556"}'
-out=$(tguard "$(ans 'thanks' 700)" plain)
-[ -z "$out" ] && grep -qx '556 human' "$R4/plain/user-kinds" || { echo "FAIL: answering a human (reply_to picks the author) must pass and cache human: $out"; exit 1; }
+out=$(tguard "$(ans '<@999> over to you')" plain)
+[ -z "$out" ] || { echo "FAIL: a message that mentions someone else is addressed to them, not an answer: $out"; exit 1; }
+out=$(tguard "$(ans 'thanks' 701)" plain)
+[ -z "$out" ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: a reply_to the bot's message reaches it (the plugin counts it as a mention) and must pass unchecked: $out"; exit 1; }
+printf '42 700 556\n' > "$R4/plain/turns/tb"; replies '200 {"id":"556"}'
+out=$(tguard "$(ans 'thanks')" plain)
+[ -z "$out" ] && grep -qx '556 human' "$R4/plain/user-kinds" || { echo "FAIL: answering a human must pass and cache human: $out"; exit 1; }
 printf '42 702 557\n' > "$R4/plain/turns/tb"; replies '500 {}'
 out=$(tguard "$(ans 'hi')" plain)
 [ -z "$out" ] && ! grep -q '^557 ' "$R4/plain/user-kinds" || { echo "FAIL: an unknown author must not block or be cached: $out"; exit 1; }
@@ -1296,7 +1293,7 @@ replies
 out=$(jq -nc '{tool_name: "mcp__plugin_discord_discord__edit_message", session_id: "tb", tool_input: {chat_id: "43", message_id: "9", text: "x"}}' | DISCORD_STATE_DIR="$R4/plain" CLAUDE_PROJECT_DIR="$P4" bash "$G/thread-guard")
 [ -z "$out" ] || { echo "FAIL: an edit is not an answer: $out"; exit 1; }
 rm -f "$R4/plain/turns/tb" "$R4/plain/user-kinds"
-echo "ok: thread-guard denies answering a bot without its <@id> (any bot, author by reply_to or the turn's last message, kind from GET /users cached in user-kinds), and passes a mention, a human, an unknown author and an edit"
+echo "ok: thread-guard denies answering a bot without its <@id> (any bot, author from the turn's last message, kind from GET /users cached in user-kinds), and passes a mention (of it or of anyone else), a reply_to, a human, an unknown author and an edit"
 echo "ok: thread-guard lets a turn with no Discord message post (channel and threads, dev-manager and mode-none, still under the channel's 500 characters) and denies an arrow mirror line but not an arrow in prose or before a Korean label"
 
 # The thread helper, against the stubbed curl: each call takes the next
