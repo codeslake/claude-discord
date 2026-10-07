@@ -5,8 +5,10 @@
 # behind. `thread start` therefore posts the short title ITSELF and opens the
 # thread on it, and everything else about the item is written inside, under
 # the id this prints (a message-started thread's id is that message's id).
-# `thread close` posts the item's closing line in the channel and archives
-# the thread so it leaves the sidebar.
+# `thread close` posts the item's closing line INSIDE the thread and archives
+# it so it leaves the sidebar. The line used to go to the channel, where it
+# sat on its own with no context (owner, 2026-10-07): the channel now holds
+# only the title, and the thread under it says how the item ended.
 #
 #   thread start "[<area>] <short title>"          prints the thread id (cite it as <#id>)
 #   thread close <thread_id> ["<closing line>"]    silent on success
@@ -124,7 +126,7 @@ case ${1:-} in
       discord_turn || grep -qE "^$2( terminal)?\$" "$open" 2>/dev/null \
         || { echo "thread: this turn has no Discord message in it and $2 is not a thread this bot opened, so no closing line: answer in the terminal" >&2; exit 2; }
       one_line "$3" "a closing line"
-      api POST "channels/$bot_channel/messages" "$(jq -nc --arg c "$3" '{content: $c}')"
+      api POST "channels/$2/messages" "$(jq -nc --arg c "$3" '{content: $c}')"
       case $status in 2*) ;; *) fail "posting the closing line";; esac
       answered
     fi

@@ -19,8 +19,9 @@
 #                                        one that starts from its handoff
 #   claude-discord health [--notify] [--json]
 #                                        is every bot in this project still
-#                                        answering? --notify posts an alert to
-#                                        the bot's own channel; exit 1 on a
+#                                        answering? --notify posts an alert in
+#                                        the bot's "[health] <bot>" thread,
+#                                        mentioning nobody; exit 1 on a
 #                                        finding
 #   claude-discord health --install-timer [--proxy <url>|inherit]
 #   claude-discord health --uninstall-timer
@@ -579,7 +580,7 @@ EOS
     systemctl --user daemon-reload >/dev/null 2>&1 || :
     systemctl --user enable --now "$unit.timer" >/dev/null 2>&1 || { echo "claude-discord: wrote $ud/$unit.timer but could not enable it; 'systemctl --user enable --now $unit.timer' says why" >&2; exit 1; }
     echo "claude-discord: $unit.timer enabled, every 5 minutes, checking the bots in $PWD"
-    echo "claude-discord: alerts go to each bot's own channel; 'claude-discord health --uninstall-timer' stops it"
+    echo "claude-discord: alerts go to each bot's [health] thread; 'claude-discord health --uninstall-timer' stops it"
     exit 0
   fi
 
@@ -707,17 +708,66 @@ EOS
       >/dev/null 2>&1
   }
 
-  # Posts one line to $ch as this bot; sets $post_status and returns 0 only
-  # on a 2xx. Token on stdin (-H @-), never argv.
-  post_message() {  # $1 = content
+  # POSTs $2 (JSON) to API path $1 as this bot; sets $post_status and
+  # $post_resp and returns 0 only on a 2xx. Token on stdin (-H @-), never argv.
+  post() {
     local out
     out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 10 -w '\n%{http_code}' \
-      -X POST -H @- -H 'Content-Type: application/json' \
-      --data-raw "$(jq -nc --arg m "$1" '{content: $m}')" \
-      "https://discord.com/api/v10/channels/$ch/messages" 2>/dev/null) || out=""
-    post_status=${out##*$'\n'}
+      -X POST -H @- -H 'Content-Type: application/json' --data-raw "$2" \
+      "https://discord.com/api/v10/$1" 2>/dev/null) || out=""
+    post_status=${out##*$'\n'} post_resp=${out%$'\n'*}
     case $post_status in ''|*[!0-9]*) post_status=000;; esac
     case $post_status in 2*) return 0;; *) return 1;; esac
+  }
+
+  post_patch() {  # $1 = path, $2 = JSON; 0 on a 2xx
+    local out
+    out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 10 -w '\n%{http_code}' \
+      -X PATCH -H @- -H 'Content-Type: application/json' --data-raw "$2" \
+      "https://discord.com/api/v10/$1" 2>/dev/null) || out=""
+    case ${out##*$'\n'} in 2*) return 0;; *) return 1;; esac
+  }
+
+  # Alerts go into ONE "[health] <bot>" thread under the bot's main channel
+  # ($ch: its only group, else the channel setup first registered), never
+  # into the channel itself, and mention nobody: in the channel an alert sat
+  # with no context in every reader's way (owner, 2026-10-07: "head 쓰레드
+  # 파서 거기에 tagging도 없이"). The thread is opened once, on a one-line
+  # anchor, and its id kept in <bot>/health-thread (setup and refresh leave it).
+  health_thread() {  # sets $hth
+    local mid
+    hth=$(cat "$d/health-thread" 2>/dev/null) || hth=""
+    is_id "$hth" && return 0
+    post "channels/$ch/messages" "$(jq -nc --arg c "[health] $bot" '{content: $c, allowed_mentions: {parse: []}}')" || return 1
+    mid=$(printf '%s' "$post_resp" | jq -r '.id // empty' 2>/dev/null)
+    is_id "$mid" || return 1
+    post "channels/$ch/messages/$mid/threads" "$(jq -nc --arg n "[health] $bot" '{name: $n, auto_archive_duration: 10080}')" || return 1
+    hth=$(printf '%s' "$post_resp" | jq -r '.id // empty' 2>/dev/null)
+    is_id "$hth" || return 1
+    printf '%s\n' "$hth" > "$d/health-thread" 2>/dev/null || :
+  }
+
+  # Only the alert's own POST counts as delivered (the caller records the
+  # state on it), never the anchor line or the thread's creation. An alert
+  # can come weeks after the last one, by when the thread has archived
+  # itself: an archived thread refusing the post (400/403) is unarchived and
+  # tried once more; a deleted one (404) is opened again. A bot that cannot
+  # open a thread at all (no Create Public Threads, or a channel that is
+  # itself a thread) posts in the channel, saying so: an alert lost there is
+  # the silence this check exists to end.
+  post_message() {  # $1 = content; into the health thread, pinging nobody
+    local body
+    body=$(jq -nc --arg m "$1" '{content: $m, allowed_mentions: {parse: []}}')
+    if ! health_thread; then
+      post "channels/$ch/messages" "$(jq -nc --arg m "$1 (the [health] thread could not be opened, HTTP $post_status)" '{content: $m, allowed_mentions: {parse: []}}')"
+      return
+    fi
+    post "channels/$hth/messages" "$body" && return 0
+    case $post_status in
+      400|403) post_patch "channels/$hth" '{"archived":false}' && post "channels/$hth/messages" "$body" ;;
+      404) rm -f "$d/health-thread"; health_thread && post "channels/$hth/messages" "$body" ;;
+      *) return 1 ;;
+    esac
   }
 
   api() {  # $1 = path; sets $status and $resp. Token on stdin, never argv.
@@ -1337,7 +1387,7 @@ When both arrive in one turn, answer each where it came from. \
 A request that needs more than a line or two gets its own thread: ~/.claude-discord/hooks/tools/thread start \"[<area>] <short title>\" posts that one line in the channel and prints the thread id. \
 In a message, a bare channel, thread, user or bot id is replaced by its name (a channel or thread as a link, a user or bot as plain @name, which pings nobody); to show the number itself, put it in backticks. \
 Everything else about the request goes inside that thread, with the id as chat_id. \
-When it lands, run thread close <id> \"<one closing line>\": it posts that line in the channel and archives the thread. \
+When it lands, run thread close <id> \"<one closing line>\": it posts that line inside the thread and archives it. \
 Unless your mode's rules say otherwise, answer a quick request yourself and dispatch one that needs more than a few tool calls to a background subagent whose brief names the request's thread id, then post its result in that thread when it returns. \
 That keeps you free for the next message, and requests from different people never share a context. \
 Another bot receives your messages only when you @mention it and it allowlists your bot. \

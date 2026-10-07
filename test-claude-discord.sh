@@ -190,7 +190,7 @@ H="$R/hooks/turn"
 rm -rf "$DSD/turns" "$DSD/last-message-id"; : > "$CURL_LOG"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"222\" user=\"u\" user_id=\"9\" ts=\"t\">\nhello\n</channel>"}')
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
-[ "$ctx" = 'Discord turn. You are alpha, the Claude Code session behind the Discord bot alpha in channel 999. Answer a Discord message with the discord reply tool; a question typed in the terminal in the same turn is answered in the terminal. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically. One request, one thread: ~/.claude-discord/hooks/tools/thread start "[<area>] <short title>" posts its channel line and prints the thread id (a bare channel, thread, user or bot id in a message is shown as its name, a channel or thread as a link; put an id in backticks to show the number), thread close <id> "<closing line>" posts the line it lands with and ends it; the channel holds those two lines. Unless your mode'"'"'s rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id.' ] || { echo "FAIL: on-prompt context text wrong: $ctx"; exit 1; }
+[ "$ctx" = 'Discord turn. You are alpha, the Claude Code session behind the Discord bot alpha in channel 999. Answer a Discord message with the discord reply tool; a question typed in the terminal in the same turn is answered in the terminal. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically. One request, one thread: ~/.claude-discord/hooks/tools/thread start "[<area>] <short title>" posts its channel line and prints the thread id (a bare channel, thread, user or bot id in a message is shown as its name, a channel or thread as a link; put an id in backticks to show the number), thread close <id> "<closing line>" posts the line it lands with inside the thread and ends it; the channel holds only the title line. Unless your mode'"'"'s rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id.' ] || { echo "FAIL: on-prompt context text wrong: $ctx"; exit 1; }
 [ "$(cat "$DSD/turns/s1")" = "111 222 9" ] || { echo "FAIL: turns file wrong (chat_id message_id user_id)"; exit 1; }
 [ "$(cat "$DSD/last-message-id")" = "222" ] || { echo "FAIL: last-message-id wrong"; exit 1; }
 [ ! -s "$CURL_LOG" ] || { echo "FAIL: on-prompt must never call curl"; exit 1; }
@@ -1395,7 +1395,7 @@ grep -qF 'PATCH' <<<"$(call 1)" && grep -qF 'channels/99' <<<"$(call 1)" && grep
 NOWID2=$((NOWID + 1)); echo "$NOWID2" >> "$R4/mgr/open-threads"
 replies '200 {"id":"6"}' "200 {\"id\":\"$NOWID2\",\"archived\":true}"
 out=$(CLAUDE_CODE_SESSION_ID=cli9 thread close "$NOWID2" '[guard] landed') && [ -z "$out" ] || { echo "FAIL: closing an open thread with a line must succeed silently: $out"; exit 1; }
-grep -qF 'channels/42/messages' <<<"$(call 1)" && grep -qF '{"content":"[guard] landed"}' <<<"$(call 1)" && grep -qF "channels/$NOWID2" <<<"$(call 2)" || { echo "FAIL: close posts the closing line in the channel, then archives: $(cat "$CURL_LOG")"; exit 1; }
+grep -qF "channels/$NOWID2/messages" <<<"$(call 1)" && ! grep -qF 'channels/42/' <<<"$(call 1)" && grep -qF '{"content":"[guard] landed"}' <<<"$(call 1)" && grep -qF "channels/$NOWID2" <<<"$(call 2)" || { echo "FAIL: close posts the closing line inside the thread, never in the channel, then archives: $(cat "$CURL_LOG")"; exit 1; }
 [ "$(cat "$R4/mgr/open-threads")" = "$NOWID" ] || { echo "FAIL: close must take only its thread off open-threads (ids compared as strings): $(cat "$R4/mgr/open-threads")"; exit 1; }
 replies
 rc=0; out=$(CLAUDE_CODE_SESSION_ID=cli9 thread close 5 '[guard] again' 2>&1) || rc=$?
@@ -2238,6 +2238,7 @@ NP="$HOME/notify-project"; mkdir -p "$NP"; cd "$NP"
 printf '900\n111\n222\ntokN\nn\n' | bash "$S" setup nbot >/dev/null
 ND="$NP/.claude/discord-agents/nbot"
 echo "$ID_SEEN" > "$ND/last-message-id"; seed_id "$ND"; seed_guild "$ND"
+echo 7700 > "$ND/health-thread"   # its [health] thread, opened on an earlier run
 start_server "$ND"
 mkdir -p "$ND/turns"; : > "$ND/turns/s1"; touch -d '3 hours ago' "$ND/turns/s1"
 printf '#!/usr/bin/env bash\n[ "$1" = agents ] && echo "[]"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
@@ -2255,7 +2256,8 @@ notify_run() {  # $1 = the POST's reply, if one is expected
 notify_run '200 {"id":"9001"}'
 bash "$S" health --notify >/dev/null 2>&1 || :
 [ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] || { echo "FAIL: --notify must post exactly one alert: $(cat "$CURL_LOG")"; exit 1; }
-grep -q 'channels/900/messages' "$CURL_LOG" || { echo "FAIL: the alert must go to the bot's own channel: $(cat "$CURL_LOG")"; exit 1; }
+grep -q 'X POST.*channels/7700/messages' "$CURL_LOG" && ! grep -q 'X POST.*channels/900/' "$CURL_LOG" || { echo "FAIL: the alert must go to the bot's [health] thread, not its channel: $(cat "$CURL_LOG")"; exit 1; }
+grep -qF '"allowed_mentions":{"parse":[]}' "$CURL_LOG" || { echo "FAIL: the alert must ping nobody: $(cat "$CURL_LOG")"; exit 1; }
 grep -q 'refresh nbot' "$CURL_LOG" || { echo "FAIL: the alert must carry the command that fixes it: $(cat "$CURL_LOG")"; exit 1; }
 grep -q 'refresh nbot --force' "$CURL_LOG" && { echo "FAIL: an alert must not hand over --force by default: it replaces the session with no handoff: $(cat "$CURL_LOG")"; exit 1; }
 grep -q 'only if it cannot write a handoff' "$CURL_LOG" || { echo "FAIL: the alert should say when --force is the right call: $(cat "$CURL_LOG")"; exit 1; }
@@ -2282,6 +2284,40 @@ bash "$S" health --notify >/dev/null 2>&1 || :
 [ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] || { echo "FAIL: a recovery must be announced: $(cat "$CURL_LOG")"; exit 1; }
 [ ! -f "$ND/health-alert" ] || { echo "FAIL: the recovery must clear the alert state"; exit 1; }
 grep -q 'health' "$ND/health.log" || { echo "FAIL: every run must leave a local log line, since nobody may be watching the channel"; exit 1; }
+# No [health] thread yet: one anchor line in the channel, the thread opened
+# on it and remembered, the alert inside. A deleted thread (404) is opened
+# again and the alert still lands.
+rm -f "$ND/health-thread" "$ND/health-alert"; : > "$CURL_LOG"
+notify_run '200 {"id":"7800"}'; queue_line '201 {"id":"7800"}'; queue_line '200 {"id":"9010"}'
+bash "$S" health --notify >/dev/null 2>&1 || :
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 3 ] && grep 'X POST' "$CURL_LOG" | sed -n 1p | grep -qF 'channels/900/messages' && grep -qF '[health] nbot' "$CURL_LOG" \
+  && grep 'X POST' "$CURL_LOG" | sed -n 2p | grep -qF 'channels/900/messages/7800/threads' && grep 'X POST' "$CURL_LOG" | sed -n 3p | grep -qF 'channels/7800/messages' \
+  && [ "$(cat "$ND/health-thread")" = 7800 ] || { echo "FAIL: the first alert must open the [health] thread on one channel line, keep its id and post inside: $(cat "$CURL_LOG")"; exit 1; }
+rm -f "$ND/health-alert"; : > "$CURL_LOG"
+notify_run '404 {"code":10003}'; queue_line '200 {"id":"7900"}'; queue_line '201 {"id":"7900"}'; queue_line '200 {"id":"9011"}'
+bash "$S" health --notify >/dev/null 2>&1 || :
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 4 ] && [ "$(cat "$ND/health-thread")" = 7900 ] && [ -f "$ND/health-alert" ] \
+  || { echo "FAIL: a deleted [health] thread must be opened again and the alert delivered: $(cat "$CURL_LOG")"; exit 1; }
+# The next alert reuses the kept thread: one POST, no channel line, no new
+# thread. An archived thread refusing the post is unarchived and tried once
+# more. A bot that cannot open a thread posts in the channel, saying so; only
+# the alert's own POST records the state.
+rm -f "$ND/health-alert"; : > "$CURL_LOG"
+notify_run '200 {"id":"9012"}'
+bash "$S" health --notify >/dev/null 2>&1 || :
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] && grep -q 'X POST.*channels/7900/messages' "$CURL_LOG" || { echo "FAIL: a later alert must reuse the kept thread with one POST: $(cat "$CURL_LOG")"; exit 1; }
+rm -f "$ND/health-alert"; : > "$CURL_LOG"
+notify_run '400 {"code":50083}'; queue_line '200 {"id":"7900"}'; queue_line '200 {"id":"9013"}'
+bash "$S" health --notify >/dev/null 2>&1 || :
+grep -q 'X PATCH.*"archived":false.*channels/7900' "$CURL_LOG" && [ "$(grep -c 'X POST.*channels/7900/messages' "$CURL_LOG")" = 2 ] && [ -f "$ND/health-alert" ] \
+  || { echo "FAIL: an archived thread must be unarchived and the alert retried once: $(cat "$CURL_LOG")"; exit 1; }
+rm -f "$ND/health-alert" "$ND/health-thread"; : > "$CURL_LOG"
+notify_run '200 {"id":"7990"}'; queue_line '403 {"code":50013}'; queue_line '200 {"id":"9014"}'
+bash "$S" health --notify >/dev/null 2>&1 || :
+grep 'X POST' "$CURL_LOG" | sed -n 3p | grep -q 'could not be opened.*channels/900/messages' && [ -f "$ND/health-alert" ] && [ ! -f "$ND/health-thread" ] \
+  || { echo "FAIL: a bot that cannot open a thread must post the alert in its channel, saying so: $(cat "$CURL_LOG")"; exit 1; }
+echo 7700 > "$ND/health-thread"
+echo "ok: health --notify posts its alerts in one [health] thread per bot (opened once on a channel line and reused, unarchived when archived, reopened when deleted, the channel only when no thread can be opened), pinging nobody"
 echo "ok: health --notify posts one alert per state change on the bot's own token over stdin, records it only once Discord accepted it (retrying otherwise), announces the recovery, always logs locally, and never offers --force except to a bot with no session left to lose a handoff from"
 
 # Without --notify nothing is posted at all: a human running it by hand must

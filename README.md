@@ -283,8 +283,8 @@ session.
   Discord opens a thread only from a message already in the channel, so
   starting one from the long answer would leave the long answer in the
   channel. When the request lands, `thread close <thread_id> "<closing
-  line>"` posts that one line (no newline, 500 characters at most) in the channel and
-  archives the thread, which takes it out of the sidebar. A thread started,
+  line>"` posts that one line (no newline, 500 characters at most) inside the
+  thread, never in the channel, where it sat with no context, and archives the thread, which takes it out of the sidebar. A thread started,
   or a closing line posted, in a Discord turn answers its message as a reply
   would. The helper needs `DISCORD_STATE_DIR` (every hook and the bot's own
   session have it); `thread-guard` (see Hooks) keeps the channel to short
@@ -515,7 +515,7 @@ thing that died.
 ```
 claude-discord health                  # one line per bot; exit 1 if anything needs a human
 claude-discord health --json           # the same as data, for a script
-claude-discord health --notify         # also post an alert to the bot's own channel
+claude-discord health --notify         # also post an alert in the bot's [health] thread, pinging nobody
 claude-discord health --install-timer  # a systemd --user timer, every five minutes, with --notify
 claude-discord health --uninstall-timer
 ```
