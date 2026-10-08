@@ -974,7 +974,7 @@ EOS
                   | [(.id // ""), (.last_message_id // "0")] | @tsv' 2>/dev/null |
                   while IFS=$'\t' read -r tid tlast; do
                     is_id "$tid" || continue
-                    case $tlast in ''|*[!0-9]*) tlast=0;; esac
+                    case $tlast in (''|*[!0-9]*) tlast=0;; esac   # (: bash 3.2 ends $( ) at a bare )
                     id_newer "$tlast" "$last_seen" && printf '%s\n' "$tid"
                   done); do
               api "channels/$t/messages?limit=50"
