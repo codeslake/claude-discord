@@ -204,9 +204,12 @@ grep -qx '111 Own 5 er' "$DSD/user-names" && printf '%s' "$out" | jq -r '.hookSp
 cp "$DSD/access.json" "$DSD/access.json.keep"; jq '.groups["999"].allowFrom = [] | .allowFrom = []' "$DSD/access.json.keep" > "$DSD/access.json"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1m","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"999\" message_id=\"224\" user=\"Mx (owner), \"q\"\" user_id=\"77\" ts=\"t\">\nhi\n</channel>"}')
 printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext' | grep -q '^People in this channel .*Mx owner q <@77>' || { echo "FAIL: with an empty allowFrom, whoever wrote must be listed, its name without \" ( ) ,: $(cat "$DSD/user-names") / $out"; exit 1; }
+# 25 writers: the file keeps the newest 20, the one who wrote last is last.
+for i in $(seq 1 25); do DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"{\"session_id\":\"s1m\",\"prompt\":\"<channel source=\\\"plugin:discord:discord\\\" chat_id=\\\"999\\\" message_id=\\\"3$i\\\" user=\\\"p$i\\\" user_id=\\\"50$i\\\" ts=\\\"t\\\">\\nhi\\n</channel>\"}" >/dev/null; done
+[ "$(wc -l < "$DSD/user-names")" = 20 ] && [ "$(tail -n 1 "$DSD/user-names")" = '5025 p25' ] && ! grep -q '^77 ' "$DSD/user-names" || { echo "FAIL: user-names must keep the newest 20, newest last: $(cat "$DSD/user-names")"; exit 1; }
 mv -f "$DSD/access.json.keep" "$DSD/access.json"
 rm -f "$DSD/user-names" "$DSD"/turns/s1[nm] "$DSD"/turns/s1[nm].pending "$DSD"/turns/s1[nm].primed
-echo "ok: on-prompt names the channel's people (access.json, config.env's owner, everyone who has written) as <@id>, labelled with the name each last wrote under, stripped of < > @ \" ( ) ,"
+echo "ok: on-prompt names the channel's people (access.json, config.env's owner, everyone who has written) as <@id>, labelled with the name each last wrote under, stripped of < > @ \" ( ) ,, the 20 newest writers kept"
 
 # UserPromptSubmit also fires for a Discord message that arrives mid-turn, so
 # two prompts with no Stop in between are one turn, even when the first was

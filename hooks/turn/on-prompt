@@ -74,8 +74,10 @@ user_id=""; [[ $head =~ .*\ user_id=\"([0-9]+)\" ]] && user_id=${BASH_REMATCH[1]
 if [ -n "$user_id" ] && [[ $head =~ \ user=\"(.*)\"\ user_id=\"$user_id\" ]]; then
   name=$(printf '%s' "${BASH_REMATCH[1]}" | tr -s '[:space:]' ' ' | tr -d '<>@"(),' | cut -c1-32)
   names=$DISCORD_STATE_DIR/user-names
-  if [ -n "$name" ] && ! grep -qxF "$user_id $name" "$names" 2>/dev/null; then
-    { grep -v "^$user_id " "$names" 2>/dev/null; printf '%s %s\n' "$user_id" "$name"; } > "$names.$$" 2>/dev/null && mv -f "$names.$$" "$names" 2>/dev/null || rm -f "$names.$$"
+  # Newest last, 20 kept: the People line names who is around, not everyone
+  # who ever passed, and stays short (each change of it re-primes the session).
+  if [ -n "$name" ] && [ "$(tail -n 1 "$names" 2>/dev/null)" != "$user_id $name" ]; then
+    { grep -v "^$user_id " "$names" 2>/dev/null | tail -n 19; printf '%s %s\n' "$user_id" "$name"; } > "$names.$$" 2>/dev/null && mv -f "$names.$$" "$names" 2>/dev/null || rm -f "$names.$$"
   fi
 fi
 
@@ -116,10 +118,11 @@ if [ -n "$session_id" ]; then
   # has written here.
   people=$( { jq -r --arg ch "$bot_channel" '(.groups[$ch].allowFrom // [])[], (.allowFrom // [])[]' "$DISCORD_STATE_DIR/access.json" 2>/dev/null
     sed -n "s/^DISCORD_USER_ID='\{0,1\}\([0-9]*\)'\{0,1\}$/\1/p" "$DISCORD_STATE_DIR/../config.env" 2>/dev/null
-    cut -d' ' -f1 "$DISCORD_STATE_DIR/user-names" 2>/dev/null; } | awk '/^[0-9]+$/ && !seen[$0]++' \
-    | while read -r id; do n=$(sed -n "s/^$id //p" "$DISCORD_STATE_DIR/user-names" 2>/dev/null | head -n 1); printf '%s<@%s>, ' "${n:+$n }" "$id"; done)
+    cut -d' ' -f1 "$DISCORD_STATE_DIR/user-names" 2>/dev/null; } | awk -v f="$DISCORD_STATE_DIR/user-names" '
+    BEGIN { while ((getline l < f) > 0) if ((i = index(l, " "))) n[substr(l, 1, i - 1)] = substr(l, i + 1) }
+    /^[0-9]+$/ && !seen[$0]++ { printf "%s%s<@%s>", (c++ ? ", " : ""), ($0 in n ? n[$0] " " : ""), $0 }')
   [ -z "$people" ] || identity="$identity
-People in this channel (mention one as <@id> to reach them): ${people%, }"
+People in this channel (mention one as <@id> to reach them): $people"
   # A dev-manager with peers also learns who they are and how to work with them.
   if [ "$bot_mode" = dev-manager ] && p=$(jq -r --arg self "$bot_name" '[.peers[]? | {name: (.name // "" | tostring), bot_id: (.bot_id // "" | tostring)}
     | select(.name != "" and (.bot_id | test("^[0-9]+$")) and (.name | ascii_downcase) != ($self | ascii_downcase))]
