@@ -1370,8 +1370,8 @@ grep -q 'msg.mentions.has(client.user))' "$install/server.ts" &&
 # Idempotent because the call is gone once patched. A plugin update that moves
 # the call is a visible miss on stderr, never a broken edit.
 if [ -f "$helpers/discord-chunk.ts" ]; then
-  if grep -qF 'const chunks = chunk(text, limit, mode)' "$install/server.ts"; then
-    CHUNK_TS=$helpers/discord-chunk.ts perl -pi -e 's/^(\s*)const chunks = chunk\(text, limit, mode\)$/$1const chunks = (await import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)/' "$install/server.ts"
+  if grep -qE '^[[:space:]]*const chunks = chunk\(text, limit, mode\);?[[:space:]]*$' "$install/server.ts"; then
+    CHUNK_TS=$helpers/discord-chunk.ts perl -pi -e 's/^(\s*)const chunks = chunk\(text, limit, mode\)(;?\s*)$/$1const chunks = (await import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)$2/' "$install/server.ts"
   elif ! grep -qF '.chunk(text, limit, mode)' "$install/server.ts"; then
     echo "claude-discord: server.ts has no chunk() call to patch; chunking patch not applied, long replies keep the plugin's fixed-offset split" >&2
   fi

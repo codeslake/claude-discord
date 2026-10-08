@@ -17,7 +17,10 @@ function scan(piece: string, fence: string | null) {
   let ticks = 0, last = -1, pos = 0
   for (const line of piece.split("\n")) {
     const t = line.trimStart()
-    if (t.startsWith("```")) fence = fence === null ? "```" + t.slice(3).trim() : null
+    // A fence opens on ``` plus an optional tag and closes on a bare ```; a line
+    // like "```x``` done" is inline code, not a fence.
+    if (fence === null && /^```[^`]*$/.test(t)) fence = "```" + t.slice(3).trim()
+    else if (fence !== null && /^```\s*$/.test(t)) fence = null
     else if (fence === null) {
       for (const m of line.matchAll(/`+/g)) {
         if (m[0].length === 1) { ticks++; last = pos + m.index! }
