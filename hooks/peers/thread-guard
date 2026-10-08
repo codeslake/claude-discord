@@ -169,8 +169,9 @@ fi
 # inside a mention, a URL or a word such as a file name (no letter, digit,
 # @ # ! & / : _ . or - right before it), denies the
 # reply. The bot that wrote the id knows what it is, so it rewrites it: a
-# channel or thread as <#id> (its name, linked), a user or bot as plain
-# @name (<@id> would ping a person and hand the message to a bot), or the
+# channel or thread as <#id> (its name, linked), a user or bot it only names
+# as plain @name, one who must answer or decide as <@id> (only that pings:
+# plain @name reaches nobody, owner 2026-10-08), or the
 # number in `backticks` when the number itself is the point (a message id,
 # a measurement: 19 digits is also an epoch in ns). It runs on the text as
 # the table rewrite left it, so an id in a table cell, now inside a ```
@@ -181,7 +182,7 @@ BARE='(?<![0-9A-Za-z/@#!&:_.-])[0-9]{17,20}(?![0-9])'
 bare=$(printf '%s' "$input" | jq -r --arg re "$BARE" '
   .tool_input.text // "" | tostring | [splits("```")] | to_entries | map(select(.key % 2 == 0).value | [splits("`")] | to_entries | map(select(.key % 2 == 0).value)) | flatten
   | [.[] | match($re; "g").string] | unique | join(" ")' 2>/dev/null) || bare=""
-[ -z "$bare" ] || deny "Bare 17-20 digit number(s) $bare: write a channel or thread as <#id>, a user or bot as plain @name (not <@id>, which pings); any other number (a message id, a measurement) goes in \`backticks\`."
+[ -z "$bare" ] || deny "Bare 17-20 digit number(s) $bare: write a channel or thread as <#id>, a user or bot you only name as plain @name, one who must answer or decide as <@id> (that pings); any other number (a message id, a measurement) goes in \`backticks\`."
 
 if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ] && [ -n "$converted" ]; then
   over=$(printf '%s' "$input" | jq -r --arg ch "$bot_channel" '
