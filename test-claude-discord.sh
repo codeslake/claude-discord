@@ -1299,10 +1299,12 @@ echo "ok: thread-guard denies answering a bot without its <@id> (any bot, author
 lnk() { jq -nc --arg t "$1" '{tool_name: "mcp__plugin_discord_discord__reply", tool_input: {chat_id: "43", text: $t}}'; }
 replies
 out=$(tguard "$(lnk 'see 1557489868416884740 and 1557489868416884741에서, again 1557489868416884740')" plain)
-[ "$(reason <<<"$out")" = 'Bare id(s) 1557489868416884740 1557489868416884741: write a channel or thread as <#id>, a user or bot as plain @name (not <@id>, which pings), or put the number in `backticks` to show it as is.' ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: bare ids must be denied, each named once, with no lookup: $out / $(cat "$CURL_LOG")"; exit 1; }
+[ "$(reason <<<"$out")" = 'Bare 17-20 digit number(s) 1557489868416884740 1557489868416884741: write a channel or thread as <#id>, a user or bot as plain @name (not <@id>, which pings); any other number (a message id, a measurement) goes in `backticks`.' ] && [ ! -s "$CURL_LOG" ] || { echo "FAIL: bare ids must be denied, each named once, with no lookup: $out / $(cat "$CURL_LOG")"; exit 1; }
 out=$(tguard "$(lnk $'<@1557489868416884743> <#1557489868416884740> <@!1557489868416884743> https://discord.com/channels/1/1557489868416884744 `1557489868416884741` 155748986841688474012345 1234567890123456 1791404649696-1557487048141840527.md\n```\n1557489868416884741\n```')" plain)
 [ -z "$out" ] || { echo "FAIL: a mention, a link, a URL, inline code, a code block, a longer or a shorter number and one inside a file name must pass: $out"; exit 1; }
-echo "ok: thread-guard denies a bare 17-20 digit id outside code, mentions and URLs, naming each once with no lookup, and passes <#id>, <@id>, a URL, \`id\`, a code block and other numbers"
+out=$(tguard "$(lnk $'| thread | state |\n|---|---|\n| 1557508918970818601 | open |')" plain)
+[ -z "$(reason <<<"$out")" ] && jq -e '.hookSpecificOutput.updatedInput.text | contains("```")' >/dev/null <<<"$out" || { echo "FAIL: an id in a table cell must pass once the table is rewritten into a code block: $out"; exit 1; }
+echo "ok: thread-guard denies a bare 17-20 digit id outside code, mentions and URLs, naming each once with no lookup, and passes <#id>, <@id>, a URL, \`id\`, a code block, a table cell and other numbers"
 echo "ok: thread-guard lets a turn with no Discord message post (channel and threads, dev-manager and mode-none, still under the channel's 500 characters) and denies an arrow mirror line but not an arrow in prose or before a Korean label"
 
 # The thread helper, against the stubbed curl: each call takes the next

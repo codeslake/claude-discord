@@ -72,21 +72,6 @@ input=$(cat 2>/dev/null) || exit 0
 # the line was a copy. A Korean label ("-> 수정: ...") is prose, not a name.
 [ "${arrow:-}" != true ] || deny 'A mirror line says which way it went: "[sent to name] ..." or "[received from name] ...", not an arrow.'
 
-# No bare ids: a reader sees a name, never a number (owner, 2026-10-07).
-# Every 17-20 digit number outside ``` blocks and `inline code`, not already
-# inside a mention, a URL or a word such as a file name (no letter, digit,
-# @ # ! & / : _ . or - right before it), denies the
-# reply. The bot that wrote the id knows what it is, so it rewrites it: a
-# channel or thread as <#id> (its name, linked), a user or bot as plain
-# @name (<@id> would ping a person and hand the message to a bot), or the
-# number in `backticks` when the number itself is the point (a message id).
-# Asking Discord instead put a network round trip on every reply, ~1 s each
-# through the proxy here, for a choice the writer can make (owner, 2026-10-07).
-BARE='(?<![0-9A-Za-z/@#!&:_.-])[0-9]{17,20}(?![0-9])'
-bare=$(printf '%s' "$input" | jq -r --arg re "$BARE" '
-  .tool_input.text // "" | tostring | [splits("```")] | to_entries | map(select(.key % 2 == 0).value | [splits("`")] | to_entries | map(select(.key % 2 == 0).value)) | flatten
-  | [.[] | match($re; "g").string] | unique | join(" ")' 2>/dev/null) || bare=""
-[ -z "$bare" ] || deny "Bare id(s) $bare: write a channel or thread as <#id>, a user or bot as plain @name (not <@id>, which pings), or put the number in \`backticks\` to show it as is."
 
 # Answering a bot means mentioning it, every bot: a bot receives only the
 # messages that mention it, so an unmentioned answer never reaches it. A
@@ -176,6 +161,25 @@ if new != p:
 ' 2>/dev/null) || deny 'Discord does not render markdown tables: rewrite it as a list, or put the table inside a ``` code block, and close every ``` fence.'
   [ -z "$converted" ] || input=$converted
 fi
+
+# No bare ids: a reader sees a name, never a number (owner, 2026-10-07).
+# Every 17-20 digit number outside ``` blocks and `inline code`, not already
+# inside a mention, a URL or a word such as a file name (no letter, digit,
+# @ # ! & / : _ . or - right before it), denies the
+# reply. The bot that wrote the id knows what it is, so it rewrites it: a
+# channel or thread as <#id> (its name, linked), a user or bot as plain
+# @name (<@id> would ping a person and hand the message to a bot), or the
+# number in `backticks` when the number itself is the point (a message id,
+# a measurement: 19 digits is also an epoch in ns). It runs on the text as
+# the table rewrite left it, so an id in a table cell, now inside a ```
+# block, passes.
+# Asking Discord instead put a network round trip on every reply, ~1 s each
+# through the proxy here, for a choice the writer can make (owner, 2026-10-07).
+BARE='(?<![0-9A-Za-z/@#!&:_.-])[0-9]{17,20}(?![0-9])'
+bare=$(printf '%s' "$input" | jq -r --arg re "$BARE" '
+  .tool_input.text // "" | tostring | [splits("```")] | to_entries | map(select(.key % 2 == 0).value | [splits("`")] | to_entries | map(select(.key % 2 == 0).value)) | flatten
+  | [.[] | match($re; "g").string] | unique | join(" ")' 2>/dev/null) || bare=""
+[ -z "$bare" ] || deny "Bare 17-20 digit number(s) $bare: write a channel or thread as <#id>, a user or bot as plain @name (not <@id>, which pings); any other number (a message id, a measurement) goes in \`backticks\`."
 
 if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ] && [ -n "$converted" ]; then
   over=$(printf '%s' "$input" | jq -r --arg ch "$bot_channel" '
