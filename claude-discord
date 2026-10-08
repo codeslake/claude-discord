@@ -51,6 +51,11 @@
 #                             so behind a corporate proxy the Discord gateway
 #                             dies on TLS interception; this preload pins it to
 #                             HTTPS_PROXY. Only wired in when the file exists.
+#   ~/.claude-discord/discord-chunk.ts
+#                             optional. The plugin splits long replies at a fixed
+#                             offset, mid-`code span` or mid-fence; this chunker
+#                             keeps backticks and fences balanced. The plugin's
+#                             chunk() call is pointed at it when the file exists.
 # Needs: bun, jq, and `claude plugin install discord@claude-plugins-official`.
 set -euo pipefail
 
@@ -1358,6 +1363,19 @@ grep -q 'if (msg.author.bot) return' "$install/server.ts" &&
 # wakes every session in the channel. A session is addressed by its own bot only.
 grep -q 'msg.mentions.has(client.user))' "$install/server.ts" &&
   perl -pi -e 's/msg\.mentions\.has\(client\.user\)\)/msg.mentions.has(client.user, { ignoreEveryone: true }))/' "$install/server.ts"
+# The plugin splits a long reply at a fixed offset, which can land inside a
+# `code span` or a ``` fence and leave Discord rendering the rest as code.
+# Point its one chunk() call at the balanced chunker instead; only the call
+# line is touched, so the plugin's own function and version stay as shipped.
+# Idempotent because the call is gone once patched. A plugin update that moves
+# the call is a visible miss on stderr, never a broken edit.
+if [ -f "$helpers/discord-chunk.ts" ]; then
+  if grep -qF 'const chunks = chunk(text, limit, mode)' "$install/server.ts"; then
+    CHUNK_TS=$helpers/discord-chunk.ts perl -pi -e 's/^(\s*)const chunks = chunk\(text, limit, mode\)$/$1const chunks = (await import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)/' "$install/server.ts"
+  elif ! grep -qF '.chunk(text, limit, mode)' "$install/server.ts"; then
+    echo "claude-discord: server.ts has no chunk() call to patch; chunking patch not applied, long replies keep the plugin's fixed-offset split" >&2
+  fi
+fi
 
 # The bot's channel is the single group key in its access.json, where a bot
 # is moved to another channel; config.env's DISCORD_CHANNEL_ID otherwise (no

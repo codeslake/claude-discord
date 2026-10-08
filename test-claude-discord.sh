@@ -55,7 +55,7 @@ KILL_AT_EXIT=""
 export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'kill $KILL_AT_EXIT 2>/dev/null || :; rm -rf /tmp/claude-discord-test-$$' EXIT
 mkdir -p "$HOME/.claude/plugins" "$HOME/fakeplugin" "$HOME/bin"
 echo '{"plugins":{"discord@claude-plugins-official":[{"installPath":"'"$HOME"'/fakeplugin"}]}}' > "$HOME/.claude/plugins/installed_plugins.json"
-printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(msg)\n})\nfunction isAddressed(msg) {\n  if (client.user && msg.mentions.has(client.user)) return true\n}\n' "'messageCreate'" > "$HOME/fakeplugin/server.ts"
+printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(msg)\n})\nfunction isAddressed(msg) {\n  if (client.user && msg.mentions.has(client.user)) return true\n}\nasync function reply(text, limit, mode) {\n        const chunks = chunk(text, limit, mode)\n}\n' "'messageCreate'" > "$HOME/fakeplugin/server.ts"
 printf '#!/bin/bash\necho "LAUNCHER $*"\n' > "$HOME/bin/claude-launcher"; chmod +x "$HOME/bin/claude-launcher"
 printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
 CURL_LOG="$HOME/curl.log"; : > "$CURL_LOG"
@@ -112,7 +112,7 @@ chmod +x "$HOME/bin/fake-worker"
 export PATH="$HOME/bin:$PATH"
 export CURL_LOG CURL_STDIN_LOG CURL_REPLIES
 export CLAUDE_DISCORD_LAUNCHER=claude-launcher
-mkdir -p "$HOME/.claude-discord"; : > "$HOME/.claude-discord/discord-proxy.ts"
+mkdir -p "$HOME/.claude-discord"; : > "$HOME/.claude-discord/discord-proxy.ts"; : > "$HOME/.claude-discord/discord-chunk.ts"
 cp -r "$D/hooks" "$HOME/.claude-discord/hooks"   # stand-in for install.sh, not exercised here
 cp -r "$D/rules" "$HOME/.claude-discord/rules"
 P="$HOME/project"; mkdir -p "$P"; cd "$P"; git init -q .
@@ -535,6 +535,89 @@ bash "$S" alpha >/dev/null 2>&1
 [ "$(grep -c 'client.user?.id) return' "$HOME/fakeplugin/server.ts")" = 1 ]
 [ "$(grep -c 'ignoreEveryone' "$HOME/fakeplugin/server.ts")" = 1 ]
 echo "ok: both patches are idempotent"
+
+CALL='const chunks = chunk(text, limit, mode)'
+PATCHED="const chunks = (await import(\"$HOME/.claude-discord/discord-chunk.ts\")).chunk(text, limit, mode)"
+[ "$(grep -cF "$PATCHED" "$HOME/fakeplugin/server.ts")" = 1 ]
+! grep -qF "$CALL" "$HOME/fakeplugin/server.ts"
+[ "$(grep -c 'const chunks' "$HOME/fakeplugin/server.ts")" = 1 ]
+echo "ok: the chunk() call is pointed at the helper once, and a second start does not patch again"
+
+cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.patched"
+printf 'async function reply() {\n        %s\n}\n' "$CALL" > "$HOME/fakeplugin/server.ts"
+cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.orig"
+mv "$HOME/.claude-discord/discord-chunk.ts" "$HOME/discord-chunk.ts.held"
+out=$(bash "$S" alpha 2>&1)
+cmp -s "$HOME/server.ts.orig" "$HOME/fakeplugin/server.ts"
+! grep -q "chunking patch not applied" <<<"$out"
+mv "$HOME/discord-chunk.ts.held" "$HOME/.claude-discord/discord-chunk.ts"
+echo "ok: no helper file -> server.ts keeps the plugin's chunk() call, no warning"
+
+printf 'async function reply() {\n  const chunks = splitReply(text)\n}\n' > "$HOME/fakeplugin/server.ts"
+cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.orig"
+out=$(bash "$S" alpha 2>&1)
+cmp -s "$HOME/server.ts.orig" "$HOME/fakeplugin/server.ts"
+grep -q "claude-discord: server.ts has no chunk() call to patch; chunking patch not applied" <<<"$out"
+echo "ok: a server.ts without the chunk() call is left as is and the start says the chunking patch was not applied"
+cp "$HOME/server.ts.patched" "$HOME/fakeplugin/server.ts"; rm -f "$HOME/server.ts.orig" "$HOME/server.ts.patched"
+
+if command -v bun >/dev/null; then
+  { printf 'import { chunk } from "%s/discord-chunk.ts"\n' "$D"; cat <<'EOF'
+import assert from "node:assert/strict"
+
+// Single backticks outside fences, and ``` lines, of one piece.
+const ticks = (s: string) => {
+  let fenced = false, n = 0
+  for (const l of s.split("\n")) {
+    if (l.trimStart().startsWith("```")) fenced = !fenced
+    else if (!fenced) n += (l.match(/(?<!`)`(?!`)/g) ?? []).length
+  }
+  return n
+}
+const fences = (s: string) => s.split("\n").filter(l => l.trimStart().startsWith("```")).length
+const alnum = (s: string) => s.replace(/\s+/g, "")
+
+assert.deepEqual(chunk("short", 2000), ["short"])
+
+const span = "Use `foo` and `bar baz` here <@1550630977607565453> then `qux`. "
+const mixed = (span.repeat(8) + "\n\n").repeat(12) + "```bash\n" + "echo hello world\n".repeat(150) + "```\nafter"
+for (const limit of [2000, 200]) {
+  const out = chunk(mixed, limit)
+  assert.ok(out.length > 1)
+  for (const p of out) {
+    assert.ok(p.length > 0 && p.length <= limit, `piece ${p.length} > ${limit}`)
+    assert.equal(ticks(p) % 2, 0, `odd backticks in: ${p}`)
+    assert.equal(fences(p) % 2, 0, `odd fences in: ${p}`)
+  }
+  // Only fence lines were added: dropping them from both sides must match.
+  const body = (s: string) => alnum(s.split("\n").filter(l => !l.trimStart().startsWith("```")).join("\n"))
+  assert.equal(out.map(body).join(""), body(mixed))
+}
+
+// Regression: the old fixed-offset cut at 2000 lands inside a span.
+let para = ""
+for (let k = 0; (para.slice(0, 2000).match(/`/g) ?? []).length % 2 === 0; k++) {
+  para = "x".repeat(k) + ("word `inline code` <@1550630977607565453> ").repeat(100)
+}
+const pieces = chunk(para, 2000)
+assert.ok(pieces.length > 1)
+for (const p of pieces) assert.equal(ticks(p) % 2, 0)
+assert.equal(alnum(pieces.join("")), alnum(para))
+
+// A cut inside a fence closes it and reopens it with the same language tag.
+const f = chunk("```bash\n" + "echo hello world\n".repeat(30) + "```", 200)
+assert.ok(f.length > 1)
+assert.ok(f[0].endsWith("\n```"))
+for (const p of f.slice(1, -1)) assert.ok(p.startsWith("```bash\n") && p.endsWith("\n```"))
+assert.ok(f.at(-1)!.startsWith("```bash\n") && f.at(-1)!.endsWith("```"))
+for (const p of f) assert.equal(fences(p), 2)
+EOF
+  } > "$HOME/chunk.test.ts"
+  bun "$HOME/chunk.test.ts" >/dev/null
+  echo "ok: discord-chunk.ts keeps pieces within the limit, backticks and fences balanced, no text lost"
+else
+  echo "ok: discord-chunk.ts checks skipped (no bun)"
+fi
 
 out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" alpha 2>&1)
 grep -q "^PLAIN --channels plugin:discord@claude-plugins-official" <<<"$out"
