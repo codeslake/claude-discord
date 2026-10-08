@@ -14,7 +14,7 @@
 #    Fullwidth count 2, combining marks 0), and `**`, `__` and backticks,
 #    which a code block shows raw, stripped from the cells. A table with a
 #    line wider than MAX_WIDTH becomes one "header: value · ..." line per
-#    row instead. The reply goes out through updatedInput: the whole input,
+#    row instead, in a ``` block too. The reply goes out through updatedInput: the whole input,
 #    only `text` changed. One inside a code block is left alone. A reply
 #    with a table and an odd number of ``` marks is denied instead: a lone
 #    ``` may be prose or a fence that opens real code, and rewriting around
@@ -128,11 +128,13 @@ def render(header, align, rows):
     ws = [max(width(r[i]) for r in [header] + rows) for i in range(n)]
     line = lambda r: " | ".join(pad(c, w, a) for c, w, a in zip(r, ws, align + ["l"] * n)).rstrip()
     out = [line(header), "-+-".join("-" * w for w in ws)] + [line(r) for r in rows]
-    if max(map(width, out)) <= MAX_WIDTH:
-        # A mention inside a code block pings nobody: mentions in the table go on a line of their own above it.
-        tags = list(dict.fromkeys(re.findall(r"<@[!&]?\d+>", " ".join(sum([header] + rows, [])))))
-        return ([" ".join(tags)] if tags else []) + ["```"] + out + ["```"]
-    return [" · ".join(h + ": " + v for h, v in zip(header, r)) for r in rows] or [" · ".join(header)]
+    if max(map(width, out)) > MAX_WIDTH:
+        out = [" · ".join(h + ": " + v for h, v in zip(header, r)) for r in rows] or [" · ".join(header)]
+    # Both shapes go in a code block, so a cell holds an id as written (the bare-id
+    # check skips code). A mention inside a code block pings nobody: mentions in
+    # the table go on a line of their own above it.
+    tags = list(dict.fromkeys(re.findall(r"<@[!&]?\d+>", " ".join(sum([header] + rows, [])))))
+    return ([" ".join(tags)] if tags else []) + ["```"] + out + ["```"]
 
 def convert(piece):
     lines, out, i = piece.split("\n"), [], 0

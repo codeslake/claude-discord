@@ -1327,7 +1327,7 @@ out=$(tguard "$(body 43 $'설명 ``` 참고\n| a | b |\n|---|---|\n| 1 | 2 |')")
 out=$(tguard "$(body 43 $'| 식 | 값 |\n|---|---|\n| x \\| y | 2 |')")   # GFM keeps an escaped pipe in its cell
 [ "$(newtext <<<"$out")" = $'```\n식    | 값\n------+---\nx | y | 2\n```' ] || { echo "FAIL: an escaped pipe must stay in its cell, unescaped: $(newtext <<<"$out")"; exit 1; }
 out=$(tguard "$(body 43 $'| name | description |\n|---|---|\n| x | '"$(printf 'y%.0s' $(seq 70))"$' |\n| z | w |')")
-[ "$(newtext <<<"$out")" = $'name: x · description: '"$(printf 'y%.0s' $(seq 70))"$'\nname: z · description: w' ] || { echo "FAIL: a table wider than 72 columns must become header: value lines: $out"; exit 1; }
+[ "$(newtext <<<"$out")" = $'```\nname: x · description: '"$(printf 'y%.0s' $(seq 70))"$'\nname: z · description: w\n```' ] || { echo "FAIL: a table wider than 72 columns must become header: value lines in a code block: $out"; exit 1; }
 LONG=$'| hhhhhhhhhhhhhhhhhhhh | b |\n|-|-|'; for _ in $(seq 25); do LONG+=$'\n|1|2|'; done   # 184 characters, 682 once padded
 [ "${#LONG}" -le 500 ] || { echo "FAIL: the sample must be within 500 characters before conversion"; exit 1; }
 out=$(tguard "$(body 42 "$LONG")")
@@ -1401,7 +1401,9 @@ out=$(tguard "$(lnk $'<@1557489868416884743> <#1557489868416884740> <@!155748986
 [ -z "$out" ] || { echo "FAIL: a mention, a link, a URL, inline code, a code block, a longer or a shorter number and one inside a file name must pass: $out"; exit 1; }
 out=$(tguard "$(lnk $'| thread | state |\n|---|---|\n| 1557508918970818601 | open |')" plain)
 [ -z "$(reason <<<"$out")" ] && jq -e '.hookSpecificOutput.updatedInput.text | contains("```")' >/dev/null <<<"$out" || { echo "FAIL: an id in a table cell must pass once the table is rewritten into a code block: $out"; exit 1; }
-echo "ok: thread-guard denies a bare 17-20 digit id outside code, mentions and URLs, naming each once with no lookup, and passes <#id>, <@id>, a URL, \`id\`, a code block, a table cell and other numbers"
+out=$(tguard "$(lnk $'| 쓰레드 | 설명 |\n|---|---|\n| 1557508918970818601 | 오늘 올린 긴 설명입니다. 한글은 한 글자가 두 칸이라 이 표는 일흔두 칸을 넘습니다 |')" plain)
+[ -z "$(reason <<<"$out")" ] && jq -e '.hookSpecificOutput.updatedInput.text | startswith("```\n쓰레드: 1557508918970818601 · ")' >/dev/null <<<"$out" || { echo "FAIL: an id in a table wider than 72 columns must pass once it becomes header: value lines in a code block: $out"; exit 1; }
+echo "ok: thread-guard denies a bare 17-20 digit id outside code, mentions and URLs, naming each once with no lookup, and passes <#id>, <@id>, a URL, \`id\`, a code block, a table cell (narrow or wide) and other numbers"
 echo "ok: thread-guard lets a turn with no Discord message post (channel and threads, dev-manager and mode-none, still under the channel's 500 characters) and denies an arrow mirror line but not an arrow in prose or before a Korean label"
 
 # The thread helper, against the stubbed curl: each call takes the next
