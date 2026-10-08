@@ -700,4 +700,6 @@ rest of Claude Code.
 
 `./test-claude-discord.sh ./claude-discord` runs the wrapper against a
 throwaway HOME with a stub plugin and stub `claude`; it touches nothing real
-and prints `ALL PASS`.
+and prints `ALL PASS`. It runs on Linux only: it finds its stand-in plugin
+servers through `/proc`, and assumes GNU `wc`, `sed` and a `/tmp` that is not a
+symlink, none of which hold on macOS.
