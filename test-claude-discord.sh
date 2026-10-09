@@ -851,7 +851,15 @@ bash "$S" gamma >/dev/null 2>&1
 [ "$(jq -c . "$P2/.claude/settings.json")" = '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' ] || { echo "FAIL: settings.json must keep the unrelated key and hook and none of ours: $(jq -c . "$P2/.claude/settings.json")"; exit 1; }
 ! grep -q 'discord-agents/hooks/' "$P2/.claude/settings.json" || { echo "FAIL: settings.json still holds one of our entries"; exit 1; }
 has_hooks "$P2/.claude/settings.local.json" || { echo "FAIL: settings.local.json must hold all five: $(cat "$P2/.claude/settings.local.json")"; exit 1; }
-echo "ok: a start takes the five entries an older version put into settings.json out of it (its own key and hook stay) and puts them in settings.local.json"
+# A settings.json that held only our entries goes back to its other keys: no
+# "hooks": {} is left behind as a diff.
+jq -n --arg p "$CMD_PROMPT" '{enabledPlugins:{x:true}, hooks:{UserPromptSubmit:[{hooks:[{type:"command",command:$p}]}]}}' > "$P2/.claude/settings.json"
+bash "$S" gamma >/dev/null 2>&1
+[ "$(jq -c . "$P2/.claude/settings.json")" = '{"enabledPlugins":{"x":true}}' ] || { echo "FAIL: a hooks key we emptied must be dropped: $(jq -c . "$P2/.claude/settings.json")"; exit 1; }
+echo '{"hooks":{}}' > "$P2/.claude/settings.json"; bash "$S" gamma >/dev/null 2>&1
+[ "$(jq -c . "$P2/.claude/settings.json")" = '{"hooks":{}}' ] || { echo "FAIL: a hooks key the project left empty itself must stay: $(cat "$P2/.claude/settings.json")"; exit 1; }
+echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"
+echo "ok: a start takes the five entries an older version put into settings.json out of it (its own key and hook stay, a hooks key we emptied goes) and puts them in settings.local.json"
 
 # h3. the next start leaves both files byte-identical.
 cp "$P2/.claude/settings.json" "$P2/sj.before"; cp "$P2/.claude/settings.local.json" "$P2/sl.before"

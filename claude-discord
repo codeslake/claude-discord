@@ -109,8 +109,9 @@ jq_edit() {  # $1 = file, the rest = jq arguments
 # Registers this project's hooks, all of them in settings.local.json, which is
 # gitignored and per machine, and none in settings.json, which a shared repo
 # tracks: writing our entries there on every bot start left such a repo dirty,
-# blocked its merge script, broke its own tests on a clean checkout and made
-# the hooks fire in every non-bot session of that checkout (2026-10-09). Five
+# blocked its merge script and broke its own tests on a clean checkout
+# (2026-10-09). settings.local.json is still project-wide, so every session of
+# the checkout still runs them; they exit at once outside a Discord turn. Five
 # entries are the same for every bot on every machine: the four Discord-turn
 # hooks (identity/refresh, primed once per session; the reply flag; the
 # checkmark reaction; at session start, re-priming after a compact/clear and
@@ -148,6 +149,7 @@ register_hooks() {  # $1 = the project's bot modes, space-separated
   for file in settings.json settings.local.json; do
     jq_edit "$PWD/.claude/$file" --argjson all "$want" --arg file "$file" '
       (if $file == "settings.local.json" then $all else [] end) as $want
+      | ((.hooks | type) == "object" and (.hooks | tostring | contains("/.claude/discord-agents/hooks/"))) as $ours
       | def stale($ev; $m): (.command? // "" | tostring) as $c
           | ($c | contains("/.claude/discord-agents/hooks/"))
             and ([$want[] | select(.ev == $ev and .m == $m) | .cmd] | index($c)) == null;
@@ -162,7 +164,8 @@ register_hooks() {  # $1 = the project's bot modes, space-separated
       | reduce $want[] as $w (.;
           if any(.hooks[$w.ev][]?.hooks?[]?; .command? == $w.cmd) then .
           else .hooks[$w.ev] = ((.hooks[$w.ev] // []) + [(if $w.m == "" then {} else {matcher: $w.m} end) + {hooks: [{type: "command", command: $w.cmd}]}])
-          end)'
+          end)
+      | if $ours and .hooks == {} then del(.hooks) else . end'   # emptied by us: leave no "hooks": {} diff behind
   done
 }
 

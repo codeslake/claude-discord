@@ -332,12 +332,17 @@ Which file holds what:
   `autoresearchclaw/on-start` while one is autoresearchclaw; see Modes)
   depend on the bots THIS machine runs. Writing any of them into a tracked
   `settings.json` left a shared repo dirty on every bot start, blocked its
-  merge script, broke its own tests on a clean checkout and made the hooks
-  fire in every non-bot session of that checkout (reported 2026-10-09).
+  merge script and broke its own tests on a clean checkout (reported
+  2026-10-09). `settings.local.json` is still project-wide, not per bot: every
+  session in that checkout, bot or not, still runs these hooks, which exit at
+  once outside a Discord turn. Registering them per bot needs the plugin.
 - Cleanup removes stale entries of ours (commands under
   `.claude/discord-agents/hooks/`) from both files, so the entries an earlier
   version put into `settings.json` move over to `settings.local.json` on the
-  next start. Every other key and hook in `settings.json` stays as it was.
+  next start. Every other key and hook in `settings.json` stays as it was,
+  and a `hooks` key left empty is dropped. In a repo that committed the old
+  entries, that first start removes them from the tracked file once: commit
+  that removal.
 
 Both `setup` and the start path register them, so a bot set up before this
 existed gets them on its next start too. `mention-guard`, `checkin` and
