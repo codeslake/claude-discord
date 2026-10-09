@@ -945,6 +945,7 @@ if [ "${1:-}" = refresh ]; then
     if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) fresh+=("$a"); continue;; esac; fi
     case $a in
       --force) force=yes;;
+      -n|--name|--name=*) echo "claude-discord: the session is named after the bot; drop $a" >&2; exit 2;;
       -*) fresh+=("$a"); takes_value "$a" && skip=1 || :;;
       *)  if [ -z "$name" ]; then name=$a; else fresh+=("$a"); fi;;
     esac
@@ -1008,18 +1009,22 @@ if [ "${1:-}" = refresh ]; then
   fi
   # Sessions are registered under the name the wrapper gave them (-n) and the
   # directory they were started in; another project's bot of the same name is
-  # not ours. A /rename changes the name, so the session id on-session-start
-  # last recorded for this bot finds it too: without it, refresh found no
-  # renamed session and --force put a second one on the token (DY-DevBot's
-  # alphabot, renamed researchbot, 2026-10-09). A background session has an id for `claude stop` (its pid may be
+  # not ours. A renamed one (/rename) is still found by its job record: every
+  # background launch passes --settings naming this bot's DISCORD_STATE_DIR,
+  # and the daemon keeps that in jobs/<id>/state.json's respawnFlags. A child
+  # session started from the bot's shell only inherits the variable, so it
+  # is never matched this way. Every live match is stopped, not one: a copy
+  # left running is the two-sessions-on-one-token this exists to prevent. A background session has an id for `claude stop` (its pid may be
   # null while it is blocked, so the id decides); a foreground one has only a
   # pid, and SIGTERM is what closing its terminal would send. A listing that
   # fails or is not an array says nothing about what is running, which is not
   # the same as "nothing is": --force may not paper over it.
-  sid=$(cat "$dir/session-id" 2>/dev/null) || sid=""
-  if ! agents=$(claude agents --json 2>/dev/null) || ! live=$(printf '%s' "${agents:-null}" | jq -r --arg n "$name" --arg sid "$sid" --arg cwd "$(pwd -P)" '
+  jobs=$(grep -lF -- "DISCORD_STATE_DIR\\\": \\\"$dir\\\"" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/jobs/*/state.json 2>/dev/null) || jobs=""
+  jobs=$(printf '%s\n' "$jobs" | sed -n 's#.*/\([^/]*\)/state\.json$#\1#p')
+  if ! agents=$(claude agents --json 2>/dev/null) || ! live=$(printf '%s' "${agents:-null}" | jq -r --arg n "$name" --arg jobs "$jobs" --arg cwd "$(pwd -P)" '
+      ($jobs | split("\n")) as $j |
       if type != "array" then error("not a list") else
-        .[] | select((.name == $n or ($sid != "" and .sessionId == $sid)) and .cwd == $cwd and (.id != null or .pid != null))
+        .[] | select((.name == $n or (.id as $i | any($j[]; . == $i))) and .cwd == $cwd and (.id != null or .pid != null))
         | "\(.id // "-") \(.pid // "-")" end' 2>/dev/null); then
     echo "claude-discord: 'claude agents --json' failed, so what is running is unknown; refusing to start a second session" >&2
     exit 1
@@ -1030,7 +1035,7 @@ if [ "${1:-}" = refresh ]; then
     # Starting a second session in the latter case puts two on one token, so
     # refuse unless told otherwise.
     if [ "$force" = no ]; then
-      echo "claude-discord: no running session named $name started in $PWD; it may be down, or running under another name. 'claude agents' lists them; pass --force to start a fresh one anyway" >&2
+      echo "claude-discord: no running session of $name (by name or by its job record) started in $PWD; it may be down, or running under another name. 'claude agents' lists them; pass --force to start a fresh one anyway" >&2
       exit 1
     fi
     echo "claude-discord: no running session named $name found; starting a fresh one (--force)"
@@ -1100,6 +1105,10 @@ args=() name="" skip=0
 for a in "$@"; do
   if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) args+=("$a"); continue;; esac; fi   # a value never starts with "-" (see refresh)
   case $a in
+    # The wrapper names the session after the bot (-n below); a later --name
+    # wins and the bot then goes by another name (DY-DevBot's alphabot ran as
+    # researchbot, 2026-10-09).
+    -n|--name|--name=*) echo "claude-discord: the session is named after the bot; drop $a" >&2; exit 2;;
     -*) args+=("$a"); takes_value "$a" && skip=1 || :;;
     *)  if [ -z "$name" ]; then name=$a; else args+=("$a"); fi;;
   esac

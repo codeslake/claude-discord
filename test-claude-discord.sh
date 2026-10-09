@@ -340,10 +340,7 @@ for src in startup resume; do
   printf '111 222\n' > "$DSD/turns/sPrime"; : > "$DSD/turns/sPrime.replied"; : > "$DSD/turns/sPrime.pending"
 done
 rm -f "$DSD/turns/sPrime" "$DSD/turns/sPrime.replied" "$DSD/turns/sPrime.pending"
-DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<'{"session_id":"sCleared","source":"clear"}'
-[ "$(cat "$DSD/session-id")" = sCleared ] || { echo "FAIL: on-session-start must record the session id, a /clear's new one too"; exit 1; }
 DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<'{"session_id":"sPrime","source":"compact"}'
-[ "$(cat "$DSD/session-id")" = sPrime ] || { echo "FAIL: on-session-start must record the session id on every source"; exit 1; }
 [ ! -f "$DSD/turns/sPrime.primed" ] || { echo "FAIL: a compact must remove the primed flag"; exit 1; }
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$PP")
 [ -n "$out" ] || { echo "FAIL: the turn after a compact/clear must print the identity context again"; exit 1; }
@@ -1773,26 +1770,46 @@ grep -q 'Catch up on the channel and continue from your handoff. $' <<<"$launch"
 [ ! -f "$R/alpha/handoff.md" ] && [ -f "$R/alpha/handoff.prev.md" ] || { echo "FAIL: handoff.md must be consumed into handoff.prev.md"; exit 1; }
 echo "ok: refresh from any cwd stops alpha's live and blocked sessions in this project, waits for the old pid to go, then starts a fresh --bg one holding the handoff, the last message id and a kickoff turn; the file is consumed once"
 
-# A session renamed with /rename is still alpha's: refresh finds it by the
-# session id on-session-start recorded, and stops it before starting.
+# A renamed bot session is found by its job record (the --settings naming
+# alpha's state dir that every launch passes), and every live match is
+# stopped -- a --resume copy left running would be a second session on the
+# token. A child session started from the bot's shell only inherits the
+# variable, so it has no such record and is left alone, whatever its name.
 sleep 300 & OLD=$!
 echo "$OLD" > "$HOME/old.pid"
+JD="$HOME/.claude/jobs"; mkdir -p "$JD/ren11111" "$JD/cpy22222" "$JD/kid33333"
+for j in ren11111 cpy22222; do
+  jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$R/alpha\"}}" '{respawnFlags: ["--settings", $s, "--name", "researchbot"]}' > "$JD/$j/state.json"
+done
+jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$R/alpha2\"}}" '{respawnFlags: ["--settings", $s]}' > "$JD/kid33333/state.json"
 cat > "$HOME/bin/claude" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
-  agents) echo '[{"id":"ren11111","pid":'"$(cat "$HOME/old.pid")"',"name":"researchbot","sessionId":"sid-renamed","cwd":"'"$PWD"'"},{"id":"oth22222","pid":45,"name":"researchbot","sessionId":"sid-other","cwd":"'"$PWD"'"}]';;
+  agents) echo '[{"id":"ren11111","pid":'"$(cat "$HOME/old.pid")"',"name":"researchbot","cwd":"'"$PWD"'"},{"id":"cpy22222","pid":null,"name":"researchbot","cwd":"'"$PWD"'"},{"id":"kid33333","pid":46,"name":"helper","cwd":"'"$PWD"'"}]';;
   stop)   echo "STOP $2" >> "$HOME/claude.calls"; [ "$2" != ren11111 ] || kill "$(cat "$HOME/old.pid")";;
   *)      printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
 esac
 STUB
 rm -f "$HOME/claude.calls" "$R/alpha/refresh.log"
-printf 'x\n' > "$R/alpha/handoff.md"; echo sid-renamed > "$R/alpha/session-id"
-env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null
+printf 'x\n' > "$R/alpha/handoff.md"
+env -u CLAUDE_DISCORD_LAUNCHER -u CLAUDE_CONFIG_DIR bash "$S" refresh alpha >/dev/null
 for _ in $(seq 300); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.05; done
-[ "$(grep '^STOP ' "$HOME/claude.calls")" = "STOP ren11111" ] || { echo "FAIL: refresh must stop the renamed session, and only it: $(cat "$HOME/claude.calls"); log: $(cat "$R/alpha/refresh.log")"; exit 1; }
-grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: refresh must start after stopping the renamed session"; exit 1; }
-rm -f "$R/alpha/session-id"
-echo "ok: refresh finds a /rename'd session by the session id on-session-start recorded, and leaves another session of that name alone"
+[ "$(grep '^STOP ' "$HOME/claude.calls" | sort | tr '\n' ' ')" = "STOP cpy22222 STOP ren11111 " ] || { echo "FAIL: refresh must stop both of alpha's renamed sessions and not the child: $(cat "$HOME/claude.calls"); log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: refresh must start after stopping them"; exit 1; }
+rm -rf "$JD"
+echo "ok: refresh finds a renamed bot session by its job record, stops every live match, and leaves a child session of the bot's shell alone"
+
+# The wrapper names the session after the bot, so --name (which would win
+# over its -n) is refused up front, by refresh before it stops anything.
+rm -f "$HOME/claude.calls"; printf 'x\n' > "$R/alpha/handoff.md"
+for f in "-n x" "--name x" "--name=x"; do
+  out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha $f 2>&1) && { echo "FAIL: refresh $f must be refused"; exit 1; }
+  grep -q 'named after the bot' <<<"$out" || { echo "FAIL: refresh $f: wrong error: $out"; exit 1; }
+  out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" alpha --bg $f 2>&1) && { echo "FAIL: a launch with $f must be refused"; exit 1; }
+  grep -q 'named after the bot' <<<"$out" || { echo "FAIL: launch $f: wrong error: $out"; exit 1; }
+done
+[ ! -f "$HOME/claude.calls" ] || { echo "FAIL: a refused --name must stop and start nothing: $(cat "$HOME/claude.calls")"; exit 1; }
+echo "ok: -n/--name is refused by refresh and by a launch, before anything is stopped or started"
 
 # A stop that does not take: the old process stays up, so nothing may start.
 sleep 300 & OLD=$!
