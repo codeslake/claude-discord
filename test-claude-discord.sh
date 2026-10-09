@@ -19,7 +19,7 @@ CMD_COMPACT_OLD='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/turn/on-com
 CMD_TGUARD='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/peers/thread-guard"; [ ! -x "$h" ] || "$h"'
 has_cmd() { jq -e --arg ev "$1" --arg cmd "$2" '[.hooks[$ev][]?.hooks[]?.command] | index($cmd) != null' "$3" >/dev/null 2>&1; }
 has_matcher() { jq -e --arg ev "$1" --arg m "$2" --arg cmd "$3" '[.hooks[$ev][]? | select(.matcher == $m) | .hooks[]?.command] | index($cmd) != null' "$4" >/dev/null 2>&1; }
-has_hooks() {  # $1 = settings.json path; all five every-bot entries present
+has_hooks() {  # $1 = settings.local.json path; all five every-bot entries present
   has_cmd UserPromptSubmit "$CMD_PROMPT" "$1" &&
   has_matcher PostToolUse mcp__plugin_discord_discord__reply "$CMD_REPLY" "$1" &&
   has_cmd Stop "$CMD_STOP" "$1" &&
@@ -128,7 +128,7 @@ grep -q "^DISCORD_BOT_TOKEN=tokA$" "$R/alpha/.env"
 [ "$(cat "$R/alpha/mode")" = none ] || { echo "FAIL: no mode answer (EOF) must store the default, none"; exit 1; }
 echo "ok: setup writes config.env, .env, access.json (with ackReaction) and mode (default none); others normalised; no-mention honoured"
 
-has_hooks "$P/.claude/settings.json"
+has_hooks "$P/.claude/settings.local.json"
 [ -L "$R/hooks" ] || { echo "FAIL: setup must create the hooks symlink"; exit 1; }
 [ "$(readlink "$R/hooks")" = "$HOME/.claude-discord/hooks" ] || { echo "FAIL: hooks symlink must point at the installed copy"; exit 1; }
 echo "ok: setup also registers the four discord-turn hooks and the hooks symlink (after access.json is written)"
@@ -738,102 +738,127 @@ printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "
 printf 'DISCORD_BOT_TOKEN=tokG\n' > "$P2/.claude/discord-agents/gamma/.env"
 jq -n '{dmPolicy:"allowlist", allowFrom:["2"], groups:{"1":{requireMention:true, allowFrom:["2"]}}}' > "$P2/.claude/discord-agents/gamma/access.json"
 
-# b. no project settings.json yet -> start creates it with exactly one entry
+# b. no project settings.local.json yet (and never a settings.json) -> start creates it with exactly one entry
 # per event, and adds the missing ackReaction and hooks symlink.
-[ ! -f "$P2/.claude/settings.json" ]
+[ ! -f "$P2/.claude/settings.local.json" ]
 bash "$S" gamma >/dev/null 2>&1
-has_hooks "$P2/.claude/settings.json"
-[ "$(jq -c 'keys' "$P2/.claude/settings.json")" = '["hooks"]' ]
-[ ! -e "$P2/.claude/settings.local.json" ] || { echo "FAIL: a project with no dev-manager must get no settings.local.json"; exit 1; }
-[ "$(jq '.hooks.UserPromptSubmit | length' "$P2/.claude/settings.json")" = 1 ]
-[ "$(jq '.hooks.PostToolUse | length' "$P2/.claude/settings.json")" = 1 ]
-[ "$(jq '.hooks.Stop | length' "$P2/.claude/settings.json")" = 1 ]
-[ "$(jq '.hooks.SessionStart | length' "$P2/.claude/settings.json")" = 1 ]
-[ "$(jq '.hooks.PreToolUse | length' "$P2/.claude/settings.json")" = 1 ]
-[ "$(jq -r '.hooks.PostToolUse[0].matcher' "$P2/.claude/settings.json")" = mcp__plugin_discord_discord__reply ]
-[ "$(jq -r '.hooks.SessionStart[0].matcher' "$P2/.claude/settings.json")" = 'startup|resume|compact|clear' ]
+has_hooks "$P2/.claude/settings.local.json"
+[ "$(jq -c 'keys' "$P2/.claude/settings.local.json")" = '["hooks"]' ]
+[ ! -e "$P2/.claude/settings.json" ] || { echo "FAIL: the tracked settings.json must not be created: $(cat "$P2/.claude/settings.json")"; exit 1; }
+[ "$(jq '.hooks.UserPromptSubmit | length' "$P2/.claude/settings.local.json")" = 1 ]
+[ "$(jq '.hooks.PostToolUse | length' "$P2/.claude/settings.local.json")" = 1 ]
+[ "$(jq '.hooks.Stop | length' "$P2/.claude/settings.local.json")" = 1 ]
+[ "$(jq '.hooks.SessionStart | length' "$P2/.claude/settings.local.json")" = 1 ]
+[ "$(jq '.hooks.PreToolUse | length' "$P2/.claude/settings.local.json")" = 1 ]
+[ "$(jq -r '.hooks.PostToolUse[0].matcher' "$P2/.claude/settings.local.json")" = mcp__plugin_discord_discord__reply ]
+[ "$(jq -r '.hooks.SessionStart[0].matcher' "$P2/.claude/settings.local.json")" = 'startup|resume|compact|clear' ]
 [ "$(jq -r '.ackReaction' "$P2/.claude/discord-agents/gamma/access.json")" = "👀" ]
 [ -L "$P2/.claude/discord-agents/hooks" ] || { echo "FAIL: start must create the hooks symlink"; exit 1; }
-[ "$(tail -c1 "$P2/.claude/settings.json" | wc -l)" -eq 1 ] || { echo "FAIL: settings.json must end with a trailing newline"; exit 1; }
+[ "$(tail -c1 "$P2/.claude/settings.local.json" | wc -l)" -eq 1 ] || { echo "FAIL: settings.local.json must end with a trailing newline"; exit 1; }
 [ "$(tail -c1 "$P2/.claude/discord-agents/gamma/access.json" | wc -l)" -eq 1 ] || { echo "FAIL: access.json must end with a trailing newline"; exit 1; }
-echo "ok: start creates settings.json holding exactly one entry per hook, adds ackReaction and the hooks symlink when they were missing, both files end with a trailing newline"
+echo "ok: start creates settings.local.json holding exactly one entry per hook, adds ackReaction and the hooks symlink when they were missing, both files end with a trailing newline"
 
-# c. an existing settings.json keeps its other keys; a second start is a no-op.
-echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"
+# c. an existing settings.local.json keeps its other keys; a second start is a no-op.
+echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.local.json"
 bash "$S" gamma >/dev/null 2>&1
-[ "$(jq -r '.enabledPlugins.x' "$P2/.claude/settings.json")" = true ]
-has_hooks "$P2/.claude/settings.json"
-cp "$P2/.claude/settings.json" "$P2/.claude/settings.json.before"
+[ "$(jq -r '.enabledPlugins.x' "$P2/.claude/settings.local.json")" = true ]
+has_hooks "$P2/.claude/settings.local.json"
+cp "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before"
 bash "$S" gamma >/dev/null 2>&1
-cmp -s "$P2/.claude/settings.json" "$P2/.claude/settings.json.before" || { echo "FAIL: a second start must leave settings.json byte-identical"; exit 1; }
-rm -f "$P2/.claude/settings.json.before"
+cmp -s "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before" || { echo "FAIL: a second start must leave settings.local.json byte-identical"; exit 1; }
+rm -f "$P2/.claude/settings.local.json.before"
 # Migration: an earlier version's turn/on-compact entry (compact|clear) is
 # replaced by on-session-start, leaving one SessionStart entry, not two.
-jq --arg c "$CMD_COMPACT_OLD" '.hooks.SessionStart = [{matcher: "compact|clear", hooks: [{type: "command", command: $c}]}]' "$P2/.claude/settings.json" > "$P2/s.tmp" && cat "$P2/s.tmp" > "$P2/.claude/settings.json" && rm -f "$P2/s.tmp"
+jq --arg c "$CMD_COMPACT_OLD" '.hooks.SessionStart = [{matcher: "compact|clear", hooks: [{type: "command", command: $c}]}]' "$P2/.claude/settings.local.json" > "$P2/s.tmp" && cat "$P2/s.tmp" > "$P2/.claude/settings.local.json" && rm -f "$P2/s.tmp"
 bash "$S" gamma >/dev/null 2>&1
-has_hooks "$P2/.claude/settings.json" && [ "$(jq -c '[.hooks.SessionStart[].hooks[].command]' "$P2/.claude/settings.json")" = "$(jq -nc --arg c "$CMD_SESSION" '[$c]')" ] || { echo "FAIL: the old on-compact entry must be replaced by one on-session-start entry: $(jq -c .hooks.SessionStart "$P2/.claude/settings.json")"; exit 1; }
+has_hooks "$P2/.claude/settings.local.json" && [ "$(jq -c '[.hooks.SessionStart[].hooks[].command]' "$P2/.claude/settings.local.json")" = "$(jq -nc --arg c "$CMD_SESSION" '[$c]')" ] || { echo "FAIL: the old on-compact entry must be replaced by one on-session-start entry: $(jq -c .hooks.SessionStart "$P2/.claude/settings.local.json")"; exit 1; }
 echo "ok: start keeps other keys, adds exactly the four hook entries, replaces an old on-compact entry, and a second start is byte-identical (idempotent)"
 
 # d. invalid JSON is left untouched; the start still reaches the exec; stderr
 # names the file.
-printf 'not json' > "$P2/.claude/settings.json"
-cp "$P2/.claude/settings.json" "$P2/.claude/settings.json.before"
+printf 'not json' > "$P2/.claude/settings.local.json"
+cp "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before"
 out=$(bash "$S" gamma 2>"$P2/stderr.log")
-cmp -s "$P2/.claude/settings.json" "$P2/.claude/settings.json.before" || { echo "FAIL: invalid-JSON settings.json must be left untouched"; exit 1; }
-rm -f "$P2/.claude/settings.json.before"
-grep -qF "$P2/.claude/settings.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the invalid settings file"; exit 1; }
-grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec when settings.json is invalid JSON"; exit 1; }
+cmp -s "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before" || { echo "FAIL: invalid-JSON settings.local.json must be left untouched"; exit 1; }
+rm -f "$P2/.claude/settings.local.json.before"
+grep -qF "$P2/.claude/settings.local.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the invalid settings file"; exit 1; }
+grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec when settings.local.json is invalid JSON"; exit 1; }
 rm -f "$P2/stderr.log"
-echo "ok: invalid-JSON settings.json is left untouched, warned on stderr naming the file, and the start still execs claude"
+echo "ok: invalid-JSON settings.local.json is left untouched, warned on stderr naming the file, and the start still execs claude"
 
-# e. a read-only settings.json without the entries: a failed write must never
+# e. a read-only settings.local.json without the entries: a failed write must never
 # abort the start, must leave the file as it was, and must not leave a temp
 # file behind.
-echo '{}' > "$P2/.claude/settings.json"; chmod 444 "$P2/.claude/settings.json"
-cp "$P2/.claude/settings.json" "$P2/.claude/settings.json.before"
+echo '{}' > "$P2/.claude/settings.local.json"; chmod 444 "$P2/.claude/settings.local.json"
+cp "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before"
 out=$(bash "$S" gamma 2>"$P2/stderr.log")
-chmod 644 "$P2/.claude/settings.json"
-cmp -s "$P2/.claude/settings.json" "$P2/.claude/settings.json.before" || { echo "FAIL: a read-only settings.json must be left untouched"; exit 1; }
-rm -f "$P2/.claude/settings.json.before"
-grep -qF "$P2/.claude/settings.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the unwritable settings file"; exit 1; }
-grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec when settings.json is read-only"; exit 1; }
-[ -z "$(find "$P2/.claude" -maxdepth 1 -name 'settings.json.tmp.*')" ] || { echo "FAIL: a temp file was left behind"; exit 1; }
+chmod 644 "$P2/.claude/settings.local.json"
+cmp -s "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before" || { echo "FAIL: a read-only settings.local.json must be left untouched"; exit 1; }
+rm -f "$P2/.claude/settings.local.json.before"
+grep -qF "$P2/.claude/settings.local.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the unwritable settings file"; exit 1; }
+grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec when settings.local.json is read-only"; exit 1; }
+[ -z "$(find "$P2/.claude" -maxdepth 1 -name 'settings.local.json.tmp.*')" ] || { echo "FAIL: a temp file was left behind"; exit 1; }
 rm -f "$P2/stderr.log"
-echo "ok: a read-only settings.json is left untouched, no temp file is left, and the start still execs claude"
+echo "ok: a read-only settings.local.json is left untouched, no temp file is left, and the start still execs claude"
 
 # f. valid JSON that is not an object: jq can't merge into it; same guarantees.
-echo '[]' > "$P2/.claude/settings.json"
-cp "$P2/.claude/settings.json" "$P2/.claude/settings.json.before"
+echo '[]' > "$P2/.claude/settings.local.json"
+cp "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before"
 out=$(bash "$S" gamma 2>"$P2/stderr.log")
-cmp -s "$P2/.claude/settings.json" "$P2/.claude/settings.json.before" || { echo "FAIL: settings.json holding [] must be left untouched"; exit 1; }
-rm -f "$P2/.claude/settings.json.before"
-grep -qF "$P2/.claude/settings.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the file when settings.json holds []"; exit 1; }
-grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec when settings.json holds []"; exit 1; }
-[ -z "$(find "$P2/.claude" -maxdepth 1 -name 'settings.json.tmp.*')" ] || { echo "FAIL: a temp file was left behind"; exit 1; }
+cmp -s "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before" || { echo "FAIL: settings.local.json holding [] must be left untouched"; exit 1; }
+rm -f "$P2/.claude/settings.local.json.before"
+grep -qF "$P2/.claude/settings.local.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the file when settings.local.json holds []"; exit 1; }
+grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec when settings.local.json holds []"; exit 1; }
+[ -z "$(find "$P2/.claude" -maxdepth 1 -name 'settings.local.json.tmp.*')" ] || { echo "FAIL: a temp file was left behind"; exit 1; }
 rm -f "$P2/stderr.log"
-echo "ok: settings.json holding [] is left untouched, no temp file is left, and the start still execs claude"
+echo "ok: settings.local.json holding [] is left untouched, no temp file is left, and the start still execs claude"
 
 # g. one event key already holds a non-array value: that entry's merge fails
 # under set -e (a bare jq merge, not guarded by an if/&&), so this also
 # proves registration cannot silently abort the start.
-echo '{"hooks":{"UserPromptSubmit":{}}}' > "$P2/.claude/settings.json"
-cp "$P2/.claude/settings.json" "$P2/.claude/settings.json.before"
+echo '{"hooks":{"UserPromptSubmit":{}}}' > "$P2/.claude/settings.local.json"
+cp "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before"
 out=$(bash "$S" gamma 2>"$P2/stderr.log")
-cmp -s "$P2/.claude/settings.json" "$P2/.claude/settings.json.before" || { echo "FAIL: settings.json with a non-array UserPromptSubmit must be left untouched"; exit 1; }
-rm -f "$P2/.claude/settings.json.before"
-grep -qF "$P2/.claude/settings.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the file"; exit 1; }
+cmp -s "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before" || { echo "FAIL: settings.local.json with a non-array UserPromptSubmit must be left untouched"; exit 1; }
+rm -f "$P2/.claude/settings.local.json.before"
+grep -qF "$P2/.claude/settings.local.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the file"; exit 1; }
 grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec"; exit 1; }
-[ -z "$(find "$P2/.claude" -maxdepth 1 -name 'settings.json.tmp.*')" ] || { echo "FAIL: a temp file was left behind"; exit 1; }
+[ -z "$(find "$P2/.claude" -maxdepth 1 -name 'settings.local.json.tmp.*')" ] || { echo "FAIL: a temp file was left behind"; exit 1; }
 rm -f "$P2/stderr.log"
 echo "ok: a non-array value under one event key is warned about and left alone, and the start still execs claude under set -e"
 
-# h. a 0-byte settings.json passes `jq empty`; it must still get the entries,
+# h. a 0-byte settings.local.json passes `jq empty`; it must still get the entries,
 # not be silently skipped.
-: > "$P2/.claude/settings.json"
+: > "$P2/.claude/settings.local.json"
 bash "$S" gamma >/dev/null 2>&1
-has_hooks "$P2/.claude/settings.json"
-[ "$(jq -c 'keys' "$P2/.claude/settings.json")" = '["hooks"]' ]
-echo "ok: a 0-byte settings.json is treated as {} and still gets the four hook entries"
+has_hooks "$P2/.claude/settings.local.json"
+[ "$(jq -c 'keys' "$P2/.claude/settings.local.json")" = '["hooks"]' ]
+echo "ok: a 0-byte settings.local.json is treated as {} and still gets the four hook entries"
+
+# h2. an older version left the five every-bot entries in the tracked
+# settings.json, next to the project's own key and hook: a start takes ours out
+# (only ours), leaves the rest as it was, and puts the five in settings.local.json.
+rm -f "$P2/.claude/settings.local.json"
+jq -n --arg p "$CMD_PROMPT" --arg r "$CMD_REPLY" --arg s "$CMD_STOP" --arg ss "$CMD_SESSION" --arg tg "$CMD_TGUARD" '
+  {enabledPlugins:{x:true},
+   hooks:{
+     UserPromptSubmit:[{hooks:[{type:"command",command:"echo mine"}]},{hooks:[{type:"command",command:$p}]}],
+     PostToolUse:[{matcher:"mcp__plugin_discord_discord__reply",hooks:[{type:"command",command:$r}]}],
+     Stop:[{hooks:[{type:"command",command:$s}]}],
+     SessionStart:[{matcher:"startup|resume|compact|clear",hooks:[{type:"command",command:$ss}]}],
+     PreToolUse:[{matcher:"mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message",hooks:[{type:"command",command:$tg}]}]}}' > "$P2/.claude/settings.json"
+bash "$S" gamma >/dev/null 2>&1
+[ "$(jq -c . "$P2/.claude/settings.json")" = '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' ] || { echo "FAIL: settings.json must keep the unrelated key and hook and none of ours: $(jq -c . "$P2/.claude/settings.json")"; exit 1; }
+! grep -q 'discord-agents/hooks/' "$P2/.claude/settings.json" || { echo "FAIL: settings.json still holds one of our entries"; exit 1; }
+has_hooks "$P2/.claude/settings.local.json" || { echo "FAIL: settings.local.json must hold all five: $(cat "$P2/.claude/settings.local.json")"; exit 1; }
+echo "ok: a start takes the five entries an older version put into settings.json out of it (its own key and hook stay) and puts them in settings.local.json"
+
+# h3. the next start leaves both files byte-identical.
+cp "$P2/.claude/settings.json" "$P2/sj.before"; cp "$P2/.claude/settings.local.json" "$P2/sl.before"
+bash "$S" gamma >/dev/null 2>&1
+cmp -s "$P2/.claude/settings.json" "$P2/sj.before" && cmp -s "$P2/.claude/settings.local.json" "$P2/sl.before" || { echo "FAIL: a second start must leave settings.json and settings.local.json byte-identical"; exit 1; }
+rm -f "$P2/sj.before" "$P2/sl.before"
+echo "ok: a second start leaves settings.json and settings.local.json byte-identical"
 
 # i. an explicit empty ackReaction means the owner disabled it; start must
 # leave it alone, never overwrite it back to the default.
@@ -1106,9 +1131,8 @@ printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bi
 # PostToolUse hook in settings.json and Claude Code's own permission grants in
 # settings.local.json; mgr is a dev-manager. peers.json lists mgr itself too
 # (one list shared across machines), which every consumer must skip by name.
-# The turn hooks and thread-guard live in settings.json (the same on every
-# machine); the other peers hooks in settings.local.json, since they depend
-# on which bots this machine runs.
+# Every hook of ours lives in settings.local.json (per machine, gitignored);
+# the tracked settings.json keeps only what the project put there.
 P4="$HOME/project4"; mkdir -p "$P4/.claude/rules"; cd "$P4"
 R4="$P4/.claude/discord-agents"
 RULE="$P4/.claude/rules/claude-discord-dev-manager.md"
@@ -1124,6 +1148,7 @@ has_peers_hooks() {
 }
 echo mine > "$P4/.claude/rules/other.md"
 echo '{"permissions":{"allow":["Bash(ls)"]},"hooks":{"PostToolUse":[{"matcher":"mcp__plugin_discord_discord__reply","hooks":[{"type":"command","command":"my-own-hook"}]}]}}' > "$SJ"
+cp "$SJ" "$P4/user.before"
 echo '{"permissions":{"allow":["Bash(git status)"]}}' > "$SL"
 out=$(printf '42\n111\n\ntokM\nn\ndev-manager\ndong:900:800:wmac, junyong:901:801:lmd42,mgr:902:803:here,bad:x:1:2\n' | bash "$S" setup mgr 2>"$P4/err")
 [ "$(cat "$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: mode by name was not stored"; exit 1; }
@@ -1135,11 +1160,11 @@ grep -qF "Ask each peer's owner to add this bot's id to their allowFrom; both di
 cmp -s "$D/rules/dev-manager.md" "$RULE" || { echo "FAIL: the dev-manager rule was not dropped into .claude/rules"; exit 1; }
 sed -n 3p "$RULE" | grep -qF 'only to a dev-manager bot: a session whose Discord-turn context contains a `Dev manager:` line' || { echo "FAIL: the rule must open with its condition, since every session in the project loads it"; exit 1; }
 [ "$(grep -c 'Dev manager:' "$RULE")" = 1 ] || { echo "FAIL: only the conditional line may contain the 'Dev manager:' marker (not the heading)"; exit 1; }
-has_hooks "$SJ" && [ -z "$(mode_peers "$SJ")" ] || { echo "FAIL: settings.json must hold the turn hooks and thread-guard and no other peers hook: $(cat "$SJ")"; exit 1; }
-has_peers_hooks "$SL" && ! grep -q 'hooks/turn/\|peers/thread-guard' "$SL" || { echo "FAIL: settings.local.json must hold the three dev-manager peers hooks, no turn hook and no thread-guard: $(cat "$SL")"; exit 1; }
+cmp -s "$SJ" "$P4/user.before" || { echo "FAIL: setup must leave the tracked settings.json as it was: $(cat "$SJ")"; exit 1; }
+has_hooks "$SL" && has_peers_hooks "$SL" || { echo "FAIL: settings.local.json must hold the five every-bot entries and the three dev-manager peers hooks: $(cat "$SL")"; exit 1; }
 [ "$(jq -c '.permissions' "$SJ")" = '{"allow":["Bash(ls)"]}' ] && has_cmd PostToolUse my-own-hook "$SJ" || { echo "FAIL: unrelated settings keys and the user's own hook must survive"; exit 1; }
 [ "$(jq -c '.permissions' "$SL")" = '{"allow":["Bash(git status)"]}' ] || { echo "FAIL: settings.local.json's permission grants must survive"; exit 1; }
-echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned), the group allowFrom, the rule file (conditional first line), the turn hooks and thread-guard in settings.json and the other peers hooks in settings.local.json"
+echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned), the group allowFrom, the rule file (conditional first line), every hook in settings.local.json and none in settings.json"
 
 cp "$R4/peers.json" "$P4/peers.before"; cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
 printf '\nn\n2\n\n' | bash "$S" setup mgr >/dev/null
@@ -1174,19 +1199,24 @@ bash "$S" mgr >/dev/null 2>&1
 cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" && cmp -s "$RULE" "$P4/rule.before" || { echo "FAIL: a second start must change nothing"; exit 1; }
 echo "ok: the drops are the union over the project's bots; start restores the rule, removes a stale claude-discord-*.md, and is idempotent"
 
-# Migration: earlier versions registered the peers hooks in settings.json,
-# and thread-guard, as a dev-manager hook, in settings.local.json. A start
-# moves them: the dev-manager peers hooks out of settings.json, kept once in
-# settings.local.json; thread-guard out of settings.local.json, once in
-# settings.json, under its matcher of now (an edit is guarded as a reply).
-jq --arg g "$CMD_GUARD" --arg c "$CMD_CHECKIN" --arg e "$CMD_GATE" '.hooks.PreToolUse = [{matcher: "mcp__plugin_discord_discord__reply", hooks: [{type: "command", command: $g}]}, {matcher: "Edit|Write|MultiEdit", hooks: [{type: "command", command: $e}]}] | .hooks.PostToolUse += [{matcher: "mcp__plugin_discord_discord__reply", hooks: [{type: "command", command: $c}]}]' "$SJ" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SJ" && rm -f "$P4/s.tmp"
+# Migration: earlier versions registered the five every-bot hooks and the
+# dev-manager peers hooks in settings.json, and thread-guard under a narrower
+# matcher in settings.local.json. A start takes ours out of settings.json (the
+# user's own hook and key stay) and leaves settings.local.json holding each once.
+jq --arg g "$CMD_GUARD" --arg c "$CMD_CHECKIN" --arg e "$CMD_GATE" --arg p "$CMD_PROMPT" --arg r "$CMD_REPLY" --arg st "$CMD_STOP" --arg ss "$CMD_SESSION" --arg t "$CMD_TGUARD" '
+  .hooks.PreToolUse = [{matcher: "mcp__plugin_discord_discord__reply", hooks: [{type: "command", command: $g}]}, {matcher: "Edit|Write|MultiEdit", hooks: [{type: "command", command: $e}]}, {matcher: "mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message", hooks: [{type: "command", command: $t}]}]
+  | .hooks.PostToolUse += [{matcher: "mcp__plugin_discord_discord__reply", hooks: [{type: "command", command: $c}]}, {matcher: "mcp__plugin_discord_discord__reply", hooks: [{type: "command", command: $r}]}]
+  | .hooks.UserPromptSubmit = [{hooks: [{type: "command", command: $p}]}]
+  | .hooks.Stop = [{hooks: [{type: "command", command: $st}]}]
+  | .hooks.SessionStart = [{matcher: "startup|resume|compact|clear", hooks: [{type: "command", command: $ss}]}]' "$SJ" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SJ" && rm -f "$P4/s.tmp"
 jq --arg t "$CMD_TGUARD" '.hooks.PreToolUse += [{matcher: "mcp__plugin_discord_discord__reply", hooks: [{type: "command", command: $t}]}]' "$SL" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SL" && rm -f "$P4/s.tmp"
 has_matcher PreToolUse mcp__plugin_discord_discord__reply "$CMD_TGUARD" "$SL" || { echo "FAIL: the old thread-guard entry was not planted"; exit 1; }
 bash "$S" mgr >/dev/null 2>&1
 tguard_entries() { jq --arg c "$CMD_TGUARD" '[.hooks[]?[]?.hooks[]? | select(.command == $c)] | length' "$1"; }
-[ -z "$(mode_peers "$SJ")" ] && [ "$(tguard_entries "$SJ")" = 1 ] && [ "$(tguard_entries "$SL")" = 0 ] || { echo "FAIL: start must move the peers hooks out of settings.json and thread-guard into it, once: $(jq -c . "$SJ" "$SL")"; exit 1; }
-cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: after the migration both files must be as before: $(jq -c . "$SJ" "$SL")"; exit 1; }
-echo "ok: a start moves the peers hooks an earlier version left in settings.json to settings.local.json, and thread-guard left in settings.local.json to settings.json, once each"
+! grep -q 'discord-agents/hooks/' "$SJ" && [ "$(jq -c . "$SJ")" = "$(jq -c . "$P4/user.before")" ] || { echo "FAIL: start must take every entry of ours out of settings.json and leave the rest: $(jq -c . "$SJ")"; exit 1; }
+[ "$(tguard_entries "$SL")" = 1 ] || { echo "FAIL: thread-guard must be in settings.local.json once: $(jq -c . "$SL")"; exit 1; }
+cmp -s "$SL" "$P4/local.before" || { echo "FAIL: after the migration settings.local.json must be as before: $(jq -c . "$SL")"; exit 1; }
+echo "ok: a start takes the hooks an earlier version left in settings.json out of it (the user's own hook and key stay), and thread-guard under the old matcher in settings.local.json is replaced, once"
 
 # Peers hooks, through the project's symlinked copy.
 G="$R4/hooks/peers"
@@ -1520,12 +1550,12 @@ printf '\nn\n1\n' | bash "$S" setup mgr >/dev/null
 [ "$(cat "$R4/mgr/mode")" = none ] || { echo "FAIL: mode none by number"; exit 1; }
 [ ! -e "$RULE" ] || { echo "FAIL: switching to none must remove the dev-manager rule"; exit 1; }
 [ "$(cat "$P4/.claude/rules/other.md")" = mine ] || { echo "FAIL: a foreign .claude/rules file must survive"; exit 1; }
-! grep -q 'hooks/peers/' "$SL" || { echo "FAIL: switching to none must remove every peers hook entry: $(cat "$SL")"; exit 1; }
+[ -z "$(mode_peers "$SL")" ] && has_hooks "$SL" || { echo "FAIL: switching to none must remove every dev-manager peers hook entry and keep the five every-bot ones: $(cat "$SL")"; exit 1; }
 cmp -s "$SJ" "$P4/settings.before" || { echo "FAIL: settings.json (turn hooks, unrelated keys, the user's own hook) must be untouched"; exit 1; }
 [ "$(jq -c '.permissions' "$SL")" = '{"allow":["Bash(git status)"]}' ] || { echo "FAIL: settings.local.json's permission grants must survive"; exit 1; }
-[ "$(jq -c '.hooks.PreToolUse' "$SL")" = '[{"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":"mine-in-group"}]}]' ] || { echo "FAIL: only our entries go; a group left empty goes, a group still holding a user hook stays: $(jq -c '.hooks.PreToolUse' "$SL")"; exit 1; }
-[ "$(jq '.hooks | has("PostToolUse")' "$SL")" = false ] || { echo "FAIL: an event left with no groups must be dropped: $(jq -c . "$SL")"; exit 1; }
-echo "ok: switching to none removes the rule file and every peers hook entry (empty groups and events dropped), keeps settings.json, the permission grants, a user's own hooks and a foreign rule file"
+[ "$(jq -c '[.hooks.PreToolUse[] | select(.matcher == "Edit|Write|MultiEdit")]' "$SL")" = '[{"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":"mine-in-group"}]}]' ] && [ "$(jq '.hooks.PreToolUse | length' "$SL")" = 2 ] || { echo "FAIL: only our entries go; a group left empty goes, a group still holding a user hook stays: $(jq -c '.hooks.PreToolUse' "$SL")"; exit 1; }
+[ "$(jq -c '[.hooks.PostToolUse[].hooks[].command]' "$SL")" = "$(jq -nc --arg c "$CMD_REPLY" '[$c]')" ] || { echo "FAIL: checkin goes, on-reply stays: $(jq -c .hooks.PostToolUse "$SL")"; exit 1; }
+echo "ok: switching to none removes the rule file and every dev-manager peers hook entry (empty groups dropped, the five every-bot entries kept), keeps settings.json, the permission grants, a user's own hooks and a foreign rule file"
 
 # Back to dev-manager, then autoresearchclaw: no rule file (every session
 # under the project loads one, AutoResearchClaw's own backend `claude` calls
@@ -1542,7 +1572,7 @@ printf '\nn\nautoresearchclaw\n' | bash "$S" setup mgr >/dev/null
 [ -z "$(find "$P4/.claude/rules" -name 'claude-discord-*')" ] || { echo "FAIL: autoresearchclaw must drop no rule file"; exit 1; }
 [ -z "$(mode_peers "$SL" "$SJ")" ] || { echo "FAIL: autoresearchclaw must register no dev-manager peers hook"; exit 1; }
 has_matcher SessionStart 'startup|resume|compact|clear' "$CMD_ARC" "$SL" && [ "$(arc_entries "$SL")" = 1 ] && ! grep -q 'hooks/autoresearchclaw/' "$SJ" || { echo "FAIL: on-start (startup|resume|compact|clear) belongs in settings.local.json only, once: $(cat "$SL")"; exit 1; }
-has_hooks "$SJ" || { echo "FAIL: the turn hooks must survive"; exit 1; }
+has_hooks "$SL" || { echo "FAIL: the turn hooks must survive"; exit 1; }
 cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
 bash "$S" mgr >/dev/null 2>&1
 cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: a start with nothing new must change neither settings file"; exit 1; }
@@ -1682,7 +1712,7 @@ echo "ok: a bot moved by editing its access.json identifies with that channel (o
 # earlier copy planted in settings.json too).
 jq --arg c "$CMD_ARC" '.hooks.SessionStart += [{matcher: "startup|resume", hooks: [{type: "command", command: $c}]}]' "$SJ" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SJ" && rm -f "$P4/s.tmp"
 printf '\nn\n1\n' | bash "$S" setup mgr >/dev/null
-! grep -q 'hooks/autoresearchclaw/' "$SJ" "$SL" && has_hooks "$SJ" || { echo "FAIL: without an autoresearchclaw bot on-start must go from both settings files, the turn hooks stay: $(cat "$SJ" "$SL")"; exit 1; }
+! grep -q 'hooks/autoresearchclaw/' "$SJ" "$SL" && has_hooks "$SL" || { echo "FAIL: without an autoresearchclaw bot on-start must go from both settings files, the turn hooks stay: $(cat "$SJ" "$SL")"; exit 1; }
 echo "ok: once no bot is autoresearchclaw, on-start is removed from both settings files"
 
 cd "$P"   # back to the project whose alpha bot the refresh tests drive
@@ -2426,7 +2456,7 @@ stop_servers
 cd "$HP"
 
 # 10. The timer is explicit, never wired into setup, and one per project.
-grep -q 'health --install-timer' "$P/.claude/settings.json" && { echo "FAIL: the timer must not be registered as a hook"; exit 1; }
+grep -q 'health --install-timer' "$P/.claude/settings.local.json" && { echo "FAIL: the timer must not be registered as a hook"; exit 1; }
 UD="$HOME/.config/systemd/user"
 cat > "$HOME/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash

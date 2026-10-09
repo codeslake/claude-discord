@@ -106,22 +106,24 @@ jq_edit() {  # $1 = file, the rest = jq arguments
   rm -f "$f.tmp.$$"
 }
 
-# Registers this project's hooks. The four Discord-turn hooks (identity/
-# refresh, primed once per session; the reply flag; the checkmark reaction; at
-# session start, re-priming after a compact/clear and clearing a turn left
-# over from a startup/resume), which make a turn that arrived over Discord be
-# answered through the discord reply tool only, never also typed into the CLI,
-# and peers/thread-guard, which keeps Discord to Discord turns and the channel
-# to short lines, on a reply and on an edit alike, are the same for every bot
-# on every machine: they go into settings.json, which can be committed and
-# shared. Every other entry is registered only while its mode is among $1, the
+# Registers this project's hooks, all of them in settings.local.json, which is
+# gitignored and per machine, and none in settings.json, which a shared repo
+# tracks: writing our entries there on every bot start left such a repo dirty,
+# blocked its merge script, broke its own tests on a clean checkout and made
+# the hooks fire in every non-bot session of that checkout (2026-10-09). Five
+# entries are the same for every bot on every machine: the four Discord-turn
+# hooks (identity/refresh, primed once per session; the reply flag; the
+# checkmark reaction; at session start, re-priming after a compact/clear and
+# clearing a turn left over from a startup/resume), which make a turn that
+# arrived over Discord be answered through the discord reply tool only, never
+# also typed into the CLI, and peers/thread-guard, which keeps Discord to
+# Discord turns and the channel to short lines, on a reply and on an edit
+# alike. Every other entry is registered only while its mode is among $1, the
 # modes of the bots THIS machine runs (the three peers hooks for dev-manager,
-# on-start for autoresearchclaw), so it goes into settings.local.json, which
-# is per machine; in a committed settings.json it would flip on every start of
-# a machine with other bots. Any entry of ours (a command under
+# on-start for autoresearchclaw). Any entry of ours (a command under
 # .claude/discord-agents/hooks/) that a file should not hold is removed from
-# it: a mode hook no bot needs, a hook in the other file (settings.json held
-# the peers hooks in an earlier version), one that no longer exists
+# it: a mode hook no bot needs, a hook in settings.json (every earlier version
+# put the five every-bot entries there), one that no longer exists
 # (turn/on-compact became turn/on-session-start) or one under another event or
 # matcher (autoresearchclaw/on-start was startup|resume), along with a matcher
 # group or an event left empty by that. Each command guards on [ -x ], so a
@@ -138,18 +140,14 @@ register_hooks() {  # $1 = the project's bot modes, space-separated
   local needs=("" "" "" "" dev-manager dev-manager "" dev-manager autoresearchclaw)   # the mode an entry needs; "" = every bot
   local want='[]' i cmd file
   for i in "${!events[@]}"; do
-    if [ -z "${needs[i]}" ]; then
-      file=settings.json
-    else
-      case $modes in *" ${needs[i]} "*) file=settings.local.json ;; *) continue ;; esac
-    fi
+    [ -z "${needs[i]}" ] || case $modes in *" ${needs[i]} "*) ;; *) continue ;; esac
     cmd="h=\"\$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/${scripts[i]}\"; [ ! -x \"\$h\" ] || \"\$h\""
-    want=$(printf '%s' "$want" | jq -c --arg ev "${events[i]}" --arg m "${matchers[i]}" --arg cmd "$cmd" --arg file "$file" \
-      '. + [{ev: $ev, m: $m, cmd: $cmd, file: $file}]') || return 0
+    want=$(printf '%s' "$want" | jq -c --arg ev "${events[i]}" --arg m "${matchers[i]}" --arg cmd "$cmd" \
+      '. + [{ev: $ev, m: $m, cmd: $cmd}]') || return 0
   done
   for file in settings.json settings.local.json; do
     jq_edit "$PWD/.claude/$file" --argjson all "$want" --arg file "$file" '
-      ($all | map(select(.file == $file))) as $want
+      (if $file == "settings.local.json" then $all else [] end) as $want
       | def stale($ev; $m): (.command? // "" | tostring) as $c
           | ($c | contains("/.claude/discord-agents/hooks/"))
             and ([$want[] | select(.ev == $ev and .m == $m) | .cmd] | index($c)) == null;

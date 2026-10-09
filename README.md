@@ -324,19 +324,20 @@ session (see Modes and Expected behaviour above).
 
 Which file holds what:
 
-- The four `turn/` hooks and `peers/thread-guard` go into
-  `.claude/settings.json`. Every bot on every machine gets the same five, so
-  this file can be committed and shared.
-- Every mode hook (the other three `peers/` hooks while some bot in the project is
-  a dev-manager, `autoresearchclaw/on-start` while one is autoresearchclaw;
-  see Modes) goes into
-  `.claude/settings.local.json`. Which modes a project has depends on the
-  bots THIS machine runs; in a committed `settings.json` these entries would
-  flip on every start of a machine with other bots. `settings.local.json`
-  is Claude Code's per-machine settings file; keep it out of git. Cleanup
-  removes stale mode entries from both files, so the ones an earlier
-  version put into `settings.json` move over on the next start, and a
-  `thread-guard` entry in `settings.local.json` moves to `settings.json`.
+- Every hook entry goes into `.claude/settings.local.json`, Claude Code's
+  per-machine settings file (keep it out of git), and none into
+  `.claude/settings.json`. The four `turn/` hooks and `peers/thread-guard` are
+  the same for every bot on every machine; the mode hooks (the other three
+  `peers/` hooks while some bot in the project is a dev-manager,
+  `autoresearchclaw/on-start` while one is autoresearchclaw; see Modes)
+  depend on the bots THIS machine runs. Writing any of them into a tracked
+  `settings.json` left a shared repo dirty on every bot start, blocked its
+  merge script, broke its own tests on a clean checkout and made the hooks
+  fire in every non-bot session of that checkout (reported 2026-10-09).
+- Cleanup removes stale entries of ours (commands under
+  `.claude/discord-agents/hooks/`) from both files, so the entries an earlier
+  version put into `settings.json` move over to `settings.local.json` on the
+  next start. Every other key and hook in `settings.json` stays as it was.
 
 Both `setup` and the start path register them, so a bot set up before this
 existed gets them on its next start too. `mention-guard`, `checkin` and
