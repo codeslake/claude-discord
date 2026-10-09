@@ -340,7 +340,10 @@ for src in startup resume; do
   printf '111 222\n' > "$DSD/turns/sPrime"; : > "$DSD/turns/sPrime.replied"; : > "$DSD/turns/sPrime.pending"
 done
 rm -f "$DSD/turns/sPrime" "$DSD/turns/sPrime.replied" "$DSD/turns/sPrime.pending"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<'{"session_id":"sCleared","source":"clear"}'
+[ "$(cat "$DSD/session-id")" = sCleared ] || { echo "FAIL: on-session-start must record the session id, a /clear's new one too"; exit 1; }
 DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<'{"session_id":"sPrime","source":"compact"}'
+[ "$(cat "$DSD/session-id")" = sPrime ] || { echo "FAIL: on-session-start must record the session id on every source"; exit 1; }
 [ ! -f "$DSD/turns/sPrime.primed" ] || { echo "FAIL: a compact must remove the primed flag"; exit 1; }
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$PP")
 [ -n "$out" ] || { echo "FAIL: the turn after a compact/clear must print the identity context again"; exit 1; }
@@ -1769,6 +1772,27 @@ grep -q 'last one your predecessor saw was 1550600000000000000' <<<"$launch" || 
 grep -q 'Catch up on the channel and continue from your handoff. $' <<<"$launch" || { echo "FAIL: the fresh session needs a first turn: $launch"; exit 1; }
 [ ! -f "$R/alpha/handoff.md" ] && [ -f "$R/alpha/handoff.prev.md" ] || { echo "FAIL: handoff.md must be consumed into handoff.prev.md"; exit 1; }
 echo "ok: refresh from any cwd stops alpha's live and blocked sessions in this project, waits for the old pid to go, then starts a fresh --bg one holding the handoff, the last message id and a kickoff turn; the file is consumed once"
+
+# A session renamed with /rename is still alpha's: refresh finds it by the
+# session id on-session-start recorded, and stops it before starting.
+sleep 300 & OLD=$!
+echo "$OLD" > "$HOME/old.pid"
+cat > "$HOME/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  agents) echo '[{"id":"ren11111","pid":'"$(cat "$HOME/old.pid")"',"name":"researchbot","sessionId":"sid-renamed","cwd":"'"$PWD"'"},{"id":"oth22222","pid":45,"name":"researchbot","sessionId":"sid-other","cwd":"'"$PWD"'"}]';;
+  stop)   echo "STOP $2" >> "$HOME/claude.calls"; [ "$2" != ren11111 ] || kill "$(cat "$HOME/old.pid")";;
+  *)      printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
+esac
+STUB
+rm -f "$HOME/claude.calls" "$R/alpha/refresh.log"
+printf 'x\n' > "$R/alpha/handoff.md"; echo sid-renamed > "$R/alpha/session-id"
+env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null
+for _ in $(seq 300); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.05; done
+[ "$(grep '^STOP ' "$HOME/claude.calls")" = "STOP ren11111" ] || { echo "FAIL: refresh must stop the renamed session, and only it: $(cat "$HOME/claude.calls"); log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: refresh must start after stopping the renamed session"; exit 1; }
+rm -f "$R/alpha/session-id"
+echo "ok: refresh finds a /rename'd session by the session id on-session-start recorded, and leaves another session of that name alone"
 
 # A stop that does not take: the old process stays up, so nothing may start.
 sleep 300 & OLD=$!

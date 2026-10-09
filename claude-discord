@@ -1008,14 +1008,18 @@ if [ "${1:-}" = refresh ]; then
   fi
   # Sessions are registered under the name the wrapper gave them (-n) and the
   # directory they were started in; another project's bot of the same name is
-  # not ours. A background session has an id for `claude stop` (its pid may be
+  # not ours. A /rename changes the name, so the session id on-session-start
+  # last recorded for this bot finds it too: without it, refresh found no
+  # renamed session and --force put a second one on the token (DY-DevBot's
+  # alphabot, renamed researchbot, 2026-10-09). A background session has an id for `claude stop` (its pid may be
   # null while it is blocked, so the id decides); a foreground one has only a
   # pid, and SIGTERM is what closing its terminal would send. A listing that
   # fails or is not an array says nothing about what is running, which is not
   # the same as "nothing is": --force may not paper over it.
-  if ! agents=$(claude agents --json 2>/dev/null) || ! live=$(printf '%s' "${agents:-null}" | jq -r --arg n "$name" --arg cwd "$(pwd -P)" '
+  sid=$(cat "$dir/session-id" 2>/dev/null) || sid=""
+  if ! agents=$(claude agents --json 2>/dev/null) || ! live=$(printf '%s' "${agents:-null}" | jq -r --arg n "$name" --arg sid "$sid" --arg cwd "$(pwd -P)" '
       if type != "array" then error("not a list") else
-        .[] | select(.name == $n and .cwd == $cwd and (.id != null or .pid != null))
+        .[] | select((.name == $n or ($sid != "" and .sessionId == $sid)) and .cwd == $cwd and (.id != null or .pid != null))
         | "\(.id // "-") \(.pid // "-")" end' 2>/dev/null); then
     echo "claude-discord: 'claude agents --json' failed, so what is running is unknown; refusing to start a second session" >&2
     exit 1

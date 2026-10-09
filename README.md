@@ -489,9 +489,11 @@ it can still choose well:
 
 Stop before start, never the reverse: two sessions on one token both answer.
 So a session that is still running ten seconds after its stop is reported and
-nothing is started; and a refresh that finds no live session to stop refuses
-rather than start one (the bot may be running under another name or from
-another directory); `--force` overrides that too, but not a `claude agents`
+nothing is started. The bot's session is found by its name or by the session
+id `on-session-start` last recorded in `<bot>/session-id`, so a `/rename`d
+session is still found. A refresh that finds no live session to stop refuses
+rather than start one (the bot may be running from another directory, or
+renamed before this version recorded its id); `--force` overrides that too, but not a `claude agents`
 listing that failed outright, which says nothing about what is running.
 Messages that arrive in the
 gap are not redelivered, so the fresh session is told the id of the last
@@ -663,7 +665,7 @@ rest of Claude Code.
 | `health` says `noreach` for every bot | this machine cannot reach Discord at all (the unauthenticated `/gateway` probe failed), so nothing is said about any bot and no token is blamed. Behind a proxy, `HTTPS_PROXY` is missing from the shell |
 | `health` says `cannot count plugin servers on this machine` | no `/proc` (macOS); the behavioural signal still works, only the cause cannot be named |
 | `claude-discord health: <bot> nostate` | `claude agents` has not answered for six runs, so whether a turn is running cannot be told, and the unanswered message is no longer being held. The daemon is probably unwell: run `claude agents` by hand |
-| `refresh` says `no running session named <name> started in <dir>` | the session was renamed (`/rename`) or started elsewhere; `claude agents` shows it, stop it by hand, then `refresh --force` |
+| `refresh` says `no running session named <name> started in <dir>` | the session was started elsewhere, or renamed (`/rename`) before `<bot>/session-id` was recorded; `claude agents` shows it, stop it by hand, then `refresh --force` |
 | The agent view still lists dead sessions of my bot | a start removes only its own (the session and, if it had one, its worktree): another name's, another project's and the one a `--resume` names are left alone on purpose, and only 20 go per start (oldest first), so start again for the next 20. Otherwise the wrapper predates 2026-09-19 (reinstall), or `claude agents --json --all` is not answering: run it by hand |
 | No report after an iteration | the bot's `mode` is not `autoresearchclaw`; the session has no standing watch running `events` (ask it to start one); the session started before the mode was set (the rules arrive at session start: restart or `/clear` it); or the runs are not under `artifacts/rc-*/` of the project the bot was set up in. `<bot>/arc-seen` lists what `events` has already reported (running `events` by hand records what it prints, so the watch will not see it again) |
 

@@ -47,6 +47,10 @@ $(jq -r '"\(.session_id // "") \(.source // "")"' 2>/dev/null)
 EOF2
 [ -n "$session_id" ] && [ -n "$bot_name" ] || exit 0
 t=$DISCORD_STATE_DIR/turns/$session_id
+# The live session id, for `refresh` to find this bot's session after a
+# /rename (it matches by name OR by this id). A /clear mints a new id, so
+# every source writes it.
+printf '%s\n' "$session_id" 2>/dev/null > "$DISCORD_STATE_DIR/session-id"
 case $source in
   compact|clear) rm -f "$t.primed" 2>/dev/null; exit 0 ;;
   startup|resume) rm -f "$t" "$t.replied" "$t.pending" 2>/dev/null ;;
