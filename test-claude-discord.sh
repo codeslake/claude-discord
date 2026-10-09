@@ -2395,8 +2395,9 @@ mkdir -p "$UD"
 bash "$S" health --uninstall-timer >/dev/null
 [ ! -f "$UD/claude-discord-health-health-project.timer" ] && [ ! -f "$UD/claude-discord-health-health-project.service" ] || { echo "FAIL: --uninstall-timer must remove both units"; exit 1; }
 grep -q 'disable --now' "$HOME/systemctl.calls" || { echo "FAIL: --uninstall-timer must disable the timer: $(cat "$HOME/systemctl.calls")"; exit 1; }
+bash "$S" health --uninstall-timer | grep -q 'no timer was installed' || { echo "FAIL: with no unit left, --uninstall-timer must say none was installed"; exit 1; }
 rm -f "$HOME/bin/systemctl"
-echo "ok: health installs no timer (--install-timer and --proxy are refused), and --uninstall-timer removes one an older version left"
+echo "ok: health installs no timer (--install-timer and --proxy are refused), and --uninstall-timer removes one an older version left, or says there was none"
 
 stop_servers
 cd "$P"

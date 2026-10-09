@@ -461,6 +461,7 @@ if [ "${1:-}" = health ]; then
     slug=$(basename "$PWD" | tr -cd 'A-Za-z0-9_-'); slug=${slug:-project}
     unit=claude-discord-health-$slug
     ud=$HOME/.config/systemd/user
+    [ -f "$ud/$unit.timer" ] || [ -f "$ud/$unit.service" ] || { echo "claude-discord: no timer was installed for this project"; exit 0; }
     systemctl --user disable --now "$unit.timer" >/dev/null 2>&1 || :
     # Both paths are built from $HOME and a slug of $PWD's basename, and
     # the slug falls back to "project", so neither can be empty; unlink
