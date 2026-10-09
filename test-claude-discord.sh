@@ -2264,18 +2264,14 @@ echo "$ID_SEEN" > "$SD/last-message-id"
 # A machine that cannot reach Discord at all must NOT blame any token:
 # measured, a run with no HTTPS_PROXY got 403 on every call and reported
 # every bot's credential as refused, which would send every owner to check
-# something that was fine. The unauthenticated probe separates the two, and
-# no alert is attempted (the POST would fail the same way) nor recorded (it
-# would suppress the real recovery line later).
-: > "$CURL_LOG"; rm -f "$SD/health-alert"
+# something that was fine. The unauthenticated probe separates the two.
+: > "$CURL_LOG"
 queue_unreachable
-out=$(bash "$S" health --notify 2>&1) && { echo "FAIL: an unreachable network must be a finding: $out"; exit 1; }
+out=$(bash "$S" health 2>&1) && { echo "FAIL: an unreachable network must be a finding: $out"; exit 1; }
 grep -q 'sbot noreach' <<<"$out" || { echo "FAIL: the bot must read as noreach: $out"; exit 1; }
 grep -q 'unreachable' <<<"$out" && { echo "FAIL: no token may be blamed when the network is down: $out"; exit 1; }
 grep -q 'HTTPS_PROXY' <<<"$out" || { echo "FAIL: the finding should name the likely cause: $out"; exit 1; }
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 0 ] || { echo "FAIL: no alert may be attempted while Discord is unreachable: $(cat "$CURL_LOG")"; exit 1; }
-[ ! -f "$SD/health-alert" ] || { echo "FAIL: noreach must not be recorded as an alert state, or the real recovery line is suppressed"; exit 1; }
-echo "ok: health tells an unreachable network from a refused token, blames no credential, and neither posts nor records an alert"
+echo "ok: health tells an unreachable network from a refused token and blames no credential"
 
 # 401 and 403 mean the credential was refused. Anything else -- a timeout, a
 # rate limit, an outage -- is not the token's fault, and saying it is sends
@@ -2363,108 +2359,27 @@ stop_servers
 cd "$HP"
 echo "ok: a session the daemon calls working holds the alert whatever the turn file's age, another bot's or another project's does not, an unusable listing counts as working but only to a cap, and a run that can tell resets that count"
 
-# --notify posts one message per state CHANGE, not one per run -- a
-# five-minute timer would otherwise repeat the same line 288 times a day --
-# on the affected bot's OWN token over REST, never through another bot on
-# the machine: a peer there shares the daemon and the upgrade that killed
-# this one, so it would be gone too. The token goes over stdin, never argv.
-# --notify gets a project of its OWN, with one bot. The eight-bot fixture
-# above is the wrong shape for it: every bot there is in some state, several
-# are findings, and each finding posts its own alert -- so "exactly one
-# alert" could only be asserted by first quieting seven bots, and each one's
-# four queued replies would have to stay in step with a POST that happens
-# inside the per-bot loop. One bot makes the queue four lines and the
-# assertions mean what they say.
+# health only reports: it posts nothing to Discord, even for a bot that is a
+# finding, and the --notify that used to post alerts is refused.
 NP="$HOME/notify-project"; mkdir -p "$NP"; cd "$NP"
 printf '900\n111\n222\ntokN\nn\n' | bash "$S" setup nbot >/dev/null
 ND="$NP/.claude/discord-agents/nbot"
 echo "$ID_SEEN" > "$ND/last-message-id"; seed_id "$ND"; seed_guild "$ND"
-echo 7700 > "$ND/health-thread"   # its [health] thread, opened on an earlier run
 start_server "$ND"
 mkdir -p "$ND/turns"; : > "$ND/turns/s1"; touch -d '3 hours ago' "$ND/turns/s1"
 printf '#!/usr/bin/env bash\n[ "$1" = agents ] && echo "[]"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
-# stale, then the reply to the alert POST that follows it.
-notify_run() {  # $1 = the POST's reply, if one is expected
-  queue; qbot "$MENTION"
-  [ $# -eq 0 ] || queue_line "$1"
-}
-# --notify posts one message per state CHANGE, not one per run -- a
-# five-minute timer would otherwise repeat the same line 288 times a day --
-# on the affected bot's OWN token over REST, never through another bot on
-# the machine: a peer there shares the daemon and the upgrade that killed
-# this one, so it would be gone too. The token goes over stdin, never argv.
-: > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
-notify_run '200 {"id":"9001"}'
-bash "$S" health --notify >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] || { echo "FAIL: --notify must post exactly one alert: $(cat "$CURL_LOG")"; exit 1; }
-grep -q 'X POST.*channels/7700/messages' "$CURL_LOG" && ! grep -q 'X POST.*channels/900/' "$CURL_LOG" || { echo "FAIL: the alert must go to the bot's [health] thread, not its channel: $(cat "$CURL_LOG")"; exit 1; }
-grep -qF '"allowed_mentions":{"parse":[]}' "$CURL_LOG" || { echo "FAIL: the alert must ping nobody: $(cat "$CURL_LOG")"; exit 1; }
-grep -q 'refresh nbot' "$CURL_LOG" || { echo "FAIL: the alert must carry the command that fixes it: $(cat "$CURL_LOG")"; exit 1; }
-grep -q 'refresh nbot --force' "$CURL_LOG" && { echo "FAIL: an alert must not hand over --force by default: it replaces the session with no handoff: $(cat "$CURL_LOG")"; exit 1; }
-grep -q 'only if it cannot write a handoff' "$CURL_LOG" || { echo "FAIL: the alert should say when --force is the right call: $(cat "$CURL_LOG")"; exit 1; }
-grep -q 'tokN' "$CURL_LOG" && { echo "FAIL: the token must never reach argv"; exit 1; }
-grep -q 'tokN' "$CURL_STDIN_LOG" || { echo "FAIL: the token must go over stdin"; exit 1; }
 : > "$CURL_LOG"
-notify_run
-bash "$S" health --notify >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 0 ] || { echo "FAIL: the same state must not be alerted twice: $(cat "$CURL_LOG")"; exit 1; }
-# A POST that failed must NOT count as sent: recording it regardless meant a
-# send that failed was never retried, and the bot stayed down and silent.
-rm -f "$ND/health-alert"; : > "$CURL_LOG"
-notify_run '500 {"message":"nope"}'
-bash "$S" health --notify >/dev/null 2>&1 || :
-[ -f "$ND/health-alert" ] && { echo "FAIL: an alert Discord did not accept must not be recorded as sent"; exit 1; }
-: > "$CURL_LOG"
-notify_run '200 {"id":"9002"}'
-bash "$S" health --notify >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] || { echo "FAIL: an alert that failed to send must be retried next run: $(cat "$CURL_LOG")"; exit 1; }
-# Recovery: announced, and only then is the state cleared.
-: > "$CURL_LOG"
-queue; qbot "$NONE"; queue_line '200 {"id":"9003"}'
-bash "$S" health --notify >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] || { echo "FAIL: a recovery must be announced: $(cat "$CURL_LOG")"; exit 1; }
-[ ! -f "$ND/health-alert" ] || { echo "FAIL: the recovery must clear the alert state"; exit 1; }
-grep -q 'health' "$ND/health.log" || { echo "FAIL: every run must leave a local log line, since nobody may be watching the channel"; exit 1; }
-# No [health] thread yet: it is opened with no starter message (nothing in
-# the channel), remembered, and the alert goes inside. The next alert reuses
-# it with one POST. A deleted thread (404) is opened again. A bot that cannot
-# open a thread posts the alert in the channel, saying so, and nothing else
-# lands there. Only the alert's own POST records the state.
-rm -f "$ND/health-thread" "$ND/health-alert"; : > "$CURL_LOG"
-notify_run '201 {"id":"7800"}'; queue_line '200 {"id":"9010"}'
-bash "$S" health --notify >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 2 ] && grep 'X POST' "$CURL_LOG" | sed -n 1p | grep -q '"type":11.*channels/900/threads' && grep 'X POST' "$CURL_LOG" | sed -n 2p | grep -qF 'channels/7800/messages' \
-  && ! grep -q 'X POST.*channels/900/messages' "$CURL_LOG" && [ "$(cat "$ND/health-thread")" = 7800 ] || { echo "FAIL: the first alert must open a starter-less [health] thread, keep its id and post inside, with nothing in the channel: $(cat "$CURL_LOG")"; exit 1; }
-rm -f "$ND/health-alert"; : > "$CURL_LOG"
-notify_run '200 {"id":"9012"}'
-bash "$S" health --notify >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 1 ] && grep -q 'X POST.*channels/7800/messages' "$CURL_LOG" || { echo "FAIL: a later alert must reuse the kept thread with one POST: $(cat "$CURL_LOG")"; exit 1; }
-rm -f "$ND/health-alert"; : > "$CURL_LOG"
-notify_run '404 {"code":10003}'; queue_line '201 {"id":"7900"}'; queue_line '200 {"id":"9011"}'
-bash "$S" health --notify >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 3 ] && [ "$(cat "$ND/health-thread")" = 7900 ] && [ -f "$ND/health-alert" ] \
-  || { echo "FAIL: a deleted [health] thread must be opened again and the alert delivered: $(cat "$CURL_LOG")"; exit 1; }
-rm -f "$ND/health-alert" "$ND/health-thread"; : > "$CURL_LOG"
-notify_run '403 {"code":50013}'; queue_line '200 {"id":"9014"}'
-bash "$S" health --notify >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 2 ] && grep 'X POST' "$CURL_LOG" | sed -n 2p | grep -q 'could not be opened.*channels/900/messages' && [ -f "$ND/health-alert" ] && [ ! -f "$ND/health-thread" ] \
-  || { echo "FAIL: a bot that cannot open a thread must post only the alert in its channel, saying so: $(cat "$CURL_LOG")"; exit 1; }
-echo 7700 > "$ND/health-thread"
-echo "ok: health --notify posts its alerts in one [health] thread per bot (opened once with no starter message and reused, reopened when deleted, the channel only when no thread can be opened, and then only the alert), pinging nobody"
-echo "ok: health --notify posts one alert per state change on the bot's own token over stdin, records it only once Discord accepted it (retrying otherwise), announces the recovery, always logs locally, and never offers --force except to a bot with no session left to lose a handoff from"
-
-# Without --notify nothing is posted at all: a human running it by hand must
-# not wake the channel.
-: > "$CURL_LOG"
-notify_run
-bash "$S" health >/dev/null 2>&1 || :
-[ "$(grep -c 'X POST' "$CURL_LOG")" = 0 ] || { echo "FAIL: health without --notify must post nothing: $(cat "$CURL_LOG")"; exit 1; }
-echo "ok: health posts nothing without --notify"
+queue; qbot "$MENTION"
+out=$(bash "$S" health 2>&1) && { echo "FAIL: a stale bot must be a finding: $out"; exit 1; }
+grep -q 'nbot stale' <<<"$out" || { echo "FAIL: the bot must read as stale: $out"; exit 1; }
+[ "$(grep -c 'X POST' "$CURL_LOG")" = 0 ] || { echo "FAIL: health must post nothing: $(cat "$CURL_LOG")"; exit 1; }
+rc=0; bash "$S" health --notify >/dev/null 2>&1 || rc=$?; [ "$rc" = 2 ] || { echo "FAIL: --notify must be refused as unknown"; exit 1; }
+echo "ok: health posts nothing, even for a finding, and refuses --notify"
 stop_servers
 cd "$HP"
 
-# 10. The timer is explicit, never wired into setup, and one per project.
-grep -q 'health --install-timer' "$P/.claude/settings.local.json" && { echo "FAIL: the timer must not be registered as a hook"; exit 1; }
+# 10. No OS scheduler: installing a timer is refused, and --uninstall-timer
+# still removes the unit an older version installed.
 UD="$HOME/.config/systemd/user"
 cat > "$HOME/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
@@ -2472,49 +2387,16 @@ printf '%s\n' "$*" >> "$HOME/systemctl.calls"
 STUB
 chmod +x "$HOME/bin/systemctl"
 rm -f "$HOME/systemctl.calls"
-bash "$S" health --install-timer >/dev/null
-[ -f "$UD/claude-discord-health-health-project.timer" ] || { echo "FAIL: --install-timer must write a timer unit named after the project"; exit 1; }
-grep -q "WorkingDirectory=$HP" "$UD/claude-discord-health-health-project.service" || { echo "FAIL: the unit must run in the project directory"; exit 1; }
-grep -q 'health --notify' "$UD/claude-discord-health-health-project.service" || { echo "FAIL: the unit must run the check with --notify"; exit 1; }
-grep -q 'OnUnitActiveSec=5min' "$UD/claude-discord-health-health-project.timer" || { echo "FAIL: the timer must fire five minutes after the last run ended"; exit 1; }
-grep -q 'enable --now' "$HOME/systemctl.calls" || { echo "FAIL: --install-timer must enable the timer: $(cat "$HOME/systemctl.calls")"; exit 1; }
-# A systemd unit inherits nothing from the installing shell, so behind a
-# corporate proxy the timer reached Discord unproxied and read every bot as
-# having a refused token (measured). But the installing shell's proxy is the
-# WRONG one to bake in: a bot session's shell usually points at a
-# session-scoped helper that restarts often, and a timer that inherits it
-# reports noreach whenever it bounces -- suppressing real alerts meanwhile.
-# So the proxy is named explicitly, and inherited only when asked for.
-UNIT_SVC="$UD/claude-discord-health-health-project.service"
-rm -f "$UNIT_SVC" "$UD/claude-discord-health-health-project.timer"
-PROXY_ENV=(env -u HTTP_PROXY -u http_proxy -u https_proxy -u no_proxy -u ALL_PROXY -u all_proxy -u NO_PROXY)
-"${PROXY_ENV[@]}" HTTPS_PROXY=http://127.0.0.1:9 bash "$S" health --install-timer >/dev/null
-grep -q 'Environment=' "$UNIT_SVC" && { echo "FAIL: the installing shell's proxy must NOT be baked in by default: $(cat "$UNIT_SVC")"; exit 1; }
-rm -f "$UNIT_SVC"
-"${PROXY_ENV[@]}" bash "$S" health --install-timer --proxy http://127.0.0.1:8118 >/dev/null 2>&1
-grep -q '^Environment=HTTPS_PROXY=http://127.0.0.1:8118$' "$UNIT_SVC" || { echo "FAIL: --proxy must be written into the unit: $(cat "$UNIT_SVC")"; exit 1; }
-grep -q '^Environment=HTTP_PROXY=http://127.0.0.1:8118$' "$UNIT_SVC" || { echo "FAIL: --proxy must cover both schemes"; exit 1; }
-grep -q '^Environment=NO_PROXY=127.0.0.1,localhost,::1$' "$UNIT_SVC" || { echo "FAIL: the loopback exclusions must be kept, or the check proxies its own localhost calls"; exit 1; }
-grep -q '^ExecStart=' "$UNIT_SVC" || { echo "FAIL: the Environment lines must not displace ExecStart"; exit 1; }
-rm -f "$UNIT_SVC"
-"${PROXY_ENV[@]}" HTTPS_PROXY=http://127.0.0.1:9 NO_PROXY=localhost bash "$S" health --install-timer --proxy inherit >/dev/null 2>&1
-grep -q '^Environment=HTTPS_PROXY=http://127.0.0.1:9$' "$UNIT_SVC" || { echo "FAIL: --proxy inherit must take the shell's: $(cat "$UNIT_SVC")"; exit 1; }
-grep -q '^Environment=NO_PROXY=localhost$' "$UNIT_SVC" || { echo "FAIL: --proxy inherit must take NO_PROXY too"; exit 1; }
-grep -q 'Environment=HTTP_PROXY' "$UNIT_SVC" && { echo "FAIL: an unset variable must not be written"; exit 1; }
-# A value that is not a URL, or that could open a second unit line and
-# inject a directive, is refused before anything is written.
-rm -f "$UNIT_SVC"
-"${PROXY_ENV[@]}" bash "$S" health --install-timer --proxy not-a-url >/dev/null 2>&1 && { echo "FAIL: a non-URL proxy must be refused"; exit 1; }
-"${PROXY_ENV[@]}" bash "$S" health --install-timer --proxy "$(printf 'http://x\nExecStart=/bin/false')" >/dev/null 2>&1 && { echo "FAIL: a multi-line proxy value must be refused"; exit 1; }
-[ ! -f "$UNIT_SVC" ] || { echo "FAIL: a refused --proxy must write no unit: $(cat "$UNIT_SVC")"; exit 1; }
-"${PROXY_ENV[@]}" bash "$S" health --install-timer --proxy >/dev/null 2>&1 && { echo "FAIL: --proxy with no value must be refused"; exit 1; }
-"${PROXY_ENV[@]}" bash "$S" health --proxy http://x >/dev/null 2>&1 && { echo "FAIL: --proxy without --install-timer must be refused"; exit 1; }
-"${PROXY_ENV[@]}" bash "$S" health --install-timer --proxy http://127.0.0.1:8118 >/dev/null 2>&1
+bash "$S" health --install-timer >/dev/null 2>&1 && { echo "FAIL: --install-timer must be refused"; exit 1; }
+bash "$S" health --proxy http://127.0.0.1:8118 >/dev/null 2>&1 && { echo "FAIL: --proxy must be refused"; exit 1; }
+[ ! -e "$UD/claude-discord-health-health-project.timer" ] && [ ! -e "$HOME/systemctl.calls" ] || { echo "FAIL: a refused option must write and enable nothing"; exit 1; }
+mkdir -p "$UD"
+: > "$UD/claude-discord-health-health-project.timer"; : > "$UD/claude-discord-health-health-project.service"
 bash "$S" health --uninstall-timer >/dev/null
 [ ! -f "$UD/claude-discord-health-health-project.timer" ] && [ ! -f "$UD/claude-discord-health-health-project.service" ] || { echo "FAIL: --uninstall-timer must remove both units"; exit 1; }
 grep -q 'disable --now' "$HOME/systemctl.calls" || { echo "FAIL: --uninstall-timer must disable the timer: $(cat "$HOME/systemctl.calls")"; exit 1; }
 rm -f "$HOME/bin/systemctl"
-echo "ok: health --install-timer writes one enabled unit per project running the check with --notify in that directory, bakes in no proxy unless --proxy says which (refusing a non-URL or multi-line one, or inheriting on request), and --uninstall-timer removes it"
+echo "ok: health installs no timer (--install-timer and --proxy are refused), and --uninstall-timer removes one an older version left"
 
 stop_servers
 cd "$P"

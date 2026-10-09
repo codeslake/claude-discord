@@ -17,20 +17,13 @@
 #   claude-discord refresh <name> [--force] [claude args]
 #                                        replace the running session with a fresh
 #                                        one that starts from its handoff
-#   claude-discord health [--notify] [--json]
+#   claude-discord health [--json]
 #                                        is every bot in this project still
-#                                        answering? --notify posts an alert in
-#                                        the bot's "[health] <bot>" thread,
-#                                        mentioning nobody; exit 1 on a
-#                                        finding
-#   claude-discord health --install-timer [--proxy <url>|inherit]
+#                                        answering? exit 1 on a finding
 #   claude-discord health --uninstall-timer
-#                                        run that check every five minutes
-#                                        (systemd --user), with --notify. A
-#                                        unit inherits no environment, so
-#                                        behind a proxy name it with --proxy;
-#                                        point it at the machine's stable
-#                                        egress, not a per-session helper
+#                                        remove the systemd --user timer an
+#                                        older version installed; no OS
+#                                        scheduler is installed any more
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
@@ -388,12 +381,11 @@ takes_value() {
 # machine, a worker that came back from a Claude Code self-upgrade ran no
 # hooks at all for 21 hours, and a `refresh` whose `--bg` start hit the
 # workspace-trust gate left the bot down for 22 -- neither reported anywhere.
-# `health` is the outside check for exactly that, run by a timer (see
-# --install-timer) rather than by a session, so it still speaks when the
-# session is the thing that died.
+# `health` is the outside check for exactly that, run by hand from outside
+# the session, so it still speaks when the session is the thing that died.
 #
-#   claude-discord health [--notify] [--json]
-#   claude-discord health --install-timer | --uninstall-timer
+#   claude-discord health [--json]
+#   claude-discord health --uninstall-timer
 #
 # What it judges by, and why not the obvious thing: `claude agents`' `.state`
 # is NOT a liveness signal. Measured on two machines, a fully live bot shows
@@ -441,22 +433,14 @@ if [ "${1:-}" = health ]; then
   # silent for days with nobody told. Deliberately generous -- well past any
   # honest turn -- so it only fires when something is really wrong.
   busy_cap_min=240    # 4 h unanswered ends the hold whatever the session says
-  notify=no as_json=no timer="" proxy="" want_proxy=0
+  as_json=no timer=""
   for a in "$@"; do
-    if [ "$want_proxy" = 1 ]; then proxy=$a; want_proxy=0; continue; fi
     case $a in
-      --notify) notify=yes;;
       --json) as_json=yes;;
-      --install-timer) timer=install;;
       --uninstall-timer) timer=uninstall;;
-      --proxy) want_proxy=1;;
-      --proxy=*) proxy=${a#--proxy=};;
-      *) echo "usage: claude-discord health [--notify] [--json] | health --install-timer [--proxy <url>|inherit] | --uninstall-timer" >&2; exit 2;;
+      *) echo "usage: claude-discord health [--json] | health --uninstall-timer" >&2; exit 2;;
     esac
   done
-  [ "$want_proxy" = 0 ] || { echo "claude-discord: --proxy needs a URL, or the word inherit" >&2; exit 2; }
-  [ -z "$proxy" ] || [ "$timer" = install ] || { echo "claude-discord: --proxy only means anything with --install-timer" >&2; exit 2; }
-  case $0 in /*) self=$0;; *) self=$PWD/$0;; esac
   # The working directory decides, and only when it holds no bots does the
   # environment stand in. `refresh` leans on DISCORD_STATE_DIR because a
   # session refreshes ITSELF, but `health` is about a project: measured,
@@ -469,124 +453,22 @@ if [ "${1:-}" = health ]; then
     root=$PWD/.claude/discord-agents
   fi
 
-  # One timer per PROJECT, not per bot and not per machine: the unit carries
-  # this project's directory, and `health` walks every bot in it. A machine
-  # with bots in two projects installs two, whose names differ by the
-  # project's basename. Deliberately NOT wired into `setup`: setup only ever
-  # writes inside the project, and a unit is user-wide state.
-  if [ -n "$timer" ]; then
-    command -v systemctl >/dev/null 2>&1 || { echo "claude-discord: no systemctl on this machine; run '$self health --notify' from a cron entry or launchd job in $PWD instead" >&2; exit 1; }
+  # Removing a timer an older version installed. Installing one is gone: the
+  # owner's rule (2026-10-09) is no OS scheduler -- a systemd unit outlives
+  # every session, so a bot thought stopped comes back on the next boot.
+  # One unit per project, named after its basename.
+  if [ "$timer" = uninstall ]; then
     slug=$(basename "$PWD" | tr -cd 'A-Za-z0-9_-'); slug=${slug:-project}
     unit=claude-discord-health-$slug
     ud=$HOME/.config/systemd/user
-    if [ "$timer" = uninstall ]; then
-      systemctl --user disable --now "$unit.timer" >/dev/null 2>&1 || :
-      # Both paths are built from $HOME and a slug of $PWD's basename, and
-      # the slug falls back to "project", so neither can be empty; unlink
-      # rather than rm, since it can only ever remove one plain file.
-      [ -f "$ud/$unit.timer" ] && unlink "$ud/$unit.timer"
-      [ -f "$ud/$unit.service" ] && unlink "$ud/$unit.service"
-      systemctl --user daemon-reload >/dev/null 2>&1 || :
-      echo "claude-discord: removed $unit.timer"
-      exit 0
-    fi
-    [ -d "$root" ] || { echo "claude-discord: no bot set up in $root; run 'claude-discord setup <name>' here first" >&2; exit 1; }
-    mkdir -p "$ud"
-    # A systemd unit inherits nothing from the shell that installed it, and
-    # behind a corporate proxy that breaks everything: measured 2026-09-25,
-    # the first timer run reached Discord with no HTTPS_PROXY, got 403 on
-    # every call and concluded that every bot's token had been refused.
-    # So the unit needs a proxy -- but NOT, by default, the installing
-    # shell's. A bot session's shell usually points at a session-scoped
-    # helper that restarts often (on this machine 127.0.0.1:9801 is
-    # claude-code-cache-fix's node proxy, up 9 days but tied to the session
-    # manager; on another, a pin proxy whose restarts already produced two
-    # false DOWN reports in someone else's monitor). A timer that inherits
-    # such a proxy reports noreach whenever it bounces, and a real alert is
-    # suppressed for as long as that lasts. So the proxy is named
-    # explicitly, with --proxy, and otherwise left out; the timer then uses
-    # whatever the user manager has, or nothing. --proxy inherit asks for
-    # the old behaviour knowingly.
-    case ${proxy:-} in
-      "")  envlines="";;
-      inherit)
-        envlines=""
-        for v in HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NO_PROXY no_proxy; do
-          [ -n "${!v:-}" ] || continue
-          envlines="${envlines}Environment=$v=${!v}
-"
-        done
-        [ -n "$envlines" ] || echo "claude-discord: --proxy inherit, but this shell has no proxy variables, so none were written" >&2
-        ;;
-      *)
-        # A value goes into the unit verbatim, so it must not be able to
-        # open a second line and inject a directive of its own.
-        # An allowlist, not a search for bad characters: a blocklist let a
-        # space, a tab or a systemd %-specifier through, and a unit file
-        # takes `Environment=` values with spaces, so anything after one
-        # could become a second assignment -- and systemd expands
-        # %-specifiers in unit files besides. So the value must be exactly
-        # scheme://host[:port], with host and port from a fixed character
-        # set. Nothing else can reach the file.
-        case $proxy in
-          http://*|https://*|socks5://*|socks5h://*) ;;
-          *) echo "claude-discord: --proxy wants a URL like http://127.0.0.1:8118, got '$proxy'" >&2; exit 2;;
-        esac
-        # bash's own =~, not `grep -qE`: grep matches LINE BY LINE, so a
-        # value whose first line is a valid URL passes however many lines
-        # follow -- measured, "http://x\nExecStart=/bin/false" was accepted,
-        # which is exactly the unit-file injection this check exists to
-        # stop. bash anchors ^ and $ to the whole string.
-        if ! [[ $proxy =~ ^(https?|socks5h?)://[A-Za-z0-9._:-]*[A-Za-z0-9.]$ ]]; then
-          echo "claude-discord: --proxy must be scheme://host[:port] with host letters, digits, dots and dashes, got '$proxy'" >&2
-          exit 2
-        fi
-        # Checked now rather than at the first run 5 minutes later: a
-        # mistyped proxy would otherwise look exactly like Discord being
-        # down. A failure is reported and the install goes ahead, since the
-        # proxy may simply not be up yet.
-        if command -v curl >/dev/null 2>&1; then
-          st=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --proxy "$proxy" \
-            https://discord.com/api/v10/gateway </dev/null 2>/dev/null) || st=000
-          case $st in 2*) echo "claude-discord: $proxy reaches Discord (HTTP $st)";;
-                       *) echo "claude-discord: warning: $proxy did not reach Discord (HTTP $st); the timer will report noreach until it does" >&2;; esac
-        fi
-        envlines="Environment=HTTPS_PROXY=$proxy
-Environment=HTTP_PROXY=$proxy
-Environment=NO_PROXY=127.0.0.1,localhost,::1
-"
-        ;;
-    esac
-    # Type=oneshot: the timer waits for the check to finish, so a slow
-    # Discord call cannot overlap two runs. OnUnitActiveSec, not
-    # OnCalendar: five minutes after the last run ENDED, whatever the clock
-    # did.
-    cat > "$ud/$unit.service" <<EOS
-[Unit]
-Description=claude-discord bot health check ($PWD)
-
-[Service]
-Type=oneshot
-WorkingDirectory=$PWD
-${envlines}ExecStart=$self health --notify
-EOS
-    cat > "$ud/$unit.timer" <<EOS
-[Unit]
-Description=Run the claude-discord bot health check every 5 minutes ($PWD)
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-AccuracySec=30s
-Unit=$unit.service
-
-[Install]
-WantedBy=timers.target
-EOS
+    systemctl --user disable --now "$unit.timer" >/dev/null 2>&1 || :
+    # Both paths are built from $HOME and a slug of $PWD's basename, and
+    # the slug falls back to "project", so neither can be empty; unlink
+    # rather than rm, since it can only ever remove one plain file.
+    [ -f "$ud/$unit.timer" ] && unlink "$ud/$unit.timer"
+    [ -f "$ud/$unit.service" ] && unlink "$ud/$unit.service"
     systemctl --user daemon-reload >/dev/null 2>&1 || :
-    systemctl --user enable --now "$unit.timer" >/dev/null 2>&1 || { echo "claude-discord: wrote $ud/$unit.timer but could not enable it; 'systemctl --user enable --now $unit.timer' says why" >&2; exit 1; }
-    echo "claude-discord: $unit.timer enabled, every 5 minutes, checking the bots in $PWD"
-    echo "claude-discord: alerts go to each bot's [health] thread; 'claude-discord health --uninstall-timer' stops it"
+    echo "claude-discord: removed $unit.timer"
     exit 0
   fi
 
@@ -714,55 +596,6 @@ EOS
       >/dev/null 2>&1
   }
 
-  # POSTs $2 (JSON) to API path $1 as this bot; sets $post_status and
-  # $post_resp and returns 0 only on a 2xx. Token on stdin (-H @-), never argv.
-  post() {
-    local out
-    out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 10 -w '\n%{http_code}' \
-      -X POST -H @- -H 'Content-Type: application/json' --data-raw "$2" \
-      "https://discord.com/api/v10/$1" 2>/dev/null) || out=""
-    post_status=${out##*$'\n'} post_resp=${out%$'\n'*}
-    case $post_status in ''|*[!0-9]*) post_status=000;; esac
-    case $post_status in 2*) return 0;; *) return 1;; esac
-  }
-
-  # Alerts go into ONE "[health] <bot>" thread under the bot's main channel
-  # ($ch: its only group, else the channel setup first registered), never
-  # into the channel itself, and mention nobody: in the channel an alert sat
-  # with no context in every reader's way (owner, 2026-10-07: "head 쓰레드
-  # 파서 거기에 tagging도 없이"). The thread is opened once, with no starter
-  # message (type 11: nothing lands in the channel, so a failed open leaves
-  # no stray line behind), and its id kept in <bot>/health-thread (setup and
-  # refresh leave it).
-  health_thread() {  # sets $hth
-    hth=$(cat "$d/health-thread" 2>/dev/null) || hth=""
-    is_id "$hth" && return 0
-    post "channels/$ch/threads" "$(jq -nc --arg n "[health] $bot" '{name: $n, type: 11, auto_archive_duration: 10080}')" || return 1
-    hth=$(printf '%s' "$post_resp" | jq -r '.id // empty' 2>/dev/null)
-    is_id "$hth" || return 1
-    printf '%s\n' "$hth" > "$d/health-thread" 2>/dev/null || :
-  }
-
-  # Only the alert's own POST counts as delivered (the caller records the
-  # state on it), never the thread's creation. A post to an archived thread
-  # reopens it on its own (measured 2026-10-07, unlocked thread: 200); a
-  # deleted one (404) is opened again. A bot that cannot
-  # open a thread at all (no Create Public Threads, or a channel that is
-  # itself a thread) posts in the channel, saying so: an alert lost there is
-  # the silence this check exists to end.
-  post_message() {  # $1 = content; into the health thread, pinging nobody
-    local body
-    body=$(jq -nc --arg m "$1" '{content: $m, allowed_mentions: {parse: []}}')
-    if ! health_thread; then
-      post "channels/$ch/messages" "$(jq -nc --arg m "$1 (the [health] thread could not be opened, HTTP $post_status)" '{content: $m, allowed_mentions: {parse: []}}')"
-      return
-    fi
-    post "channels/$hth/messages" "$body" && return 0
-    [ "$post_status" = 404 ] || return 1
-    rm -f "$d/health-thread"
-    health_thread && post "channels/$hth/messages" "$body"
-  }
-
   api() {  # $1 = path; sets $status and $resp. Token on stdin, never argv.
     local out
     out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 10 -w '\n%{http_code}' -H @- \
@@ -843,8 +676,7 @@ EOS
   # measured 2026-09-25, a run with no HTTPS_PROXY got 403 on every call and
   # blamed every bot's token, which would have sent every owner to check a
   # credential that was perfectly fine. So when the network is down, that is
-  # the single finding, no token is blamed, and no alert is attempted (the
-  # POST would fail by the same route). The wording names the likely cause,
+  # the single finding and no token is blamed. The wording names the likely cause,
   # since a missing proxy is what produced it here.
   # Same `-w '\n%{http_code}'` shape as api() below rather than
   # `-o /dev/null -w '%{http_code}'`: the status must be taken from the LAST
@@ -916,7 +748,7 @@ EOS
       verdict=unknown detail="no token or channel in $d"
     else
       # A bot's own user id never changes, so it is asked for once and kept
-      # in the state dir: on a five-minute timer that is one fewer HTTP call
+      # in the state dir: that is one fewer HTTP call
       # AND one fewer jq per bot per run, for a fact that was already known.
       # A cached value is trusted only if it looks like an id.
       me=$(cat "$d/bot-id" 2>/dev/null) || me=""
@@ -955,7 +787,7 @@ EOS
           # created inside one guild and is deleted, not moved -- so this
           # whole request exists to learn one immutable fact. It is kept in
           # the state dir like bot-id, which is one fewer HTTP call AND one
-          # fewer jq per bot per run, 288 runs a day on the timer.
+          # fewer jq per bot per run.
           # The CHANNEL is stored beside the guild because the bot's channel
           # CAN change (access.json is edited to move it), and a cache keyed
           # on nothing would then answer for the old channel. A cached line
@@ -1015,7 +847,7 @@ EOS
           verdict=nostate detail="unanswered for ${age}m and 'claude agents' has not answered for $unknowns runs, so whether a turn is running cannot be told; the daemon itself may be unwell"
         elif [ -n "$turn" ] && { [ "$turn" -lt "$turn_max_min" ] || [ "$working" != 1 ]; } &&
              [ "$age" -lt "$busy_cap_min" ]; then
-          verdict=busy detail="a turn has been in flight ${turn}m; holding the alert"
+          verdict=busy detail="a turn has been in flight ${turn}m; holding the finding"
           case $working in
             0) detail="$detail (the session is running one now)";;
             2) detail="$detail (run $unknowns of $unknown_cap with no answer from 'claude agents')";;
@@ -1058,73 +890,12 @@ EOS
     # whose whole problem may be that nobody is looking at it.
     ! command -v logger >/dev/null 2>&1 || logger -t claude-discord-health -- "$line" 2>/dev/null || :
 
-    # One alert per state change, not one per run: a five-minute timer would
-    # otherwise repeat the same line 288 times a day. The recovery line is
-    # worth its own message -- someone who saw the alert needs to be told it
-    # is over. The alert goes out on the DOWN bot's own token over REST,
-    # never through another bot on this machine: a peer there shares the
-    # daemon and the upgrade that killed this one, so it would be gone too.
-    # `$net` is in the condition because a POST would fail by the same route
-    # the checks just failed on, and because the state file must not record
-    # `noreach` -- otherwise the real recovery line would be suppressed as a
-    # repeat once the network came back.
-    if [ "$notify" = yes ] && [ "$net" = ok ] && [ -n "$tok" ] && is_id "$ch"; then
-      # The state file holds "<verdict> <oldest unanswered id>", not just the
-      # verdict. With the verdict alone, a bot that was refreshed but never
-      # answered the message that triggered the alert keeps its old
-      # last-message-id, so the finding never clears -- and because the
-      # verdict then never CHANGES, no later outage is ever announced
-      # either: one stuck alert silences the channel for good. Including the
-      # id means a finding about a different message is a new finding, and
-      # the bot answering anything moves last-message-id past it, which ends
-      # the old one and posts the recovery.
-      prev=$(cat "$d/health-alert" 2>/dev/null) || prev=""
-      now_state="$verdict ${oldest:-none}"
-      if [ "$verdict" != ok ] && [ "$verdict" != busy ]; then
-        if [ "$now_state" != "$prev" ]; then
-          # Never `--force` by default. It replaces the session WITHOUT a
-          # handoff, throwing away everything that session knew, and a plain
-          # `refresh` is what is wanted whenever the session can still write
-          # one. The alert says so rather than handing over the destructive
-          # form: the false alert this check sent on its first live run told
-          # its reader to force-refresh a session that was working fine.
-          fix="claude-discord refresh $bot   # --force only if it cannot write a handoff"
-          case $verdict in
-            down)        fix="claude-discord refresh $bot --force   # nothing is running, so there is no handoff to lose";;
-            duplicate)   fix="claude agents   # stop whichever session is not $bot's";;
-            unreachable) fix="check DISCORD_BOT_TOKEN in $d/.env";;
-            unknown)     fix="claude-discord setup $bot";;
-            noreach)     fix="check this machine's network and HTTPS_PROXY";;
-            nostate)     fix="claude agents   # see whether the daemon answers at all";;
-          esac
-          # The state is written only when the POST actually succeeded.
-          # Recording it regardless meant a send that failed (a rate limit,
-          # a dropped connection) counted as "already told them", and the
-          # alert was never retried -- the bot stayed down and silent, which
-          # is the exact failure this exists to report. On a failure nothing
-          # is recorded, so the next run tries again.
-          if post_message "[health] $bot: $verdict — ${detail:-no detail}. 조치: \`$fix\`"; then
-            printf '%s\n' "$now_state" > "$d/health-alert" 2>/dev/null || :
-          else
-            echo "claude-discord health: could not post $bot's alert to Discord (HTTP $post_status); will try again next run" >&2
-          fi
-        fi
-      elif [ -n "$prev" ] && [ "$verdict" = ok ]; then
-        # Same rule for the recovery line: clear the state only once it has
-        # been delivered, or the recovery is never announced.
-        if post_message "[health] $bot: 복구됐습니다 (이전 상태 ${prev%% *})."; then
-          [ ! -f "$d/health-alert" ] || unlink "$d/health-alert" 2>/dev/null || :
-        else
-          echo "claude-discord health: could not post $bot's recovery to Discord (HTTP $post_status); will try again next run" >&2
-        fi
-      fi
-    fi
     [ "$as_json" = yes ] || echo "$line"
   done
   # One jq for the whole run: it reads the NUL-separated fields, groups them
   # ten at a time into objects, prints them when asked, and reports through
-  # its exit status whether anything needs a human -- so a cron entry that
-  # mails non-zero output says so without parsing anything. `busy` is not a
+  # its exit status whether anything needs a human -- so a caller can tell
+  # without parsing anything. `busy` is not a
   # finding. No bots at all is an empty list, which is "nothing wrong".
   # The findings flag goes on its own LAST line, so what precedes it stays
   # exactly the JSON a caller would parse; the shell strips that line off
