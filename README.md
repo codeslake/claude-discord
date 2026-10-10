@@ -94,7 +94,7 @@ The setup prompts:
 |---|---|---|
 | Discord channel ID | `config.env` (shared) | also written as the channel group of each bot's `access.json` the first time it is set up. A running bot's channel is that group: to move one bot, edit its `access.json` (the plugin, the hooks' identity text and the start prompt all follow it; `config.env` is the fallback when the file has no single group). A setup re-run keeps `access.json` as it is, wherever its group has moved to, and only updates `requireMention` there; `setup ... --reset` (which deletes the bot's directory first) writes `config.env`'s channel into a fresh one |
 | Your Discord user ID | `config.env` (shared) | the only user allowed to DM the bot |
-| Other user or bot IDs | `config.env` (shared) | comma-separated; may be empty. These can trigger the bot in the channel |
+| Other user or bot IDs | `config.env` (shared) | comma-separated; may be empty. These can trigger the bot in the channel. Answer `all` instead to let **everyone who can post in that channel** trigger it — the group's `allowFrom` is written empty, which is how the plugin spells "no filter". Anyone who can post there can then drive a session that has shell access on that machine, and that includes every other bot in the channel (the wrapper patches the plugin to let bot authors reach this gate). The plugin counts a reply to one of the bot's own messages as a mention, so two open bots can answer each other without end even with the mention requirement on; with "Respond without an @mention" set to Y they will. `all` is **not** stored in the shared `config.env`, so it applies to the bot being set up and no other; a bot set up later inherits the stored IDs and stays closed, and `setup <name> --reset` is how you answer again (it clears the token and shared IDs too); to open a bot that already exists without re-answering, set its channel group `allowFrom` to `[]` in `access.json` by hand. `all` cannot be mixed with IDs, and DMs stay owner-only either way |
 | Bot token | `<name>/.env` | input is hidden, like a password. On a re-run, empty keeps the current token |
 | Respond without an @mention? | `<name>/access.json` | default N. With Y the bot answers every channel message |
 | Mode | `<name>/mode` | `none` (default), `dev-manager` or `autoresearchclaw`; see Modes below. On a re-run the picker starts at the current mode |
@@ -122,8 +122,10 @@ A dev-manager's setup also asks for its peers as
 into `.claude/discord-agents/peers.json` (one file per project, so the same
 list can be pasted on every machine: each bot skips itself by name), and
 every peer's `bot_id` is added to every group's `allowFrom` in this bot's
-`access.json` (not the DM one). Peers need this bot's id in their own
-`allowFrom` too; ask their owners.
+`access.json` (not the DM one). A group whose `allowFrom` is empty is left
+alone: it already admits every author, peers included, and adding ids to it
+would narrow "everyone" down to "peers only" without saying so. Peers need
+this bot's id in their own `allowFrom` too; ask their owners.
 
 What a project gets is the union over its bots' modes, re-synced by `setup`
 and by every start: one dev-manager bot keeps the rule and the peers hooks in
@@ -558,6 +560,7 @@ Three things would make that signal cry wolf, and each is filtered:
 
 - An author outside the channel's `allowFrom` is dropped by the plugin before
   any hook runs, so `last-message-id` could never catch up to such a message.
+  An EMPTY `allowFrom` drops nobody, there and here alike.
   `health` applies the same `allowFrom` and the same `requireMention`, and
   counts a reply to one of the bot's own messages as addressing it, exactly as
   the plugin does.
@@ -642,7 +645,7 @@ rest of Claude Code.
 
 | Symptom | Cause |
 |---|---|
-| Bot online but silent when a teammate @mentions it | their user ID is not in the group `allowFrom`; add it at setup or in `access.json` |
+| Bot online but silent when a teammate @mentions it | their user ID is not in the group `allowFrom`; add it at setup, answer `all` there, or edit `access.json` (an empty `allowFrom` admits everyone) |
 | Bot cannot read message text | Message Content Intent is off in the Developer Portal |
 | Gateway connection fails behind a proxy | `discord-proxy.ts` missing from `~/.claude-discord/`, or `HTTPS_PROXY` unset in the shell that ran `claude-discord` |
 | Bot answers in the foreground, silent after `/bg` | wrapper older than 2026-09-18 (state dir not in `--settings`); reinstall |

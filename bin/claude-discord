@@ -66,12 +66,23 @@ self_root=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." &&
 # access.json is written at setup time, so every answer lives in the file the
 # plugin reads and nothing else needs persisting. The run path below keeps a
 # fallback for bot dirs set up before this existed.
-write_access() {  # $1 = bot dir, $2 = requireMention (true|false)
+write_access() {  # $1 = bot dir, $2 = requireMention (true|false), $3 = "all" for this bot only
+  # An EMPTY group allowFrom lets everyone in that channel through (the plugin
+  # only filters when the list is non-empty), which is what "all" answers.
+  # dmPolicy stays an allowlist of the owner either way: "all" opens the
+  # channel, never DMs.
+  #
+  # "all" is honoured ONLY from $3 (the live answer for this one bot), never
+  # from config.env: that file is shared, so a hand-written DISCORD_ALLOW_IDS=all
+  # must not silently open every bot the run path writes a fresh access.json for.
+  # config.env is always read as an id list.
+  local open=""; [ "$(printf '%s' "${3:-}" | tr '[:upper:]' '[:lower:]')" = all ] && open=yes
   jq -n --arg ch "$DISCORD_CHANNEL_ID" --arg me "$DISCORD_USER_ID" \
-        --arg others "${DISCORD_ALLOW_IDS:-}" --argjson mention "$2" \
+        --arg others "${DISCORD_ALLOW_IDS:-}" --argjson mention "$2" --arg open "$open" \
     '{dmPolicy: "allowlist", allowFrom: [$me], ackReaction: "👀",
       groups: {($ch): {requireMention: $mention,
-                       allowFrom: ([$me] + ($others | split(",") | map(gsub("\\s";"")) | map(select(. != ""))))}}}' \
+                       allowFrom: (if $open == "yes" then []
+                                   else [$me] + ($others | split(",") | map(gsub("\\s";"")) | map(select(. != ""))) end)}}}' \
     > "$1/access.json"
 }
 
@@ -360,8 +371,26 @@ if [ "${1:-}" = setup ]; then
     if [ ! -f "$root/config.env" ]; then
       read -rp "Discord channel ID: " channel
       read -rp "Your Discord user ID: " user
-      read -rp "Other user or bot IDs allowed to trigger bots there (comma-separated, empty for none): " others
+      # Shown only at a terminal, like read -p's own prompt.
+      [ -t 0 ] && cat >&2 <<'EOT'
+Other user or bot IDs allowed to trigger bots there: comma-separated, empty for none,
+or 'all' for everyone in the channel -- anyone who can post there could then drive this
+session, which runs with shell access on this machine. Other bots in the channel count too, and
+a reply to this bot counts as a mention, so two open bots can answer each other without end;
+with 'respond without an @mention' on, they will.
+EOT
+      read -rp "IDs: " others
       others=${others//[[:space:]]/}   # the file is sourced: a stray space would run an ID as a command
+      # "all" applies to THIS bot only and is not persisted: config.env is
+      # shared by every bot in the project, so storing it would quietly open
+      # up each bot set up here later. Mixing it with ids is refused rather
+      # than guessed: taking the wider reading would open the channel on a
+      # typo, and the narrower one would store a literal "all" as an ID.
+      case $(printf '%s' "$others" | tr '[:upper:]' '[:lower:]') in   # tr, not the ,, expansion: macOS /bin/bash is 3.2
+        all) allow_all=yes; others=;;
+        *,all|all,*|*,all,*)
+          echo "claude-discord: answer either 'all' or a list of IDs, not both" >&2; exit 2;;
+      esac
       printf "DISCORD_CHANNEL_ID='%s'\nDISCORD_USER_ID='%s'\nDISCORD_ALLOW_IDS='%s'\n" "$channel" "$user" "$others" > "$root/config.env"
     fi
   fi
@@ -385,7 +414,11 @@ if [ "${1:-}" = setup ]; then
       jq_edit "$root/$name/access.json" --argjson mention "$mention" \
         'if (.groups | type) == "object" then .groups |= map_values(.requireMention = $mention) else . end'
     else
-      write_access "$root/$name" "$mention"
+      # allow_all is set only by the answer above, so it reaches this bot and
+      # no other: a bot set up later in the same project inherits config.env's
+      # ids, which never carry "all", and stays closed unless asked again with
+      # --reset.
+      write_access "$root/$name" "$mention" "${allow_all:+all}"
     fi
   fi
   mode=$(cat "$root/$name/mode" 2>/dev/null) || mode=none
@@ -409,9 +442,14 @@ if [ "${1:-}" = setup ]; then
     # is, not only the one keyed by config.env's channel; this bot itself is
     # skipped by name, and $a + ($ids - $a) keeps it additive, as before.
     ids=$(jq -c --arg self "$name" '[.peers[]? | select((.name // "" | tostring | ascii_downcase) != ($self | ascii_downcase)) | .bot_id | tostring]' "$root/peers.json" 2>/dev/null) || ids='[]'
+    # An EMPTY allowFrom already lets every author through, peers included, and
+    # adding ids to it would narrow the group to just those ids -- turning
+    # "everyone" into "peers only" without saying so. Such a group is left as
+    # it is.
     jq_edit "$root/$name/access.json" --argjson ids "${ids:-[]}" \
       'if (.groups | type) == "object"
-       then .groups |= map_values(.allowFrom = ((.allowFrom // []) as $a | $a + ($ids - $a)))
+       then .groups |= map_values(if (.allowFrom // []) == [] then .
+                                  else .allowFrom = (.allowFrom as $a | $a + ($ids - $a)) end)
        else . end'
     echo "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed."
   fi
@@ -609,7 +647,7 @@ if [ "${1:-}" = health ]; then
       # silence, and this must print nothing but a number. No `basename`
       # either -- one fork per process on a machine with 800 of them cost
       # 281 ms a scan, against 83 ms for the expansion (measured).
-      { mapfile -d '' -t args < "$c"; } 2>/dev/null || continue
+      { mapfile -d '' -t args < "$c"; } 2>/dev/null || continue   # bash4-ok: reached only where /proc exists
       [ "${#args[@]}" -ge 2 ] || continue
       [ "${args[0]##*/}" = bun ] || continue
       [ "${args[${#args[@]}-1]}" = start ] || continue

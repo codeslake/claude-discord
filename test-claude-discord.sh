@@ -41,6 +41,12 @@ wait_for_file() {  # $1 = path; up to 2s in 0.02s steps, for an async write to l
 }
 
 bash -n "$S"
+# macOS runs the wrapper under /bin/bash 3.2, which this Linux suite never does:
+# refuse the bash 4+ constructs that would only fail there, in everything a Mac runs (a line that can
+# never run on macOS carries the marker bash4-ok).
+if grep -nE '\$\{[A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?(,,?|\^\^?)\}|(^|[;&|[:space:]])(mapfile|readarray|coproc)[[:space:]]|(declare|local|typeset)[[:space:]]+-[a-zA-Z]*A|\|&|&>>' "$S" "$D/shim/claude-discord" "$D"/hooks/*/* "$D"/tools/* | grep -vE 'bash4-ok|^[^:]*:[0-9]+:[[:space:]]*#'; then
+  echo "FAIL: bash 4+ construct in the wrapper, shim, hooks or tools (macOS /bin/bash is 3.2)"; exit 1
+fi
 bash -n "$D/hooks/lib/discord.sh"
 bash -n "$D/hooks/turn/on-prompt"
 bash -n "$D/hooks/turn/on-reply"
@@ -162,7 +168,7 @@ done | tar --null -T - -cf -) | tar -xf - -C "$SRC" &&
   (cd "$SRC" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm stand-in) || { echo "FAIL: could not build the stand-in repo"; exit 1; }
 export CLAUDE_DISCORD_REPO=$SRC
 PHOME=$(cd "$HOME" && pwd -P)   # setup keys trust by the physical path
-jq -n --arg h "$PHOME" '[$h + "/project", $h + "/project-moved", $h + "/project4"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
+jq -n --arg h "$PHOME" '[$h + "/project", $h + "/project-moved", $h + "/project4", $h + "/project-all", $h + "/project-upper", $h + "/project-runpath", $h + "/project2"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
 R="$P/.claude/discord-agents"
 
 printf '1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alpha --scope project >/dev/null
@@ -189,6 +195,64 @@ echo "ok: setup registers no settings hook and links the project's hooks to the 
 printf 'tokB\nn\n' | bash "$S" setup beta --scope project >/dev/null
 [ "$(jq -r '.groups["1550575144320110662"].requireMention' "$R/beta/access.json")" = true ]
 echo "ok: second bot asks only token+mention and reuses shared IDs"
+
+# "all" opens the CHANNEL to everyone by leaving the group's allowFrom empty,
+# which is how the plugin spells "no filter". Its own project: the answer is
+# deliberately not written to the shared config.env, and the suite checks that
+# a later bot there does not inherit it.
+PA="$HOME/project-all"; mkdir -p "$PA"; cd "$PA"
+RA="$PA/.claude/discord-agents"
+printf '999\n111\nall\ntokC\nn\n' | bash "$S" setup gamma >/dev/null
+[ "$(jq -c '.groups["999"].allowFrom' "$RA/gamma/access.json")" = '[]' ] || { echo "FAIL: 'all' must leave the group allowFrom empty: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
+[ "$(jq -c '.allowFrom' "$RA/gamma/access.json")" = '["111"]' ] || { echo "FAIL: 'all' opens the channel, never DMs: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
+grep -q "^DISCORD_ALLOW_IDS=''$" "$RA/config.env" || { echo "FAIL: 'all' must not be stored in the shared config.env: $(grep ALLOW "$RA/config.env")"; exit 1; }
+echo "ok: 'all' empties the group allowFrom (everyone in the channel), keeps DMs owner-only, and is not persisted"
+
+# A later bot in that project inherits config.env's ids, which never carry
+# "all", so it stays closed: the open answer reaches one bot only.
+printf 'tokD\nn\n' | bash "$S" setup delta >/dev/null
+[ "$(jq -c '.groups["999"].allowFrom' "$RA/delta/access.json")" = '["111"]' ] || { echo "FAIL: a later bot must not inherit 'all': $(jq -c . "$RA/delta/access.json")"; exit 1; }
+echo "ok: a bot set up after an 'all' one stays closed -- the answer reaches that one bot only"
+
+# The dev-manager peer merge adds ids to allowFrom; on an "all" group that
+# would silently turn "everyone" into "peers only", so such a group is skipped.
+printf '\nn\ndev-manager\npeerx:4242:111:mach\n' | bash "$S" setup gamma >/dev/null
+[ "$(jq -c '.groups["999"].allowFrom' "$RA/gamma/access.json")" = '[]' ] || { echo "FAIL: peers must not narrow an 'all' group: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
+printf '\nn\ndev-manager\npeery:5151:111:mach\n' | bash "$S" setup delta >/dev/null
+[ "$(jq -c '.groups["999"].allowFrom' "$RA/delta/access.json")" = '["111","4242","5151"]' ] || { echo "FAIL: peers must still be added to a normal group: $(jq -c . "$RA/delta/access.json")"; exit 1; }
+echo "ok: dev-manager peers leave an 'all' group alone and are still added to a normal one"
+
+# "all" is one answer or the other, never a list containing it: guessing either
+# way is wrong (the wide reading opens the channel on a typo, the narrow one
+# stores a literal "all" as an ID).
+PU="$HOME/project-upper"; mkdir -p "$PU"; cd "$PU"
+printf '999\n111\nALL\ntokU\nn\n' | bash "$S" setup upper >/dev/null
+[ "$(jq -c '.groups["999"].allowFrom' "$PU/.claude/discord-agents/upper/access.json")" = '[]' ] || { echo "FAIL: 'ALL' must be read as 'all'"; exit 1; }
+PX="$HOME/project-mixed"; mkdir -p "$PX"; cd "$PX"
+if printf '999\n111\nall,123\ntokX\nn\n' | bash "$S" setup mixed >/dev/null 2>&1; then
+  echo "FAIL: 'all' mixed with IDs must be refused"; exit 1
+fi
+[ ! -f "$PX/.claude/discord-agents/mixed/access.json" ] || { echo "FAIL: a refused answer must not write access.json"; exit 1; }
+echo "ok: 'all' is case-insensitive and refuses to be mixed with IDs"
+
+# The run path writes a missing access.json with TWO arguments (no "all"
+# answer to pass), so the stored IDs must still be honoured when the third is
+# absent -- the fallback for bot dirs predating access.json. And a hand-written
+# DISCORD_ALLOW_IDS=all in the shared config.env must NOT open that bot: "all"
+# is honoured only from the live third argument, never from config.env.
+PR2="$HOME/project-runpath"; mkdir -p "$PR2"; cd "$PR2"
+RR="$PR2/.claude/discord-agents"
+printf '999\n111\n222,333\ntokR\nn\n' | bash "$S" setup runner >/dev/null
+rm -f "$RR/runner/access.json"
+bash "$S" runner >/dev/null 2>&1 || :   # the run path rewrites it before anything else
+[ "$(jq -c '.groups["999"].allowFrom' "$RR/runner/access.json" 2>/dev/null)" = '["111","222","333"]' ] || { echo "FAIL: the run path must rebuild access.json from the stored IDs: $(jq -c . "$RR/runner/access.json" 2>/dev/null)"; exit 1; }
+sed -i "s/^DISCORD_ALLOW_IDS=.*/DISCORD_ALLOW_IDS='all'/" "$RR/config.env"
+rm -f "$RR/runner/access.json"
+bash "$S" runner >/dev/null 2>&1 || :
+[ "$(jq -c '.groups["999"].allowFrom' "$RR/runner/access.json" 2>/dev/null)" = '["111","all"]' ] || { echo "FAIL: config.env's 'all' must be read as a literal ID, never as open-channel: $(jq -c . "$RR/runner/access.json" 2>/dev/null)"; exit 1; }
+echo "ok: the run path rebuilds access.json from config.env's IDs, and config.env can never spell open-channel"
+
+cd "$P"
 
 # Its own throwaway project, so the bot-count assumptions the rest of this
 # suite makes about $P (project) are untouched.
@@ -2604,7 +2668,7 @@ for t in turn peers lib autoresearchclaw; do mkdir -p "$OH/hooks/$t"; echo old >
 # The previous release's project: its settings hook runs a script through .claude/discord-agents/hooks -> ~/.claude-discord/hooks.
 mkdir -p "$UP/.claude/discord-agents"; ln -s "$OH/hooks" "$UP/.claude/discord-agents/hooks"
 echo '{}' > "$UP/.claude/settings.local.json"; plant_old "$UP/.claude/settings.local.json"
-jq -n --arg p "$OP" '{projects: {($p): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
+jq -n --arg p "$OP" --arg p5 "$PHOME/project5" '{projects: {($p): {hasTrustDialogAccepted: true}, ($p5): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
 (cd "$OP" && printf '900\n111\n\ntokO\nn\ndev-manager\n\n' | bash "$S" setup obot --scope project >/dev/null)
 [ ! -e "$OH/rules" ] || { echo "FAIL: the old rule copies must go"; exit 1; }
 for f in hooks/turn/on-prompt hooks/turn/on-reply hooks/turn/on-stop hooks/turn/on-session-start hooks/peers/mention-guard hooks/peers/checkin hooks/peers/thread-guard hooks/peers/edit-gate hooks/autoresearchclaw/on-start hooks/lib/discord.sh hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events discord-chunk.ts discord-proxy.ts; do
