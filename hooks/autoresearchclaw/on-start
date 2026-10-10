@@ -17,7 +17,8 @@
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 [ "$bot_mode" = autoresearchclaw ] || exit 0
-rule=$HOME/.claude-discord/rules/autoresearchclaw.md
+rule=$plugin_root/rules/autoresearchclaw.md
 [ -f "$rule" ] || exit 0
-jq -Rsc '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: .}}' 2>/dev/null < "$rule"   # not --rawfile: jq 1.5 lacks it
+# The rule's Bash loop needs a real path (a context line is not an env var).
+sed "s#@ARC_EVENTS@#$plugin_root/tools/arc-events#g" "$rule" | jq -Rsc '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: .}}' 2>/dev/null   # not --rawfile: jq 1.5 lacks it
 exit 0

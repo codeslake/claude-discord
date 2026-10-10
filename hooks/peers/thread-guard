@@ -190,7 +190,7 @@ if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ] && [ -n "$conver
       and ((.tool_input.text // "" | tostring) | length) > 500) | "over"' 2>/dev/null) || exit 0
 fi
 if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ]; then
-  [ "${over:-}" != over ] || deny 'Over 500 characters in the channel: start a thread (~/.claude-discord/hooks/tools/thread start "[<area>] <short title>") and post this inside it, leaving one line here.'
+  [ "${over:-}" != over ] || deny "Over 500 characters in the channel: start a thread ($thread_tool start \"[<area>] <short title>\") and post this inside it, leaving one line here."
 fi
 
 [ -n "$converted" ] || exit 0

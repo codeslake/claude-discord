@@ -9,7 +9,7 @@ set -euo pipefail
 # would turn PLAIN into LAUNCHER. The suite sets the ones it needs below.
 for v in "${!CLAUDE_@}" "${!DISCORD_@}"; do unset "$v"; done
 S=${1:?script path}; S=$(cd "$(dirname "$S")" && pwd)/$(basename "$S")   # absolute: the test cd-s into a throwaway project
-D=$(dirname "$S")   # repo root: where hooks/ and install.sh live
+D=$(cd "$(dirname "$S")/.." && pwd -P)   # repo root = plugin root (bin/claude-discord); -P matches the hooks' plugin_root
 
 CMD_PROMPT='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/turn/on-prompt"; [ ! -x "$h" ] || "$h"'
 CMD_REPLY='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/turn/on-reply"; [ ! -x "$h" ] || "$h"'
@@ -44,10 +44,10 @@ bash -n "$D/hooks/peers/mention-guard"
 bash -n "$D/hooks/peers/checkin"
 bash -n "$D/hooks/peers/thread-guard"
 bash -n "$D/hooks/peers/edit-gate"
-bash -n "$D/hooks/tools/thread"
-bash -n "$D/hooks/tools/local-bots"
+bash -n "$D/tools/thread"
+bash -n "$D/tools/local-bots"
 bash -n "$D/hooks/autoresearchclaw/on-start"
-bash -n "$D/hooks/autoresearchclaw/events"
+bash -n "$D/tools/arc-events"
 # The plugin manifest and hooks.json: valid JSON, name claude-discord, and every
 # hook command names a script that exists in the repo and is executable.
 jq -e '.name == "claude-discord" and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$D/.claude-plugin/plugin.json" >/dev/null || { echo "FAIL: plugin.json needs name claude-discord and a semver version"; exit 1; }
@@ -126,9 +126,13 @@ export PATH="$HOME/bin:$PATH"
 export CURL_LOG CURL_STDIN_LOG CURL_REPLIES
 export CLAUDE_DISCORD_LAUNCHER=claude-launcher
 mkdir -p "$HOME/.claude-discord"; : > "$HOME/.claude-discord/discord-proxy.ts"; : > "$HOME/.claude-discord/discord-chunk.ts"
-cp -r "$D/hooks" "$HOME/.claude-discord/hooks"   # stand-in for install.sh, not exercised here
-cp -r "$D/rules" "$HOME/.claude-discord/rules"
+# Stand-in for the plugin install: a copy of the repo tree (the missing-lib test
+# renames a file inside it, never in the working tree), linked in as the hooks
+# and rules the projects reach. The hooks resolve plugin_root to the copy.
+PC="$HOME/plugin-copy"; mkdir -p "$PC"; cp -r "$D/hooks" "$D/rules" "$D/tools" "$D/runtime" "$D/bin" "$PC/"; PC=$(cd "$PC" && pwd -P)
+ln -s "$PC/hooks" "$HOME/.claude-discord/hooks"; ln -s "$PC/rules" "$HOME/.claude-discord/rules"
 P="$HOME/project"; mkdir -p "$P"; cd "$P"; git init -q .
+TT=$PC/tools/thread   # the hooks name the thread tool by its absolute path in the plugin
 R="$P/.claude/discord-agents"
 
 printf '1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alpha >/dev/null
@@ -203,7 +207,7 @@ H="$R/hooks/turn"
 rm -rf "$DSD/turns" "$DSD/last-message-id"; : > "$CURL_LOG"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"222\" user=\"u\" user_id=\"9\" ts=\"t\">\nhello\n</channel>"}')
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
-[ "$ctx" = 'Discord turn. You are alpha, the Claude Code session behind the Discord bot alpha in channel 999. Answer a Discord message with the discord reply tool; a question typed in the terminal in the same turn is answered in the terminal. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically. One request, one thread: ~/.claude-discord/hooks/tools/thread start "[<area>] <short title>" posts its channel line and prints the thread id (in a message write a channel or thread as <#id>, a user or bot you only name as plain @name, one who must answer or decide as <@id>, which is how you reach them; a bare id is denied, an id in backticks shows the number), thread close <id> "<closing line>" posts the line it lands with inside the thread and ends it; the channel holds only the title line. Unless your mode'"'"'s rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id.
+[ "$ctx" = 'Discord turn. You are alpha, the Claude Code session behind the Discord bot alpha in channel 999. Answer a Discord message with the discord reply tool; a question typed in the terminal in the same turn is answered in the terminal. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically. One request, one thread: '"$TT"' start "[<area>] <short title>" posts its channel line and prints the thread id (in a message write a channel or thread as <#id>, a user or bot you only name as plain @name, one who must answer or decide as <@id>, which is how you reach them; a bare id is denied, an id in backticks shows the number), thread close <id> "<closing line>" posts the line it lands with inside the thread and ends it; the channel holds only the title line. Unless your mode'"'"'s rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id.
 People in this channel (mention one as <@id> to reach them): <@111>, u <@9>' ] || { echo "FAIL: on-prompt context text wrong: $ctx"; exit 1; }
 [ "$(cat "$DSD/turns/s1")" = "111 222 9" ] || { echo "FAIL: turns file wrong (chat_id message_id user_id)"; exit 1; }
 [ "$(cat "$DSD/last-message-id")" = "222" ] || { echo "FAIL: last-message-id wrong"; exit 1; }
@@ -467,12 +471,12 @@ out=$(printf '' | DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt"); rc=$?
 [ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: on-prompt must exit 0 with no output on empty stdin"; exit 1; }
 echo "ok: on-prompt exits 0 with no output on invalid JSON and on empty stdin"
 
-mv "$HOME/.claude-discord/hooks/lib/discord.sh" "$HOME/.claude-discord/hooks/lib/discord.sh.bak"
+mv "$PC/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh.bak"
 for hookname in turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/thread-guard peers/edit-gate autoresearchclaw/on-start; do
   out=$(DISCORD_STATE_DIR="$DSD" bash "$R/hooks/$hookname" <<<'{"session_id":"sX","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\">\nhi\n</channel>"}'); rc=$?
   [ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: $hookname with a missing lib must exit 0 with no output"; exit 1; }
 done
-mv "$HOME/.claude-discord/hooks/lib/discord.sh.bak" "$HOME/.claude-discord/hooks/lib/discord.sh"
+mv "$PC/hooks/lib/discord.sh.bak" "$PC/hooks/lib/discord.sh"
 echo "ok: a missing lib/discord.sh makes every hook exit 0 with no output, never an unbound-variable crash"
 
 rm -rf "$DSD/turns"; mkdir -p "$DSD/turns"
@@ -596,7 +600,7 @@ echo "ok: a chunk() call ending in ; and CRLF is patched, not skipped silently"
 cp "$HOME/server.ts.patched" "$HOME/fakeplugin/server.ts"; rm -f "$HOME/server.ts.orig" "$HOME/server.ts.patched"
 
 if command -v bun >/dev/null; then
-  { printf 'import { chunk } from "%s/discord-chunk.ts"\n' "$D"; cat <<'EOF'
+  { printf 'import { chunk } from "%s/runtime/discord-chunk.ts"\n' "$D"; cat <<'EOF'
 import assert from "node:assert/strict"
 
 // Single backticks outside fences, and ``` lines, of one piece.
@@ -1110,7 +1114,7 @@ grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out
 [ ! -s "$HOME/rm.log" ] || { echo "FAIL: a failing 'agents' call must remove nothing: $(cat "$HOME/rm.log")"; exit 1; }
 echo "ok: a listing that is not JSON, one that is empty and one that fails each leave the start untouched and remove nothing"
 
-# hooks/tools/local-bots: not a hook, run by hand, reusing the "dead"
+# tools/local-bots: not a hook, run by hand, reusing the "dead"
 # project's still-active claude stub ("agents" cats agents.json, or
 # agents.all.json for --all, exits agents.rc) and more real directories beside
 # "dead" -- the check only needs a directory to exist, nothing else about a
@@ -1127,7 +1131,7 @@ jq -n --arg cwd "$PDP" '[
   {name:"other", cwd:"/elsewhere"}]' > "$HOME/agents.json"
 jq --arg cwd "$PDP" '. + [{name:"gone", cwd:$cwd, state:"done"}]' "$HOME/agents.json" > "$HOME/agents.all.json"
 : > "$HOME/agents.rc"; : > "$HOME/agents.calls"
-out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/hooks/tools/local-bots")
+out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/tools/local-bots")
 [ "$(cat "$HOME/agents.calls")" = "agents --json" ] || { echo "FAIL: local-bots must list active sessions only, without --all: $(cat "$HOME/agents.calls")"; exit 1; }
 [ "$out" = "$(printf 'b sp\t%s\nbeta\t%s\ndonepid\t%s' "$PDP" "$PDP" "$PDP")" ] || { echo "FAIL: local-bots must print exactly the OTHER live bots (a real .claude/discord-agents/<name> dir), name-TAB-project, sorted by name; self ('dead', by state dir) excluded, a live 'done' row kept, a completed session ('gone') absent, a name holding a slash never riding another bot's directory, and a name whose directory is missing ('nodir') or whose project does not exist ('other') left out: $out"; exit 1; }
 rm -f "$HOME/agents.all.json"
@@ -1136,13 +1140,13 @@ echo "ok: local-bots lists this machine's other live bot sessions only (no --all
 # Never fails: no output and exit 0 on bad JSON, an empty array, or a
 # listing call that itself fails.
 printf 'not json\n' > "$HOME/agents.json"
-out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/hooks/tools/local-bots"; echo "rc=$?")
+out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/tools/local-bots"; echo "rc=$?")
 [ "$out" = "rc=0" ] || { echo "FAIL: invalid JSON must print nothing and exit 0: $out"; exit 1; }
 printf '[]\n' > "$HOME/agents.json"
-out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/hooks/tools/local-bots"; echo "rc=$?")
+out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/tools/local-bots"; echo "rc=$?")
 [ "$out" = "rc=0" ] || { echo "FAIL: an empty array must print nothing and exit 0: $out"; exit 1; }
 cp "$HOME/agents.full.json" "$HOME/agents.json"; echo 1 > "$HOME/agents.rc"
-out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/hooks/tools/local-bots"; echo "rc=$?")
+out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/tools/local-bots"; echo "rc=$?")
 [ "$out" = "rc=0" ] || { echo "FAIL: a failing listing must print nothing and exit 0: $out"; exit 1; }
 : > "$HOME/agents.rc"
 echo "ok: local-bots prints nothing and exits 0 on invalid JSON, an empty array, and a failing listing"
@@ -1331,7 +1335,7 @@ echo "ok: edit-gate denies claude-discord edits (tracked or untracked, via a sym
 # thread-guard: the channel keeps short lines, the long text goes in a
 # thread. 500 is counted in CHARACTERS, so a Korean line well over 500 bytes
 # still passes.
-TG_REASON='Over 500 characters in the channel: start a thread (~/.claude-discord/hooks/tools/thread start "[<area>] <short title>") and post this inside it, leaving one line here.'
+TG_REASON="Over 500 characters in the channel: start a thread ($TT start \"[<area>] <short title>\") and post this inside it, leaving one line here."
 tguard() { DISCORD_STATE_DIR="${3:-$R4/${2:-mgr}}" CLAUDE_PROJECT_DIR="$P4" bash "$G/thread-guard" <<<"$1"; }
 body() { jq -nc --arg c "$1" --arg t "$2" '{session_id: "t1", tool_input: {chat_id: $c, text: $t}}'; }
 # Session t1 is inside a Discord turn (on-prompt's turns file), so the checks
@@ -1474,7 +1478,7 @@ echo "ok: thread-guard lets a turn with no Discord message post (channel and thr
 
 # The thread helper, against the stubbed curl: each call takes the next
 # queued "<status> <body>" line.
-T="$R4/hooks/tools/thread"
+T="$PC/tools/thread"
 thread() { DISCORD_STATE_DIR="$R4/mgr" bash "$T" "$@"; }
 replies() { printf '%s\n' "$@" > "$CURL_REPLIES"; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; }
 call() { sed -n "$1p" "$CURL_LOG"; }
@@ -1626,11 +1630,13 @@ echo "ok: on-prompt gives an autoresearchclaw bot the same identity context as a
 # as SessionStart context; nothing for any other session.
 ARC="$R4/hooks/autoresearchclaw"
 ARC_RULE="$HOME/.claude-discord/rules/autoresearchclaw.md"
+arc_rule() { sed "s#@ARC_EVENTS@#$PC/tools/arc-events#g" "$ARC_RULE"; }   # what on-start must emit
 onstart() { DISCORD_STATE_DIR="$R4/$1" bash "$ARC/on-start" <<<'{"session_id":"o1","source":"compact"}'; }
 cmp -s "$D/rules/autoresearchclaw.md" "$ARC_RULE" || { echo "FAIL: the install stand-in must carry rules/autoresearchclaw.md"; exit 1; }
 out=$(onstart mgr)
 jq -e '.hookSpecificOutput.hookEventName == "SessionStart"' <<<"$out" >/dev/null || { echo "FAIL: on-start must print SessionStart JSON: $out"; exit 1; }
-jq -j '.hookSpecificOutput.additionalContext' <<<"$out" | cmp -s - "$ARC_RULE" || { echo "FAIL: additionalContext must be the installed rule file, byte for byte"; exit 1; }
+jq -j '.hookSpecificOutput.additionalContext' <<<"$out" | cmp -s - <(arc_rule) || { echo "FAIL: additionalContext must be the installed rule file with @ARC_EVENTS@ filled in, byte for byte"; exit 1; }
+jq -j '.hookSpecificOutput.additionalContext' <<<"$out" | grep -qF "$PC/tools/arc-events" && ! jq -j '.hookSpecificOutput.additionalContext' <<<"$out" | grep -qF '@ARC_EVENTS@' || { echo "FAIL: the rule's events command must be the plugin's tools/arc-events, not the placeholder"; exit 1; }
 out=$(bash "$ARC/on-start" <<<'{"session_id":"o1","source":"startup"}')
 [ -z "$out" ] || { echo "FAIL: on-start must print nothing without DISCORD_STATE_DIR: $out"; exit 1; }
 out=$(onstart plain)
@@ -1646,7 +1652,7 @@ mv "$ARC_RULE" "$ARC_RULE.bak"; rc=0; out=$(onstart mgr) || rc=$?; mv "$ARC_RULE
 W=$!; KILL_AT_EXIT="$KILL_AT_EXIT $W"
 n=0; while [ ! -e "$HOME/worker.out.done" ] && [ "$n" -lt 250 ]; do sleep 0.02; n=$((n+1)); done
 [ -e "$HOME/worker.out.done" ] || { echo "FAIL: on-start did not return (a child holding its output?)"; exit 1; }
-jq -j '.hookSpecificOutput.additionalContext' "$HOME/worker.out" | cmp -s - "$ARC_RULE" || { echo "FAIL: on-start through sh -c must print the rule: $(cat "$HOME/worker.out")"; exit 1; }
+jq -j '.hookSpecificOutput.additionalContext' "$HOME/worker.out" | cmp -s - <(arc_rule) || { echo "FAIL: on-start through sh -c must print the rule: $(cat "$HOME/worker.out")"; exit 1; }
 kill "$W"; wait "$W" 2>/dev/null || :
 KILL_AT_EXIT=${KILL_AT_EXIT% $W}   # reaped: its pid may be reused
 left=$(ps -eo pid=,pgid=,args= | awk -v g="$W" '$2 == g')
@@ -1657,7 +1663,7 @@ echo "ok: on-start gives an autoresearchclaw bot's session the installed rule fi
 # project; arc-seen holds "<path> <cksum>" per seen file and content. A file
 # written less than 2 s ago is left for a later call, so every write below
 # is backdated (put) unless the test is about that wait.
-events() { DISCORD_STATE_DIR="$R4/mgr" bash "$ARC/events"; }
+events() { DISCORD_STATE_DIR="$R4/mgr" bash "$PC/tools/arc-events"; }
 put() { printf '%b' "$1" > "$2" && age 10 "$2"; }   # $1 = content (printf %b), $2 = file
 RUN=artifacts/rc-20260919-000000-8b3f10 RUN2=artifacts/rc-20260919-010000-aaaaaa RUN3=artifacts/rc-20260919-020000-bbbbbb
 SEEN="$R4/mgr/arc-seen"
@@ -1700,13 +1706,13 @@ chmod 644 "$SEEN"
 [ "$rc" = 0 ] && [ -z "$out" ] || { echo "FAIL: an event that cannot be recorded must not be printed (rc=$rc): $out"; exit 1; }
 out=$(events)
 [ "$out" = "iteration-end $RUN2/stage-15/decision.md" ] && [ -z "$(events)" ] || { echo "FAIL: once it can be recorded, it prints once: $out"; exit 1; }
-rc=0; out=$(bash "$ARC/events" 2>"$HOME/events.err") || rc=$?
+rc=0; out=$(bash "$PC/tools/arc-events" 2>"$HOME/events.err") || rc=$?
 [ "$rc" = 2 ] && [ -z "$out" ] && [ "$(wc -l < "$HOME/events.err" | tr -d ' ')" = 1 ] || { echo "FAIL: without DISCORD_STATE_DIR events must exit 2 with one line on stderr: rc=$rc out=$out err=$(cat "$HOME/events.err")"; exit 1; }
 # A project with no run yet: the first call still starts arc-seen, so the
 # first iteration is reported, not swallowed as history.
-[ -z "$(DISCORD_STATE_DIR="$R/alpha" bash "$ARC/events")" ] && [ -e "$R/alpha/arc-seen" ] || { echo "FAIL: a first call with nothing there must still create arc-seen"; exit 1; }
+[ -z "$(DISCORD_STATE_DIR="$R/alpha" bash "$PC/tools/arc-events")" ] && [ -e "$R/alpha/arc-seen" ] || { echo "FAIL: a first call with nothing there must still create arc-seen"; exit 1; }
 mkdir -p "$P/artifacts/rc-1/stage-15"; put 'PROCEED\n' "$P/artifacts/rc-1/stage-15/decision.md"
-out=$(DISCORD_STATE_DIR="$R/alpha" bash "$ARC/events")
+out=$(DISCORD_STATE_DIR="$R/alpha" bash "$PC/tools/arc-events")
 rm -rf "$P/artifacts" "$R/alpha/arc-seen"
 [ "$out" = "iteration-end artifacts/rc-1/stage-15/decision.md" ] || { echo "FAIL: the first iteration after an empty first call must be reported: $out"; exit 1; }
 echo "ok: events records history silently on its first call (and starts arc-seen with none), prints a new decision.md as iteration-end and pipeline_summary.json as run-end once, again on a rewrite with other content, never on an identical rewrite or a touch, ignores dirs not named rc-*, waits out an empty or just-written file, prints nothing it could not record, and exits 2 without DISCORD_STATE_DIR"
@@ -2467,13 +2473,13 @@ mkdir -p "$IH/.claude-discord/hooks/autoresearchclaw" "$IH/.claude-discord/hooks
 : > "$IH/.claude-discord/rules/old.md"; echo mine > "$IH/.claude-discord/notes"
 HOME="$IH" bash "$D/install.sh" >/dev/null 2>&1 || { echo "FAIL: install.sh failed"; exit 1; }
 [ ! -e "$IH/.claude-discord/hooks/autoresearchclaw/watch" ] && [ ! -e "$IH/.claude-discord/hooks/turn/on-compact" ] && [ ! -e "$IH/.claude-discord/hooks/tools/old-tool" ] && [ ! -e "$IH/.claude-discord/rules/old.md" ] || { echo "FAIL: install.sh must remove what the repo no longer ships: $(cd "$IH/.claude-discord" && find . -type f)"; exit 1; }
-[ -x "$IH/.claude-discord/hooks/tools/thread" ] && [ -x "$IH/.claude-discord/hooks/tools/local-bots" ] && [ -x "$IH/.claude-discord/hooks/peers/thread-guard" ] || { echo "FAIL: install.sh must install the thread and local-bots helpers and the thread guard, executable"; exit 1; }
+[ -x "$IH/.claude-discord/tools/thread" ] && [ -x "$IH/.claude-discord/tools/local-bots" ] && [ -x "$IH/.claude-discord/hooks/peers/thread-guard" ] || { echo "FAIL: install.sh must install the thread and local-bots helpers and the thread guard, executable"; exit 1; }
 grep -qF '~/.claude-discord/hooks/tools/local-bots' "$IH/.claude-discord/rules/dev-manager.md" && grep -qF 'Those sessions are not your peers' "$IH/.claude-discord/rules/dev-manager.md" || { echo "FAIL: the installed rule file must carry both local-bots notify bullets"; exit 1; }
 [ "$(cat "$IH/.claude-discord/notes")" = mine ] && [ -x "$IH/.local/bin/claude-discord" ] || { echo "FAIL: install.sh must install the wrapper and leave other files alone"; exit 1; }
-for f in $(cd "$D" && ls hooks/*/* rules/*); do
+for f in $(cd "$D" && ls hooks/*/* tools/* rules/*); do
   cmp -s "$D/$f" "$IH/.claude-discord/$f" || { echo "FAIL: install.sh must install $f"; exit 1; }
 done
-[ -x "$IH/.claude-discord/hooks/autoresearchclaw/events" ] && [ -x "$IH/.claude-discord/hooks/autoresearchclaw/on-start" ] || { echo "FAIL: the autoresearchclaw hooks must be executable"; exit 1; }
+[ -x "$IH/.claude-discord/tools/arc-events" ] && [ -x "$IH/.claude-discord/hooks/autoresearchclaw/on-start" ] || { echo "FAIL: the autoresearchclaw hooks must be executable"; exit 1; }
 echo "ok: install.sh installs every shipped hook and rule (events and autoresearchclaw.md included) and removes the stale watch, on-compact, hooks/tools and rule files, leaving everything else"
 
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these

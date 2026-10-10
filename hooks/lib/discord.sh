@@ -10,6 +10,14 @@ bot_channel=""
 bot_token=""
 bot_mode=""
 
+# The plugin root, from this file's own location (hooks/lib/discord.sh), with
+# symlinks resolved: tools and rules are named by absolute path in the text a
+# session reads, so it must be the real install, wherever setup put it.
+# cd -P: the hooks are often reached through the project's discord-agents/hooks
+# symlink, and a logical `..` from there would land in discord-agents/.
+plugin_root=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd -P) || plugin_root=""
+thread_tool=$plugin_root/tools/thread
+
 # resolve_channel: sets bot_channel to the bot's channel. That is the single
 # group key in its access.json: the plugin reads that file on every message,
 # and moving a bot to another channel is an edit there, which config.env's
