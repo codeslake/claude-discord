@@ -8,6 +8,7 @@
 # mention (the plugin's isMentioned), so a reply with reply_to is not held to
 # it. Prints nothing unless it denies; a no-op
 # without peers.json. Must never fail a turn.
+[ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 plugin_gate || exit 0

@@ -6,6 +6,7 @@
 # the sender's user_id, which mention-guard reads), and offers a "refresh"
 # handoff trigger. Must never block or fail a turn: any parse failure,
 # missing field or unrelated prompt is silent success.
+[ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 plugin_gate || exit 0

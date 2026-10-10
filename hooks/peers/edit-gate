@@ -6,6 +6,9 @@
 # the checkin hook) within the last 60 minutes; an allowed edit re-touches
 # it, so the window slides. Prints nothing unless it denies; a no-op without
 # peers.json. Must never fail a turn.
+[ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
+{ IFS= read -r m < "$DISCORD_STATE_DIR/mode"; } 2>/dev/null || m=""
+[ "$m" = dev-manager ] || exit 0   # every edit on the machine runs this: a non-dev-manager bot stops before any fork
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 plugin_gate || exit 0

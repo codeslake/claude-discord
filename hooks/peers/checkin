@@ -4,6 +4,7 @@
 # check-in, so touch $CLAUDE_PROJECT_DIR/.claude/discord-agents/checkin/
 # <session_id>, which edit-gate reads. Prints nothing; a no-op without
 # peers.json. Must never fail a turn.
+[ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 plugin_gate || exit 0

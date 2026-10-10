@@ -42,7 +42,11 @@ resolve_channel() {
   esac
 }
 
-if [ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ]; then
+# A bot is the session its state dir belongs to: a `claude -p` started from a
+# bot's shell inherits DISCORD_STATE_DIR, and in another project it is not that
+# bot (Claude Code gives every hook CLAUDE_PROJECT_DIR, measured on 2.1.296).
+if [ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ] &&
+   { [ -z "${CLAUDE_PROJECT_DIR:-}" ] || [ "$DISCORD_STATE_DIR/.." -ef "$CLAUDE_PROJECT_DIR/.claude/discord-agents" ]; }; then
   bot_name=${DISCORD_STATE_DIR%/}; bot_name=${bot_name##*/}
   IFS= read -r bot_mode 2>/dev/null < "$DISCORD_STATE_DIR/mode" || :
 fi
@@ -139,11 +143,14 @@ plugin_gate() {
     return
   fi
   hook_session || return 0
-  [ ! -e "$m/$sid" ] || return 0
+  if [ -e "$m/$sid" ]; then
+    : > "$m/$sid" 2>/dev/null   # a live session keeps its marker fresh (no fork), so the month-old prune never takes it
+    return 0
+  fi
   mkdir -p "$m" 2>/dev/null || return 0
   set -C; { : > "$m/$sid"; } 2>/dev/null && won=1; set +C   # noclobber: of the event's parallel hooks, one migrates
   [ -n "$won" ] || return 0
-  find "$m" -type f -mtime +30 -exec rm -f {} + 2>/dev/null   # markers of sessions a month gone
+  find "$m" -type f -mtime +30 -exec rm -f {} + 2>/dev/null   # markers no hook has touched for a month
   . "$plugin_root/hooks/lib/old-hooks.sh" 2>/dev/null && migrate_project
   return 0
 }

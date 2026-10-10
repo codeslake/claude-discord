@@ -39,6 +39,7 @@
 # reads, and nothing here can tell.
 # Undo: ctrl+t on the bot in the agent view (`claude agents`), or delete its
 # id from pins.json.
+[ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 plugin_gate || exit 0
@@ -52,7 +53,12 @@ EOF2
 # Context instead of a project rules file, so the project's other sessions do
 # not read a bot's rules. The patch run covers a start that did not go through
 # the wrapper (a daemon respawn, an auto-update since the last start).
-"$plugin_root/bin/claude-discord" patch >/dev/null 2>&1 || :
+# A failure is kept in the bot's health.log (the line health reads), not dropped:
+# a pattern the official plugin moved would otherwise go unseen. Not run where
+# there is no wrapper (the compat copy an old settings entry runs from).
+if [ -x "$plugin_root/bin/claude-discord" ] && ! pout=$("$plugin_root/bin/claude-discord" patch 2>&1); then
+  printf '%s on-session-start: patch failed: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${pout//$'\n'/ | }" >> "$DISCORD_STATE_DIR/health.log" 2>/dev/null || :
+fi
 tools=$plugin_root/tools
 ctx="CLAUDE_DISCORD_TOOLS=$tools"
 if [ "$bot_mode" = dev-manager ] && [ -f "$plugin_root/rules/dev-manager.md" ]; then

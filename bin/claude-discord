@@ -209,16 +209,40 @@ select_one() (
 # kind is kept as it is. Project scope loads only when ~/.claude.json trusts
 # that exact path; setup asks before writing it.
 has_path() { [ -e "$1" ] || [ -L "$1" ]; }   # a dangling link counts
+plugin_version() { jq -r '.version // "?"' "$1/.claude-plugin/plugin.json" 2>/dev/null || echo "?"; }
+# ver_ge <a> <b>: a >= b for x.y.z versions; anything else is not.
+ver_ge() {
+  local a1 a2 a3 b1 b2 b3
+  IFS=. read -r a1 a2 a3 <<<"$1"; IFS=. read -r b1 b2 b3 <<<"$2"
+  case $a1.$a2.$a3.$b1.$b2.$b3 in *[!0-9.]*|*..*|.*) return 1;; esac
+  [ $((a1 * 1000000 + a2 * 1000 + a3)) -ge $((b1 * 1000000 + b2 * 1000 + b3)) ]
+}
+# git over the network: never a credential prompt (a script would hang on it),
+# and a 120 s ceiling where timeout(1) exists. The ambient git config and
+# environment apply, so a proxy is per clone: git -C <clone> config http.proxy <url>.
+git_net() {
+  if command -v timeout >/dev/null 2>&1; then GIT_TERMINAL_PROMPT=0 timeout 120 git "$@"; else GIT_TERMINAL_PROMPT=0 git "$@"; fi
+}
+# A link to the machine's source clone: two of them run the same code.
+src_link() { [ -L "$1" ] && [ "$1" -ef "$HOME/.claude-discord/source" ]; }
 
 # The runtime files the patched official plugin imports live at a stable path,
 # ~/.claude-discord/runtime/, because the plugin cache is machine-wide while
 # clones are per project. setup and update copy them from the real clone.
+# runtime/VERSION names the plugin version that wrote it. Two installs of
+# different versions share runtime/ and the patched cache, so an older one
+# leaves a newer copy alone (runtime_newer, said once by patch_official)
+# instead of flipping it back at every start.
 sync_runtime() {
-  local rt=$HOME/.claude-discord/runtime f
+  local rt=$HOME/.claude-discord/runtime f mine have=""
+  mine=$(plugin_version "$self_root")
   [ -d "$rt" ] || mkdir -p "$rt" || return 1
+  [ ! -f "$rt/VERSION" ] || IFS= read -r have < "$rt/VERSION" || :
+  if [ -n "$have" ] && ! ver_ge "$mine" "$have"; then runtime_newer=$have; return 0; fi
   for f in discord-chunk.ts discord-proxy.ts; do
     cmp -s "$self_root/runtime/$f" "$rt/$f" || cp "$self_root/runtime/$f" "$rt/$f" || return 1
   done
+  [ "$have" = "$mine" ] || printf '%s\n' "$mine" > "$rt/VERSION"
 }
 
 # Drops recorded installs whose path is gone (a dangling link counts as gone).
@@ -240,13 +264,15 @@ install_plugin() {  # uses $scope $method $pdir $gdir
   if [ -e "$target" ]; then
     echo "claude-discord: plugin already installed at $target, kept as it is"
   else
-    [ -n "$method" ] || method=$(select_one Method link "link   the machine's one source clone, ~/.claude-discord/source (one update for every bot)" "clone  its own copy, so this install can pin a version")
+    if [ -z "$method" ]; then
+      if [ -n "${noask:-}" ]; then method=link; else method=$(select_one Method link "link   the machine's one source clone, ~/.claude-discord/source (one update for every bot)" "clone  its own copy, so this install can pin a version"); fi
+    fi
     mkdir -p "$(dirname "$target")"
     if [ "$method" = link ]; then
-      has_path "$src" || git clone -q "$repo" "$src" || { echo "claude-discord: could not clone $repo into $src" >&2; return 1; }
+      has_path "$src" || git_net clone -q "$repo" "$src" || { echo "claude-discord: could not clone $repo into $src" >&2; return 1; }
       ln -s "$src" "$target"
     else
-      git clone -q "$repo" "$target" || { echo "claude-discord: could not clone $repo into $target" >&2; return 1; }
+      git_net clone -q "$repo" "$target" || { echo "claude-discord: could not clone $repo into $target" >&2; return 1; }
     fi
   fi
   # A git-tracked project (worktree, submodule or subdirectory too) keeps the
@@ -268,8 +294,12 @@ install_plugin() {  # uses $scope $method $pdir $gdir
   # Keyed by the physical path, like refresh's check.
   if [ "$scope" = project ] && [ "$(jq -r --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted | if . == true then "yes" else "no" end' "$HOME/.claude.json" 2>/dev/null)" != yes ]; then
     echo "claude-discord: $PWD is not trusted in ~/.claude.json, so Claude Code will not load the plugin here." >&2
-    read -rp "Mark this project trusted now? [y/N] " t || t=""
-    case $t in y|Y) jq_edit "$HOME/.claude.json" --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted = true';; esac
+    if [ -n "${noask:-}" ]; then
+      echo "claude-discord: accept the trust dialog in a claude session here, or answer y in 'claude-discord setup <bot>' at a terminal" >&2
+    else
+      read -rp "Mark this project trusted now? [y/N] " t || t=""
+      case $t in y|Y) jq_edit "$HOME/.claude.json" --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted = true';; esac
+    fi
   fi
 }
 
@@ -327,7 +357,9 @@ sync_compat() {
   rm -rf "$n" && mkdir -p "$n/hooks" || return 1
   for t in turn peers lib autoresearchclaw; do cp -R "$1/hooks/$t" "$n/hooks/" || { rm -rf "$n"; return 1; }; done
   cp -R "$1/tools" "$1/rules" "$n/" || { rm -rf "$n"; return 1; }
-  if [ -d "$c" ] && [ ! -L "$c" ] && diff -r "$c" "$n" >/dev/null 2>&1; then rm -rf "$n"; return 0; fi
+  # Same files and the same executables (diff -r ignores modes, and an old settings entry skips a hook that is not -x).
+  if [ -d "$c" ] && [ ! -L "$c" ] && diff -r "$c" "$n" >/dev/null 2>&1 &&
+     [ "$(cd "$c" && find . -type f -perm -100 | sort)" = "$(cd "$n" && find . -type f -perm -100 | sort)" ]; then rm -rf "$n"; return 0; fi
   rm -rf "$c.old.$$"
   { ! has_path "$c" || mv "$c" "$c.old.$$"; } && mv "$n" "$c" || { rm -rf "$n"; return 1; }
   rm -rf "$c.old.$$"
@@ -347,7 +379,7 @@ report_old_hooks() {
     case $found in *"'$f'"*) continue;; esac   # in $HOME, the project's settings.json is the global one
     found="$found '$f'"
   done
-  [ -z "$found" ] || echo "claude-discord: old claude-discord hook entries stay in$found (a symlink or the user-global file, never edited here; a session the plugin runs in skips them). Remove them by hand: bash '$self_root/hooks/lib/old-hooks.sh'$found" >&2
+  [ -z "$found" ] || echo "claude-discord: old claude-discord hook entries stay in$found (a symlink or the user-global file, never edited here; a session the plugin runs in skips them). They still serve every bot on this machine, and on every machine sharing that file, whose plugin is not loaded yet: only when each of those bots has a <bot dir>/plugin-sessions/ marker, remove them by hand: bash '$self_root/hooks/lib/old-hooks.sh'$found" >&2
 }
 
 # --scope and --method, anywhere and in the = form too, for setup and install;
@@ -379,26 +411,46 @@ check_install_scope() {
   local p
   case $scope in ''|project|global) ;; *) echo "claude-discord: --scope must be project or global, got '$scope'" >&2; exit 2;; esac
   case $method in ''|link|clone) ;; *) echo "claude-discord: --method must be link or clone, got '$method'" >&2; exit 2;; esac
+  # A bot in $HOME: its project's .claude IS ~/.claude, so its install is the global one.
+  if [ "$(pwd -P)" = "$(cd -P "$HOME" && pwd)" ]; then
+    [ "$scope" = global ] || echo "claude-discord: this project is \$HOME, whose .claude is ~/.claude: installing at global scope ($gdir)" >&2
+    scope=global pdir=""
+  fi
   # Asked once per project: an install already there decides the scope.
   if [ -z "$scope" ]; then
     if has_path "$pdir"; then scope=project; elif has_path "$gdir"; then scope=global; fi
   fi
   if [ "$scope" = project ] && has_path "$gdir"; then
-    echo "claude-discord: already installed globally at $gdir; remove it or use --scope global" >&2; exit 2
+    coexist "$pdir" "$gdir" "claude-discord: already installed globally at $gdir, and both scopes may hold an install only as links to ~/.claude-discord/source; remove it or use --scope global"
   elif [ "$scope" = global ] && has_path "$pdir"; then
-    echo "claude-discord: already installed for this project at $pdir; remove it or use --scope project" >&2; exit 2
-  elif [ "$scope" = global ] && ! has_path "$gdir"; then
+    coexist "$gdir" "$pdir" "claude-discord: already installed for this project at $pdir, and both scopes may hold an install only as links to ~/.claude-discord/source; remove it or use --scope project"
+  fi
+  if [ "$scope" = global ] && ! has_path "$gdir"; then
     # A new global copy would shadow every project install the machine records (the global one wins).
     while IFS= read -r p || [ -n "$p" ]; do
-      [ -z "$p" ] || [ ! -e "$p" ] || { echo "claude-discord: a project install exists at $p, which a global install would shadow; remove it or use --scope project" >&2; exit 2; }
+      [ -z "$p" ] || [ ! -e "$p" ] || coexist "$gdir" "$p" "claude-discord: a project install exists at $p, which a global install would shadow (allowed only when both are links to ~/.claude-discord/source); remove it or use --scope project"
     done < <(cat "$HOME/.claude-discord/records/installs" 2>/dev/null)
   fi
+}
+# coexist <own path> <other install> <refusal>: a plugin present at both scopes
+# loads once (measured), so two installs are fine when both are links to the
+# source clone (one code); a clone on either side would run another version
+# beside it, so that is refused before anything is written. An own install not
+# made yet becomes a link.
+coexist() {
+  if src_link "$2" && { src_link "$1" || { ! has_path "$1" && [ "$method" != clone ]; }; }; then
+    has_path "$1" || method=link
+    return 0
+  fi
+  echo "$3" >&2; exit 2
 }
 
 # The plugin, the shim, runtime/, compat/ and the install record; before any
 # bot question (R17), so a failed clone leaves no bot file behind.
 install_all() {
-  [ -n "$scope" ] || scope=$(select_one Scope project "project  this project only (.claude/skills/claude-discord)" "global  every project (~/.claude/skills/claude-discord)")
+  if [ -z "$scope" ]; then
+    if [ -n "${noask:-}" ]; then scope=project; else scope=$(select_one Scope project "project  this project only (.claude/skills/claude-discord)" "global  every project (~/.claude/skills/claude-discord)"); fi
+  fi
   install_plugin || return $?
   self_root=$plugin_target   # from here on, everything points at the real install
   remove_old_install || return $?
@@ -406,9 +458,12 @@ install_all() {
 }
 pdir=$PWD/.claude/skills/claude-discord gdir=$HOME/.claude/skills/claude-discord
 
-# install: the plugin and what goes with it, asking nothing about a bot (the
-# bootstrap's command); safe to re-run.
+# install: the plugin and what goes with it (the bootstrap's command): it reads
+# no stdin at all, so a script's stdin is left alone. An install already there
+# decides the scope, else project; the method is link unless --method says
+# otherwise; an untrusted project gets a hint, never a question. Safe to re-run.
 if [ "${1:-}" = install ]; then
+  noask=1
   parse_install_flags "${@:2}"
   [ "${#rest[@]}" = 0 ] || { echo "usage: claude-discord install [--scope project|global] [--method link|clone]" >&2; exit 2; }
   check_install_scope
@@ -437,6 +492,7 @@ if [ "${1:-}" = setup ]; then
   case $name in
     ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
     hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
+    setup|install|update|patch|compat|refresh|health) echo "claude-discord: bot name '$name' is reserved: 'claude-discord $name' is a subcommand" >&2; exit 2;;
   esac
   if [ "${3:-}" = --mode ]; then
     [ -z "$scope$method" ] || { echo "claude-discord: --mode changes only the mode and installs nothing; --scope and --method do not apply" >&2; exit 2; }
@@ -1322,6 +1378,10 @@ patch_official() {
   local rt=$HOME/.claude-discord/runtime d f rc=0 changed=""
   mark() { case " $changed " in *" $1 "*) ;; *) changed="$changed $1";; esac; }   # list a file once
   sync_runtime || return 1
+  if [ -n "${runtime_newer:-}" ]; then
+    echo "claude-discord: patch: ~/.claude-discord/runtime is from $runtime_newer, newer than this $(plugin_version "$self_root"); the newer code patches the plugin cache, left as it is" >&2
+    return 0
+  fi
   for d in "$HOME"/.claude/plugins/cache/claude-plugins-official/discord/*/; do
     d=${d%/}; f=$d/server.ts   # no trailing slash, so messages name the file cleanly
     [ -f "$f" ] || continue
@@ -1346,13 +1406,18 @@ patch_official() {
     fi
     [ "$(cat "$d/bunfig.toml" 2>/dev/null)" = "preload = [\"$rt/discord-proxy.ts\"]" ] ||
       { printf 'preload = ["%s"]\n' "$rt/discord-proxy.ts" > "$d/bunfig.toml"; mark "$d/bunfig.toml"; }
-    if [ -f "$d/.mcp.json" ] && ! jq -e '.mcpServers.discord.env.DISCORD_STATE_DIR' "$d/.mcp.json" >/dev/null 2>&1; then
+    # The key is ours, not the server's DISCORD_STATE_DIR: unset, "${DISCORD_STATE_DIR}"
+    # would stay a literal string and mask the server's own default state dir for
+    # a user of the official plugin without claude-discord; "${VAR:-}" expands to
+    # "" (measured, 2.1.296). An earlier release's DISCORD_STATE_DIR line is removed.
+    if [ -f "$d/.mcp.json" ] && ! jq -e '(.mcpServers.discord.env.CLAUDE_DISCORD_BOT == "${DISCORD_STATE_DIR:-}") and (.mcpServers.discord.env.DISCORD_STATE_DIR != "${DISCORD_STATE_DIR}")' "$d/.mcp.json" >/dev/null 2>&1; then
       # Only a file that already defines the discord server is edited (jq would
       # otherwise create a command-less one); jq_edit leaves bad JSON alone and
       # returns 0, so the result is verified, not assumed.
       jq -e '.mcpServers.discord.command' "$d/.mcp.json" >/dev/null 2>&1 &&
-        jq_edit "$d/.mcp.json" '.mcpServers.discord.env = ((.mcpServers.discord.env // {}) + {DISCORD_STATE_DIR: "${DISCORD_STATE_DIR}"})'
-      if jq -e '.mcpServers.discord.env.DISCORD_STATE_DIR' "$d/.mcp.json" >/dev/null 2>&1; then
+        jq_edit "$d/.mcp.json" '.mcpServers.discord.env = ((.mcpServers.discord.env // {}) + {CLAUDE_DISCORD_BOT: "${DISCORD_STATE_DIR:-}"})
+          | if .mcpServers.discord.env.DISCORD_STATE_DIR == "${DISCORD_STATE_DIR}" then del(.mcpServers.discord.env.DISCORD_STATE_DIR) else . end'
+      if jq -e '(.mcpServers.discord.env.CLAUDE_DISCORD_BOT == "${DISCORD_STATE_DIR:-}") and (.mcpServers.discord.env.DISCORD_STATE_DIR != "${DISCORD_STATE_DIR}")' "$d/.mcp.json" >/dev/null 2>&1; then
         mark "$d/.mcp.json"
       else
         echo "claude-discord: patch: $d/.mcp.json: failure-cache no longer matches" >&2; rc=1
@@ -1364,7 +1429,6 @@ patch_official() {
 }
 if [ "${1:-}" = patch ]; then patch_official; exit $?; fi
 
-plugin_version() { jq -r '.version // "?"' "$1/.claude-plugin/plugin.json" 2>/dev/null || echo "?"; }
 # self_root is already the real clone (a link resolved through readlink and pwd -P).
 if [ "${1:-}" = --version ]; then
   echo "claude-discord $(plugin_version "$self_root") ($(git -C "$self_root" rev-parse --short HEAD 2>/dev/null || echo nogit))"
@@ -1396,7 +1460,7 @@ if [ "${1:-}" = update ]; then
     # A clone checked out at a tag or sha is pinned on purpose: skipped, not a failure.
     git -C "$c" symbolic-ref -q HEAD >/dev/null 2>&1 || { echo "claude-discord: $c: pinned at $(git -C "$c" rev-parse --short HEAD 2>/dev/null || echo '?'), skipped"; continue; }
     old=$(plugin_version "$c")
-    git -C "$c" pull -q --ff-only || { echo "claude-discord: $c: pull failed (local changes, diverged, or no network)" >&2; rc=1; continue; }
+    git_net -C "$c" pull -q --ff-only || { echo "claude-discord: $c: pull failed (local changes, diverged, or no network)" >&2; rc=1; continue; }
     echo "claude-discord $c: $old -> $(plugin_version "$c")"
   done
   # The patch step and the shim come from the freshly pulled code, run as a
@@ -1406,7 +1470,12 @@ if [ "${1:-}" = update ]; then
   new=$self_root
   [ -x "$helpers/source/bin/claude-discord" ] && new=$helpers/source || { [ "${#clones[@]}" -eq 0 ] || new=${clones[0]}; }
   "$new/bin/claude-discord" patch || rc=1
-  "$new/bin/claude-discord" compat || rc=1
+  # compat arrived in 1.8.0: older code would read the word as a bot name.
+  if ver_ge "$(plugin_version "$new")" 1.8.0; then
+    "$new/bin/claude-discord" compat || rc=1
+  else
+    echo "claude-discord: $new is at $(plugin_version "$new"), before the compat copy (1.8.0); ~/.claude-discord/hooks left as it is"
+  fi
   mkdir -p "$HOME/.local/bin"
   cmp -s "$new/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
     install -m 755 "$new/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
@@ -1427,7 +1496,12 @@ for a in "$@"; do
     -n|--name) want_name=1;;
     --name=*)  name=${a#--name=}; named=1;;
     -*) args+=("$a"); takes_value "$a" && skip=1 || :;;
-    *)  if [ "$has_name" = 0 ] && [ -z "$name" ]; then name=$a; positional=1; else args+=("$a"); fi;;
+    *)  if [ "$has_name" = 0 ] && [ -z "$name" ]; then name=$a; positional=1
+        else
+          # A set-up bot's name as a bare word beside --name is the old positional form mixed with the new one.
+          case $a in */*|.|..) ;; *) [ ! -f "$root/$a/.env" ] || { echo "claude-discord: '$a' and --name both name a bot; use 'claude-discord --name <bot> ...' (the positional 'claude-discord <bot> ...' is the old form), never both" >&2; exit 2; };; esac
+          args+=("$a")
+        fi;;
   esac
 done
 if [ "$want_name" = 1 ] || { [ "$named" = 1 ] && [ -z "$name" ]; }; then echo "claude-discord: --name needs a bot name" >&2; exit 2; fi
@@ -1561,8 +1635,9 @@ run=("$bin")
 if [ -n "$resume_id" ]; then
   lt=(); command -v timeout >/dev/null 2>&1 && lt=(timeout 5)
   if agents=$(${lt[@]+"${lt[@]}"} "$bin" agents --json 2>/dev/null) &&
-     printf '%s' "$agents" | jq -e --arg s0 "$resume_id" '($s0 | ascii_downcase) as $s | type == "array" and ($s | test("^[0-9a-f-]{8,}$")) and any(.[]; (((.sessionId // "") | startswith($s)) or ((.resumeSessionId // "") | startswith($s)) or (.id == $s[0:8])) and (.state // "") != "stopped")' >/dev/null 2>&1; then
-    echo "claude-discord: session $resume_id is running; use 'claude-discord refresh $name' to replace it" >&2
+     live=$(printf '%s' "$agents" | jq -r --arg s0 "$resume_id" '($s0 | ascii_downcase) as $s | if type == "array" and ($s | test("^[0-9a-f-]{8,}$")) then first(.[] | select((((.sessionId // "") | startswith($s)) or ((.resumeSessionId // "") | startswith($s)) or (.id == $s[0:8])) and (.state // "") != "stopped")) | (.id // "?" | tostring) else empty end' 2>/dev/null) && [ -n "$live" ]; then
+    # A dead session the listing still shows as done counts too; stopping its row is the way to resume it.
+    echo "claude-discord: session $resume_id is running (job $live); use 'claude-discord refresh $name' to replace it, or, if that session is dead but still listed, 'claude stop $live' and then --resume" >&2
     exit 2
   fi
 fi

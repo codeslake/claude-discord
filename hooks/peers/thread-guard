@@ -32,6 +32,7 @@
 #    rule covers requests, not those reports.
 #
 # Must never fail a turn.
+[ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 plugin_gate || exit 0

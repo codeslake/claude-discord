@@ -14,6 +14,7 @@
 # bot's own session apart (its worker pid, say) if such a child ever acts on it.
 # Prints nothing without DISCORD_STATE_DIR, for a bot in another mode or
 # without the rule file. Starts no process; never fails.
+[ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 plugin_gate || exit 0

@@ -42,9 +42,39 @@ wait_for_file() {  # $1 = path; up to 2s in 0.02s steps, for an async write to l
 
 bash -n "$S"
 # macOS runs the wrapper under /bin/bash 3.2, which this Linux suite never does:
-# refuse the bash 4+ constructs that would only fail there, in everything a Mac runs (a line that can
-# never run on macOS carries the marker bash4-ok).
-if grep -nE '\$\{[A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?(,,?|\^\^?)\}|(^|[;&|[:space:]])(mapfile|readarray|coproc)[[:space:]]|(declare|local|typeset)[[:space:]]+-[a-zA-Z]*A|\|&|&>>' "$S" "$D/shim/claude-discord" "$D"/hooks/*/* "$D"/tools/* | grep -vE 'bash4-ok|^[^:]*:[0-9]+:[[:space:]]*#'; then
+# refuse the bash 4+ constructs that would only fail there, in everything a Mac runs. A code line that can
+# never run on macOS ends in the comment `# bash4-ok: <why>`; the word anywhere else exempts nothing, and
+# a comment line is never code. Constructs: ${x,,} ${x^^} (with a pattern too, and on $1 $@ $*),
+# mapfile/readarray/coproc, declare/local/typeset -A or -n, [[ -v, ${a[-1]}, ;& and ;;&, ${x@Q}-style
+# transforms, wait -n, |& and &>>.
+bash4_lint() {
+  grep -nHE '\$\{([A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?|[0-9]+|[@*])(,,?|\^\^?)[^}]*\}|(^|[;&|[:space:]])(mapfile|readarray|coproc)[[:space:]]|(declare|local|typeset)[[:space:]]+-[a-zA-Z]*[An]|\[\[[[:space:]]+-v[[:space:]]|\$\{[A-Za-z_][A-Za-z_0-9]*\[-[0-9]|;;?&([^&]|$)|\$\{[^}]*@[A-Za-z]\}|(^|[;&|[:space:]])wait[[:space:]]+-n|\|&|&>>' "$@" |
+    grep -vE '^[^:]*:[0-9]+:[[:space:]]*#|^[^:]*:[0-9]+:[[:space:]]*[^#[:space:]].*[[:space:]]# bash4-ok: '
+}
+# The lint itself: every construct is caught, a trailing marker exempts its line, the bare word does not.
+LF=$(mktemp); trap 'rm -f "$LF"' EXIT
+cat > "$LF" <<'EOF'
+a=${x,,}
+a=${x^^[a-z]}
+a=${1,,}
+a=${@^^}
+mapfile -t a < f
+local -n ref=x
+declare -A m
+[[ -v x ]] && :
+a=${arr[-1]}
+case $x in a) : ;& b) : ;;& esac
+a=${x@Q}
+wait -n
+cmd |& cat
+cmd &>> log
+echo bash4-ok ${y,,}
+z=${x,,}   # bash4-ok: Linux-only path
+# a comment with ${x,,} and bash4-ok
+EOF
+[ "$(bash4_lint "$LF" | wc -l | tr -d ' ')" = 15 ] || { echo "FAIL: the bash 4 lint must flag each of the 15 code lines and exempt only the trailing marker: $(bash4_lint "$LF")"; exit 1; }
+rm -f "$LF"; trap - EXIT
+if bash4_lint "$S" "$D/shim/claude-discord" "$D"/hooks/*/* "$D"/tools/*; then
   echo "FAIL: bash 4+ construct in the wrapper, shim, hooks or tools (macOS /bin/bash is 3.2)"; exit 1
 fi
 bash -n "$D/hooks/lib/discord.sh"
@@ -678,7 +708,26 @@ rc=$?
 out=$(bash "$S" --name checkin 2>&1) && { echo "FAIL: starting a bot named checkin should have been refused"; exit 1; }
 rc=$?
 [ "$rc" -eq 2 ] && grep -qF "bot name 'checkin' is reserved for the checkin directory" <<<"$out" || { echo "FAIL: starting a bot named checkin must be refused by the reserved-name guard, got rc=$rc: $out"; exit 1; }
-echo "ok: the bot names 'hooks' and 'checkin' are reserved and rejected by both setup and start, by the reserved-name guard specifically"
+for n in install compat update; do
+  rc=0; out=$(printf '' | bash "$S" setup $n 2>&1) || rc=$?
+  [ "$rc" = 2 ] && grep -qF "bot name '$n' is reserved: 'claude-discord $n' is a subcommand" <<<"$out" || { echo "FAIL: setup $n must be refused as a subcommand name, rc=$rc: $out"; exit 1; }
+done
+echo "ok: the bot names 'hooks' and 'checkin' are reserved and rejected by both setup and start, by the reserved-name guard specifically; a subcommand's name is refused by setup"
+
+# Every hook's first line: no DISCORD_STATE_DIR, no source of the lib (here a lib that says so), no fork;
+# edit-gate also stops before it for a bot that is not a dev-manager.
+FL="$HOME/firstline"; mkdir -p "$FL/hooks/lib" "$FL/bot"; printf 'echo SOURCED\nplugin_gate() { exit 0; }\n' > "$FL/hooks/lib/discord.sh"; echo none > "$FL/bot/mode"
+for h in turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/checkin peers/edit-gate peers/mention-guard peers/thread-guard autoresearchclaw/on-start; do
+  mkdir -p "$FL/hooks/${h%/*}"; cp "$D/hooks/$h" "$FL/hooks/$h"
+  out=$(bash "$FL/hooks/$h" <<<'{"session_id":"x"}' 2>&1)
+  [ -z "$out" ] || { echo "FAIL: $h must exit before sourcing anything in a non-bot session: $out"; exit 1; }
+done
+out=$(DISCORD_STATE_DIR="$FL/bot" bash "$FL/hooks/peers/edit-gate" <<<'{"session_id":"x"}' 2>&1)
+[ -z "$out" ] || { echo "FAIL: edit-gate must stop before the lib for a bot that is not a dev-manager: $out"; exit 1; }
+echo dev-manager > "$FL/bot/mode"; out=$(DISCORD_STATE_DIR="$FL/bot" bash "$FL/hooks/peers/edit-gate" <<<'{}' 2>&1)
+[ "$out" = SOURCED ] || { echo "FAIL: fixture: a dev-manager's edit-gate must reach the lib: $out"; exit 1; }
+rm -rf "$FL"
+echo "ok: every hook exits before sourcing anything without DISCORD_STATE_DIR, and edit-gate before it for a non-dev-manager bot"
 
 bash "$S" --name gamma >/dev/null 2>&1 && { echo "FAIL: run without setup should refuse"; exit 1; }
 echo "ok: run refuses without setup"
@@ -742,13 +791,26 @@ for v in 0.0.5 0.0.6; do
   grep -q 'ignoreEveryone: true' "$PCACHE/$v/server.ts" &&
   grep -qF "(await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chunk(text, limit, mode)" "$PCACHE/$v/server.ts" &&
   grep -qF "$HOME/.claude-discord/runtime/discord-proxy.ts" "$PCACHE/$v/bunfig.toml" &&
-  [ "$(jq -r '.mcpServers.discord.env.DISCORD_STATE_DIR' "$PCACHE/$v/.mcp.json")" = '${DISCORD_STATE_DIR}' ] &&
+  [ "$(jq -c '.mcpServers.discord.env' "$PCACHE/$v/.mcp.json")" = '{"CLAUDE_DISCORD_BOT":"${DISCORD_STATE_DIR:-}"}' ] &&
   grep -qF "$PCACHE/$v/server.ts" <<<"$out" ||
   { echo "FAIL: patch must apply all five patches to $v and name its files: $out"; exit 1; }
 done
 ! grep -qF "$PCACHE/0.0.4" <<<"$out" || { echo "FAIL: the already patched 0.0.4 must not be reported as changed: $out"; exit 1; }
 out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch run must be silent and exit 0: $out"; exit 1; }
 [ -f "$HOME/.claude-discord/runtime/discord-chunk.ts" ] && [ -f "$HOME/.claude-discord/runtime/discord-proxy.ts" ] || { echo "FAIL: patch must keep the runtime copy"; exit 1; }
+# A .mcp.json an earlier release patched carries DISCORD_STATE_DIR: "${DISCORD_STATE_DIR}", which masks the
+# server's own default for a user without claude-discord: it goes, our key comes, any other env key stays; once.
+jq '.mcpServers.discord.env = {DISCORD_STATE_DIR: "${DISCORD_STATE_DIR}", KEEP: "1"}' "$PCACHE/0.0.5/.mcp.json" > "$HOME/m.tmp" && mv "$HOME/m.tmp" "$PCACHE/0.0.5/.mcp.json"
+out=$(bash "$S" patch 2>&1) && [ "$(jq -c '.mcpServers.discord.env' "$PCACHE/0.0.5/.mcp.json")" = '{"KEEP":"1","CLAUDE_DISCORD_BOT":"${DISCORD_STATE_DIR:-}"}' ] && grep -qF "$PCACHE/0.0.5/.mcp.json" <<<"$out" || { echo "FAIL: patch must replace an earlier DISCORD_STATE_DIR env line by CLAUDE_DISCORD_BOT and keep other keys: $out $(cat "$PCACHE/0.0.5/.mcp.json")"; exit 1; }
+out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: the .mcp.json rewrite must be idempotent: $out"; exit 1; }
+# runtime/VERSION: an older wrapper leaves a newer runtime and the cache alone, says so once, exits 0.
+[ "$(cat "$HOME/.claude-discord/runtime/VERSION")" = "$(jq -r .version "$PC/.claude-plugin/plugin.json")" ] || { echo "FAIL: patch must stamp runtime/VERSION with its plugin version"; exit 1; }
+cp "$HOME/.claude-discord/runtime/VERSION" "$HOME/rtv.before"; echo 99.0.0 > "$HOME/.claude-discord/runtime/VERSION"
+echo stale > "$HOME/.claude-discord/runtime/discord-chunk.ts"; cp "$HOME/server.ts.pristine" "$PCACHE/0.0.5/server.ts"
+rc=0; out=$(bash "$S" patch 2>&1) || rc=$?
+[ "$rc" = 0 ] && [ "$(grep -c 'newer than this' <<<"$out")" = 1 ] && [ "$(cat "$HOME/.claude-discord/runtime/discord-chunk.ts")" = stale ] && cmp -s "$HOME/server.ts.pristine" "$PCACHE/0.0.5/server.ts" || { echo "FAIL: an older patch must leave a newer runtime and the cache alone and say so once (rc=$rc): $out"; exit 1; }
+cp "$HOME/rtv.before" "$HOME/.claude-discord/runtime/VERSION"; rm -f "$HOME/rtv.before"
+bash "$S" patch >/dev/null 2>&1 && cmp -s "$PC/runtime/discord-chunk.ts" "$HOME/.claude-discord/runtime/discord-chunk.ts" && grep -q 'ignoreEveryone: true' "$PCACHE/0.0.5/server.ts" || { echo "FAIL: the same version must refill the runtime and patch again"; exit 1; }
 # A dir the previous release patched imports the chunk helper and preloads the proxy from the old compat paths; patch re-points both to runtime/, once.
 perl -pi -e 's{import\("[^"]*"\)}{import("$ENV{HOME}/.claude-discord/discord-chunk.ts")}' "$PCACHE/0.0.6/server.ts"
 printf 'preload = ["%s/.claude-discord/discord-proxy.ts"]\n' "$HOME" > "$PCACHE/0.0.6/bunfig.toml"
@@ -767,7 +829,7 @@ out=$(bash "$S" patch 2>&1) && { echo "FAIL: a pattern that no longer matches mu
 grep -q 'patch: .*0.0.7/server.ts: bot-authors no longer matches' <<<"$out" || { echo "FAIL: wrong no-match report: $out"; exit 1; }
 ! grep -q '0.0.[456]/server.ts: ' <<<"$out" || { echo "FAIL: only the moved dir may be reported: $out"; exit 1; }
 grep -qF "$HOME/.claude-discord/runtime/discord-proxy.ts" "$PCACHE/0.0.7/bunfig.toml" &&
-  [ "$(jq -r '.mcpServers.discord.env.DISCORD_STATE_DIR' "$PCACHE/0.0.7/.mcp.json")" = '${DISCORD_STATE_DIR}' ] || { echo "FAIL: the patches that still match must be applied beside the moved one"; exit 1; }
+  [ "$(jq -r '.mcpServers.discord.env.CLAUDE_DISCORD_BOT' "$PCACHE/0.0.7/.mcp.json")" = '${DISCORD_STATE_DIR:-}' ] || { echo "FAIL: the patches that still match must be applied beside the moved one"; exit 1; }
 # failure-cache: a .mcp.json without the discord server's command, and one that
 # is not JSON, are left byte-identical, named, exit 1; the file lists once.
 rm -rf "$PCACHE/0.0.7"
@@ -959,7 +1021,7 @@ RID=aaaaaaaa-1111-2222-3333-444444444444
 agents_rows() { printf '#!/bin/bash\ncase $1 in agents) echo %s;; *) echo "PLAIN $*";; esac\n' "'$1'" > "$HOME/bin/claude"; }
 refused() {  # $1 = resume value, $2 = what the case shows; the start must be refused, point at refresh, start nothing
   out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --name alpha --resume "$1" 2>&1) && { echo "FAIL: $2: must be refused: $out"; exit 1; }
-  grep -q 'refresh alpha' <<<"$out" && ! grep -q PLAIN <<<"$out" || { echo "FAIL: $2: the refusal must point at refresh and start nothing: $out"; exit 1; }
+  grep -q 'refresh alpha' <<<"$out" && grep -q 'claude stop ' <<<"$out" && ! grep -q PLAIN <<<"$out" || { echo "FAIL: $2: the refusal must point at refresh and at claude stop, and start nothing: $out"; exit 1; }
 }
 started() {  # $1 = resume value, $2 = what the case shows
   out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --name alpha --resume "$1" 2>&1 || :)
@@ -972,6 +1034,7 @@ agents_rows "[{\"sessionId\":\"$RID\",\"state\":\"done\",\"cwd\":\"$P\"}]"
 refused $RID "an idle (done) bot is live"
 agents_rows "[{\"id\":\"jobid001\",\"sessionId\":\"dddddddd-0000-0000-0000-000000000000\",\"resumeSessionId\":\"$RID\",\"state\":\"working\",\"cwd\":\"$P\"}]"
 refused $RID "a row matched by resumeSessionId"
+grep -q "claude stop jobid001" <<<"$out" || { echo "FAIL: the refusal must name the job to stop: $out"; exit 1; }
 agents_rows "[{\"sessionId\":\"$RID\",\"state\":\"working\",\"cwd\":\"$P\"}]"
 refused aaaaaaaa-1111-2222 "a 12+ character prefix"
 refused AAAAAAAA-1111-2222 "an uppercase prefix"
@@ -1004,10 +1067,10 @@ grep -q -- '--name needs a bot name' <<<"$out" || { echo "FAIL: --name '': wrong
 
 # With a --name, a bare word is an argument for claude, not the bot.
 printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"
+rc=0; out=$(bash "$S" alpha --name beta 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -qF "'alpha' and --name both name a bot" <<<"$out" && ! grep -q 'PLAIN\|LAUNCHER' <<<"$out" || { echo "FAIL: a positional bot beside --name must be refused naming both forms (rc=$rc): $out"; exit 1; }
 out=$(bash "$S" -p hello --name beta 2>&1)
 grep -q -- '-n beta' <<<"$out" && grep -q -- ' -p hello' <<<"$out" || { echo "FAIL: '-p hello --name beta' must start beta and keep hello: $out"; exit 1; }
-out=$(bash "$S" alpha --name beta 2>&1)
-grep -q -- '-n beta' <<<"$out" && grep -q -- ' alpha' <<<"$out" && ! grep -q deprecated <<<"$out" || { echo "FAIL: 'alpha --name beta' must start beta, pass alpha through, and not warn: $out"; exit 1; }
 
 # The -r and -r= forms resolve the bot and pass the value through like --resume.
 for f in "-r aaaaaaaa" "-r=aaaaaaaa"; do
@@ -1024,7 +1087,7 @@ out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume dead 2>&1 || :)
 grep -q -- '-n dead' <<<"$out" && ! grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: --resume dead with a bot dead must go to the bot-name rule: $out"; exit 1; }
 rm -rf "$R/dead" "$JR"
 printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"
-echo "ok: --name/-n/--name= name the bot silently, the positional form warns, setup stays quiet, an empty --name is refused, a bare word beside --name goes to claude; --resume (also -r, -r=) finds the bot from its job record (8+ hex, ambiguity refused) or by a bot's name; a live session is refused whatever its state short of stopped, however it is matched, without consuming the handoff, and a failing or non-array listing is not"
+echo "ok: --name/-n/--name= name the bot silently, the positional form warns, setup stays quiet, an empty --name is refused, a bare word beside --name goes to claude unless it names a set-up bot (refused: both forms); --resume (also -r, -r=) finds the bot from its job record (8+ hex, ambiguity refused) or by a bot's name; a live session is refused whatever its state short of stopped, however it is matched, without consuming the handoff, and a failing or non-array listing is not"
 
 mkdir -p "$HOME/nobin"
 cp "$HOME/bin/claude-launcher" "$HOME/nobin/claude-launcher"
@@ -1109,7 +1172,10 @@ echo "ok: a first run leaves an invalid-JSON, a read-only and a nothing-of-ours 
 rm -f "$P2/.claude/settings.local.json"
 echo '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' > "$P2/.claude/settings.json"
 plant_old "$P2/.claude/settings.json"; cp "$P2/.claude/settings.json" "$P2/.claude/settings.local.json"; chmod 600 "$P2/.claude/settings.local.json"
+ino() { ls -i "$1" | awk '{print $1}'; }
+i0=$(ino "$P2/.claude/settings.local.json")
 plugin_hook "$P2" gamma h1
+[ "$(ino "$P2/.claude/settings.local.json")" != "$i0" ] || { echo "FAIL: the settings edit must replace the file by a rename (a new inode), never write it in place"; exit 1; }
 for f in settings.json settings.local.json; do
   [ "$(jq -c . "$P2/.claude/$f")" = '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' ] || { echo "FAIL: $f must keep the unrelated key and hook and none of ours: $(jq -c . "$P2/.claude/$f")"; exit 1; }
 done
@@ -1134,16 +1200,27 @@ rm -f "$P2/.claude/settings.json"; ln -s "$HOME/dotrepo/settings.json" "$P2/.cla
 echo '{}' > "$P2/.claude/settings.local.json"; plant_old "$P2/.claude/settings.local.json"
 echo '{}' > "$HOME/.claude/settings.json"; plant_old "$HOME/.claude/settings.json"; cp "$HOME/.claude/settings.json" "$P2/global.before"
 plugin_hook "$P2" gamma s1
-printf '{"session_id":"s2"}' | CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$HOME" DISCORD_STATE_DIR="$P2/.claude/discord-agents/gamma" bash "$PC/hooks/turn/on-stop"   # a bot whose project is $HOME
+mkdir -p "$HOME/.claude/discord-agents/hb"; plugin_hook "$HOME" hb s2   # a bot whose project is $HOME
+[ -e "$HOME/.claude/discord-agents/hb/plugin-sessions/s2" ] || { echo "FAIL: fixture: the \$HOME bot's first run did not happen"; exit 1; }
+rm -rf "$HOME/.claude/discord-agents"
 [ -L "$P2/.claude/settings.json" ] && cmp -s "$HOME/dotrepo/settings.json" "$P2/dot.before" && cmp -s "$HOME/.claude/settings.json" "$P2/global.before" || { echo "FAIL: a symlinked settings.json and the user-global one must be left byte-identical"; exit 1; }
+# A project whose .claude is itself a link (into the dotfiles tree): nothing in it is the project's own.
+PL="$HOME/linked proj"; mkdir -p "$PL" "$HOME/dotrepo/cl/discord-agents/lb" "$HOME/dotrepo/cl/rules"; ln -s "$HOME/dotrepo/cl" "$PL/.claude"
+echo '{}' > "$HOME/dotrepo/cl/settings.local.json"; plant_old "$HOME/dotrepo/cl/settings.local.json"; cp "$HOME/dotrepo/cl/settings.local.json" "$P2/cl.before"; : > "$HOME/dotrepo/cl/rules/claude-discord-dev-manager.md"
+plugin_hook "$PL" lb l1
+[ -e "$HOME/dotrepo/cl/discord-agents/lb/plugin-sessions/l1" ] && cmp -s "$HOME/dotrepo/cl/settings.local.json" "$P2/cl.before" && [ -e "$HOME/dotrepo/cl/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: a first run must not edit through a symlinked .claude"; exit 1; }
+rm -rf "$PL" "$HOME/dotrepo/cl" "$P2/cl.before"
 ! grep -q '/.claude/discord-agents/hooks/' "$P2/.claude/settings.local.json" || { echo "FAIL: the regular settings.local.json beside them must still be migrated"; exit 1; }
 err=$(printf '\nn\n\n' | bash "$S" setup gamma 2>&1 >/dev/null)
 grep -qF "old claude-discord hook entries stay in '$P2/.claude/settings.json' '$HOME/.claude/settings.json'" <<<"$err" && grep -qF "old-hooks.sh'" <<<"$err" || { echo "FAIL: setup must name the files it will not touch, with the command: $err"; exit 1; }
-cmd=${err##*Remove them by hand: }; eval "$cmd"
+grep -qF "They still serve every bot on this machine, and on every machine sharing that file, whose plugin is not loaded yet: only when each of those bots has a <bot dir>/plugin-sessions/ marker" <<<"$err" || { echo "FAIL: the hint must warn that the entries still serve unmigrated bots: $err"; exit 1; }
+i0=$(ls -i "$HOME/dotrepo/settings.json" | awk '{print $1}')
+cmd=${err##*remove them by hand: }; eval "$cmd"
 ! grep -q '/.claude/discord-agents/hooks/' "$HOME/dotrepo/settings.json" "$HOME/.claude/settings.json" && [ -L "$P2/.claude/settings.json" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] || { echo "FAIL: the printed command must remove the entries, through the symlink: $(cat "$HOME/dotrepo/settings.json")"; exit 1; }
+[ "$(ls -i "$HOME/dotrepo/settings.json" | awk '{print $1}')" != "$i0" ] || { echo "FAIL: by hand, a symlink's target must be replaced by a rename, not written in place"; exit 1; }
 rm -f "$P2/.claude/settings.json" "$HOME/.claude/settings.json" "$P2/dot.before" "$P2/global.before"; rm -rf "$HOME/dotrepo"
 echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"
-echo "ok: a first run never edits a symlinked settings.json or the user-global one (a bot in \$HOME included); setup names them with a command that removes the entries through the link"
+echo "ok: a first run never edits a symlinked settings.json, the user-global one (a bot in \$HOME included) or anything under a symlinked .claude; setup names them, warns they still serve unmigrated bots, and its command renames a new target in under the link"
 
 # h6. the gate. An old-path hook (run through .claude/discord-agents/hooks or ~/.claude-discord/hooks, or with
 # no CLAUDE_PLUGIN_ROOT) runs in a session with no marker and exits 0 doing nothing in a marked one; the
@@ -1152,7 +1229,7 @@ GD="$P2/.claude/discord-agents/gamma"; rm -rf "$GD/turns" "$GD/plugin-sessions"
 tagged() { printf '{"session_id":"%s","prompt":"<channel source=\\"plugin:discord:discord\\" chat_id=\\"111\\" message_id=\\"%s\\" user=\\"u\\" user_id=\\"9\\" ts=\\"t\\">\\nhello\\n</channel>"}' "$1" "$2"; }
 tagged g0 500 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
 [ -s "$GD/turns/g0" ] && [ ! -e "$GD/plugin-sessions" ] || { echo "FAIL: with no marker directory an old-path hook must run as before"; exit 1; }
-mkdir -p "$GD/plugin-sessions"; : > "$GD/plugin-sessions/g2"; : > "$GD/plugin-sessions/old"; touch -d '40 days ago' "$GD/plugin-sessions/old"
+mkdir -p "$GD/plugin-sessions"; : > "$GD/plugin-sessions/g2"; : > "$GD/plugin-sessions/old"; touch -d '40 days ago' "$GD/plugin-sessions/old" "$GD/plugin-sessions/g2"
 tagged g1 501 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
 [ -s "$GD/turns/g1" ] || { echo "FAIL: an old-path hook must run in a session with no marker"; exit 1; }
 out=$(tagged g2 502 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt")
@@ -1162,9 +1239,30 @@ out3=$(tagged g2 504 | DISCORD_STATE_DIR="$GD" bash "$PC/hooks/turn/on-prompt")
 out=$(tagged g2 505 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$PC/hooks/turn/on-prompt")
 [ "$(cut -d' ' -f2 "$GD/turns/g2")" = 505 ] && [ -n "$out" ] || { echo "FAIL: the plugin's hook must run in a marked session: $out"; exit 1; }
 plugin_hook "$P2" gamma g3
-[ -e "$GD/plugin-sessions/g3" ] && [ ! -e "$GD/plugin-sessions/old" ] && [ -e "$GD/plugin-sessions/g2" ] || { echo "FAIL: a new marker must prune the month-old ones and only those: $(ls "$GD/plugin-sessions")"; exit 1; }
+[ -e "$GD/plugin-sessions/g3" ] && [ ! -e "$GD/plugin-sessions/old" ] && [ -e "$GD/plugin-sessions/g2" ] || { echo "FAIL: a new marker must prune the month-old ones and only those (g2's run refreshed it): $(ls "$GD/plugin-sessions")"; exit 1; }
+# A claude -p started from the bot's shell inherits DISCORD_STATE_DIR; in another project it is no bot.
+out=$(tagged g4 506 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$HOME" bash "$PC/hooks/turn/on-prompt")
+[ -z "$out" ] && [ ! -e "$GD/turns/g4" ] && [ ! -e "$GD/plugin-sessions/g4" ] || { echo "FAIL: a session in another project is not the bot: $out"; exit 1; }
 rm -rf "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"
-echo "ok: an old-path hook runs with no marker (no marker directory, or another session's) and exits 0 doing nothing in a marked session, whatever CLAUDE_PLUGIN_ROOT says; the plugin's hook still runs there; a new marker prunes month-old ones"
+echo "ok: an old-path hook runs with no marker (no marker directory, or another session's) and exits 0 doing nothing in a marked session, whatever CLAUDE_PLUGIN_ROOT says; the plugin's hook still runs there and keeps its marker fresh; a new marker prunes month-old ones; a session in another project is no bot"
+
+# h7. one migration per session however many of its hooks start at once (noclobber on the marker). A slow jq
+# (0.3 s) keeps the first migration running while the others pass the marker check, so each of them would
+# migrate too without it.
+JL="$HOME/jq.log"; mkdir -p "$HOME/jqshim"; : > "$JL"
+printf '#!/bin/bash\ncase "$*" in *discord-agents/hooks*) echo x >> "%s"; sleep 0.3;; esac\nexec %s "$@"\n' "$JL" "$(command -v jq)" > "$HOME/jqshim/jq"; chmod +x "$HOME/jqshim/jq"
+echo '{"permissions":{"allow":["Bash(ls)"]}}' > "$P2/.claude/settings.local.json"; plant_old "$P2/.claude/settings.local.json"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do PATH="$HOME/jqshim:$PATH" plugin_hook "$P2" gamma par1 & done; wait
+[ "$(wc -l < "$JL" | tr -d ' ')" = 1 ] && [ "$(jq -c . "$P2/.claude/settings.local.json")" = '{"permissions":{"allow":["Bash(ls)"]}}' ] || { echo "FAIL: twelve parallel first runs must migrate once ($(wc -l < "$JL") migrations): $(cat "$P2/.claude/settings.local.json")"; exit 1; }
+rm -rf "$HOME/jqshim" "$JL" "$GD/plugin-sessions"
+echo "ok: twelve hooks of one session starting at once migrate once (noclobber marker) and leave valid JSON"
+
+# on-session-start's patch run: a failure lands in the bot's health.log, not nowhere.
+mkdir -p "$PCACHE/0.0.99"; printf 'nothing to patch here\n' > "$PCACHE/0.0.99/server.ts"; rm -f "$GD/health.log"
+plugin_hook "$P2" gamma ss1 turn/on-session-start >/dev/null
+grep -q 'on-session-start: patch failed: .*0.0.99/server.ts: bot-authors no longer matches' "$GD/health.log" || { echo "FAIL: a failed patch at session start must be recorded in health.log: $(cat "$GD/health.log" 2>&1)"; exit 1; }
+rm -rf "$PCACHE/0.0.99" "$GD/health.log" "$GD/plugin-sessions"
+echo "ok: on-session-start records a failed patch run in the bot's health.log"
 
 # i. an explicit empty ackReaction means the owner disabled it; start must
 # leave it alone, never overwrite it back to the default.
@@ -1613,7 +1711,8 @@ echo "ok: edit-gate denies claude-discord edits (tracked or untracked, via a sym
 # thread. 500 is counted in CHARACTERS, so a Korean line well over 500 bytes
 # still passes.
 TG_REASON="Over 500 characters in the channel: start a thread ($TT start \"[<area>] <short title>\") and post this inside it, leaving one line here."
-tguard() { DISCORD_STATE_DIR="${3:-$R4/${2:-mgr}}" CLAUDE_PROJECT_DIR="$P4" bash "$G/thread-guard" <<<"$1"; }
+# A state dir given outside the project ($3) runs with no CLAUDE_PROJECT_DIR, the case the hooks cannot check.
+tguard() { local pd=$P4; [ -z "${3:-}" ] || pd=""; DISCORD_STATE_DIR="${3:-$R4/${2:-mgr}}" CLAUDE_PROJECT_DIR="$pd" bash "$G/thread-guard" <<<"$1"; }
 body() { jq -nc --arg c "$1" --arg t "$2" '{session_id: "t1", tool_input: {chat_id: $c, text: $t}}'; }
 # Session t1 is inside a Discord turn (on-prompt's turns file), so the checks
 # below reach the channel; the turn check itself is asserted after them.
@@ -2761,6 +2860,9 @@ install -m 755 "$OH/hooks/turn/on-stop" "$OH/hooks/turn/on-prompt"; echo old > "
 [ -z "$(git -C "$PC" status --porcelain)" ] && cmp -s "$PC/hooks/turn/on-prompt" "$D/hooks/turn/on-prompt" || { echo "FAIL: a write through the compat links must not reach the source clone: $(git -C "$PC" status --porcelain)"; exit 1; }
 (cd "$OP" && printf '\nn\n\n' | bash "$S" setup obot --scope project >/dev/null)
 cmp -s "$OH/hooks/turn/on-prompt" "$PC/hooks/turn/on-prompt" && cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && cmp -s "$OH/hooks/tools/thread" "$PC/tools/thread" && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] || { echo "FAIL: the next setup must restore the compat copy and leave no temp dir"; exit 1; }
+chmod -x "$OH/compat/hooks/turn/on-stop"   # the same bytes, no longer executable: an old entry's -x test would skip it
+(cd "$OP" && printf '\nn\n\n' | bash "$S" setup obot --scope project >/dev/null)
+[ -x "$OH/hooks/turn/on-stop" ] || { echo "FAIL: a mode-only difference must refresh the compat copy"; exit 1; }
 rm -f "$OP/.claude/skills/claude-discord"
 [ -x "$OH/hooks/tools/thread" ] && [ -x "$OH/hooks/turn/on-prompt" ] || { echo "FAIL: the compat links must outlive the project's install link"; exit 1; }
 # A symlink at hooks/ or rules/ (a dev checkout) goes as a link; its target keeps its files and is not written through.
@@ -2823,11 +2925,11 @@ mkdir -p "$GL"
 out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup rbot --scope project 2>&1) && { echo "FAIL: a global copy beside a project copy must be refused"; exit 1; }
 grep -q "already installed globally" <<<"$out" && [ ! -e "$XR/rbot" ] || { echo "FAIL: wrong or late refusal ($(ls "$XR")): $out"; exit 1; }
 rmdir "$GL"
-out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot --reset --scope global 2>&1) && { echo "FAIL: a project copy beside a global one must be refused"; exit 1; }
+out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot --reset --scope global --method clone 2>&1) && { echo "FAIL: a global clone beside a project copy must be refused"; exit 1; }
 grep -q "already installed for this project" <<<"$out" && [ -f "$XR/xbot/.env" ] || { echo "FAIL: wrong or late refusal, --reset must not run: $out"; exit 1; }
 # A new global copy would shadow every recorded project install (the global one wins), so it is refused naming one.
 mkdir -p "$HOME/gr proj"
-out=$(cd "$HOME/gr proj" && printf '\nn\n' | bash "$S" setup grbot --scope global 2>&1) && { echo "FAIL: a global install beside another project's install must be refused"; exit 1; }
+out=$(cd "$HOME/gr proj" && printf '\nn\n' | bash "$S" setup grbot --scope global --method clone 2>&1) && { echo "FAIL: a global clone beside another project's install must be refused"; exit 1; }
 grep -q "a project install exists at .*claude/skills/claude-discord" <<<"$out" && [ ! -e "$HOME/gr proj/.claude/discord-agents/grbot" ] && [ ! -e "$GL" ] || { echo "FAIL: wrong or late refusal: $out"; exit 1; }
 rm -rf "$HOME/gr proj"
 rc=0; (cd "$XP" && printf 'dev-manager\n\n' | bash "$S" setup xbot --mode --scope project >/dev/null 2>&1) || rc=$?
@@ -2887,12 +2989,40 @@ for _ in 1 2; do
   [ "$rc" = 0 ] && [ "$left" = leftover ] && [ "$(readlink "$IP/.claude/skills/claude-discord")" = "$HOME/.claude-discord/source" ] && [ ! -e "$IP/.claude/discord-agents" ] || { echo "FAIL: install must install, read nothing from stdin and write no bot file (rc=$rc, left=$left): $(cat "$HOME/inst.out")"; exit 1; }
 done
 grep -qxF "$IP/.claude/skills/claude-discord" "$HOME/.claude-discord/records/installs" && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" && [ -d "$HOME/.claude-discord/compat/hooks/turn" ] || { echo "FAIL: install must record the install and refresh the shim and compat copy"; exit 1; }
+# No flags, an untrusted project: still no stdin read (no scope, method or trust question), a hint instead; </dev/null too.
+UI="$HOME/untrusted inst"; mkdir -p "$UI"
+rc=0; left=$(printf 'l1\nl2\nl3\nl4\n' | { (cd "$UI" && bash "$S" install >"$HOME/inst.out" 2>&1) || rc=$?; cat; })
+[ "$rc" = 0 ] && [ "$left" = "$(printf 'l1\nl2\nl3\nl4')" ] && [ "$(readlink "$UI/.claude/skills/claude-discord")" = "$HOME/.claude-discord/source" ] && grep -q 'not trusted' "$HOME/inst.out" && grep -q "answer y in 'claude-discord setup <bot>'" "$HOME/inst.out" ||
+  { echo "FAIL: install with no flags in an untrusted project must read none of 4 piped lines and print the trust hint (rc=$rc, left=$left): $(cat "$HOME/inst.out")"; exit 1; }
+[ "$(jq -r --arg p "$PHOME/untrusted inst" '.projects[$p] | if . == null then "unset" else "set" end' "$HOME/.claude.json")" = unset ] || { echo "FAIL: install must not write trust"; exit 1; }
+rc=0; (cd "$UI" && bash "$S" install </dev/null >/dev/null 2>&1) || rc=$?
+[ "$rc" = 0 ] || { echo "FAIL: install </dev/null must succeed, rc=$rc"; exit 1; }
+rm -rf "$UI"
 rc=0; (cd "$IP" && bash "$S" install bogus >/dev/null 2>&1) || rc=$?
 [ "$rc" = 2 ] || { echo "FAIL: install takes only --scope and --method, rc=$rc"; exit 1; }
-rc=0; out=$(cd "$FP" && printf '900\n111\n\ntokF\nn\n' | CLAUDE_DISCORD_REPO="$HOME/no such repo" bash "$S" setup fbot --scope project --method clone 2>&1) || rc=$?
+GW="$HOME/gitwrap"; mkdir -p "$GW"
+printf '#!/bin/bash\necho "${GIT_TERMINAL_PROMPT:-unset} $(ps -o comm= -p $PPID) $1" >> "%s/log"\nexec %s "$@"\n' "$GW" "$(command -v git)" > "$GW/git"; chmod +x "$GW/git"
+rc=0; out=$(cd "$FP" && printf '900\n111\n\ntokF\nn\n' | PATH="$GW:$PATH" CLAUDE_DISCORD_REPO="$HOME/no such repo" bash "$S" setup fbot --scope project --method clone 2>&1) || rc=$?
 [ "$rc" != 0 ] && grep -q 'could not clone' <<<"$out" && [ ! -e "$FP/.claude/discord-agents" ] || { echo "FAIL: a failed clone must stop setup before any bot file (rc=$rc): $out $(find "$FP")"; exit 1; }
+! command -v timeout >/dev/null || grep -q '^0 timeout clone$' "$GW/log" || { echo "FAIL: a clone must run with GIT_TERMINAL_PROMPT=0 under timeout: $(cat "$GW/log")"; exit 1; }
+rm -rf "$GW"
 rm -rf "$IP" "$FP" "$HOME/inst.out"
-echo "ok: install installs and refreshes (twice) asking nothing and writing no bot file, refuses other words; a setup whose clone fails writes no bot file"
+echo "ok: install installs and refreshes (twice) reading no stdin at all (no flags and untrusted too: a trust hint instead) and writing no bot file, refuses other words; a setup whose clone fails writes no bot file, and git runs with no prompt under a timeout"
+
+# Scopes: a bot in $HOME is a global install (its .claude is ~/.claude); a project link and the global link to
+# the one source coexist (one code, loaded once); a clone on either side beside another install is refused.
+mkdir -p "$HOME/.claude"
+rc=0; out=$(cd "$HOME" && printf '900\n111\n\ntokH\nn\n' | bash "$S" setup hbot --method link 2>&1) || rc=$?
+[ "$rc" = 0 ] && grep -q 'this project is \$HOME' <<<"$out" && [ "$(readlink "$GL")" = "$HOME/.claude-discord/source" ] && [ -f "$HOME/.claude/discord-agents/hbot/.env" ] || { echo "FAIL: a bot in \$HOME must install globally, saying so (rc=$rc): $out"; exit 1; }
+CO="$HOME/co proj"; mkdir -p "$CO"
+jq --arg p "$PHOME/co proj" '.projects[$p].hasTrustDialogAccepted = true' "$HOME/.claude.json" > "$HOME/cj.tmp" && mv "$HOME/cj.tmp" "$HOME/.claude.json"
+rc=0; out=$(cd "$CO" && printf '900\n111\n\ntokC\nn\n' | bash "$S" setup cobot --scope project 2>&1) || rc=$?
+[ "$rc" = 0 ] && [ "$(readlink "$CO/.claude/skills/claude-discord")" = "$HOME/.claude-discord/source" ] && [ -L "$GL" ] || { echo "FAIL: a project link beside the global link must be allowed, as a link (rc=$rc): $out"; exit 1; }
+rm -f "$CO/.claude/skills/claude-discord"
+rc=0; out=$(cd "$CO" && printf '\nn\n' | bash "$S" setup cobot --scope project --method clone 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -q 'already installed globally' <<<"$out" && [ ! -e "$CO/.claude/skills/claude-discord" ] || { echo "FAIL: a project clone beside the global link must be refused (rc=$rc): $out"; exit 1; }
+rm -f "$GL"; rm -rf "$CO" "$HOME/.claude/discord-agents"
+echo "ok: a bot in \$HOME installs globally and says so; a project link and the global link coexist; a clone beside another install is refused"
 
 # --version and update. UP is a project linked to the source (so are the earlier projects the records still hold), UC a clone-method install.
 UP="$HOME/up proj"; UC="$HOME/up clone"; mkdir -p "$UP" "$UC"; for w in "$UP" "$UC"; do (cd "$w" && git init -q .); done
@@ -2908,12 +3038,12 @@ grep -qE '^claude-discord [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]{7,}\)$' <<<"$v" && [
 jq '.version = "9.9.9"' "$SRC/.claude-plugin/plugin.json" > "$SRC/p.json" && mv "$SRC/p.json" "$SRC/.claude-plugin/plugin.json" &&
   sed -i 's/^if \[ "\${1:-}" = patch \]; then patch_official;/if [ "${1:-}" = patch ]; then echo PATCH-CODE-V2 >\&2; patch_official;/' "$SRC/bin/claude-discord" && grep -q PATCH-CODE-V2 "$SRC/bin/claude-discord" &&
   git -C "$SRC" -c user.email=t@t -c user.name=t commit -qam bump || { echo "FAIL: could not bump the stand-in repo"; exit 1; }
-rm -rf "$HOME/.claude-discord/runtime"; echo stale > "$HOME/.local/bin/claude-discord"
+rm -rf "$HOME/.claude-discord/runtime" "$HOME/.claude-discord/compat"; echo stale > "$HOME/.local/bin/claude-discord"
 out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || { echo "FAIL: update failed: $out"; exit 1; }
 grep -q PATCH-CODE-V2 <<<"$out" || { echo "FAIL: update must run the patch step from the code it just pulled: $out"; exit 1; }
 grep -q -- '-> 9.9.9' <<<"$out" && grep -q '/reload-plugins' <<<"$out" && [ "$(grep -c -- "$PC" <<<"$out")" = 1 ] || { echo "FAIL: update must pull the source behind the link once and ask for /reload-plugins: $out"; exit 1; }
 [ "$(jq -r .version "$PC/.claude-plugin/plugin.json")" = 9.9.9 ] && [ "$(jq -r .version "$CC/.claude-plugin/plugin.json")" != 9.9.9 ] || { echo "FAIL: update must pull the source and only the source"; exit 1; }
-[ -s "$HOME/.claude-discord/runtime/discord-chunk.ts" ] && [ -s "$HOME/.claude-discord/runtime/discord-proxy.ts" ] && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" || { echo "FAIL: update must refill the runtime copy and refresh the shim"; exit 1; }
+[ -s "$HOME/.claude-discord/runtime/discord-chunk.ts" ] && [ -s "$HOME/.claude-discord/runtime/discord-proxy.ts" ] && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" && [ -x "$HOME/.claude-discord/compat/hooks/turn/on-prompt" ] || { echo "FAIL: update must refill the runtime copy and the compat copy and refresh the shim"; exit 1; }
 # --all: every recorded link and the clone, the source pulled once, a project removed since setup pruned, live records kept.
 git -C "$SRC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m again
 printf '%s\n' "$HOME/gone proj/.claude/skills/claude-discord" >> "$HOME/.claude-discord/records/installs"
@@ -2941,6 +3071,11 @@ git -C "$SRC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m after-
 rc=0; out=$(cd "$UP" && bash "$C/bin/claude-discord" update --all 2>&1) || rc=$?
 [ "$rc" = 0 ] && grep -q "$CC: pinned at ${pin:0:7}, skipped" <<<"$out" && [ "$(git -C "$CC" rev-parse HEAD)" = "$pin" ] && [ "$(git -C "$PC" rev-parse HEAD)" = "$(git -C "$SRC" rev-parse HEAD)" ] || { echo "FAIL: a detached clone must be skipped without failing the run (rc=$rc): $out"; exit 1; }
 bash "$C/bin/claude-discord" update --bogus >/dev/null 2>&1 && { echo "FAIL: update takes only --all"; exit 1; }
+# Pulled code older than the compat copy (1.8.0) would read 'compat' as a bot name: skipped with a line.
+jq '.version = "1.7.9"' "$SRC/.claude-plugin/plugin.json" > "$SRC/p.json" && mv "$SRC/p.json" "$SRC/.claude-plugin/plugin.json" && git -C "$SRC" -c user.email=t@t -c user.name=t commit -qam old-version
+rm -rf "$HOME/.claude-discord/compat"
+rc=0; out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || rc=$?
+[ "$rc" = 0 ] && grep -q 'before the compat copy (1.8.0)' <<<"$out" && [ ! -e "$HOME/.claude-discord/compat" ] || { echo "FAIL: update must skip compat from code before 1.8.0, with a line (rc=$rc): $out"; exit 1; }
 rm -rf "$UP" "$UC"
 echo "ok: --version prints the version and the clone's sha (a link's is the source's); update pulls the source behind a link once, runs the pulled commit's patch step, refills the runtime copy and the shim and asks for /reload-plugins; --all pulls each real clone once, prunes a removed project, skips a detached (pinned) clone without failing, and exits 1 on a diverged clone (left as it was) or an unwritable shim"
 
