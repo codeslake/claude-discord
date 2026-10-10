@@ -1384,7 +1384,7 @@ run=("$bin")
 if [ -n "$resume_id" ]; then
   lt=(); command -v timeout >/dev/null 2>&1 && lt=(timeout 5)
   if agents=$(${lt[@]+"${lt[@]}"} "$bin" agents --json 2>/dev/null) &&
-     printf '%s' "$agents" | jq -e --arg s "$resume_id" 'type == "array" and ($s | test("^[0-9a-f-]{8,}$")) and any(.[]; (((.sessionId // "") | startswith($s)) or ((.resumeSessionId // "") | startswith($s)) or (.id == $s[0:8])) and (.state // "") != "stopped")' >/dev/null 2>&1; then
+     printf '%s' "$agents" | jq -e --arg s0 "$resume_id" '($s0 | ascii_downcase) as $s | type == "array" and ($s | test("^[0-9a-f-]{8,}$")) and any(.[]; (((.sessionId // "") | startswith($s)) or ((.resumeSessionId // "") | startswith($s)) or (.id == $s[0:8])) and (.state // "") != "stopped")' >/dev/null 2>&1; then
     echo "claude-discord: session $resume_id is running; use 'claude-discord refresh $name' to replace it" >&2
     exit 2
   fi

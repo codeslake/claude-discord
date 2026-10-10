@@ -883,6 +883,7 @@ agents_rows "[{\"id\":\"jobid001\",\"sessionId\":\"dddddddd-0000-0000-0000-00000
 refused $RID "a row matched by resumeSessionId"
 agents_rows "[{\"sessionId\":\"$RID\",\"state\":\"working\",\"cwd\":\"$P\"}]"
 refused aaaaaaaa-1111-2222 "a 12+ character prefix"
+refused AAAAAAAA-1111-2222 "an uppercase prefix"
 # a resumed job keeps its id while its sessionId changes: the resume value is the OLD transcript id
 agents_rows "[{\"id\":\"aaaaaaaa\",\"sessionId\":\"eeeeeeee-0000-0000-0000-000000000000\",\"state\":\"working\",\"cwd\":\"$P\"}]"
 refused $RID "a row matched by its job id"
@@ -1209,8 +1210,9 @@ cp "$HOME/agents.full.json" "$HOME/agents.json"
 # it would delete what the start is reopening. It must survive, resolved from a
 # name (a transcript's basename is the session id) as well as passed through.
 PROJD="$HOME/.claude/projects/$(printf '%s' "$PD" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$PROJD"
-# A retired (done) session is listed only with --all; without it a done row is an idle live bot and
-# the start refuses to resume it. So the plain listing is empty here and --all carries the dead rows.
+# These rows stand for sessions whose process is gone. A done row whose process lives is an idle bot,
+# listed without --all too, and the start refuses to resume it; so the plain listing is empty here
+# and --all carries the dead rows the reap reads.
 cp "$HOME/agents.full.json" "$HOME/agents.all.json"; echo '[]' > "$HOME/agents.json"
 printf '{"type":"custom-title","customTitle":"my-dead-bot"}\n' > "$PROJD/dead-0002.jsonl"
 : > "$HOME/rm.log"
