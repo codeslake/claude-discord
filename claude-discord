@@ -304,7 +304,9 @@ if [ "${1:-}" = setup ]; then
       read -rp "Your Discord user ID: " user
       echo "Other user or bot IDs allowed to trigger bots there: comma-separated, empty for none," >&2
       echo "or 'all' for everyone in the channel -- anyone who can post there could then drive this" >&2
-      echo "session, which runs with shell access on this machine." >&2
+      echo "session, which runs with shell access on this machine. Other bots in the channel count too, and" >&2
+      echo "a reply to this bot counts as a mention, so two open bots can answer each other without end;" >&2
+      echo "with 'respond without an @mention' on, they will." >&2
       read -rp "IDs: " others
       others=${others//[[:space:]]/}   # the file is sourced: a stray space would run an ID as a command
       # "all" applies to THIS bot only and is not persisted: config.env is
@@ -312,7 +314,7 @@ if [ "${1:-}" = setup ]; then
       # up each bot set up here later. Mixing it with ids is refused rather
       # than guessed: taking the wider reading would open the channel on a
       # typo, and the narrower one would store a literal "all" as an ID.
-      case ${others,,} in
+      case $(printf '%s' "$others" | tr '[:upper:]' '[:lower:]') in   # tr, not the ,, expansion: macOS /bin/bash is 3.2
         all) allow_all=yes; others=;;
         *,all|all,*|*,all,*)
           echo "claude-discord: answer either 'all' or a list of IDs, not both" >&2; exit 2;;
@@ -565,7 +567,7 @@ if [ "${1:-}" = health ]; then
       # silence, and this must print nothing but a number. No `basename`
       # either -- one fork per process on a machine with 800 of them cost
       # 281 ms a scan, against 83 ms for the expansion (measured).
-      { mapfile -d '' -t args < "$c"; } 2>/dev/null || continue
+      { mapfile -d '' -t args < "$c"; } 2>/dev/null || continue   # bash4-ok: reached only where /proc exists
       [ "${#args[@]}" -ge 2 ] || continue
       [ "${args[0]##*/}" = bun ] || continue
       [ "${args[${#args[@]}-1]}" = start ] || continue

@@ -34,6 +34,12 @@ wait_for_file() {  # $1 = path; up to 2s in 0.02s steps, for an async write to l
 }
 
 bash -n "$S"
+# macOS runs the wrapper under /bin/bash 3.2, which this Linux suite never does:
+# refuse the bash 4+ constructs that would only fail there (a line that can
+# never run on macOS carries the marker bash4-ok).
+if grep -nE '\$\{[A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?(,,?|\^\^?)\}|(^|[;&|[:space:]])(mapfile|readarray|coproc)[[:space:]]|(declare|local|typeset)[[:space:]]+-[a-zA-Z]*A|\|&|&>>' "$S" | grep -vE 'bash4-ok|^[0-9]+:[[:space:]]*#'; then
+  echo "FAIL: bash 4+ construct in the wrapper (macOS /bin/bash is 3.2)"; exit 1
+fi
 bash -n "$D/install.sh"
 bash -n "$D/hooks/lib/discord.sh"
 bash -n "$D/hooks/turn/on-prompt"
