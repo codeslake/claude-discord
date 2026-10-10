@@ -192,7 +192,7 @@ rm -rf ~/.claude-discord/hooks ~/.claude-discord/discord-chunk.ts ~/.claude-disc
 cd ~/.claude-discord/source && git checkout 2d22fca && ./install.sh   # 2d22fca: the last release before the plugin
 ```
 
-(`rm -rf` on a link removes the link, not its target.)
+(`rm -rf` on a link removes the link, not its target.) The sessions' `plugin-sessions/` markers need no cleanup: with no plugin install left, an old-path hook runs again even in a marked session.
 
 ## Usage
 

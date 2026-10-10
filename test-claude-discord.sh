@@ -1256,6 +1256,11 @@ out3=$(tagged g2 504 | DISCORD_STATE_DIR="$GD" bash "$PC/hooks/turn/on-prompt")
 [ -z "$out$out2$out3" ] && [ ! -e "$GD/turns/g2" ] || { echo "FAIL: an old-path hook in a marked session must exit 0 doing nothing ($out|$out2|$out3)"; exit 1; }
 out=$(tagged g2 505 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$PC/hooks/turn/on-prompt")
 [ "$(cut -d' ' -f2 "$GD/turns/g2")" = 505 ] && [ -n "$out" ] || { echo "FAIL: the plugin's hook must run in a marked session: $out"; exit 1; }
+# With the plugin install gone again (a rollback), a marked session's old path is all it has: it runs.
+mv "$P2/.claude/skills" "$P2/.claude/skills.off"; rm -f "$GD/turns/g2"   # a fresh turn: an open one queues the message instead
+tagged g2 508 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
+mv "$P2/.claude/skills.off" "$P2/.claude/skills"
+[ "$(cut -d' ' -f2 "$GD/turns/g2" 2>/dev/null)" = 508 ] || { echo "FAIL: a marked session with no plugin install left must run its old-path hooks"; exit 1; }
 plugin_hook "$P2" gamma g3
 [ -e "$GD/plugin-sessions/g3" ] && [ ! -e "$GD/plugin-sessions/old" ] && [ -e "$GD/plugin-sessions/g2" ] || { echo "FAIL: a new marker must prune the month-old ones and only those (g2's run refreshed it): $(ls "$GD/plugin-sessions")"; exit 1; }
 # A claude -p started from the bot's shell inherits DISCORD_STATE_DIR; in another project it is no bot.

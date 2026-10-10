@@ -143,7 +143,12 @@ plugin_gate() {
   if [ -n "$old" ]; then
     [ -d "$m" ] || return 0
     hook_session || return 0
-    [ ! -e "$m/$sid" ]
+    [ -e "$m/$sid" ] || return 0
+    # A marked session whose plugin install is gone again (rolled back) has no
+    # plugin hooks left: the old path is all it has, so it runs.
+    [ -e "$bot_project/.claude/skills/claude-discord/hooks/hooks.json" ] ||
+      [ -e "$HOME/.claude/skills/claude-discord/hooks/hooks.json" ]
+    [ $? != 0 ]
     return
   fi
   hook_session || return 0
