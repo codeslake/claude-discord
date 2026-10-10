@@ -48,6 +48,7 @@ if grep -nE '\$\{[A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?(,,?|\^\^?)\}|(^|[;&|[:space:
   echo "FAIL: bash 4+ construct in the wrapper, shim, hooks or tools (macOS /bin/bash is 3.2)"; exit 1
 fi
 bash -n "$D/hooks/lib/discord.sh"
+bash -n "$D/hooks/lib/old-hooks.sh"
 bash -n "$D/hooks/turn/on-prompt"
 bash -n "$D/hooks/turn/on-reply"
 bash -n "$D/hooks/turn/on-stop"
@@ -61,9 +62,9 @@ bash -n "$D/tools/local-bots"
 bash -n "$D/hooks/autoresearchclaw/on-start"
 bash -n "$D/tools/arc-events"
 bash -n "$D/shim/claude-discord"
-# The plugin manifest and hooks.json: valid JSON, name claude-discord, and every
+# The plugin manifest and hooks.json: valid JSON, name discord-agents (a "claude-" name is reserved), and every
 # hook command names a script that exists in the repo and is executable.
-jq -e '.name == "claude-discord" and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$D/.claude-plugin/plugin.json" >/dev/null || { echo "FAIL: plugin.json needs name claude-discord and a semver version"; exit 1; }
+jq -e '.name == "discord-agents" and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$D/.claude-plugin/plugin.json" >/dev/null || { echo "FAIL: plugin.json needs name discord-agents and a semver version"; exit 1; }
 cmds=$(jq -r '.hooks[][] .hooks[] .command' "$D/hooks/hooks.json") || { echo "FAIL: hooks.json is not valid"; exit 1; }
 [ "$(printf '%s\n' "$cmds" | wc -l | tr -d ' ')" = 9 ] || { echo "FAIL: hooks.json must register the nine hooks: $cmds"; exit 1; }
 while IFS= read -r c; do
@@ -175,7 +176,7 @@ PHOME=$(cd "$HOME" && pwd -P)   # setup keys trust by the physical path
 jq -n --arg h "$PHOME" '[$h + "/project", $h + "/project-moved", $h + "/project4", $h + "/project-all", $h + "/project-upper", $h + "/project-runpath", $h + "/project2"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
 R="$P/.claude/discord-agents"
 
-printf '1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alpha --scope project >/dev/null
+printf '\n1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alpha --scope project >/dev/null
 # No --method: the default is link, and the first setup on a machine clones the source.
 [ -L "$P/.claude/skills/claude-discord" ] && [ "$(readlink "$P/.claude/skills/claude-discord")" = "$HOME/.claude-discord/source" ] && [ -d "$HOME/.claude-discord/source/.git" ] || { echo "FAIL: the default method must link the project to a freshly cloned source"; exit 1; }
 [ "$(jq -r '.groups["1550575144320110662"].requireMention' "$R/alpha/access.json")" = false ]
@@ -206,7 +207,7 @@ echo "ok: second bot asks only token+mention and reuses shared IDs"
 # a later bot there does not inherit it.
 PA="$HOME/project-all"; mkdir -p "$PA"; cd "$PA"
 RA="$PA/.claude/discord-agents"
-printf '999\n111\nall\ntokC\nn\n' | bash "$S" setup gamma >/dev/null
+printf '\n\n999\n111\nall\ntokC\nn\n' | bash "$S" setup gamma >/dev/null
 [ "$(jq -c '.groups["999"].allowFrom' "$RA/gamma/access.json")" = '[]' ] || { echo "FAIL: 'all' must leave the group allowFrom empty: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
 [ "$(jq -c '.allowFrom' "$RA/gamma/access.json")" = '["111"]' ] || { echo "FAIL: 'all' opens the channel, never DMs: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
 grep -q "^DISCORD_ALLOW_IDS=''$" "$RA/config.env" || { echo "FAIL: 'all' must not be stored in the shared config.env: $(grep ALLOW "$RA/config.env")"; exit 1; }
@@ -230,10 +231,10 @@ echo "ok: dev-manager peers leave an 'all' group alone and are still added to a 
 # way is wrong (the wide reading opens the channel on a typo, the narrow one
 # stores a literal "all" as an ID).
 PU="$HOME/project-upper"; mkdir -p "$PU"; cd "$PU"
-printf '999\n111\nALL\ntokU\nn\n' | bash "$S" setup upper >/dev/null
+printf '\n\n999\n111\nALL\ntokU\nn\n' | bash "$S" setup upper >/dev/null
 [ "$(jq -c '.groups["999"].allowFrom' "$PU/.claude/discord-agents/upper/access.json")" = '[]' ] || { echo "FAIL: 'ALL' must be read as 'all'"; exit 1; }
 PX="$HOME/project-mixed"; mkdir -p "$PX"; cd "$PX"
-if printf '999\n111\nall,123\ntokX\nn\n' | bash "$S" setup mixed >/dev/null 2>&1; then
+if printf '\n\n\n999\n111\nall,123\ntokX\nn\n' | bash "$S" setup mixed >/dev/null 2>&1; then
   echo "FAIL: 'all' mixed with IDs must be refused"; exit 1
 fi
 [ ! -f "$PX/.claude/discord-agents/mixed/access.json" ] || { echo "FAIL: a refused answer must not write access.json"; exit 1; }
@@ -246,7 +247,7 @@ echo "ok: 'all' is case-insensitive and refuses to be mixed with IDs"
 # is honoured only from the live third argument, never from config.env.
 PR2="$HOME/project-runpath"; mkdir -p "$PR2"; cd "$PR2"
 RR="$PR2/.claude/discord-agents"
-printf '999\n111\n222,333\ntokR\nn\n' | bash "$S" setup runner >/dev/null
+printf '\n\n999\n111\n222,333\ntokR\nn\n' | bash "$S" setup runner >/dev/null
 rm -f "$RR/runner/access.json"
 bash "$S" runner >/dev/null 2>&1 || :   # the run path rewrites it before anything else
 [ "$(jq -c '.groups["999"].allowFrom' "$RR/runner/access.json" 2>/dev/null)" = '["111","222","333"]' ] || { echo "FAIL: the run path must rebuild access.json from the stored IDs: $(jq -c . "$RR/runner/access.json" 2>/dev/null)"; exit 1; }
@@ -264,7 +265,7 @@ PM="$HOME/project-moved"; mkdir -p "$PM"; cd "$PM"
 RM="$PM/.claude/discord-agents"
 
 # A fresh setup still writes config.env's channel group (unchanged behaviour).
-printf '55\n11\n\ntokZ\nn\n' | bash "$S" setup moved --scope project >/dev/null
+printf '\n55\n11\n\ntokZ\nn\n' | bash "$S" setup moved --scope project >/dev/null
 [ "$(jq -c '.groups | keys' "$RM/moved/access.json")" = '["55"]' ] || { echo "FAIL: a fresh setup must write config.env's channel group: $(jq -c . "$RM/moved/access.json")"; exit 1; }
 echo "ok: a fresh setup still writes config.env's channel group"
 
@@ -282,6 +283,17 @@ grep -q '^DISCORD_BOT_TOKEN=tokZ$' "$RM/moved/.env" || { echo "FAIL: an empty to
 [ "$(jq -r '.ackReaction' "$RM/moved/access.json")" = "" ] || { echo "FAIL: a re-run must keep an owner-disabled ackReaction: $(jq -c . "$RM/moved/access.json")"; exit 1; }
 [ "$(jq -r '.groups["777"].requireMention' "$RM/moved/access.json")" = false ] || { echo "FAIL: a re-run must still set requireMention on the moved group: $(jq -c . "$RM/moved/access.json")"; exit 1; }
 echo "ok: a setup re-run on a bot whose access.json group was moved by hand keeps the group, its allowFrom and ackReaction, only setting requireMention"
+# Enter at every prompt keeps what the bot has: requireMention false stays false, true stays true. Stdin ending
+# before a required answer says which and exits 2.
+printf '\n\n\n' | bash "$S" setup moved --scope project >/dev/null
+[ "$(jq -r '.groups["777"].requireMention' "$RM/moved/access.json")" = false ] || { echo "FAIL: Enter must keep requireMention false: $(jq -c . "$RM/moved/access.json")"; exit 1; }
+printf 'tokT\nn\n' | bash "$S" setup mtrue --scope project >/dev/null; printf '\n\n\n' | bash "$S" setup mtrue --scope project >/dev/null
+[ "$(jq -r '.groups["55"].requireMention' "$RM/mtrue/access.json")" = true ] || { echo "FAIL: Enter must keep requireMention true"; exit 1; }
+rc=0; out=$(bash "$S" setup mtrue --scope project </dev/null 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -qF "stdin ended before 'Bot token for mtrue" <<<"$out" || { echo "FAIL: EOF must name the unanswered prompt and exit 2 (rc=$rc): $out"; exit 1; }
+rc=0; out=$(printf '\n' | bash "$S" setup mtrue --scope project 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -qF "stdin ended before 'Respond to every message" <<<"$out" || { echo "FAIL: EOF at the mention prompt must exit 2 naming it (rc=$rc): $out"; exit 1; }
+echo "ok: Enter keeps requireMention (false and true); stdin ending before the token or the mention answer names that prompt and exits 2"
 
 # Same, in dev-manager mode: a peer added on the re-run must reach the moved
 # group's allowFrom, not a freshly-created group keyed by config.env's
@@ -1042,9 +1054,13 @@ bash "$S" --name gamma >/dev/null 2>&1
 [ "$(tail -c1 "$P2/.claude/discord-agents/gamma/access.json" | wc -l)" -eq 1 ] || { echo "FAIL: access.json must end with a trailing newline"; exit 1; }
 echo "ok: start registers no settings hook, adds ackReaction and the hooks symlink when they were missing, access.json ends with a trailing newline"
 
-# c. a project set up by the previous release has its hooks in the settings files and its rule file, and no plugin
-# install yet: a start and setup --mode must leave all of it, or the bot loses every hook. A full setup installs
-# the plugin and then takes it out (the project's own key, hook and rule file stay).
+# c. a project set up by the previous release has its hooks in the settings files and its rule file. setup
+# removes none of it (R15): it cannot know the plugin will load, and a bot that lost its old hooks before the
+# plugin's ran would have none. The plugin's first hook run in a bot session removes them (only ours: the
+# project's own key, hook and rule file stay).
+# plugin_hook <project> <bot> <session id> [hook]: a hook run the way the plugin's hooks.json runs it
+# (CLAUDE_PLUGIN_ROOT set, the script under it); on-stop with no turn in flight does nothing else.
+plugin_hook() { printf '{"session_id":"%s","stop_hook_active":false}' "$3" | CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$1" DISCORD_STATE_DIR="$1/.claude/discord-agents/$2" bash "$PC/hooks/${4:-turn/on-stop}"; }
 mkdir -p "$P2/.claude/rules"; echo mine > "$P2/.claude/rules/other.md"; echo old > "$P2/.claude/rules/claude-discord-dev-manager.md"
 echo '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' > "$P2/.claude/settings.json"
 cp "$P2/.claude/settings.json" "$P2/.claude/settings.local.json"
@@ -1052,77 +1068,103 @@ plant_old "$P2/.claude/settings.json"; plant_old "$P2/.claude/settings.local.jso
 cp "$P2/.claude/settings.json" "$P2/sj.before"; cp "$P2/.claude/settings.local.json" "$P2/sl.before"
 bash "$S" --name gamma >/dev/null 2>&1
 printf 'none\n' | bash "$S" setup gamma --mode >/dev/null
-cmp -s "$P2/.claude/settings.json" "$P2/sj.before" && cmp -s "$P2/.claude/settings.local.json" "$P2/sl.before" && [ -f "$P2/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: without a plugin install a start and setup --mode must leave the old hooks and rule file"; exit 1; }
-printf '\nn\nnone\n' | bash "$S" setup gamma --scope project >/dev/null
-! grep -q '/.claude/discord-agents/hooks/' "$P2/.claude/settings.json" "$P2/.claude/settings.local.json" && [ ! -e "$P2/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: a full setup must remove the old hooks and rule file"; exit 1; }
+printf '\n\nn\nnone\n' | bash "$S" setup gamma --scope project >/dev/null
+[ -e "$P2/.claude/skills/claude-discord" ] || { echo "FAIL: fixture: setup must install the plugin in $P2"; exit 1; }
+cmp -s "$P2/.claude/settings.json" "$P2/sj.before" && cmp -s "$P2/.claude/settings.local.json" "$P2/sl.before" && [ -f "$P2/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: a start, setup --mode and a full setup must all leave the old hooks and rule file"; exit 1; }
+out=$(plugin_hook "$P2" gamma c1 2>&1)
+[ -z "$out" ] && [ -e "$P2/.claude/discord-agents/gamma/plugin-sessions/c1" ] || { echo "FAIL: a plugin hook's first run must record its session silently: $out"; exit 1; }
+! grep -q '/.claude/discord-agents/hooks/' "$P2/.claude/settings.json" "$P2/.claude/settings.local.json" && [ ! -e "$P2/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: a plugin hook's first run must remove the old hooks and rule file"; exit 1; }
 for f in settings.json settings.local.json; do
   [ "$(jq -c . "$P2/.claude/$f")" = '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' ] || { echo "FAIL: $f must keep the project's own key and hook and none of ours: $(cat "$P2/.claude/$f")"; exit 1; }
 done
 [ "$(cat "$P2/.claude/rules/other.md")" = mine ] || { echo "FAIL: a foreign rule file must survive"; exit 1; }
+# Once per session: the same session's next run removes nothing, even what came back.
+plant_old "$P2/.claude/settings.local.json"; cp "$P2/.claude/settings.local.json" "$P2/sl.before"
+plugin_hook "$P2" gamma c1
+cmp -s "$P2/.claude/settings.local.json" "$P2/sl.before" || { echo "FAIL: the migration runs once per session"; exit 1; }
 rm -f "$P2/sj.before" "$P2/sl.before"
-echo "ok: with no plugin install the old settings hooks and rule file stay (start, setup --mode); a full setup removes them and nothing else"
+echo "ok: a start, setup --mode and a full setup leave the old settings hooks and rule file; the plugin's first hook run in a session removes them and nothing else, once"
 
-# d. from here the project has the install, so a start removes. Invalid JSON is left untouched; the start still
-# reaches the exec; stderr names the file.
-printf 'not json' > "$P2/.claude/settings.local.json"
-cp "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before"
-out=$(bash "$S" --name gamma 2>"$P2/stderr.log")
-cmp -s "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before" || { echo "FAIL: invalid-JSON settings.local.json must be left untouched"; exit 1; }
-rm -f "$P2/.claude/settings.local.json.before"
-grep -qF "$P2/.claude/settings.local.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the invalid settings file"; exit 1; }
-grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec when settings.local.json is invalid JSON"; exit 1; }
-rm -f "$P2/stderr.log"
-echo "ok: invalid-JSON settings.local.json is left untouched, warned on stderr naming the file, and the start still execs claude"
-
-# e. a read-only settings.local.json holding an entry of ours: a failed write must never abort the start, must
-# leave the file as it was, and must not leave a temp file behind.
-echo '{}' > "$P2/.claude/settings.local.json"; plant_old "$P2/.claude/settings.local.json"; chmod 444 "$P2/.claude/settings.local.json"
-cp "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before"
-out=$(bash "$S" --name gamma 2>"$P2/stderr.log")
-chmod 644 "$P2/.claude/settings.local.json"
-cmp -s "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before" || { echo "FAIL: a read-only settings.local.json must be left untouched"; exit 1; }
-rm -f "$P2/.claude/settings.local.json.before"
-grep -qF "$P2/.claude/settings.local.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the unwritable settings file"; exit 1; }
-grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: start must still reach the exec when settings.local.json is read-only"; exit 1; }
-[ -z "$(find "$P2/.claude" -maxdepth 1 -name 'settings.local.json.tmp.*')" ] || { echo "FAIL: a temp file was left behind"; exit 1; }
-rm -f "$P2/stderr.log"
-echo "ok: a read-only settings.local.json is left untouched, no temp file is left, and the start still execs claude"
-
-# f. shapes with nothing of ours to remove (not an object, a non-array event value, 0 bytes) stay byte-identical
-# and the start still execs.
-for shape in '[]' '{"hooks":{"UserPromptSubmit":{}}}' ''; do
-  printf '%s' "$shape" > "$P2/.claude/settings.local.json"
-  out=$(bash "$S" --name gamma 2>&1)
-  # A file jq cannot walk at all is named in a warning; the others have nothing to remove and say nothing.
-  [ "$shape" != '[]' ] || grep -qF "$P2/.claude/settings.local.json" <<<"$out" || { echo "FAIL: stderr must name settings.local.json holding []: $out"; exit 1; }
-  [ "$(cat "$P2/.claude/settings.local.json")" = "$shape" ] && grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: settings.local.json '$shape' must be left as it was and the start must exec: $out"; exit 1; }
+# d. invalid JSON, e. a read-only file, f. shapes with nothing of ours to remove: each first run (a new
+# session) leaves the file byte-identical, leaves no temp file and prints nothing.
+printf 'not json /.claude/discord-agents/hooks/' > "$P2/.claude/settings.local.json"
+echo '{}' > "$P2/ro.json"; plant_old "$P2/ro.json"
+n=0
+for shape in invalid readonly '[]' '{"hooks":{"UserPromptSubmit":{}}}' ''; do
+  n=$((n + 1))
+  case $shape in
+    invalid) ;;
+    readonly) cp "$P2/ro.json" "$P2/.claude/settings.local.json"; chmod 444 "$P2/.claude/settings.local.json";;
+    *) printf '%s' "$shape" > "$P2/.claude/settings.local.json";;
+  esac
+  cp "$P2/.claude/settings.local.json" "$P2/sl.before"
+  out=$(plugin_hook "$P2" gamma "d$n" 2>&1)
+  chmod 644 "$P2/.claude/settings.local.json"
+  cmp -s "$P2/.claude/settings.local.json" "$P2/sl.before" && [ -z "$out" ] && [ -z "$(find "$P2/.claude" -maxdepth 1 -name 'settings.local.json.tmp.*')" ] || { echo "FAIL: settings.local.json ($shape) must be left as it was, silently, with no temp file: $out"; exit 1; }
 done
-echo "ok: a settings.local.json with nothing of ours to remove ([], a non-array event value, 0 bytes) is left as it was and the start still execs claude"
+rm -f "$P2/sl.before" "$P2/ro.json"
+echo "ok: a first run leaves an invalid-JSON, a read-only and a nothing-of-ours settings.local.json ([], a non-array event value, 0 bytes) byte-identical, silently, with no temp file"
 
-# h2. a start takes every entry of ours out of both settings files (only ours: the project's own key and hook stay).
+# h2. a first run takes every entry of ours out of both files, keeps their mode, and drops a hooks key it emptied.
 rm -f "$P2/.claude/settings.local.json"
 echo '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' > "$P2/.claude/settings.json"
-plant_old "$P2/.claude/settings.json"; cp "$P2/.claude/settings.json" "$P2/.claude/settings.local.json"
-bash "$S" --name gamma >/dev/null 2>&1
+plant_old "$P2/.claude/settings.json"; cp "$P2/.claude/settings.json" "$P2/.claude/settings.local.json"; chmod 600 "$P2/.claude/settings.local.json"
+plugin_hook "$P2" gamma h1
 for f in settings.json settings.local.json; do
   [ "$(jq -c . "$P2/.claude/$f")" = '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' ] || { echo "FAIL: $f must keep the unrelated key and hook and none of ours: $(jq -c . "$P2/.claude/$f")"; exit 1; }
 done
-# A settings.json that held only our entries goes back to its other keys: no
-# "hooks": {} is left behind as a diff.
+[ "$(ls -l "$P2/.claude/settings.local.json" | cut -c1-10)" = -rw------- ] || { echo "FAIL: the rewritten file must keep its mode"; exit 1; }
 echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"; plant_old "$P2/.claude/settings.json"
-bash "$S" --name gamma >/dev/null 2>&1
+plugin_hook "$P2" gamma h2
 [ "$(jq -c . "$P2/.claude/settings.json")" = '{"enabledPlugins":{"x":true}}' ] || { echo "FAIL: a hooks key we emptied must be dropped: $(jq -c . "$P2/.claude/settings.json")"; exit 1; }
-echo '{"hooks":{}}' > "$P2/.claude/settings.json"; bash "$S" --name gamma >/dev/null 2>&1
+echo '{"hooks":{}}' > "$P2/.claude/settings.json"; plugin_hook "$P2" gamma h3
 [ "$(jq -c . "$P2/.claude/settings.json")" = '{"hooks":{}}' ] || { echo "FAIL: a hooks key the project left empty itself must stay: $(cat "$P2/.claude/settings.json")"; exit 1; }
 echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"
-echo "ok: a start takes every entry an earlier release registered out of both settings files (the project's own key and hook stay, a hooks key we emptied goes)"
-
-# h3. the next start leaves both files byte-identical.
 cp "$P2/.claude/settings.json" "$P2/sj.before"; cp "$P2/.claude/settings.local.json" "$P2/sl.before"
-bash "$S" --name gamma >/dev/null 2>&1
-cmp -s "$P2/.claude/settings.json" "$P2/sj.before" && cmp -s "$P2/.claude/settings.local.json" "$P2/sl.before" || { echo "FAIL: a second start must leave settings.json and settings.local.json byte-identical"; exit 1; }
+plugin_hook "$P2" gamma h4
+cmp -s "$P2/.claude/settings.json" "$P2/sj.before" && cmp -s "$P2/.claude/settings.local.json" "$P2/sl.before" || { echo "FAIL: a first run with nothing of ours must leave both files byte-identical"; exit 1; }
 rm -f "$P2/sj.before" "$P2/sl.before"
-echo "ok: a second start leaves settings.json and settings.local.json byte-identical"
+echo "ok: a first run takes every entry an earlier release registered out of both settings files (the project's own key and hook and the file's mode stay, a hooks key we emptied goes) and leaves files with nothing of ours byte-identical"
+
+# h5. never a symlinked settings file (it leads out of the project, here into a "dotfiles repo"), never the
+# user-global one, also when the bot's project IS $HOME; setup names both, with the command for the job.
+mkdir -p "$HOME/dotrepo" "$HOME/.claude"
+echo '{}' > "$HOME/dotrepo/settings.json"; plant_old "$HOME/dotrepo/settings.json"; cp "$HOME/dotrepo/settings.json" "$P2/dot.before"
+rm -f "$P2/.claude/settings.json"; ln -s "$HOME/dotrepo/settings.json" "$P2/.claude/settings.json"
+echo '{}' > "$P2/.claude/settings.local.json"; plant_old "$P2/.claude/settings.local.json"
+echo '{}' > "$HOME/.claude/settings.json"; plant_old "$HOME/.claude/settings.json"; cp "$HOME/.claude/settings.json" "$P2/global.before"
+plugin_hook "$P2" gamma s1
+printf '{"session_id":"s2"}' | CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$HOME" DISCORD_STATE_DIR="$P2/.claude/discord-agents/gamma" bash "$PC/hooks/turn/on-stop"   # a bot whose project is $HOME
+[ -L "$P2/.claude/settings.json" ] && cmp -s "$HOME/dotrepo/settings.json" "$P2/dot.before" && cmp -s "$HOME/.claude/settings.json" "$P2/global.before" || { echo "FAIL: a symlinked settings.json and the user-global one must be left byte-identical"; exit 1; }
+! grep -q '/.claude/discord-agents/hooks/' "$P2/.claude/settings.local.json" || { echo "FAIL: the regular settings.local.json beside them must still be migrated"; exit 1; }
+err=$(printf '\nn\n\n' | bash "$S" setup gamma 2>&1 >/dev/null)
+grep -qF "old claude-discord hook entries stay in '$P2/.claude/settings.json' '$HOME/.claude/settings.json'" <<<"$err" && grep -qF "old-hooks.sh'" <<<"$err" || { echo "FAIL: setup must name the files it will not touch, with the command: $err"; exit 1; }
+cmd=${err##*Remove them by hand: }; eval "$cmd"
+! grep -q '/.claude/discord-agents/hooks/' "$HOME/dotrepo/settings.json" "$HOME/.claude/settings.json" && [ -L "$P2/.claude/settings.json" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] || { echo "FAIL: the printed command must remove the entries, through the symlink: $(cat "$HOME/dotrepo/settings.json")"; exit 1; }
+rm -f "$P2/.claude/settings.json" "$HOME/.claude/settings.json" "$P2/dot.before" "$P2/global.before"; rm -rf "$HOME/dotrepo"
+echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"
+echo "ok: a first run never edits a symlinked settings.json or the user-global one (a bot in \$HOME included); setup names them with a command that removes the entries through the link"
+
+# h6. the gate. An old-path hook (run through .claude/discord-agents/hooks or ~/.claude-discord/hooks, or with
+# no CLAUDE_PLUGIN_ROOT) runs in a session with no marker and exits 0 doing nothing in a marked one; the
+# plugin's hook runs either way. Markers a month old go when a new one is written.
+GD="$P2/.claude/discord-agents/gamma"; rm -rf "$GD/turns" "$GD/plugin-sessions"
+tagged() { printf '{"session_id":"%s","prompt":"<channel source=\\"plugin:discord:discord\\" chat_id=\\"111\\" message_id=\\"%s\\" user=\\"u\\" user_id=\\"9\\" ts=\\"t\\">\\nhello\\n</channel>"}' "$1" "$2"; }
+tagged g0 500 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
+[ -s "$GD/turns/g0" ] && [ ! -e "$GD/plugin-sessions" ] || { echo "FAIL: with no marker directory an old-path hook must run as before"; exit 1; }
+mkdir -p "$GD/plugin-sessions"; : > "$GD/plugin-sessions/g2"; : > "$GD/plugin-sessions/old"; touch -d '40 days ago' "$GD/plugin-sessions/old"
+tagged g1 501 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
+[ -s "$GD/turns/g1" ] || { echo "FAIL: an old-path hook must run in a session with no marker"; exit 1; }
+out=$(tagged g2 502 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt")
+out2=$(tagged g2 503 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" bash "$HOME/.claude-discord/hooks/turn/on-prompt")
+out3=$(tagged g2 504 | DISCORD_STATE_DIR="$GD" bash "$PC/hooks/turn/on-prompt")
+[ -z "$out$out2$out3" ] && [ ! -e "$GD/turns/g2" ] || { echo "FAIL: an old-path hook in a marked session must exit 0 doing nothing ($out|$out2|$out3)"; exit 1; }
+out=$(tagged g2 505 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$PC/hooks/turn/on-prompt")
+[ "$(cut -d' ' -f2 "$GD/turns/g2")" = 505 ] && [ -n "$out" ] || { echo "FAIL: the plugin's hook must run in a marked session: $out"; exit 1; }
+plugin_hook "$P2" gamma g3
+[ -e "$GD/plugin-sessions/g3" ] && [ ! -e "$GD/plugin-sessions/old" ] && [ -e "$GD/plugin-sessions/g2" ] || { echo "FAIL: a new marker must prune the month-old ones and only those: $(ls "$GD/plugin-sessions")"; exit 1; }
+rm -rf "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"
+echo "ok: an old-path hook runs with no marker (no marker directory, or another session's) and exits 0 doing nothing in a marked session, whatever CLAUDE_PLUGIN_ROOT says; the plugin's hook still runs there; a new marker prunes month-old ones"
 
 # i. an explicit empty ackReaction means the owner disabled it; start must
 # leave it alone, never overwrite it back to the default.
@@ -1401,8 +1443,8 @@ printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bi
 # hook in settings.json and Claude Code's own permission grants in
 # settings.local.json; mgr is a dev-manager. peers.json lists mgr itself too
 # (one list shared across machines), which every consumer must skip by name.
-# The plugin's hooks.json registers every hook now, so setup removes ours from
-# both settings files and writes none.
+# The plugin's hooks.json registers every hook now; setup writes none and
+# removes none, and the plugin's first hook run takes ours out of both files.
 P4="$HOME/project4"; mkdir -p "$P4/.claude/rules"; cd "$P4"
 R4="$P4/.claude/discord-agents"
 RULE="$P4/.claude/rules/claude-discord-dev-manager.md"
@@ -1417,19 +1459,21 @@ plant_old "$SJ"; plant_old "$SL"
 jq '(.hooks.PreToolUse[] | select(.matcher == "Edit|Write|MultiEdit") | .hooks) += [{"type":"command","command":"mine-in-group"}]' "$SL" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SL" && rm -f "$P4/s.tmp"
 SL_EXPECT='{"permissions":{"allow":["Bash(git status)"]},"hooks":{"PreToolUse":[{"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":"mine-in-group"}]}]}}'
 cp "$D/rules/dev-manager.md" "$RULE"
-out=$(printf '42\n111\n\ntokM\nn\ndev-manager\ndong:900:800:wmac, junyong:901:801:lmd42,mgr:902:803:here,bad:x:1:2\n' | bash "$S" setup mgr --scope project 2>"$P4/err")
+out=$(printf '\n42\n111\n\ntokM\nn\ndev-manager\ndong:900:800:wmac, junyong:901:801:lmd42,mgr:902:803:here,bad:x:1:2\n' | bash "$S" setup mgr --scope project 2>"$P4/err")
 [ "$(cat "$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: mode by name was not stored"; exit 1; }
 [ "$(jq -c '.peers' "$R4/peers.json")" = '[{"name":"dong","bot_id":"900","owner_id":"800","machine":"wmac"},{"name":"junyong","bot_id":"901","owner_id":"801","machine":"lmd42"},{"name":"mgr","bot_id":"902","owner_id":"803","machine":"here"}]' ] || { echo "FAIL: peers.json wrong: $(cat "$R4/peers.json")"; exit 1; }
 grep -qF 'bad:x:1:2' "$P4/err" || { echo "FAIL: a malformed peer entry must be warned about"; exit 1; }
 [ "$(jq -c '.groups["42"].allowFrom' "$R4/mgr/access.json")" = '["111","900","901"]' ] || { echo "FAIL: peers (not self) must join the group allowFrom: $(jq -c . "$R4/mgr/access.json")"; exit 1; }
 [ "$(jq -c '.allowFrom' "$R4/mgr/access.json")" = '["111"]' ] || { echo "FAIL: the DM allowFrom must not get the peers"; exit 1; }
 grep -qF "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed." <<<"$out" || { echo "FAIL: the both-directions note is missing"; exit 1; }
-[ ! -e "$RULE" ] && [ "$(cat "$P4/.claude/rules/other.md")" = mine ] || { echo "FAIL: setup must remove the old rule file and keep a foreign one"; exit 1; }
-[ "$(jq -c . "$SJ")" = "$(jq -c . "$P4/user.before")" ] || { echo "FAIL: setup must take every entry of ours out of settings.json and leave the rest: $(jq -c . "$SJ")"; exit 1; }
+[ -e "$RULE" ] && grep -q '/.claude/discord-agents/hooks/' "$SJ" "$SL" || { echo "FAIL: setup must leave the old rule file and hooks to the plugin's first run"; exit 1; }
+plugin_hook "$P4" mgr m1 turn/on-session-start >/dev/null
+[ ! -e "$RULE" ] && [ "$(cat "$P4/.claude/rules/other.md")" = mine ] || { echo "FAIL: the first run must remove the old rule file and keep a foreign one"; exit 1; }
+[ "$(jq -c . "$SJ")" = "$(jq -c . "$P4/user.before")" ] || { echo "FAIL: the first run must take every entry of ours out of settings.json and leave the rest: $(jq -c . "$SJ")"; exit 1; }
 [ "$(jq -c . "$SL")" = "$SL_EXPECT" ] || { echo "FAIL: settings.local.json must lose every entry of ours and keep the permission grants and a user's hook that shared a group with ours: $(cat "$SL")"; exit 1; }
 [ "$(jq -c '.permissions' "$SJ")" = '{"allow":["Bash(ls)"]}' ] && grep -q my-own-hook "$SJ" || { echo "FAIL: unrelated settings keys and the user's own hook must survive"; exit 1; }
 [ "$(jq -c '.permissions' "$SL")" = '{"allow":["Bash(git status)"]}' ] || { echo "FAIL: settings.local.json's permission grants must survive"; exit 1; }
-echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned), the group allowFrom, and takes the old rule file and every settings hook of ours away, writing none"
+echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned) and the group allowFrom, writing no hook; the plugin's first run takes the old rule file and every settings hook of ours away (a user's hook sharing a group, the permission grants stay)"
 
 cp "$R4/peers.json" "$P4/peers.before"; cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
 printf '\nn\n2\n\n' | bash "$S" setup mgr --scope project >/dev/null
@@ -1457,21 +1501,24 @@ printf 'tokP\nn\nnone\n' | bash "$S" setup plain --scope project >/dev/null
 [ "$(cat "$R4/plain/mode")" = none ] && [ ! -e "$RULE" ] || { echo "FAIL: the bots' modes must bring back neither the rule file nor a hook"; exit 1; }
 cp "$D/rules/dev-manager.md" "$RULE"; echo x > "$P4/.claude/rules/claude-discord-old.md"
 bash "$S" --name mgr >/dev/null 2>&1
-[ ! -e "$RULE" ] && [ ! -e "$P4/.claude/rules/claude-discord-old.md" ] && [ "$(cat "$P4/.claude/rules/other.md")" = mine ] || { echo "FAIL: start must remove every claude-discord-*.md and keep a foreign rule file"; exit 1; }
+[ -e "$RULE" ] || { echo "FAIL: a start must remove no rule file"; exit 1; }
+plugin_hook "$P4" plain m2
+[ ! -e "$RULE" ] && [ ! -e "$P4/.claude/rules/claude-discord-old.md" ] && [ "$(cat "$P4/.claude/rules/other.md")" = mine ] || { echo "FAIL: a first run must remove every claude-discord-*.md and keep a foreign rule file"; exit 1; }
 cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
-bash "$S" --name mgr >/dev/null 2>&1
-cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: a second start must change nothing"; exit 1; }
-echo "ok: a start removes a leftover claude-discord-*.md whatever the modes, keeps a foreign rule file, and is idempotent"
+plugin_hook "$P4" plain m3
+cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: a later first run must change nothing"; exit 1; }
+echo "ok: a first run removes a leftover claude-discord-*.md whatever the modes (a start removes none), keeps a foreign rule file, and is idempotent"
 
 # Migration: earlier versions registered the five every-bot hooks and the
 # dev-manager peers hooks in settings.json, and thread-guard under a narrower
-# matcher in settings.local.json. A start takes ours out of both files (the
+# matcher in settings.local.json. A first run takes ours out of both files (the
 # user's own hook and key stay).
 plant_old "$SJ"; plant_old "$SL"
-bash "$S" --name mgr >/dev/null 2>&1
-[ "$(jq -c . "$SJ")" = "$(jq -c . "$P4/user.before")" ] || { echo "FAIL: start must take every entry of ours out of settings.json and leave the rest: $(jq -c . "$SJ")"; exit 1; }
-cmp -s "$SL" "$P4/local.before" || { echo "FAIL: start must take every entry of ours, thread-guard under both matchers included, out of settings.local.json: $(jq -c . "$SL")"; exit 1; }
-echo "ok: a start takes every hook an earlier version registered out of both settings files (the user's own hook and key stay)"
+plugin_hook "$P4" mgr m4
+[ "$(jq -c . "$SJ")" = "$(jq -c . "$P4/user.before")" ] || { echo "FAIL: a first run must take every entry of ours out of settings.json and leave the rest: $(jq -c . "$SJ")"; exit 1; }
+cmp -s "$SL" "$P4/local.before" || { echo "FAIL: a first run must take every entry of ours, thread-guard under both matchers included, out of settings.local.json: $(jq -c . "$SL")"; exit 1; }
+rm -rf "$R4/mgr/plugin-sessions" "$R4/plain/plugin-sessions"
+echo "ok: a first run takes every hook an earlier version registered out of both settings files (the user's own hook and key stay)"
 
 # Peers hooks, through the project's symlinked copy.
 G="$R4/hooks/peers"
@@ -2257,7 +2304,7 @@ seed_guild() { printf '900 5\n' > "$1/channel-guild"; }
 # The bots. Names are chosen so the glob order health walks them in is the
 # order their answers are queued below. allowFrom is 111 and 222 (from
 # config.env); 999 is outside it.
-printf '900\n111\n222\ntokH\nn\n' | bash "$S" setup b1ok --scope project >/dev/null
+printf '\n900\n111\n222\ntokH\nn\n' | bash "$S" setup b1ok --scope project >/dev/null
 for b in b2stale b3down b4busy b6dup b7reply b8cap; do
   printf 'tok%s\nn\n' "$b" | bash "$S" setup "$b" --scope project >/dev/null
 done
@@ -2450,7 +2497,7 @@ echo "ok: one health run judges every bot in the project -- ok (own messages, an
 # padding cost more than the case did. The multi-bot fixture above stays for
 # what it is actually for -- proving that one run judges every bot at once.
 SP="$HOME/single-project"; mkdir -p "$SP"; cd "$SP"
-printf '900\n111\n222\ntokS\nn\n' | bash "$S" setup sbot --scope project >/dev/null
+printf '\n900\n111\n222\ntokS\nn\n' | bash "$S" setup sbot --scope project >/dev/null
 SD="$SP/.claude/discord-agents/sbot"
 echo "$ID_SEEN" > "$SD/last-message-id"; seed_id "$SD"; seed_guild "$SD"
 start_server "$SD"
@@ -2578,7 +2625,7 @@ cd "$HP"
 # through the eight-bot fixture meant eight bots' worth of queued replies per
 # case for one bot's worth of assertion.
 WP="$HOME/working-project"; mkdir -p "$WP"; cd "$WP"
-printf '900\n111\n222\ntokW\nn\n' | bash "$S" setup wbot --scope project >/dev/null
+printf '\n900\n111\n222\ntokW\nn\n' | bash "$S" setup wbot --scope project >/dev/null
 WD="$WP/.claude/discord-agents/wbot"
 echo "$ID_SEEN" > "$WD/last-message-id"; seed_id "$WD"; seed_guild "$WD"
 start_server "$WD"
@@ -2629,7 +2676,7 @@ echo "ok: a session the daemon calls working holds the alert whatever the turn f
 # health only reports: it posts nothing to Discord, even for a bot that is a
 # finding, and the --notify that used to post alerts is refused.
 NP="$HOME/notify-project"; mkdir -p "$NP"; cd "$NP"
-printf '900\n111\n222\ntokN\nn\n' | bash "$S" setup nbot --scope project >/dev/null
+printf '\n900\n111\n222\ntokN\nn\n' | bash "$S" setup nbot --scope project >/dev/null
 ND="$NP/.claude/discord-agents/nbot"
 echo "$ID_SEEN" > "$ND/last-message-id"; seed_id "$ND"; seed_guild "$ND"
 start_server "$ND"
@@ -2670,7 +2717,7 @@ stop_servers
 cd "$P"
 
 # A machine with the old install: setup replaces what install.sh put under
-# ~/.claude-discord with links into the real plugin (a project set up by the
+# ~/.claude-discord with links into a compat copy of the real plugin (a project set up by the
 # previous release and not yet by this one still reaches its hooks through
 # there), removes the old rule copies, keeps the bots' scratch, records, runtime
 # and the source clone.
@@ -2688,12 +2735,14 @@ printf '#!/bin/sh\necho old\n' > "$OH/hooks/autoresearchclaw/events"; chmod +x "
 mkdir -p "$UP/.claude/discord-agents"; ln -s "$OH/hooks" "$UP/.claude/discord-agents/hooks"
 echo '{}' > "$UP/.claude/settings.local.json"; plant_old "$UP/.claude/settings.local.json"
 jq -n --arg p "$OP" --arg p5 "$PHOME/project5" '{projects: {($p): {hasTrustDialogAccepted: true}, ($p5): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
-(cd "$OP" && printf '900\n111\n\ntokO\nn\ndev-manager\n\n' | bash "$S" setup obot --scope project >/dev/null)
+(cd "$OP" && printf '\n900\n111\n\ntokO\nn\ndev-manager\n\n' | bash "$S" setup obot --scope project >/dev/null)
 [ ! -e "$OH/rules" ] || { echo "FAIL: the old rule copies must go"; exit 1; }
 for f in hooks/turn/on-prompt hooks/turn/on-reply hooks/turn/on-stop hooks/turn/on-session-start hooks/peers/mention-guard hooks/peers/checkin hooks/peers/thread-guard hooks/peers/edit-gate hooks/autoresearchclaw/on-start hooks/autoresearchclaw/events hooks/lib/discord.sh hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events discord-chunk.ts discord-proxy.ts; do
-  case $f in hooks/tools/*) want=$PC/tools/${f##*/};; hooks/autoresearchclaw/events) want=$PC/tools/arc-events;; hooks/*) want=$PC/$f;; *) want=$PHOME/.claude-discord/runtime/$f;; esac   # the .ts links go through the stable runtime copy
-  [ -f "$OH/$f" ] && [ "$(readlink -f "$OH/$f")" = "$want" ] || { echo "FAIL: ~/.claude-discord/$f must resolve to the real plugin's $want: $(readlink -f "$OH/$f")"; exit 1; }
+  # The hooks and tools go through the compat copy of the plugin, the .ts links through the stable runtime copy.
+  case $f in hooks/tools/*) want=$PHOME/.claude-discord/compat/tools/${f##*/}; src=$PC/tools/${f##*/};; hooks/autoresearchclaw/events) want=$PHOME/.claude-discord/compat/tools/arc-events; src=$PC/tools/arc-events;; hooks/*) want=$PHOME/.claude-discord/compat/$f; src=$PC/$f;; *) want=$PHOME/.claude-discord/runtime/$f; src=$PC/runtime/$f;; esac
+  [ -f "$OH/$f" ] && [ "$(readlink -f "$OH/$f")" = "$want" ] && cmp -s "$OH/$f" "$src" || { echo "FAIL: ~/.claude-discord/$f must resolve to $want, a copy of the real plugin's file: $(readlink -f "$OH/$f")"; exit 1; }
 done
+[ ! -e "$OH/compat/.git" ] && [ ! -e "$OH/compat/bin" ] || { echo "FAIL: the compat copy must hold no git tree and no wrapper"; exit 1; }
 cmp -s "$PC/runtime/discord-chunk.ts" "$OH/runtime/discord-chunk.ts" && cmp -s "$PC/runtime/discord-proxy.ts" "$OH/runtime/discord-proxy.ts" || { echo "FAIL: setup must fill ~/.claude-discord/runtime from the real plugin (the fixture's stale copy included)"; exit 1; }
 for f in hooks/turn/on-prompt hooks/peers/thread-guard hooks/autoresearchclaw/on-start hooks/autoresearchclaw/events hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events; do
   [ -x "$OH/$f" ] || { echo "FAIL: ~/.claude-discord/$f must be an executable"; exit 1; }
@@ -2705,9 +2754,13 @@ done
 # The unmigrated project's kept entry still names an executable file after another project's setup.
 [ -x "$UP/.claude/discord-agents/hooks/peers/thread-guard" ] && [ -x "$UP/.claude/discord-agents/hooks/turn/on-prompt" ] && grep -q '/.claude/discord-agents/hooks/peers/thread-guard' "$UP/.claude/settings.local.json" || { echo "FAIL: another project's setup must not disable an unmigrated project's hooks"; exit 1; }
 [ -e "$OH/scratch/b/note" ] && [ -e "$OH/runtime/discord-proxy.ts" ] && [ -d "$OH/source/.git" ] || { echo "FAIL: scratch, runtime and the source clone must stay"; exit 1; }
-[ ! -e "$OP/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: the old rule file must go"; exit 1; }
-# The link is to the real plugin (the machine's source clone), not to this project's link; it keeps working when that link goes.
-[ "$(readlink "$OH/hooks/tools/thread")" = "$PHOME/.claude-discord/source/tools/thread" ] || { echo "FAIL: the compat thread link must point at the real plugin: $(readlink "$OH/hooks/tools/thread")"; exit 1; }
+[ -e "$OP/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: setup must leave the project's old rule file to the plugin's first run"; exit 1; }
+# The previous release's install.sh writes through the links (install -m 755 into hooks/<topic>/ and hooks/tools/):
+# the write lands in the compat copy, never in the source clone, so update can still pull; the next setup restores the copy.
+install -m 755 "$OH/hooks/turn/on-stop" "$OH/hooks/turn/on-prompt"; echo old > "$OH/hooks/lib/discord.sh"; install -m 755 "$OH/hooks/turn/on-stop" "$OH/hooks/tools/thread"
+[ -z "$(git -C "$PC" status --porcelain)" ] && cmp -s "$PC/hooks/turn/on-prompt" "$D/hooks/turn/on-prompt" || { echo "FAIL: a write through the compat links must not reach the source clone: $(git -C "$PC" status --porcelain)"; exit 1; }
+(cd "$OP" && printf '\nn\n\n' | bash "$S" setup obot --scope project >/dev/null)
+cmp -s "$OH/hooks/turn/on-prompt" "$PC/hooks/turn/on-prompt" && cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && cmp -s "$OH/hooks/tools/thread" "$PC/tools/thread" && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] || { echo "FAIL: the next setup must restore the compat copy and leave no temp dir"; exit 1; }
 rm -f "$OP/.claude/skills/claude-discord"
 [ -x "$OH/hooks/tools/thread" ] && [ -x "$OH/hooks/turn/on-prompt" ] || { echo "FAIL: the compat links must outlive the project's install link"; exit 1; }
 # A symlink at hooks/ or rules/ (a dev checkout) goes as a link; its target keeps its files and is not written through.
@@ -2717,7 +2770,7 @@ rm -rf "$OH/hooks"; ln -s "$HOME/old-target/hooks" "$OH/hooks"; ln -s "$HOME/old
 [ ! -L "$OH/hooks" ] && [ ! -e "$OH/rules" ] && [ -e "$HOME/old-target/hooks/turn/on-prompt" ] && [ -e "$HOME/old-target/rules/dev-manager.md" ] || { echo "FAIL: a symlinked hooks or rules must be removed as a link, its target untouched"; exit 1; }
 [ -x "$OH/hooks/tools/thread" ] && [ -x "$OH/hooks/turn/on-prompt" ] && [ -z "$(ls "$HOME/old-target/hooks/tools" 2>/dev/null)" ] && [ "$(ls "$HOME/old-target/hooks/turn")" = on-prompt ] || { echo "FAIL: the links must be made in a real hooks directory, not written through the old link"; exit 1; }
 rm -rf "$OP" "$UP" "$HOME/old-target"
-echo "ok: setup on an old install replaces the old hook, tool and runtime copies with links into the real plugin (an unmigrated project's hooks still resolve), removes the old rule copies and rule file, keeps scratch, runtime and the source clone, and removes a symlinked hooks or rules as a link without touching its target"
+echo "ok: setup on an old install replaces the old hook, tool and runtime copies with links into the real plugin (an unmigrated project's hooks still resolve), removes the old rule copies (the project's rule file is the plugin's to remove), keeps scratch, runtime and the source clone, removes a symlinked hooks or rules as a link without touching its target, and an old install.sh writing through the links changes the compat copy, never the source clone"
 
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.
@@ -2731,7 +2784,7 @@ rc=$?
 [ ! -e "$R5" ] || { echo "FAIL: --mode on an unset bot must create nothing (no bot dir, .gitignore or config.env): $(find "$R5")"; exit 1; }
 echo "ok: --mode on a bot that is not set up exits 2 with a hint and creates nothing"
 
-printf '1\n222\n\ntokF\nn\n' | bash "$S" setup five --scope project >/dev/null   # mode kept at its default, none
+printf '\n1\n222\n\ntokF\nn\n' | bash "$S" setup five --scope project >/dev/null   # mode kept at its default, none
 cp "$R5/five/.env" "$P5/five.env.before"; cp "$R5/five/access.json" "$P5/five.access.before"
 printf 'autoresearchclaw\n' | bash "$S" setup five --mode >/dev/null
 [ "$(cat "$R5/five/mode")" = autoresearchclaw ] || { echo "FAIL: --mode fed only the mode answer did not switch the mode"; exit 1; }
@@ -2784,15 +2837,19 @@ for bad in "--scope bogus" "--method bogus" "--scope" "--method"; do
   rc=0; (cd "$XP" && printf '\nn\n' | bash "$S" setup rbot $bad >/dev/null 2>&1) || rc=$?
   [ "$rc" = 2 ] && [ ! -e "$XR/rbot" ] || { echo "FAIL: 'setup rbot $bad' must exit 2 and write nothing, rc=$rc"; exit 1; }
 done
-# Trust: reported, never written unasked, written (other keys kept) on an explicit y.
+# Trust: reported, never written unasked, written (other keys kept) on an explicit y. Answered n, the plugin
+# will not load, so the old settings hooks and rule file must stay (setup never removes them).
 jq -n '{projects: {}, other: 1}' > "$HOME/.claude.json"
-out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot 2>&1)
+mkdir -p "$XP/.claude/rules"; : > "$XP/.claude/rules/claude-discord-dev-manager.md"; echo '{}' > "$XP/.claude/settings.local.json"; plant_old "$XP/.claude/settings.local.json"; cp "$XP/.claude/settings.local.json" "$HOME/xsl.before"
+out=$(cd "$XP" && printf '\n\nn\n' | bash "$S" setup xbot 2>&1)
 grep -q 'not trusted' <<<"$out" && [ "$(jq -r --arg p "$PHOME/scope proj" '.projects[$p] | if . == null then "unset" else "set" end' "$HOME/.claude.json")" = unset ] || { echo "FAIL: setup must say the project is not trusted and write nothing: $out"; exit 1; }
-(cd "$XP" && printf '\nn\n\ny\n' | bash "$S" setup xbot >/dev/null 2>&1)
+cmp -s "$XP/.claude/settings.local.json" "$HOME/xsl.before" && [ -e "$XP/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: with trust answered n, setup must remove no old hook and no rule file"; exit 1; }
+rm -rf "$XP/.claude/rules" "$XP/.claude/settings.local.json" "$HOME/xsl.before"
+(cd "$XP" && printf 'y\n\nn\n' | bash "$S" setup xbot >/dev/null 2>&1)
 [ "$(jq -r --arg p "$PHOME/scope proj" '.projects[$p].hasTrustDialogAccepted' "$HOME/.claude.json")" = true ] && [ "$(jq -r .other "$HOME/.claude.json")" = 1 ] || { echo "FAIL: an explicit y must write trust and keep other keys"; exit 1; }
 # Reached through a symlink, the project is trusted by its physical path; a dangling install link is replaced.
 ln -s "$XP" "$HOME/xp link"; ln -sfn "$HOME/nowhere" "$XL"
-out=$(cd "$HOME/xp link" && printf '\nn\n\n' | bash "$S" setup xbot 2>&1)
+out=$(cd "$HOME/xp link" && printf '\n\nn\n\n' | bash "$S" setup xbot 2>&1)
 ! grep -q 'not trusted' <<<"$out" || { echo "FAIL: trust must be read by the physical path: $out"; exit 1; }
 [ "$(readlink "$XL")" = "$HOME/.claude-discord/source" ] || { echo "FAIL: a dangling install link must be replaced: $out"; exit 1; }
 rm -f "$HOME/xp link"
@@ -2805,7 +2862,7 @@ RECS=$HOME/.claude-discord/records/installs; cp "$RECS" "$HOME/installs.parked";
 [ -d "$GL/.git" ] && [ ! -L "$GL" ] && [ ! -e "$GP/.claude/skills" ] || { echo "FAIL: global clone must be a real clone at ~/.claude/skills and leave the project alone"; exit 1; }
 # The machine-wide compat links stay on the source clone, not on this clone-method install (it may be pinned, and may go). Run the clone's own wrapper: it is the one whose self_root is the clone.
 (cd "$GP" && printf '\nn\n' | bash "$GL/bin/claude-discord" setup gbot >/dev/null 2>&1) || { echo "FAIL: a re-run of the global clone's own wrapper failed"; exit 1; }
-[ "$(readlink "$HOME/.claude-discord/hooks/tools/thread")" = "$PHOME/.claude-discord/source/tools/thread" ] && [ "$(readlink "$HOME/.claude-discord/hooks/turn")" = "$PHOME/.claude-discord/source/hooks/turn" ] || { echo "FAIL: a clone-method setup must leave the compat links on the source: $(readlink "$HOME/.claude-discord/hooks/tools/thread")"; exit 1; }
+[ "$(readlink "$HOME/.claude-discord/hooks/tools/thread")" = "$HOME/.claude-discord/compat/tools/thread" ] && [ "$(readlink "$HOME/.claude-discord/hooks/turn")" = "$HOME/.claude-discord/compat/hooks/turn" ] || { echo "FAIL: a clone-method setup must keep the compat links on the compat copy: $(readlink "$HOME/.claude-discord/hooks/tools/thread")"; exit 1; }
 (cd "$GP2" && printf '900\n111\n\ntokG2\nn\n\nproject\n' | bash "$S" setup gbot2 >/dev/null 2>&1) || { echo "FAIL: a second bot on a globally installed machine must not be refused"; exit 1; }
 [ ! -e "$GP2/.claude/skills" ] || { echo "FAIL: with a global install the project must get no copy"; exit 1; }
 rm -rf "$GL"
@@ -2815,16 +2872,32 @@ rm -rf "$GL"
 # A project in a subdirectory of a repo, and in a git worktree of it, is excluded with the right path.
 SG="$HOME/sg repo"; mkdir -p "$SG/sub"; (cd "$SG" && git init -q . && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m e && git worktree add -q -b sgwt "$HOME/sg wt")
 for w in "$SG/sub" "$HOME/sg wt"; do
-  (cd "$w" && printf '900\n111\n\ntokW\nn\n' | bash "$S" setup wb --scope project --method link >/dev/null 2>&1) || { echo "FAIL: setup in $w failed"; exit 1; }
+  (cd "$w" && printf '\n900\n111\n\ntokW\nn\n' | bash "$S" setup wb --scope project --method link >/dev/null 2>&1) || { echo "FAIL: setup in $w failed"; exit 1; }
   [ "$(git -C "$w" status --porcelain --untracked-files=all | grep -c 'skills/claude-discord')" = 0 ] || { echo "FAIL: the install in $w must be ignored by git"; exit 1; }
 done
 grep -qxF '/sub/.claude/skills/claude-discord' "$SG/.git/info/exclude" || { echo "FAIL: a subdirectory project needs its prefix in the exclude pattern"; exit 1; }
 echo "ok: setup installs the plugin as a link or a clone at project or global scope, asks nothing when an install exists, refuses the other scope and bad flags before writing, excludes it in subdirectories and worktrees, records it, and writes trust only on y"
 
+# install: the plugin, shim, runtime and compat copy, asking nothing (stdin is left unread) and writing no bot
+# file; a re-run is the same. A setup whose clone fails writes no bot file: the install comes before the questions.
+IP="$HOME/inst proj"; FP="$HOME/fail proj"; mkdir -p "$IP" "$FP"
+jq --arg p "$PHOME/inst proj" '.projects[$p].hasTrustDialogAccepted = true' "$HOME/.claude.json" > "$HOME/cj.tmp" && mv "$HOME/cj.tmp" "$HOME/.claude.json"
+for _ in 1 2; do
+  rc=0; left=$(printf 'leftover\n' | { (cd "$IP" && bash "$S" install --scope project --method link >"$HOME/inst.out" 2>&1) || rc=$?; cat; })
+  [ "$rc" = 0 ] && [ "$left" = leftover ] && [ "$(readlink "$IP/.claude/skills/claude-discord")" = "$HOME/.claude-discord/source" ] && [ ! -e "$IP/.claude/discord-agents" ] || { echo "FAIL: install must install, read nothing from stdin and write no bot file (rc=$rc, left=$left): $(cat "$HOME/inst.out")"; exit 1; }
+done
+grep -qxF "$IP/.claude/skills/claude-discord" "$HOME/.claude-discord/records/installs" && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" && [ -d "$HOME/.claude-discord/compat/hooks/turn" ] || { echo "FAIL: install must record the install and refresh the shim and compat copy"; exit 1; }
+rc=0; (cd "$IP" && bash "$S" install bogus >/dev/null 2>&1) || rc=$?
+[ "$rc" = 2 ] || { echo "FAIL: install takes only --scope and --method, rc=$rc"; exit 1; }
+rc=0; out=$(cd "$FP" && printf '900\n111\n\ntokF\nn\n' | CLAUDE_DISCORD_REPO="$HOME/no such repo" bash "$S" setup fbot --scope project --method clone 2>&1) || rc=$?
+[ "$rc" != 0 ] && grep -q 'could not clone' <<<"$out" && [ ! -e "$FP/.claude/discord-agents" ] || { echo "FAIL: a failed clone must stop setup before any bot file (rc=$rc): $out $(find "$FP")"; exit 1; }
+rm -rf "$IP" "$FP" "$HOME/inst.out"
+echo "ok: install installs and refreshes (twice) asking nothing and writing no bot file, refuses other words; a setup whose clone fails writes no bot file"
+
 # --version and update. UP is a project linked to the source (so are the earlier projects the records still hold), UC a clone-method install.
 UP="$HOME/up proj"; UC="$HOME/up clone"; mkdir -p "$UP" "$UC"; for w in "$UP" "$UC"; do (cd "$w" && git init -q .); done
 jq -n --arg a "$PHOME/up proj" --arg c "$PHOME/up clone" '{projects: {($a): {hasTrustDialogAccepted: true}, ($c): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
-(cd "$UP" && printf '900\n111\n\ntokU\nn\n' | bash "$S" setup ubot --scope project >/dev/null)
+(cd "$UP" && printf '\n900\n111\n\ntokU\nn\n' | bash "$S" setup ubot --scope project >/dev/null)
 (cd "$UC" && printf '900\n111\n\ntokU\nn\n' | bash "$S" setup ubot --scope project --method clone >/dev/null)
 C="$UP/.claude/skills/claude-discord"; CC="$UC/.claude/skills/claude-discord"
 [ -L "$C" ] && [ ! -L "$CC" ] || { echo "FAIL: fixture: the default method links, --method clone does not"; exit 1; }

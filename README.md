@@ -63,16 +63,22 @@ enables it per session with `--settings`.
 ## Install
 
 claude-discord is a Claude Code plugin: the repo itself is the plugin (hooks,
-rules, tools and the launcher), and `setup` puts one copy of it where Claude
-Code loads it. A machine's first install:
+rules, tools and the launcher), and `install` (or `setup`, which runs it
+first) puts one copy of it where Claude Code loads it. A machine's first
+install, from the project directory:
 
 ```
-git clone https://github.com/codeslake/claude-discord ~/.claude-discord/source && ~/.claude-discord/source/bin/claude-discord setup <bot>
+git clone https://github.com/codeslake/claude-discord ~/.claude-discord/source && ~/.claude-discord/source/bin/claude-discord install
 ```
 
-`~/.claude-discord/source` is the machine's **source clone**; nothing is removed
-from it afterwards. `setup` asks two questions once per project (Enter takes the
-default; `--scope` and `--method` answer them for a script):
+then `claude-discord setup <bot>` there for each bot. `install` asks nothing
+about a bot and is safe to re-run (a bootstrap script calls it); it installs or
+refreshes the plugin, the shim, `~/.claude-discord/runtime/`, the compat copy
+(see Migrating) and the install record. `~/.claude-discord/source` is the
+machine's **source clone**; nothing is removed from it afterwards. `install`
+and `setup` ask two questions once per project, before any bot question, so a
+failed clone writes no bot file (Enter takes the default; `--scope` and
+`--method` answer them for a script):
 
 | Question | Choices |
 |---|---|
@@ -101,7 +107,8 @@ one, or one not yet migrated) still reaches `setup`, a launch, `update` and
 ### Update, version, patch
 
 ```
-claude-discord update          # git pull --ff-only the clone this runs from (a link resolves to the source clone), re-patch, refresh the shim
+claude-discord install         # the plugin, shim, runtime and compat copy for this project; no bot questions; safe to re-run
+claude-discord update          # git pull --ff-only the clone this runs from (a link resolves to the source clone), re-patch, refresh the compat copy and the shim
 claude-discord update --all    # every recorded install, each real clone once however many links point at it; a removed project is pruned
 claude-discord --version       # claude-discord <version> (<short sha>) of that clone
 claude-discord patch           # patch every cached copy of the official discord plugin (also done at each start and by update)
@@ -131,25 +138,43 @@ On each machine, once:
 1. `git clone` the source (above), then run `claude-discord setup <bot>` in each
    project (the shim reaches the source clone from a project that has no install
    yet, so a project not yet migrated can still be set up, launched and
-   refreshed; the existing bot's answers are kept, only the install questions
-   are new). It installs the plugin, removes the settings hook entries and the
-   `.claude/rules/claude-discord-*.md` file the old release wrote into the
-   project, and replaces the old `~/.claude-discord/hooks`, `rules` and
-   `discord-*.ts` copies. Settings hooks apply live, so from here a running bot
-   has no claude-discord hooks until step 2.
-2. Run `/reload-plugins` in each running bot (the self-reload skill). Its hooks
-   load from the plugin on the next prompt; no restart.
+   refreshed; Enter keeps each of the bot's current answers, `requireMention`
+   included, so only the install questions are new). It installs the plugin and
+   replaces the old `~/.claude-discord/hooks`, `rules` and `discord-*.ts` copies.
+   It removes nothing from the project: the old settings hook entries and the
+   `.claude/rules/claude-discord-*.md` file keep the bot working until the
+   plugin's hooks run.
+2. Run `/reload-plugins` in each running bot (the self-reload skill). On the
+   plugin's first hook run in that session, it records the session
+   (`<bot dir>/plugin-sessions/<session id>`) and removes this project's own old
+   entries from `.claude/settings.json` and `.claude/settings.local.json` (each
+   only when it is a regular file) and the `.claude/rules/claude-discord-*.md`
+   files. That one event may run both the old and the plugin's hook once (a
+   doubled turn record, a doubled ✅ attempt); from the next one, an old hook in
+   a recorded session exits at once. A bot whose plugin never loads (an
+   untrusted project, a `/reload-plugins` not yet run) keeps its old hooks.
 3. `claude-discord --version` and `claude-discord health` confirm.
 
-With a GLOBAL install, a project not yet migrated runs both its old settings hooks and the plugin's hooks until that project's next setup or start. Run `setup` in each project right after a global install.
+A settings file the plugin never edits keeps its old entries: a symlinked
+`settings.json` (a dotfiles repo, say) and the user-global
+`~/.claude/settings.json`. In a session the plugin runs in they exit at once,
+but the first event of every new session still runs them once beside the
+plugin's. `setup` names such a file with the command that removes the entries
+by hand (`bash <plugin>/hooks/lib/old-hooks.sh <file>...`, which writes through
+a symlink); commit the change where that file lives.
 
 For this release `~/.claude-discord/hooks/{turn,peers,lib,autoresearchclaw}`,
-`hooks/tools/*` and the two `.ts` files stay as links into the plugin (and the
-runtime copy), so a project not yet migrated keeps working through them; they go
-in the next release. `~/.claude-discord/rules/` is removed.
+`hooks/tools/*` and the two `.ts` files stay as links, so a project not yet
+migrated keeps working through them; they go in the next release. The hooks and
+tools links lead into `~/.claude-discord/compat/`, a plain copy (no git) of the
+plugin's hooks, tools and rules that `setup`, `install` and `update` refresh, so
+the previous release's `install.sh` writing through them never reaches a git
+clone; the `.ts` links lead into the runtime copy. `~/.claude-discord/rules/` is
+removed.
 
-Rollback: the previous release's `./install.sh` writes through the links above
-into the source clone, so remove them and the plugin installs first:
+Rollback: remove the plugin installs (or they keep loading next to the
+re-registered settings hooks) and the links above (`./install.sh` would write
+through them into the compat copy) first:
 
 ```
 while IFS= read -r p; do if [ -L "$p" ]; then rm -f "$p"; elif [ -d "$p/.git" ]; then rm -rf "$p"; fi; done < ~/.claude-discord/records/installs
@@ -188,7 +213,9 @@ The positional form `claude-discord alpha ...` still works this release and
 prints one deprecation line. The subcommands (`setup`, `refresh`, `health`,
 `update`, `patch`) keep the bot positional.
 
-The setup prompts:
+The setup prompts (piped answers are one line per prompt; stdin ending before
+a required answer exits 2 with a message, while the mode and peers prompts take
+their default):
 
 | Prompt | Stored in | Notes |
 |---|---|---|
@@ -196,7 +223,7 @@ The setup prompts:
 | Your Discord user ID | `config.env` (shared) | the only user allowed to DM the bot |
 | Other user or bot IDs | `config.env` (shared) | comma-separated; may be empty. These can trigger the bot in the channel. Answer `all` instead to let **everyone who can post in that channel** trigger it — the group's `allowFrom` is written empty, which is how the plugin spells "no filter". Anyone who can post there can then drive a session that has shell access on that machine, and that includes every other bot in the channel (the wrapper patches the plugin to let bot authors reach this gate). The plugin counts a reply to one of the bot's own messages as a mention, so two open bots can answer each other without end even with the mention requirement on; with "Respond without an @mention" set to Y they will. `all` is **not** stored in the shared `config.env`, so it applies to the bot being set up and no other; a bot set up later inherits the stored IDs and stays closed, and `setup <name> --reset` is how you answer again (it clears the token and shared IDs too); to open a bot that already exists without re-answering, set its channel group `allowFrom` to `[]` in `access.json` by hand. `all` cannot be mixed with IDs, and DMs stay owner-only either way |
 | Bot token | `<name>/.env` | input is hidden, like a password. On a re-run, empty keeps the current token |
-| Respond without an @mention? | `<name>/access.json` | default N. With Y the bot answers every channel message |
+| Respond without an @mention? | `<name>/access.json` | default N for a new bot; on a re-run Enter keeps the bot's current `requireMention`. With Y the bot answers every channel message |
 | Mode | `<name>/mode` | `none` (default), `dev-manager` or `autoresearchclaw`; see Modes below. On a re-run the picker starts at the current mode |
 | Peer dev bots (dev-manager only) | `peers.json` (shared), `<name>/access.json` | `name:bot_id:owner_id:machine`, comma-separated; empty keeps the current list |
 
@@ -444,11 +471,12 @@ Which plugin runs them:
 - Hooks, tools and the launcher resolve their real directory (`cd -P`,
   `readlink -f`) instead of trusting `${CLAUDE_PLUGIN_ROOT}`, which is why the
   link method works.
-- `setup` and every start remove what the previous release registered (the
-  entries under `.claude/discord-agents/hooks/` in `settings.json` and
-  `settings.local.json`), only in a project that has a plugin install. Every
-  other key and hook in either file stays, and a `hooks` key left empty is
-  dropped. `.claude/discord-agents/hooks` in the project stays a symlink to the
+- The plugin's first hook run in a bot session removes what the previous
+  release registered in the project (the entries under
+  `.claude/discord-agents/hooks/` in a regular `settings.json` and
+  `settings.local.json`, and the `claude-discord-*.md` rule files); `setup` and
+  a start remove nothing (see Migrating). Every other key and hook in either
+  file stays, and a `hooks` key left empty is dropped. `.claude/discord-agents/hooks` in the project stays a symlink to the
   plugin's `hooks/` for this release (a peer's committed settings may still
   name it; the next release removes it). To switch the hooks off, uninstall the
   plugin (delete its install path) or disable it in `/plugin`.

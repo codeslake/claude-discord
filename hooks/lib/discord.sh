@@ -110,3 +110,51 @@ peers() {
     | select(.name != "" and (.bot_id | test("^[0-9]+$")) and (.name | ascii_downcase) != ($self | ascii_downcase))]
     | select(length > 0)' "$DISCORD_STATE_DIR/../peers.json" 2>/dev/null
 }
+
+# plugin_gate: every hook calls it right after sourcing this file (a tool never
+# does: it would read the terminal). Returns 1 when the hook must exit 0 at once.
+# Hooks earlier releases wrote into settings files keep running beside the
+# plugin's where setup cannot remove them (the user-global settings.json, a
+# symlinked one), and a hook run twice records a turn twice. So the plugin's
+# own hook (CLAUDE_PLUGIN_ROOT set and $0 under it) leaves a marker,
+# <state dir>/plugin-sessions/<session id>, on its first run in a session, and
+# an old one (run from .claude/discord-agents/hooks/ or ~/.claude-discord/hooks/,
+# or with no CLAUDE_PLUGIN_ROOT) does nothing in a session that has one. That
+# first run is also the migration: it takes this project's own old entries and
+# rule copies out (old-hooks.sh), in a session the plugin is known to be loaded
+# in, which setup cannot know. The event it happens in may run both once.
+# Cheap on purpose, since it runs on every event: no jq, one [ -e ], and an old
+# hook of a bot no plugin hook ever ran for does not even read its stdin.
+plugin_gate() {
+  local m=${DISCORD_STATE_DIR:-}/plugin-sessions root=${CLAUDE_PLUGIN_ROOT:-} sid old=1 won=""
+  [ -n "$bot_name" ] || return 0
+  case $0 in
+    */.claude/discord-agents/hooks/*|"$HOME"/.claude-discord/hooks/*) ;;
+    *) [ -z "$root" ] || case $0 in "$root"/*) old="";; esac ;;
+  esac
+  if [ -n "$old" ]; then
+    [ -d "$m" ] || return 0
+    hook_session || return 0
+    [ ! -e "$m/$sid" ]
+    return
+  fi
+  hook_session || return 0
+  [ ! -e "$m/$sid" ] || return 0
+  mkdir -p "$m" 2>/dev/null || return 0
+  set -C; { : > "$m/$sid"; } 2>/dev/null && won=1; set +C   # noclobber: of the event's parallel hooks, one migrates
+  [ -n "$won" ] || return 0
+  find "$m" -type f -mtime +30 -exec rm -f {} + 2>/dev/null   # markers of sessions a month gone
+  . "$plugin_root/hooks/lib/old-hooks.sh" 2>/dev/null && migrate_project
+  return 0
+}
+# hook_session: sets sid from the hook's stdin JSON and hands the same input
+# back on stdin for the hook to read. The top-level session_id comes first in
+# the object Claude Code writes, and the leftmost match wins.
+hook_session() {
+  local re='"session_id"[[:space:]]*:[[:space:]]*"([^"/\\]+)"' input
+  input=$(cat 2>/dev/null) || input=""
+  exec <<<"$input"
+  [[ $input =~ $re ]] || return 1
+  sid=${BASH_REMATCH[1]}
+  case $sid in .*) return 1;; esac
+}

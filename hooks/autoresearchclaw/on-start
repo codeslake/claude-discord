@@ -16,6 +16,7 @@
 # without the rule file. Starts no process; never fails.
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
+plugin_gate || exit 0
 [ "$bot_mode" = autoresearchclaw ] || exit 0
 rule=$plugin_root/rules/autoresearchclaw.md
 [ -f "$rule" ] || exit 0

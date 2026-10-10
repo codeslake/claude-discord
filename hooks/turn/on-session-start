@@ -41,6 +41,7 @@
 # id from pins.json.
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
+plugin_gate || exit 0
 
 read -r session_id source <<EOF2
 $(jq -r '"\(.session_id // "") \(.source // "")"' 2>/dev/null)

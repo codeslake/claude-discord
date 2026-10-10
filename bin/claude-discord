@@ -21,10 +21,14 @@
 #   claude-discord refresh <name> [--force] [claude args]
 #                                        replace the running session with a fresh
 #                                        one that starts from its handoff
+#   claude-discord install [--scope project|global] [--method link|clone]
+#                                        the plugin, the shim, runtime/ and compat/ for this
+#                                        project (or globally), asking nothing about a bot;
+#                                        safe to re-run (the bootstrap's command)
 #   claude-discord update [--all]        git pull --ff-only the clone this runs from (--all:
 #                                        every recorded install, each real clone once; a
 #                                        clone on a detached HEAD is skipped), then the
-#                                        pulled code's patch and shim
+#                                        pulled code's patch, compat copy and shim
 #   claude-discord --version             version and short sha of the clone
 #   claude-discord health [--json]
 #                                        is every bot in this project still
@@ -118,32 +122,6 @@ jq_edit() {  # $1 = file, the rest = jq arguments
   rm -f "$f.tmp.$$"
 }
 
-# The plugin's hooks.json registers every hook now. Entries earlier versions
-# wrote into the project's settings files (a command under
-# .claude/discord-agents/hooks/) would run each hook twice, so they are removed
-# from settings.json and settings.local.json, along with a matcher group or an
-# event left empty by that; every other entry stays. Settings hooks apply live
-# (measured), so a running bot drops them at once and gets the plugin's on
-# /reload-plugins. A file is written only when it changes (Claude Code writes
-# its permission grants into settings.local.json).
-remove_old_hooks() {
-  local file
-  for file in settings.json settings.local.json; do
-    [ -e "$PWD/.claude/$file" ] || continue   # nothing to remove from a file that is not there (and no jq forks)
-    jq_edit "$PWD/.claude/$file" '
-      ((.hooks | type) == "object" and (.hooks | tostring | contains("/.claude/discord-agents/hooks/"))) as $ours
-      | def stale: (.command? // "" | tostring | contains("/.claude/discord-agents/hooks/"));
-      (if (.hooks | type) != "object" then . else
-        .hooks |= with_entries(
-          if (.value | type) == "array" and any(.value[]; any(.hooks?[]?; stale)) then
-            .value |= map(if any(.hooks?[]?; stale) then (.hooks |= map(select(stale | not))) | select(.hooks | length > 0) else . end)
-            | select(.value | length > 0)
-          else . end)
-      end)
-      | if $ours and .hooks == {} then del(.hooks) else . end'   # emptied by us: leave no "hooks": {} diff behind
-  done
-}
-
 # Adds access.json's ackReaction key (the plugin's own read-receipt
 # reaction) only when the key is absent; an explicit "" means the owner
 # disabled it and is left alone.
@@ -151,24 +129,6 @@ ensure_ack_reaction() {  # $1 = bot dir
   [ -f "$1/access.json" ] || return 0
   grep -q '"ackReaction"' "$1/access.json" && return 0   # present (even ""): nothing to add, and no jq forks
   jq_edit "$1/access.json" 'if has("ackReaction") then . else . + {ackReaction: "👀"} end'
-}
-
-# Takes out what earlier versions registered per project: the settings hooks
-# (see remove_old_hooks) and every .claude/rules/claude-discord-*.md (that
-# prefix is claude-discord's own; no other file is touched). The dev-manager
-# rule reaches a session through the plugin's SessionStart hook now. Only in a
-# project with a plugin install, because that install is what replaces them:
-# a project set up by the previous release and not yet by this one (setup
-# --mode and every start also come here) keeps its hooks and rule file, or its
-# bot would lose all of them. Idempotent; never aborts either caller.
-remove_old_registration() {
-  local f
-  [ -e "$PWD/.claude/skills/claude-discord" ] || [ -e "$HOME/.claude/skills/claude-discord" ] || return 0
-  for f in "$PWD"/.claude/rules/claude-discord-*.md; do
-    [ -e "$f" ] || [ -L "$f" ] || continue   # an unmatched glob stays literal: no rm fork on every start
-    rm -f "$f" 2>/dev/null || echo "claude-discord: could not remove $f" >&2
-  done
-  remove_old_hooks
 }
 
 # Makes <project>/.claude/discord-agents/hooks a symlink to the plugin's hooks,
@@ -313,35 +273,40 @@ install_plugin() {  # uses $scope $method $pdir $gdir
   fi
 }
 
-# What install.sh used to put under ~/.claude-discord becomes links into the
-# real plugin (the source clone when there is one, else $self_root, the resolved install, not one project's link):
-# hooks/{turn,peers,lib,autoresearchclaw}, every tool under hooks/tools, and the
-# two runtime .ts files (the bunfig preload an old bot's MCP server names; they
-# link to the stable runtime/ copy, which sync_runtime fills, so they never dangle).
+# What install.sh used to put under ~/.claude-discord becomes links into
+# ~/.claude-discord/compat, a plain copy (no git) of the real plugin's hooks,
+# tools and rules (the source clone when there is one, else $self_root, the
+# resolved install, not one project's link): hooks/{turn,peers,lib,autoresearchclaw},
+# every tool under hooks/tools, and the two runtime .ts files (the bunfig preload
+# an old bot's MCP server names; they link to the stable runtime/ copy, which
+# sync_runtime fills, so they never dangle). A copy, not the clone (R16): the
+# previous release's install.sh writes through these links, and a write into a
+# clone would leave `update` refusing to pull for good.
 # Links stay for one release, because a project set up by the previous release
 # and not yet by this one keeps its settings hooks, and those resolve through
 # .claude/discord-agents/hooks -> ~/.claude-discord/hooks; deleting the copies
 # would silently turn every one of them into a no-op. The next release removes
 # the links. rules/ goes (only the old rule copies read it); scratch/, records/,
-# source/ are not touched (runtime/ is refreshed). A symlink at hooks/ itself is removed as
+# source/ are not touched (runtime/ and compat/ are refreshed). A symlink at hooks/ itself is removed as
 # a link (R2): it leads somewhere that is not ours to empty. The other paths
 # are removed with rm -rf, which on a link removes only the link.
 remove_old_install() {
-  local h=$helpers real=$self_root t f bad=0
-  # The machine-wide source clone when there is one: a clone-method (possibly pinned) project must not pull every unmigrated project onto its version, nor leave the links dangling when it is removed.
+  local h=$helpers real=$self_root c=$helpers/compat t f bad=0
+  # The machine-wide source clone when there is one: a clone-method (possibly pinned) project must not pull every unmigrated project onto its version.
   [ ! -d "$h/source/hooks" ] || real=$h/source
   [ ! -L "$h/hooks" ] || rm -f "$h/hooks"
   [ ! -e "$h/rules" ] && [ ! -L "$h/rules" ] || rm -rf "$h/rules"
   [ -d "$h/hooks/tools" ] && [ ! -L "$h/hooks/tools" ] || { rm -rf "$h/hooks/tools"; mkdir -p "$h/hooks/tools" || bad=1; }
-  for f in "$h"/hooks/tools/* "$h"/hooks/tools/.[!.]*; do   # an old copy or a link to a tool the plugin no longer ships goes
-    { [ -e "$f" ] || [ -L "$f" ]; } && ! { [ -L "$f" ] && [ "$f" -ef "$real/tools/${f##*/}" ]; } && { rm -rf "$f" || bad=1; }
-  done
   sync_runtime || bad=1
-  for t in turn peers lib autoresearchclaw; do
-    [ -L "$h/hooks/$t" ] && [ "$h/hooks/$t" -ef "$real/hooks/$t" ] && continue   # already linked (every setup after the first)
-    rm -rf "${h:?}/hooks/$t" && ln -s "$real/hooks/$t" "$h/hooks/$t" || bad=1
+  sync_compat "$real" || bad=1
+  for f in "$h"/hooks/tools/* "$h"/hooks/tools/.[!.]*; do   # an old copy, a link into a clone, or a link to a tool the plugin no longer ships goes
+    { [ -e "$f" ] || [ -L "$f" ]; } && ! { [ -L "$f" ] && [ "$f" -ef "$c/tools/${f##*/}" ]; } && { rm -rf "$f" || bad=1; }
   done
-  for f in "$real"/tools/*; do
+  for t in turn peers lib autoresearchclaw; do
+    [ -L "$h/hooks/$t" ] && [ "$(readlink "$h/hooks/$t")" = "$c/hooks/$t" ] && continue   # already linked (every setup after the first)
+    rm -rf "${h:?}/hooks/$t" && ln -s "$c/hooks/$t" "$h/hooks/$t" || bad=1
+  done
+  for f in "$c"/tools/*; do
     [ -L "$h/hooks/tools/${f##*/}" ] && [ "$h/hooks/tools/${f##*/}" -ef "$f" ] && continue
     ln -sfn "$f" "$h/hooks/tools/${f##*/}" || bad=1
   done
@@ -349,14 +314,48 @@ remove_old_install() {
     [ -L "$h/$f" ] && [ "$h/$f" -ef "$h/runtime/$f" ] && continue
     ln -sfn "$h/runtime/$f" "$h/$f" || bad=1
   done
-  [ "$bad" = 0 ] || { echo "claude-discord: could not link the old install paths under $h to $real" >&2; return 1; }
+  [ "$bad" = 0 ] || { echo "claude-discord: could not link the old install paths under $h to $c" >&2; return 1; }
 }
 
-if [ "${1:-}" = setup ]; then
-  name=${2:?usage: claude-discord setup <name> [--scope project|global] [--method link|clone] [--reset|--mode]}
-  # --scope and --method may sit anywhere after the name; the rest keeps its place so ${3:-} still sees --reset/--mode.
-  scope="" method="" want="" rest=()
-  for a in "${@:3}"; do
+# sync_compat <plugin>: rebuilds ~/.claude-discord/compat from that plugin when
+# it differs (a write through a link included), in a new directory swapped in by
+# rename, so a hook already running from the old copy keeps its open file.
+# rename(2) cannot replace a non-empty directory, hence two renames; a settings
+# hook started between them finds no file and its entry's -x test skips it.
+sync_compat() {
+  local c=$helpers/compat n=$helpers/compat.new.$$ t
+  rm -rf "$n" && mkdir -p "$n/hooks" || return 1
+  for t in turn peers lib autoresearchclaw; do cp -R "$1/hooks/$t" "$n/hooks/" || { rm -rf "$n"; return 1; }; done
+  cp -R "$1/tools" "$1/rules" "$n/" || { rm -rf "$n"; return 1; }
+  if [ -d "$c" ] && [ ! -L "$c" ] && diff -r "$c" "$n" >/dev/null 2>&1; then rm -rf "$n"; return 0; fi
+  rm -rf "$c.old.$$"
+  { ! has_path "$c" || mv "$c" "$c.old.$$"; } && mv "$n" "$c" || { rm -rf "$n"; return 1; }
+  rm -rf "$c.old.$$"
+}
+# Run by update from the freshly pulled code (this process holds the old functions).
+if [ "${1:-}" = compat ]; then remove_old_install; exit $?; fi
+
+# setup tells, once, of old entries in a settings file nothing here edits: a
+# symlink (often into a dotfiles repo) or the user-global settings.json. The
+# plugin's first hook run removes the project's own regular files' entries;
+# these keep running beside the plugin's, as no-ops in a session it runs in.
+report_old_hooks() {
+  local f found=""
+  for f in "$PWD/.claude/settings.json" "$PWD/.claude/settings.local.json" "$HOME/.claude/settings.json"; do
+    [ -L "$f" ] || [ "$f" -ef "$HOME/.claude/settings.json" ] || continue
+    grep -qF /.claude/discord-agents/hooks/ "$f" 2>/dev/null || continue
+    case $found in *"'$f'"*) continue;; esac   # in $HOME, the project's settings.json is the global one
+    found="$found '$f'"
+  done
+  [ -z "$found" ] || echo "claude-discord: old claude-discord hook entries stay in$found (a symlink or the user-global file, never edited here; a session the plugin runs in skips them). Remove them by hand: bash '$self_root/hooks/lib/old-hooks.sh'$found" >&2
+}
+
+# --scope and --method, anywhere and in the = form too, for setup and install;
+# every other word lands in rest, in order.
+parse_install_flags() {
+  local a want=""
+  scope="" method="" rest=()
+  for a in "$@"; do
     if [ -n "$want" ]; then
       case $want in scope) scope=$a;; method) method=$a;; esac
       want=""
@@ -371,34 +370,79 @@ if [ "${1:-}" = setup ]; then
     esac
   done
   [ -z "$want" ] || { echo "claude-discord: --$want needs a value" >&2; exit 2; }
+}
+
+# Everything about the install that can be refused is decided here, before a
+# prompt or a write: a bad flag or a copy at the other scope must leave the
+# bot's files (and --reset's deletion) alone.
+check_install_scope() {
+  local p
+  case $scope in ''|project|global) ;; *) echo "claude-discord: --scope must be project or global, got '$scope'" >&2; exit 2;; esac
+  case $method in ''|link|clone) ;; *) echo "claude-discord: --method must be link or clone, got '$method'" >&2; exit 2;; esac
+  # Asked once per project: an install already there decides the scope.
+  if [ -z "$scope" ]; then
+    if has_path "$pdir"; then scope=project; elif has_path "$gdir"; then scope=global; fi
+  fi
+  if [ "$scope" = project ] && has_path "$gdir"; then
+    echo "claude-discord: already installed globally at $gdir; remove it or use --scope global" >&2; exit 2
+  elif [ "$scope" = global ] && has_path "$pdir"; then
+    echo "claude-discord: already installed for this project at $pdir; remove it or use --scope project" >&2; exit 2
+  elif [ "$scope" = global ] && ! has_path "$gdir"; then
+    # A new global copy would shadow every project install the machine records (the global one wins).
+    while IFS= read -r p || [ -n "$p" ]; do
+      [ -z "$p" ] || [ ! -e "$p" ] || { echo "claude-discord: a project install exists at $p, which a global install would shadow; remove it or use --scope project" >&2; exit 2; }
+    done < <(cat "$HOME/.claude-discord/records/installs" 2>/dev/null)
+  fi
+}
+
+# The plugin, the shim, runtime/, compat/ and the install record; before any
+# bot question (R17), so a failed clone leaves no bot file behind.
+install_all() {
+  [ -n "$scope" ] || scope=$(select_one Scope project "project  this project only (.claude/skills/claude-discord)" "global  every project (~/.claude/skills/claude-discord)")
+  install_plugin || return $?
+  self_root=$plugin_target   # from here on, everything points at the real install
+  remove_old_install || return $?
+  report_old_hooks
+}
+pdir=$PWD/.claude/skills/claude-discord gdir=$HOME/.claude/skills/claude-discord
+
+# install: the plugin and what goes with it, asking nothing about a bot (the
+# bootstrap's command); safe to re-run.
+if [ "${1:-}" = install ]; then
+  parse_install_flags "${@:2}"
+  [ "${#rest[@]}" = 0 ] || { echo "usage: claude-discord install [--scope project|global] [--method link|clone]" >&2; exit 2; }
+  check_install_scope
+  install_all || exit $?
+  echo "claude-discord: installed at $plugin_target; set up a bot with: claude-discord setup <name>"
+  exit 0
+fi
+
+# ask <var> <prompt> [-s]: one answer from stdin. Stdin ending before an answer
+# is said and exits 2 (set -e would otherwise end setup with a silent 1).
+ask() {
+  local a=""
+  read -r ${3:-} -p "$2" a || [ -n "$a" ] || {
+    [ ! -t 0 ] || echo >&2
+    echo "claude-discord: setup: stdin ended before '$2' was answered; run setup at a terminal, or pipe one line per question (an empty line keeps the current value)" >&2
+    exit 2
+  }
+  printf -v "$1" '%s' "$a"
+}
+
+if [ "${1:-}" = setup ]; then
+  name=${2:?usage: claude-discord setup <name> [--scope project|global] [--method link|clone] [--reset|--mode]}
+  # --scope and --method may sit anywhere after the name; the rest keeps its place so ${3:-} still sees --reset/--mode.
+  parse_install_flags "${@:3}"
   set -- "$1" "$2" ${rest[@]+"${rest[@]}"}
   case $name in
     ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
     hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
   esac
-  # Everything about the install that can be refused is decided here, before a
-  # prompt or a write: a bad flag or a copy at the other scope must leave the
-  # bot's files (and --reset's deletion) alone.
-  pdir=$PWD/.claude/skills/claude-discord gdir=$HOME/.claude/skills/claude-discord
   if [ "${3:-}" = --mode ]; then
     [ -z "$scope$method" ] || { echo "claude-discord: --mode changes only the mode and installs nothing; --scope and --method do not apply" >&2; exit 2; }
   else
-    case $scope in ''|project|global) ;; *) echo "claude-discord: --scope must be project or global, got '$scope'" >&2; exit 2;; esac
-    case $method in ''|link|clone) ;; *) echo "claude-discord: --method must be link or clone, got '$method'" >&2; exit 2;; esac
-    # Asked once per project: an install already there decides the scope.
-    if [ -z "$scope" ]; then
-      if has_path "$pdir"; then scope=project; elif has_path "$gdir"; then scope=global; fi
-    fi
-    if [ "$scope" = project ] && has_path "$gdir"; then
-      echo "claude-discord: already installed globally at $gdir; remove it or use --scope global" >&2; exit 2
-    elif [ "$scope" = global ] && has_path "$pdir"; then
-      echo "claude-discord: already installed for this project at $pdir; remove it or use --scope project" >&2; exit 2
-    elif [ "$scope" = global ] && ! has_path "$gdir"; then
-      # A new global copy would shadow every project install the machine records (the global one wins).
-      while IFS= read -r p || [ -n "$p" ]; do
-        [ -z "$p" ] || [ ! -e "$p" ] || { echo "claude-discord: a project install exists at $p, which a global install would shadow; remove it or use --scope project" >&2; exit 2; }
-      done < <(cat "$HOME/.claude-discord/records/installs" 2>/dev/null)
-    fi
+    check_install_scope
+    install_all || exit $?
   fi
   umask 077
   if [ "${3:-}" = --mode ]; then
@@ -416,8 +460,8 @@ if [ "${1:-}" = setup ]; then
     mkdir -p "$root/$name"
     printf '*\n' > "$root/.gitignore"
     if [ ! -f "$root/config.env" ]; then
-      read -rp "Discord channel ID: " channel
-      read -rp "Your Discord user ID: " user
+      ask channel "Discord channel ID: "
+      ask user "Your Discord user ID: "
       # Shown only at a terminal, like read -p's own prompt.
       [ -t 0 ] && cat >&2 <<'EOT'
 Other user or bot IDs allowed to trigger bots there: comma-separated, empty for none,
@@ -426,7 +470,7 @@ session, which runs with shell access on this machine. Other bots in the channel
 a reply to this bot counts as a mention, so two open bots can answer each other without end;
 with 'respond without an @mention' on, they will.
 EOT
-      read -rp "IDs: " others
+      ask others "IDs: "
       others=${others//[[:space:]]/}   # the file is sourced: a stray space would run an ID as a command
       # "all" applies to THIS bot only and is not persisted: config.env is
       # shared by every bot in the project, so storing it would quietly open
@@ -445,13 +489,16 @@ EOT
   if [ "${3:-}" != --mode ]; then
     keep=""
     [ -f "$root/$name/.env" ] && keep=" (empty keeps the current one)"
-    read -rsp "Bot token for $name$keep: " token
+    ask token "Bot token for $name$keep: " -s
     echo
     [ -z "$token" ] && [ -n "$keep" ] || printf 'DISCORD_BOT_TOKEN=%s\n' "$token" > "$root/$name/.env"
     # Every bot in one channel answering every message means N replies per human
-    # message, so the default stays mention-only; opt in per bot.
-    read -rp "Respond to every message in the channel without an @mention? [y/N] " nomention
-    case $nomention in y|Y) mention=false;; *) mention=true;; esac
+    # message, so the default stays mention-only; opt in per bot. Enter keeps
+    # what the bot has now (its first group's requireMention).
+    mention=true q='[y/N]'
+    if [ "$(jq -r '[.groups[]?.requireMention][0]' "$root/$name/access.json" 2>/dev/null)" = false ]; then mention=false q='[Y/n]'; fi
+    ask nomention "Respond to every message in the channel without an @mention? $q "
+    case $nomention in y|Y) mention=false;; n|N) mention=true;; esac
     # access.json is the bot's LIVE policy: the plugin re-reads it on every
     # message, and its groups may have been hand-edited since the last setup
     # (moved to another channel, allowFrom trimmed, ackReaction silenced). A
@@ -500,15 +547,7 @@ EOT
        else . end'
     echo "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed."
   fi
-  # --mode touches only the mode file, so it never installs or asks for a scope.
-  if [ "${3:-}" != --mode ]; then
-    [ -n "$scope" ] || scope=$(select_one Scope project "project  this project only (.claude/skills/claude-discord)" "global  every project (~/.claude/skills/claude-discord)")
-    install_plugin || exit $?
-    self_root=$plugin_target   # from here on, everything points at the real install
-    remove_old_install || exit $?
-  fi
   ensure_hooks_symlink
-  remove_old_registration
   if [ "${3:-}" = --mode ]; then
     echo "claude-discord: $root/$name/mode set to $mode"
   else
@@ -1367,6 +1406,7 @@ if [ "${1:-}" = update ]; then
   new=$self_root
   [ -x "$helpers/source/bin/claude-discord" ] && new=$helpers/source || { [ "${#clones[@]}" -eq 0 ] || new=${clones[0]}; }
   "$new/bin/claude-discord" patch || rc=1
+  "$new/bin/claude-discord" compat || rc=1
   mkdir -p "$HOME/.local/bin"
   cmp -s "$new/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
     install -m 755 "$new/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
@@ -1657,7 +1697,6 @@ prune_dead_sessions() {
 }
 
 ensure_hooks_symlink
-remove_old_registration
 prune_dead_sessions || :   # even its last line (a warning on a closed stderr) may not fail the start
 # worktree.bgIsolation "none" turns off Claude Code's background-isolation
 # guard for this session: measured on two machines, a session started with

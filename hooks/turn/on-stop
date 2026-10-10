@@ -11,6 +11,7 @@
 # it ends. Otherwise never blocks, and must never fail a turn.
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
+plugin_gate || exit 0
 
 [ -n "$bot_name" ] || exit 0
 any=""; for f in "$DISCORD_STATE_DIR"/turns/*; do case $f in *.primed) ;; *) [ ! -e "$f" ] || any=1;; esac; done

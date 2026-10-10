@@ -34,6 +34,7 @@
 # Must never fail a turn.
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
+plugin_gate || exit 0
 
 deny() {
   jq -nc --arg r "$1" \

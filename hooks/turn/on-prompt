@@ -8,6 +8,7 @@
 # missing field or unrelated prompt is silent success.
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
+plugin_gate || exit 0
 
 [ -n "$bot_name" ] || exit 0
 input=$(cat 2>/dev/null) || exit 0

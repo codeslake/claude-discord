@@ -10,6 +10,7 @@
 # without peers.json. Must never fail a turn.
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
+plugin_gate || exit 0
 
 [ "$bot_mode" = dev-manager ] && [ -f "$DISCORD_STATE_DIR/../peers.json" ] || exit 0
 input=$(cat 2>/dev/null) || exit 0

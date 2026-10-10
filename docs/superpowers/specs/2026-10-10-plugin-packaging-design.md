@@ -16,7 +16,9 @@ settings files, or on a rule file every session of the project loads.
 Success means:
 
 - `claude-discord setup <bot>` leaves exactly one copy of the plugin for the
-  project and no claude-discord hook entries in any settings file.
+  project, and the plugin's first hook run in a bot session leaves no
+  claude-discord hook entry in the project's own settings files (one it may
+  not edit runs as a no-op; see Migration).
 - Every running bot on lmd42, wmac, pmac, lmd79 and dongyong22's wmac moves
   to the plugin without a restart and keeps answering.
 - `claude-discord --bg --name RVP` and `claude-discord --bg --resume <uuid>`
@@ -40,7 +42,7 @@ The repo itself is the plugin. Everything a session or hook needs is inside it.
 
 ```
 claude-discord/                     (the git clone setup makes)
-  .claude-plugin/plugin.json        name "claude-discord", version (semver)
+  .claude-plugin/plugin.json        name "discord-agents", version (semver)
   hooks/hooks.json                  the nine hooks, ${CLAUDE_PLUGIN_ROOT} paths
   hooks/lib, turn/, peers/, autoresearchclaw/   (as today)
   tools/thread, tools/local-bots, tools/arc-events   (moved out of hooks/)
@@ -51,12 +53,18 @@ claude-discord/                     (the git clone setup makes)
   test-claude-discord.sh, README.md, CLAUDE.md, docs/
 ```
 
-`plugin.json` declares no MCP server. The plugin carries hooks only.
+`plugin.json` declares no MCP server. The plugin carries hooks only. Its name is
+`discord-agents` (R18): `claude plugin validate` reserves names starting with
+`claude-`, and a loader that enforces it would silently drop every bot's hooks.
+The install path stays `.claude/skills/claude-discord` and the CLI stays
+`claude-discord`.
 
 ## Install scopes
 
-`setup` asks two questions once per project (`--scope project|global` and
-`--method link|clone` for scripts; owner decision 2026-10-10):
+`setup` and `install` ask two questions once per project (`--scope project|global` and
+`--method link|clone` for scripts; owner decision 2026-10-10), and `setup` asks
+them, installs, and only then asks the bot questions (R17), so a failed clone
+writes no bot file:
 
 - **scope**: **project** (default, Enter) puts the plugin at
   `<project>/.claude/skills/claude-discord`; **global** at
@@ -76,6 +84,17 @@ included) gets the path in the repo's `info/exclude`, added only when missing.
 When the project already has an install at either scope, setup uses it and
 asks nothing; both questions are validated before any other setup step
 writes anything.
+
+`claude-discord install [--scope project|global] [--method link|clone]` does
+the install part alone: the plugin, the shim, `runtime/`, the compat copy and
+the install record, asking nothing about a bot. It is safe to re-run, and it
+is the bootstrap's command.
+
+Every setup prompt's Enter keeps the bot's current value (the token, the
+mention policy read from its `access.json`, the mode, the peers list). Stdin
+ending before a required answer (the IDs, the token, the mention policy) prints
+which prompt went unanswered and exits 2; the mode and peers prompts take their
+default.
 
 A plugin present in both places loads once, the global copy winning, and the
 project copy reports "shadowed" (measured). `setup` therefore refuses to
@@ -111,16 +130,17 @@ changes rarely; `update` refreshes it when it differs.
 ## Bootstrap
 
 A machine with no clone yet runs the one-liner in the README:
-`git clone https://github.com/codeslake/claude-discord ~/.claude-discord/source && ~/.claude-discord/source/bin/claude-discord setup <bot>`.
+`git clone https://github.com/codeslake/claude-discord ~/.claude-discord/source && ~/.claude-discord/source/bin/claude-discord install`,
+from the project directory, then `claude-discord setup <bot>` per bot.
 The first clone is the machine's source clone, so nothing is removed
-afterwards: `setup` links to it (method link) or clones from the repo URL
+afterwards: `install` links to it (method link) or clones from the repo URL
 (method clone), and installs the shim.
 
 ## Update
 
 `claude-discord update` runs, for the clone the shim resolved (a link
 resolves to the source clone): `git -C <clone> pull --ff-only`, then the
-patch step and the shim refresh, both run from the freshly pulled code as a
+patch step, the compat copy refresh and the shim refresh, all run from the freshly pulled code as a
 new process (the running one still holds the old functions; `runtime/` and
 the patched cache are machine-wide, so the source clone owns them, else the
 first clone pulled), then prints the plugin version before and after and tells the operator to run
@@ -146,9 +166,10 @@ so a non-bot session in the project pays one exec per event. Matchers stay on
 the official plugin's tool names (`mcp__plugin_discord_discord__reply` and
 `__edit_message`), since the official plugin stays the channel.
 
-`register_hooks` turns into a remover: it deletes every entry whose command
-names `/.claude/discord-agents/hooks/` from the project's `settings.json` and
-`settings.local.json`, and nothing else. The `discord-agents/hooks` symlink is
+The entries earlier releases wrote into settings files (a command naming
+`/.claude/discord-agents/hooks/`) are removed by the plugin's own first hook run
+in a bot session, not by `setup` (R15; see Migration), and nothing else in
+those files is touched. The `discord-agents/hooks` symlink is
 kept for this release (old peers' committed settings may still point at it)
 and removed in the next one.
 
@@ -158,8 +179,8 @@ The dev-manager rule text (today copied to
 `.claude/rules/claude-discord-dev-manager.md`, read by every session of the
 project) is emitted by the plugin's SessionStart hook as `additionalContext`,
 only for a bot whose mode is `dev-manager`, on startup, resume, compact and
-clear: the same path autoresearchclaw already uses. `setup` removes the old
-rule file.
+clear: the same path autoresearchclaw already uses. The plugin's first hook
+run in a bot session removes the old rule file (R15).
 
 No text hard-codes `~/.claude-discord/hooks/tools/...` any more. The wrapper's
 system prompt, the on-prompt identity text and thread-guard's deny message
@@ -176,14 +197,23 @@ the copies would silently disable all of them, so for this release:
 
 - `~/.claude-discord/hooks/{turn,peers,lib,autoresearchclaw}`, every tool under
   `hooks/tools/*`, and the top-level `discord-chunk.ts` and `discord-proxy.ts`
-  become **links**: the hooks and tools into the real plugin (the source
-  clone, or the clone itself, never a project's own link), the two `.ts`
-  files into the stable runtime copy `~/.claude-discord/runtime/`, which
-  `setup` fills first so the links never dangle. A real directory or file
+  become **links**: the hooks and tools into `~/.claude-discord/compat/`, the
+  two `.ts` files into the stable runtime copy `~/.claude-discord/runtime/`,
+  which `setup` fills first so the links never dangle. A real directory or file
   there is replaced; a symlink at `hooks/` itself is removed as a link and
   its target left alone.
+- `compat/` (R16) is a plain copy, no git, of the real plugin's (the source
+  clone, else the clone itself, never a project's own link)
+  `hooks/{turn,peers,lib,autoresearchclaw}`, `tools/` and `rules/`. The
+  previous release's `install.sh` writes through these links (measured by
+  dong-dev-bot: six files of the source clone changed, and `update` then
+  refused to pull for good); through the copy the write never reaches a git
+  tree. `setup`, `install` and `update` rebuild it when it differs from the
+  plugin, in a new directory swapped in by rename (a hook already running keeps
+  its open file).
 - `rules/` is removed: only the old rule copies read it.
 - `runtime/`, `records/`, `scratch/` (bots' own notes) and `source/` stay.
+  `compat/` goes with the links.
 - The next release removes the links, but only those no job record still names: a bot started by the old wrapper keeps `~/.claude-discord/hooks/tools/thread` in its saved `--append-system-prompt`, and a `claude respawn` replays it (measured on lmd42 2026-10-10: RVP and cswap). Grep `~/.claude/jobs/*/state.json` before deleting, or relaunch those bots through the wrapper first.
 
 `~/.local/bin/claude-discord` is replaced by the shim.
@@ -240,26 +270,59 @@ the backend monitor every five minutes.
 
 Per machine, by its operator (dkim's boxes: dong-dev-bot):
 
-1. `git clone` and `setup` (scope chosen per project) install the plugin and,
-   in the same run, remove the old settings hook entries and the old rule
-   file. Hooks in settings files apply live (measured), so from this moment a
-   running bot has no claude-discord hooks.
+1. `git clone` and `setup` (scope chosen per project) install the plugin. Setup
+   removes nothing from the project (R15): it cannot know whether the plugin
+   will load (an untrusted project, a trust prompt answered n, a bot that has
+   not reloaded yet), and removing the old settings hooks before it does would
+   leave the bot with none (✅, mention-guard, edit-gate, thread-guard gone, and
+   after a compact the dev-manager rule too).
 2. Each running bot runs `/reload-plugins` (self-reload skill). Measured on
    2.1.296, interactive and `--bg`: a plugin directory created after the
    session started loads on `/reload-plugins` with no restart and no respawn,
    and its UserPromptSubmit hook fires on the next prompt; a hook removed
-   from `settings.local.json` stops on the very next prompt. The gap between
-   1 and 2 is seconds. A message that lands in the gap gets no ✅ and no turn
-   record; the next message heals both.
-   The plugin's SessionStart hook does NOT run on a reload, only at the next
-   real start, compact or clear. That is harmless here: the dev-manager rule
-   text is already in the running session's context from the old rule file
-   (removing the file does not unload it), and the official plugin was
-   patched by the wrapper when the bot started.
-3. `claude-discord --version` and `health` confirm each bot.
+   from `settings.local.json` stops on the very next prompt.
+3. The migration happens on the plugin's first hook run in that session, the
+   first moment the plugin is known to be loaded there. Every hook calls
+   `plugin_gate` (`hooks/lib/discord.sh`) first. A plugin hook
+   (`CLAUDE_PLUGIN_ROOT` set and the script under it) in a bot session
+   (`DISCORD_STATE_DIR` set) reads `session_id` from its stdin JSON (a bash
+   match, no jq) and checks for `$DISCORD_STATE_DIR/plugin-sessions/<session_id>`
+   (one `[ -e ]`). On the first run it creates that marker (noclobber, so one
+   of an event's parallel hooks wins), prunes markers older than 30 days, and
+   removes this project's own old entries: from
+   `$CLAUDE_PROJECT_DIR/.claude/settings.json` and `settings.local.json` only
+   when each is a regular file (`[ -f ] && [ ! -L ]`) and is not
+   `~/.claude/settings.json` (a bot in `$HOME`), and the
+   `.claude/rules/claude-discord-*.md` files (`hooks/lib/old-hooks.sh`). A
+   regular file is replaced by renaming a mode-preserving copy, so Claude Code,
+   which re-reads settings live, never reads it half written. A symlinked
+   settings file or the user-global one is never edited.
+4. An old-path hook (no `CLAUDE_PLUGIN_ROOT`, or run from a path under
+   `/.claude/discord-agents/hooks/` or `~/.claude-discord/hooks/`) exits 0 at
+   once when its session has a marker. With no `plugin-sessions/` directory at
+   all it does not even read its stdin, so an unmigrated bot pays nothing.
+5. `claude-discord --version` and `health` confirm each bot.
+
+Known double run: the first event after `/reload-plugins` runs the old hooks
+and the plugin's in parallel, and the old one may check for the marker before
+the plugin's has written it: that one event is recorded twice (one duplicate
+turn record per bot, a second ✅ attempt). Where an old entry stays because the
+plugin may not edit its file (a symlinked settings.json, the user-global
+settings.json, as on lmd79), the same happens once at the first event of every
+new session (a startup, a `/clear`, which brings a new session id). `setup`
+names such files on stderr with the command that removes the entries by hand,
+`bash <plugin>/hooks/lib/old-hooks.sh <file>...` (it writes through a symlink;
+the owner commits it where the file lives).
+
+The plugin's SessionStart hook does NOT run on a reload, only at the next real
+start, compact or clear. That is harmless here: the dev-manager rule text is
+already in the running session's context from the old rule file (removing the
+file does not unload it), and the official plugin was patched by the wrapper
+when the bot started.
 
 Rollback (R13): the previous release's `install.sh` writes through the R8
-links into the source clone, so first remove the plugin installs (each path in
+links (into the compat copy since R16), and a plugin install left in place
+keeps loading, so first remove the plugin installs (each path in
 `~/.claude-discord/records/installs`: `rm` a link, `rm -rf` a clone) and
 `rm -rf ~/.claude-discord/hooks ~/.claude-discord/discord-chunk.ts
 ~/.claude-discord/discord-proxy.ts` (only links remain there); then
@@ -271,14 +334,19 @@ which re-registers the settings hooks. Or stay on this release and
 
 - The bash suite stays the gate (40 s serial, stubs only). New cases: the
   shim's resolution order; `setup --scope` both ways, the both-scopes refusal
-  and idempotence; `register_hooks` removing old entries and nothing else;
+  and idempotence; the old-entry removal touching nothing else;
   `hooks.json` naming only files that exist and are executable; the
   SessionStart rule injection by mode; `patch` across two version dirs (all
   five, including the `.mcp.json` env line), idempotence and the no-match
   exit; `--name` and `--resume` bot resolution, the refusal to resume a live
   session, and the deprecation line; `setup` replacing the old
-  `~/.claude-discord/hooks` and `.ts` copies with compat links (R8) and
-  removing `rules`; `update` and `update --all` (one pull per real clone,
+  `~/.claude-discord/hooks` and `.ts` copies with compat links (R8) into the
+  compat copy (R16), which absorbs an old `install.sh` write, and removing
+  `rules`; the plugin's first hook run migrating only the project's regular
+  settings files and rule copies, an old-path hook exiting in a marked session
+  and running in an unmarked one, setup removing nothing (a trust answered n
+  included); `install` asking nothing; Enter keeping `requireMention`; the EOF
+  message; a failed clone writing no bot file; `update` and `update --all` (one pull per real clone,
   removed projects pruned); `--version`.
 - `claude plugin validate` (or the equivalent load check) runs as a separate
   script outside the 40 s budget, as decided in issue #1 C1 Q1.
