@@ -154,14 +154,20 @@ P="$HOME/project"; mkdir -p "$P"; cd "$P"; git init -q .
 # setup below clones it, so it exists from the first one; the network is never
 # reached. The main project is trusted so no setup asks.
 SRC="$HOME/src-repo"; mkdir -p "$SRC"
-(cd "$D" && git ls-files -co --exclude-standard -z | tar --null -T - -cf - | tar -xf - -C "$SRC") &&
+# Only files that exist (a tracked file deleted in the tree is still listed), and never the nested worktrees or the SDD notes.
+(cd "$D" && git ls-files -co --exclude-standard -z | while IFS= read -r -d '' f; do
+  if [ -e "$f" ]; then case $f in .worktrees/*|.superpowers/*) ;; *) printf '%s\0' "$f";; esac; fi
+done | tar --null -T - -cf -) | tar -xf - -C "$SRC" &&
   (cd "$SRC" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm stand-in) || { echo "FAIL: could not build the stand-in repo"; exit 1; }
 export CLAUDE_DISCORD_REPO=$SRC
-jq -n --arg h "$HOME" '[$h + "/project", $h + "/project-moved", $h + "/project4"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
+PHOME=$(cd "$HOME" && pwd -P)   # setup keys trust by the physical path
+jq -n --arg h "$PHOME" '[$h + "/project", $h + "/project-moved", $h + "/project4"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
 TT=$PC/tools/thread   # the hooks name the thread tool by its absolute path in the plugin
 R="$P/.claude/discord-agents"
 
 printf '1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alpha --scope project >/dev/null
+# No --method: the default is link, and the first setup on a machine clones the source.
+[ -L "$P/.claude/skills/claude-discord" ] && [ "$(readlink "$P/.claude/skills/claude-discord")" = "$HOME/.claude-discord/source" ] && [ -d "$HOME/.claude-discord/source/.git" ] || { echo "FAIL: the default method must link the project to a freshly cloned source"; exit 1; }
 [ "$(jq -r '.groups["1550575144320110662"].requireMention' "$R/alpha/access.json")" = false ]
 [ "$(jq -c '.groups["1550575144320110662"].allowFrom' "$R/alpha/access.json")" = '["111","222","333"]' ]
 [ "$(jq -c '.allowFrom' "$R/alpha/access.json")" = '["111"]' ]
@@ -2022,8 +2028,8 @@ echo "ok: refresh keeps the default kickoff past a value-taking flag (--allowedT
 # accepted, and the foreground path does not, so a bot moved to the
 # background with /bg can run for weeks and only discover it when a refresh
 # has already stopped it. refresh reads the flag BEFORE stopping anything.
-# The rest of this suite runs with no ~/.claude.json at all, which is the
-# fail-open case and is asserted last.
+# The file is rewritten below for each case; the missing-file case takes the
+# same empty-output path as the unparseable one asserted last.
 cat > "$HOME/bin/claude" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
@@ -2066,7 +2072,7 @@ env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null 2>&1
 for _ in $(seq 200); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.05; done
 grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: the trust check must fail open when jq cannot parse the file; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
 # The projects set up from here on are trusted, so no setup asks; none is a refresh target.
-jq -n --arg h "$HOME" '[$h + "/health-project", $h + "/single-project", $h + "/working-project", $h + "/notify-project", $h + "/project5"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
+jq -n --arg h "$PHOME" '[$h + "/health-project", $h + "/single-project", $h + "/working-project", $h + "/notify-project", $h + "/project5"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
 echo "ok: the trust check fails open on a file that is not JSON (jq exits non-zero and prints nothing)"
 
 # --- refresh: a failed launch puts the handoff back ------------------------
@@ -2605,29 +2611,57 @@ printf 'dev-manager\npeerx:700:800:host\n' | bash "$S" setup five --mode >/dev/n
 [ "$(jq -c '.groups["1"].allowFrom' "$R5/five/access.json")" = '["222","700"]' ] || { echo "FAIL: the peer must reach access.json's allowFrom: $(jq -c . "$R5/five/access.json")"; exit 1; }
 echo "ok: --mode to dev-manager also asks the peers question and records a peer in peers.json and access.json's allowFrom"
 
-# setup installs the plugin: a real clone (no link) at the chosen scope,
-# excluded from the project's git, the shim on PATH, the install recorded;
-# both scopes at once is refused; a re-run keeps the clone.
-XP="$HOME/scope proj"; mkdir -p "$XP"; (cd "$XP" && git init -q .)
-jq -n --arg p "$XP" '{projects: {($p): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
-(cd "$XP" && printf '900\n111\n\ntokS\nn\n' | bash "$S" setup xbot --scope project >/dev/null) || { echo "FAIL: setup --scope project failed"; exit 1; }
-[ -d "$XP/.claude/skills/claude-discord/.git" ] && [ ! -L "$XP/.claude/skills/claude-discord" ] || { echo "FAIL: project scope must be a real clone"; exit 1; }
-grep -qxF '/.claude/skills/claude-discord/' "$XP/.git/info/exclude" || { echo "FAIL: the clone must be excluded from the project's git"; exit 1; }
+# setup installs the plugin. Fixtures: XP (git, path with a space, trusted), refusals leave the bot untouched.
+XP="$HOME/scope proj"; XR="$XP/.claude/discord-agents"; XL="$XP/.claude/skills/claude-discord"; GL="$HOME/.claude/skills/claude-discord"
+mkdir -p "$XP"; (cd "$XP" && git init -q .)
+jq -n --arg p "$PHOME/scope proj" '{projects: {($p): {hasTrustDialogAccepted: true}}, other: 1}' > "$HOME/.claude.json"
+# link: the project path is a symlink to the one source; second project shares it; the install stays out of git status, is recorded, and the shim is installed.
+(cd "$XP" && printf '900\n111\n\ntokS\nn\n' | bash "$S" setup xbot --scope project --method link >/dev/null) || { echo "FAIL: setup --scope project --method link failed"; exit 1; }
+[ "$(readlink "$XL")" = "$HOME/.claude-discord/source" ] || { echo "FAIL: link method must link to the source clone"; exit 1; }
+[ "$(git -C "$XP" status --porcelain --untracked-files=all | grep -c 'skills/claude-discord')" = 0 ] && grep -qxF '/.claude/skills/claude-discord' "$XP/.git/info/exclude" || { echo "FAIL: the link must be excluded from the project's git"; exit 1; }
 cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" || { echo "FAIL: setup must install the shim"; exit 1; }
-grep -qxF "$XP/.claude/skills/claude-discord" "$HOME/.claude-discord/records/installs" || { echo "FAIL: setup must record the install"; exit 1; }
-head=$(git -C "$XP/.claude/skills/claude-discord" rev-parse HEAD)
-(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot --scope project >/dev/null)
-[ "$(git -C "$XP/.claude/skills/claude-discord" rev-parse HEAD)" = "$head" ] && [ "$(grep -c '/.claude/skills/claude-discord/' "$XP/.git/info/exclude")" = 1 ] || { echo "FAIL: a re-run must keep the clone and the single exclude line"; exit 1; }
-mkdir -p "$HOME/.claude/skills/claude-discord"
-out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot --scope project 2>&1) && { echo "FAIL: a global copy beside a project copy must be refused"; exit 1; }
-grep -q "already installed globally" <<<"$out" || { echo "FAIL: wrong refusal: $out"; exit 1; }
-rmdir "$HOME/.claude/skills/claude-discord"
-jq -n '{projects: {}}' > "$HOME/.claude.json"
-out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot --scope project 2>&1)
-grep -q 'not trusted' <<<"$out" || { echo "FAIL: setup must say the project is not trusted: $out"; exit 1; }
-[ "$(jq -r --arg p "$XP" '.projects[$p].hasTrustDialogAccepted // "unset"' "$HOME/.claude.json")" = unset ] || { echo "FAIL: setup must never write trust without asking"; exit 1; }
+grep -qxF "$XL" "$HOME/.claude-discord/records/installs" || { echo "FAIL: setup must record the install"; exit 1; }
+# A re-run with no flags keeps the link and asks nothing (the extra 'global' line would be taken by a scope question), refreshes a stale shim, keeps one exclude line.
+echo stale > "$HOME/.local/bin/claude-discord"
+out=$(cd "$XP" && printf '\nn\n\nglobal\n' | bash "$S" setup xbot 2>&1) || { echo "FAIL: a re-run in an installed project must succeed without a question: $out"; exit 1; }
+[ "$(readlink "$XL")" = "$HOME/.claude-discord/source" ] && grep -q 'already installed at' <<<"$out" && [ ! -e "$GL" ] || { echo "FAIL: a re-run must keep the install and ask nothing: $out"; exit 1; }
+cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" && [ "$(grep -c 'skills/claude-discord' "$XP/.git/info/exclude")" = 1 ] || { echo "FAIL: a re-run must refresh the shim and keep a single exclude line"; exit 1; }
+# Refusals and bad flags decide before anything is written: no new bot dir, and --reset deletes nothing.
+mkdir -p "$GL"
+out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup rbot --scope project 2>&1) && { echo "FAIL: a global copy beside a project copy must be refused"; exit 1; }
+grep -q "already installed globally" <<<"$out" && [ ! -e "$XR/rbot" ] || { echo "FAIL: wrong or late refusal ($(ls "$XR")): $out"; exit 1; }
+rmdir "$GL"
+out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot --reset --scope global 2>&1) && { echo "FAIL: a project copy beside a global one must be refused"; exit 1; }
+grep -q "already installed for this project" <<<"$out" && [ -f "$XR/xbot/.env" ] || { echo "FAIL: wrong or late refusal, --reset must not run: $out"; exit 1; }
+for bad in "--scope bogus" "--method bogus" "--scope" "--method" "--mode --scope project"; do
+  # shellcheck disable=SC2086
+  rc=0; (cd "$XP" && printf '\nn\n' | bash "$S" setup rbot $bad >/dev/null 2>&1) || rc=$?
+  [ "$rc" = 2 ] && [ ! -e "$XR/rbot" ] || { echo "FAIL: 'setup rbot $bad' must exit 2 and write nothing, rc=$rc"; exit 1; }
+done
+# Trust: reported, never written unasked, written (other keys kept) on an explicit y.
+jq -n '{projects: {}, other: 1}' > "$HOME/.claude.json"
+out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot 2>&1)
+grep -q 'not trusted' <<<"$out" && [ "$(jq -r --arg p "$PHOME/scope proj" '.projects[$p] | if . == null then "unset" else "set" end' "$HOME/.claude.json")" = unset ] || { echo "FAIL: setup must say the project is not trusted and write nothing: $out"; exit 1; }
+(cd "$XP" && printf '\nn\n\ny\n' | bash "$S" setup xbot >/dev/null 2>&1)
+[ "$(jq -r --arg p "$PHOME/scope proj" '.projects[$p].hasTrustDialogAccepted' "$HOME/.claude.json")" = true ] && [ "$(jq -r .other "$HOME/.claude.json")" = 1 ] || { echo "FAIL: an explicit y must write trust and keep other keys"; exit 1; }
+# clone + global, then a second bot elsewhere uses the global install on Enter (no refusal, no project copy); --mode installs nothing.
 rm -rf "$XP"
-echo "ok: setup clones the plugin at project scope (path with a space), excludes it, installs the shim, records it, keeps it on re-run, refuses two scopes, and reports untrusted without writing"
+GP="$HOME/g proj"; GP2="$HOME/g proj2"; mkdir -p "$GP" "$GP2"
+(cd "$GP" && printf '900\n111\n\ntokG\nn\n' | bash "$S" setup gbot --scope global --method clone >/dev/null) || { echo "FAIL: setup --scope global --method clone failed"; exit 1; }
+[ -d "$GL/.git" ] && [ ! -L "$GL" ] && [ ! -e "$GP/.claude/skills" ] || { echo "FAIL: global clone must be a real clone at ~/.claude/skills and leave the project alone"; exit 1; }
+(cd "$GP2" && printf '900\n111\n\ntokG2\nn\n\nproject\n' | bash "$S" setup gbot2 >/dev/null 2>&1) || { echo "FAIL: a second bot on a globally installed machine must not be refused"; exit 1; }
+[ ! -e "$GP2/.claude/skills" ] || { echo "FAIL: with a global install the project must get no copy"; exit 1; }
+rm -rf "$GL"
+(cd "$GP2" && printf 'none\n' | bash "$S" setup gbot2 --mode >/dev/null)
+[ ! -e "$GL" ] && [ ! -e "$GP2/.claude/skills" ] || { echo "FAIL: setup --mode must install nothing"; exit 1; }
+# A project in a subdirectory of a repo, and in a git worktree of it, is excluded with the right path.
+SG="$HOME/sg repo"; mkdir -p "$SG/sub"; (cd "$SG" && git init -q . && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m e && git worktree add -q -b sgwt "$HOME/sg wt")
+for w in "$SG/sub" "$HOME/sg wt"; do
+  (cd "$w" && printf '900\n111\n\ntokW\nn\n' | bash "$S" setup wb --scope project --method link >/dev/null 2>&1) || { echo "FAIL: setup in $w failed"; exit 1; }
+  [ "$(git -C "$w" status --porcelain --untracked-files=all | grep -c 'skills/claude-discord')" = 0 ] || { echo "FAIL: the install in $w must be ignored by git"; exit 1; }
+done
+grep -qxF '/sub/.claude/skills/claude-discord' "$SG/.git/info/exclude" || { echo "FAIL: a subdirectory project needs its prefix in the exclude pattern"; exit 1; }
+echo "ok: setup installs the plugin as a link or a clone at project or global scope, asks nothing when an install exists, refuses the other scope and bad flags before writing, excludes it in subdirectories and worktrees, records it, and writes trust only on y"
 
 # Nothing this suite started is still running: no process runs from its
 # HOME (hooks, stubs, the fake worker).

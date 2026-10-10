@@ -265,56 +265,96 @@ select_one() (
   echo "${opts[cur]%% *}"
 )
 
-# Installs the plugin by cloning this repo into the skills dir of the chosen
-# scope: a real directory, never a link (a link makes ${CLAUDE_PLUGIN_ROOT}
-# name the link and skips a .mcp.json outside the project; measured). A plugin
-# in both scopes loads once with the global copy winning, so the other scope
-# is refused. Re-running keeps an existing clone. Project scope loads only
-# when ~/.claude.json trusts that exact path; setup asks before writing it.
-install_plugin() {  # $1 = project|global
+# Installs the plugin at the chosen scope (setup has validated $scope, $method
+# and the other scope's absence by now). method clone: this repo cloned into
+# the skills dir, so a project can pin its own version. method link: a symlink
+# to the machine's one source clone, ~/.claude-discord/source, so one update
+# moves every bot; the hooks and tools resolve their real directory rather
+# than trust ${CLAUDE_PLUGIN_ROOT}, and the plugin declares no .mcp.json, so
+# the measured problems of a link do not bite. An existing install of either
+# kind is kept as it is. Project scope loads only when ~/.claude.json trusts
+# that exact path; setup asks before writing it.
+has_path() { [ -e "$1" ] || [ -L "$1" ]; }   # a dangling link counts
+install_plugin() {  # uses $scope $method $pdir $gdir
   local repo=${CLAUDE_DISCORD_REPO:-https://github.com/codeslake/claude-discord}
-  local pdir=$PWD/.claude/skills/claude-discord gdir=$HOME/.claude/skills/claude-discord target other t
-  case $1 in
-    project) target=$pdir other=$gdir;;
-    global) target=$gdir other=$pdir;;
-    *) echo "claude-discord: --scope must be project or global, got '$1'" >&2; return 2;;
-  esac
-  if [ -e "$other" ]; then
-    [ "$1" = project ] && echo "claude-discord: already installed globally at $other; remove it or use --scope global" >&2
-    [ "$1" = global ] && echo "claude-discord: already installed for this project at $other; remove it or use --scope project" >&2
-    return 2
+  local src=$HOME/.claude-discord/source target ex pat here t
+  case $scope in project) target=$pdir;; *) target=$gdir;; esac
+  if has_path "$target"; then
+    echo "claude-discord: plugin already installed at $target, kept as it is"
+  else
+    [ -n "$method" ] || method=$(select_one Method link "link   the machine's one source clone, ~/.claude-discord/source (one update for every bot)" "clone  its own copy, so this install can pin a version")
+    mkdir -p "$(dirname "$target")"
+    if [ "$method" = link ]; then
+      has_path "$src" || git clone -q "$repo" "$src" || { echo "claude-discord: could not clone $repo into $src" >&2; return 1; }
+      ln -s "$src" "$target"
+    else
+      git clone -q "$repo" "$target" || { echo "claude-discord: could not clone $repo into $target" >&2; return 1; }
+    fi
   fi
-  if [ ! -d "$target/.git" ]; then
-    mkdir -p "$(dirname "$target")" && git clone -q "$repo" "$target" || { echo "claude-discord: could not clone $repo into $target" >&2; return 1; }
-  fi
-  if [ "$1" = project ] && [ -d "$PWD/.git" ]; then
-    grep -qxF '/.claude/skills/claude-discord/' "$PWD/.git/info/exclude" 2>/dev/null ||
-      printf '/.claude/skills/claude-discord/\n' >> "$PWD/.git/info/exclude"
+  # A git-tracked project (worktree, submodule or subdirectory too) keeps the
+  # install out of git status; no trailing slash, so it matches a link as well.
+  if [ "$scope" = project ] && git -C "$PWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    ex=$(git -C "$PWD" rev-parse --git-path info/exclude) here=$(git -C "$PWD" rev-parse --show-prefix)
+    case $ex in /*) ;; *) ex=$PWD/$ex;; esac
+    pat=/${here}.claude/skills/claude-discord
+    grep -qxF "$pat" "$ex" 2>/dev/null || { mkdir -p "$(dirname "$ex")" && printf '%s\n' "$pat" >> "$ex"; }
   fi
   mkdir -p "$HOME/.local/bin" "$HOME/.claude-discord/records"
   cmp -s "$target/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
     install -m 755 "$target/shim/claude-discord" "$HOME/.local/bin/claude-discord"
   touch "$HOME/.claude-discord/records/installs"
   grep -qxF "$target" "$HOME/.claude-discord/records/installs" || printf '%s\n' "$target" >> "$HOME/.claude-discord/records/installs"
-  if [ "$1" = project ] && [ "$(jq -r --arg p "$PWD" '.projects[$p].hasTrustDialogAccepted // false' "$HOME/.claude.json" 2>/dev/null)" != true ]; then
+  # Keyed by the physical path, like refresh's check.
+  if [ "$scope" = project ] && [ "$(jq -r --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted | if . == true then "yes" else "no" end' "$HOME/.claude.json" 2>/dev/null)" != yes ]; then
     echo "claude-discord: $PWD is not trusted in ~/.claude.json, so Claude Code will not load the plugin here." >&2
     read -rp "Mark this project trusted now? [y/N] " t || t=""
-    case $t in y|Y) jq_edit "$HOME/.claude.json" --arg p "$PWD" '.projects[$p].hasTrustDialogAccepted = true';; esac
+    case $t in y|Y) jq_edit "$HOME/.claude.json" --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted = true';; esac
   fi
 }
 
 if [ "${1:-}" = setup ]; then
-  name=${2:?usage: claude-discord setup <name> [--scope project|global] [--reset|--mode]}
-  # --scope may sit anywhere after the name; the rest keeps its place so ${3:-} still sees --reset/--mode.
-  scope="" rest=()
+  name=${2:?usage: claude-discord setup <name> [--scope project|global] [--method link|clone] [--reset|--mode]}
+  # --scope and --method may sit anywhere after the name; the rest keeps its place so ${3:-} still sees --reset/--mode.
+  scope="" method="" want="" rest=()
   for a in "${@:3}"; do
-    case $a in --scope=*) scope=${a#--scope=};; --scope) scope=__next;; *) [ "$scope" = __next ] && scope=$a || rest+=("$a");; esac
+    if [ -n "$want" ]; then
+      case $want in scope) scope=$a;; method) method=$a;; esac
+      want=""
+      continue
+    fi
+    case $a in
+      --scope=*) scope=${a#--scope=};;
+      --method=*) method=${a#--method=};;
+      --scope) want=scope;;
+      --method) want=method;;
+      *) rest+=("$a");;
+    esac
   done
+  [ -z "$want" ] || { echo "claude-discord: --$want needs a value" >&2; exit 2; }
   set -- "$1" "$2" ${rest[@]+"${rest[@]}"}
   case $name in
     ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
     hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
   esac
+  # Everything about the install that can be refused is decided here, before a
+  # prompt or a write: a bad flag or a copy at the other scope must leave the
+  # bot's files (and --reset's deletion) alone.
+  pdir=$PWD/.claude/skills/claude-discord gdir=$HOME/.claude/skills/claude-discord
+  if [ "${3:-}" = --mode ]; then
+    [ -z "$scope$method" ] || { echo "claude-discord: --mode changes only the mode and installs nothing; --scope and --method do not apply" >&2; exit 2; }
+  else
+    case $scope in ''|project|global) ;; *) echo "claude-discord: --scope must be project or global, got '$scope'" >&2; exit 2;; esac
+    case $method in ''|link|clone) ;; *) echo "claude-discord: --method must be link or clone, got '$method'" >&2; exit 2;; esac
+    # Asked once per project: an install already there decides the scope.
+    if [ -z "$scope" ]; then
+      if has_path "$pdir"; then scope=project; elif has_path "$gdir"; then scope=global; fi
+    fi
+    if [ "$scope" = project ] && has_path "$gdir"; then
+      echo "claude-discord: already installed globally at $gdir; remove it or use --scope global" >&2; exit 2
+    elif [ "$scope" = global ] && has_path "$pdir"; then
+      echo "claude-discord: already installed for this project at $pdir; remove it or use --scope project" >&2; exit 2
+    fi
+  fi
   umask 077
   if [ "${3:-}" = --mode ]; then
     # --mode changes only an already set-up bot's mode, so re-picking a mode
@@ -391,7 +431,7 @@ if [ "${1:-}" = setup ]; then
   # --mode touches only the mode file, so it never installs or asks for a scope.
   if [ "${3:-}" != --mode ]; then
     [ -n "$scope" ] || scope=$(select_one Scope project "project  this project only (.claude/skills/claude-discord)" "global  every project (~/.claude/skills/claude-discord)")
-    install_plugin "$scope" || exit $?
+    install_plugin || exit $?
   fi
   ensure_hooks_symlink
   sync_mode_drops

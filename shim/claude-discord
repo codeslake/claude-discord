@@ -15,5 +15,5 @@ done
 g=$HOME/.claude/skills/claude-discord/bin/claude-discord
 [ -x "$g" ] && exec "$g" "$@"
 echo "claude-discord: not set up here. Install it with:" >&2
-echo "  git clone https://github.com/codeslake/claude-discord ~/.claude-discord/bootstrap && ~/.claude-discord/bootstrap/bin/claude-discord setup <bot>" >&2
+echo "  git clone https://github.com/codeslake/claude-discord ~/.claude-discord/source && ~/.claude-discord/source/bin/claude-discord setup <bot>" >&2
 exit 1
