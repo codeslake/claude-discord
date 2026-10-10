@@ -215,8 +215,10 @@ plugin_version() { jq -r '.version // "?"' "$1/.claude-plugin/plugin.json" 2>/de
 ver_ge() {
   local a1 a2 a3 b1 b2 b3
   IFS=. read -r a1 a2 a3 <<<"$1"; IFS=. read -r b1 b2 b3 <<<"$2"
-  case $a1.$a2.$a3.$b1.$b2.$b3 in *[!0-9.]*|*..*|.*) return 1;; esac
-  [ $((a1 * 1000000 + a2 * 1000 + a3)) -ge $((b1 * 1000000 + b2 * 1000 + b3)) ]
+  # Exactly three numeric parts each (1.9.0.1 leaves a dot in the third); base 10, so 1.08.0 is not octal.
+  case $a1.$a2.$a3.$b1.$b2.$b3 in *[!0-9.]*|*..*|.*|*.) return 1;; esac
+  case $a3$b3 in *.*) return 1;; esac
+  [ $((10#$a1 * 1000000 + 10#$a2 * 1000 + 10#$a3)) -ge $((10#$b1 * 1000000 + 10#$b2 * 1000 + 10#$b3)) ]
 }
 # git over the network: never a credential prompt (a script would hang on it),
 # and a 120 s ceiling where timeout(1) exists. The ambient git config and
@@ -241,7 +243,7 @@ sync_runtime() {
   [ -d "$rt" ] || mkdir -p "$rt" || return 1
   [ ! -f "$rt/VERSION" ] || IFS= read -r have < "$rt/VERSION" || :
   if [ -n "$have" ] && [ "$have" != "$mine" ] && ver_ge "$have" "$mine"; then
-    [ -n "${runtime_newer:-}" ] || echo "claude-discord: ~/.claude-discord/runtime is from $have, newer than this $mine; the newer code owns it and patches the plugin cache, both left as they are" >&2
+    [ -n "${runtime_newer:-}" ] || echo "claude-discord: ~/.claude-discord/runtime is from $have, newer than this $mine; left as it is, and so is the plugin cache until that newer version runs (its next start or update patches it)" >&2
     runtime_newer=$have; return 0
   fi
   for f in discord-chunk.ts discord-proxy.ts; do
@@ -1490,20 +1492,21 @@ args=() name="" skip=0 want_name=0 named=0 positional=0 has_name=0 bare=0
 # With a --name anywhere, a bare word is an argument for claude, not the bot
 # (`-p hello --name beta` keeps `hello`).
 for a in "$@"; do case $a in -n|--name|--name=*) has_name=1;; esac; done
+seen_name=0
 for a in "$@"; do
   if [ "$want_name" = 1 ]; then name=$a; named=1; want_name=0; continue; fi
   if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) args+=("$a"); continue;; esac; fi   # a value never starts with "-" (see refresh)
   case $a in
     # --name/-n IS the bot name, and the session is named after it (-n below).
-    -n|--name) want_name=1;;
-    --name=*)  name=${a#--name=}; named=1;;
+    -n|--name) want_name=1; seen_name=1;;
+    --name=*)  name=${a#--name=}; named=1; seen_name=1;;
     -*) args+=("$a"); takes_value "$a" && skip=1 || :;;
     *)  if [ "$has_name" = 0 ] && [ -z "$name" ]; then name=$a; positional=1
         else
-          # A set-up bot's name as the first bare word (the one the positional form takes) beside --name is
-          # the old form mixed with the new one; a later bare word is claude's.
+          # A set-up bot's name as the first bare word BEFORE --name is the old positional form
+          # mixed with the new one; a bare word after --name (or with no --name) is claude's.
           bare=$((bare + 1))
-          case $a in */*|.|..) ;; *) [ "$bare" != 1 ] || [ ! -f "$root/$a/.env" ] || { echo "claude-discord: '$a' and --name both name a bot; use 'claude-discord --name <bot> ...' (the positional 'claude-discord <bot> ...' is the old form), never both" >&2; exit 2; };; esac
+          case $a in */*|.|..) ;; *) [ "$has_name" != 1 ] || [ "$seen_name" = 1 ] || [ "$bare" != 1 ] || [ ! -f "$root/$a/.env" ] || { echo "claude-discord: '$a' and --name both name a bot; use 'claude-discord --name <bot> ...' (the positional 'claude-discord <bot> ...' is the old form), never both" >&2; exit 2; };; esac
           args+=("$a")
         fi;;
   esac

@@ -271,8 +271,8 @@ this bot's id in their own `allowFrom` too; ask their owners.
 All of the plugin's hooks are registered unconditionally by its `hooks/hooks.json`;
 each script exits at once unless the session is a bot (`DISCORD_STATE_DIR` set) whose
 mode matches, so a mode takes effect on the next event and a non-bot session in the
-project pays one exec per event. `setup` and every start remove what the previous
-release wrote per project: the hook entries under `.claude/discord-agents/hooks/` in
+project pays two execve (`env`, then `bash`) and no fork per event. The plugin's first hook run in a bot session removes what the previous
+release wrote in that bot's project: the hook entries under `.claude/discord-agents/hooks/` in
 both settings files (with a matcher group or an event left empty by that) and every
 `.claude/rules/claude-discord-*.md` (that prefix belongs to claude-discord; name your
 own rules differently), only in a project that has a plugin install. Nothing else in
@@ -476,7 +476,7 @@ Which plugin runs them:
   `UserPromptSubmit` hook fires from the next prompt.
 - Every script's first line exits 0 when `DISCORD_STATE_DIR` is unset (no
   fork, nothing sourced), and `edit-gate` also exits there for a bot that is
-  not a dev-manager, so a session that is not a bot pays one exec per event.
+  not a dev-manager, so a session that is not a bot pays two execve and no fork per event.
   A session inheriting `DISCORD_STATE_DIR` in another project is not the bot. The
   four `turn/` hooks and `peers/thread-guard` are for every bot; `mention-guard`,
   `checkin` and `edit-gate` do nothing in a session whose bot is not a

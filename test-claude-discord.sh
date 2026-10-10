@@ -726,6 +726,8 @@ out=$(DISCORD_STATE_DIR="$FL/bot" bash "$FL/hooks/peers/edit-gate" <<<'{"session
 [ -z "$out" ] || { echo "FAIL: edit-gate must stop before the lib for a bot that is not a dev-manager: $out"; exit 1; }
 echo dev-manager > "$FL/bot/mode"; out=$(DISCORD_STATE_DIR="$FL/bot" bash "$FL/hooks/peers/edit-gate" <<<'{}' 2>&1)
 [ "$out" = SOURCED ] || { echo "FAIL: fixture: a dev-manager's edit-gate must reach the lib: $out"; exit 1; }
+printf dev-manager > "$FL/bot/mode"; out=$(DISCORD_STATE_DIR="$FL/bot" bash "$FL/hooks/peers/edit-gate" <<<'{}' 2>&1)
+[ "$out" = SOURCED ] || { echo "FAIL: a mode file with no trailing newline is still a dev-manager for edit-gate: $out"; exit 1; }
 rm -rf "$FL"
 echo "ok: every hook exits before sourcing anything without DISCORD_STATE_DIR, and edit-gate before it for a non-dev-manager bot"
 
@@ -811,8 +813,10 @@ rc=0; out=$(bash "$S" patch 2>&1) || rc=$?
 [ "$rc" = 0 ] && [ "$(grep -c 'newer than this' <<<"$out")" = 1 ] && [ "$(cat "$HOME/.claude-discord/runtime/discord-chunk.ts")" = stale ] && cmp -s "$HOME/server.ts.pristine" "$PCACHE/0.0.5/server.ts" || { echo "FAIL: an older patch must leave a newer runtime and the cache alone and say so once (rc=$rc): $out"; exit 1; }
 cp "$HOME/rtv.before" "$HOME/.claude-discord/runtime/VERSION"; mv "$HOME/rtv.before" "$HOME/rtv.ref"
 bash "$S" patch >/dev/null 2>&1 && cmp -s "$PC/runtime/discord-chunk.ts" "$HOME/.claude-discord/runtime/discord-chunk.ts" && grep -q 'ignoreEveryone: true' "$PCACHE/0.0.5/server.ts" || { echo "FAIL: the same version must refill the runtime and patch again"; exit 1; }
-echo junk > "$HOME/.claude-discord/runtime/VERSION"; echo stale > "$HOME/.claude-discord/runtime/discord-chunk.ts"
-bash "$S" patch >/dev/null 2>&1 && cmp -s "$PC/runtime/discord-chunk.ts" "$HOME/.claude-discord/runtime/discord-chunk.ts" && cmp -s "$HOME/rtv.ref" "$HOME/.claude-discord/runtime/VERSION" || { echo "FAIL: a garbled runtime/VERSION must not lock the runtime: it is refilled and restamped"; exit 1; }
+for junk in junk 1.9.0.1 1.08.0; do   # garbled, four parts, a leading zero (not octal; 1.8.0 is older)
+  echo "$junk" > "$HOME/.claude-discord/runtime/VERSION"; echo stale > "$HOME/.claude-discord/runtime/discord-chunk.ts"
+  bash "$S" patch >/dev/null 2>&1 && cmp -s "$PC/runtime/discord-chunk.ts" "$HOME/.claude-discord/runtime/discord-chunk.ts" && cmp -s "$HOME/rtv.ref" "$HOME/.claude-discord/runtime/VERSION" || { echo "FAIL: runtime/VERSION '$junk' must not lock the runtime or crash patch: it is refilled and restamped"; exit 1; }
+done
 rm -f "$HOME/rtv.ref"
 # A dir the previous release patched imports the chunk helper and preloads the proxy from the old compat paths; patch re-points both to runtime/, once.
 perl -pi -e 's{import\("[^"]*"\)}{import("$ENV{HOME}/.claude-discord/discord-chunk.ts")}' "$PCACHE/0.0.6/server.ts"
@@ -1076,6 +1080,11 @@ rc=0; out=$(bash "$S" --bg alpha --name beta 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -qF "'alpha' and --name both name a bot" <<<"$out" || { echo "FAIL: '--bg alpha --name beta' is the positional form too and must be refused (rc=$rc): $out"; exit 1; }
 out=$(bash "$S" -p hello --name beta 2>&1)
 grep -q -- '-n beta' <<<"$out" && grep -q -- ' -p hello' <<<"$out" || { echo "FAIL: '-p hello --name beta' must start beta and keep hello: $out"; exit 1; }
+# A bot's name AFTER --name, or with no --name at all, is claude's argument, not the old form.
+out=$(bash "$S" --name beta -p alpha 2>&1)
+grep -q -- '-n beta' <<<"$out" && grep -q -- ' -p alpha' <<<"$out" || { echo "FAIL: '--name beta -p alpha' must start beta and pass alpha: $out"; exit 1; }
+out=$(bash "$S" alpha -p beta 2>&1)
+grep -q -- '-n alpha' <<<"$out" && grep -q -- ' -p beta' <<<"$out" && ! grep -q 'both name a bot' <<<"$out" || { echo "FAIL: 'alpha -p beta' (no --name) is the positional form and must start alpha: $out"; exit 1; }
 
 # The -r and -r= forms resolve the bot and pass the value through like --resume.
 for f in "-r aaaaaaaa" "-r=aaaaaaaa"; do
@@ -1252,7 +1261,11 @@ plugin_hook "$P2" gamma g3
 # A claude -p started from the bot's shell inherits DISCORD_STATE_DIR; in another project it is no bot.
 out=$(tagged g4 506 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$HOME" bash "$PC/hooks/turn/on-prompt")
 [ -z "$out" ] && [ ! -e "$GD/turns/g4" ] && [ ! -e "$GD/plugin-sessions/g4" ] || { echo "FAIL: a session in another project is not the bot: $out"; exit 1; }
-rm -rf "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"
+# A bot started with --worktree runs with CLAUDE_PROJECT_DIR at its worktree inside the project: still the bot.
+mkdir -p "$P2/.claude/worktrees/wt1"
+out=$(tagged g5 507 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2/.claude/worktrees/wt1" bash "$PC/hooks/turn/on-prompt")
+[ -n "$out" ] && [ -e "$GD/turns/g5" ] || { echo "FAIL: a bot session in its project's worktree is still the bot: $out"; exit 1; }
+rm -rf "$P2/.claude/worktrees" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"
 echo "ok: an old-path hook runs with no marker (no marker directory, or another session's) and exits 0 doing nothing in a marked session, whatever CLAUDE_PLUGIN_ROOT says; the plugin's hook still runs there and keeps its marker fresh; a new marker prunes month-old ones; a session in another project is no bot"
 
 # h7. one migration per session however many of its hooks start at once (noclobber on the marker). A slow jq

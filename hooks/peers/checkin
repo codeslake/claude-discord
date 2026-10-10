@@ -17,6 +17,6 @@ session_id=$(jq -r --arg self "$bot_name" --slurpfile pf "$DISCORD_STATE_DIR/../
       . as $p | $text | contains("<@\($p.bot_id)>") or contains("<@!\($p.bot_id)>")))
   | .session_id // empty' 2>/dev/null) || exit 0
 case $session_id in ''|*[!A-Za-z0-9_-]*) exit 0 ;; esac
-d="$CLAUDE_PROJECT_DIR/.claude/discord-agents/checkin"
+d="$DISCORD_STATE_DIR/../checkin"   # the bot project's, also from a worktree session
 mkdir -p "$d" 2>/dev/null && touch "$d/$session_id" 2>/dev/null
 exit 0

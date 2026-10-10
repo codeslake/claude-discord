@@ -45,8 +45,12 @@ resolve_channel() {
 # A bot is the session its state dir belongs to: a `claude -p` started from a
 # bot's shell inherits DISCORD_STATE_DIR, and in another project it is not that
 # bot (Claude Code gives every hook CLAUDE_PROJECT_DIR, measured on 2.1.296).
+# The bot's own project, or anywhere under it: a bot started with --worktree
+# runs with CLAUDE_PROJECT_DIR set to its worktree inside the project.
+bot_project=${DISCORD_STATE_DIR:-}; bot_project=${bot_project%/}; bot_project=${bot_project%/.claude/discord-agents/*}
 if [ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ] &&
-   { [ -z "${CLAUDE_PROJECT_DIR:-}" ] || [ "$DISCORD_STATE_DIR/.." -ef "$CLAUDE_PROJECT_DIR/.claude/discord-agents" ]; }; then
+   { [ -z "${CLAUDE_PROJECT_DIR:-}" ] || [ "$DISCORD_STATE_DIR/.." -ef "$CLAUDE_PROJECT_DIR/.claude/discord-agents" ] ||
+     case $(cd -P "$CLAUDE_PROJECT_DIR" 2>/dev/null && pwd)/ in "$(cd -P "$bot_project" 2>/dev/null && pwd)"/?*) true;; *) false;; esac; }; then
   bot_name=${DISCORD_STATE_DIR%/}; bot_name=${bot_name##*/}
   IFS= read -r bot_mode 2>/dev/null < "$DISCORD_STATE_DIR/mode" || :
 fi

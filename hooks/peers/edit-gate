@@ -7,7 +7,7 @@
 # it, so the window slides. Prints nothing unless it denies; a no-op without
 # peers.json. Must never fail a turn.
 [ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
-{ IFS= read -r m < "$DISCORD_STATE_DIR/mode"; } 2>/dev/null || m=""
+m=""; { IFS= read -r m < "$DISCORD_STATE_DIR/mode"; } 2>/dev/null || :   # a file with no trailing newline still sets m
 [ "$m" = dev-manager ] || exit 0   # every edit on the machine runs this: a non-dev-manager bot stops before any fork
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
@@ -27,7 +27,7 @@ d=$(dirname "$r")
 while [ ! -d "$d" ]; do d=$(dirname "$d"); done
 git -C "$d" check-ignore -q "$r" 2>/dev/null && exit 0
 p=$(peers) && [ -n "$p" ] || exit 0
-ci="$CLAUDE_PROJECT_DIR/.claude/discord-agents/checkin/$session_id"
+ci="$DISCORD_STATE_DIR/../checkin/$session_id"
 if [ -n "$(find "$ci" -mmin -60 2>/dev/null)" ]; then
   touch "$ci" 2>/dev/null
   exit 0

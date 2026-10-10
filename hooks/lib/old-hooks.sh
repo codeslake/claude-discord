@@ -47,7 +47,7 @@ strip_old_hooks() {
 # repo a hook auto-pushes) and never the user-global settings.json, which is
 # what a bot in $HOME would call its project settings.
 migrate_project() {
-  local p=${CLAUDE_PROJECT_DIR:-} f d
+  local p=${bot_project:-${CLAUDE_PROJECT_DIR:-}} f d   # the bot's project, also from a session in its worktree
   [ -n "$p" ] || return 0
   # Every component under the project, not only the file: a .claude that is
   # itself a link (into a dotfiles tree, say) is not the project's own.
