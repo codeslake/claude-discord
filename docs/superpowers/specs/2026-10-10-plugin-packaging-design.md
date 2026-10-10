@@ -55,20 +55,33 @@ claude-discord/                     (the git clone setup makes)
 
 ## Install scopes
 
-`setup` asks once per project (`--scope project|global` for scripts):
+`setup` asks two questions once per project (`--scope project|global` and
+`--method link|clone` for scripts; owner decision 2026-10-10):
 
-- **project** (default, Enter): `git clone https://github.com/codeslake/claude-discord <project>/.claude/skills/claude-discord`.
-  The clone is a plain directory, not a link: the measured link problems
-  (`${CLAUDE_PLUGIN_ROOT}` naming the link, `.mcp.json` skipped outside the
-  project) do not arise. A git-tracked project gets the path in
-  `.git/info/exclude`, added only when missing.
-- **global**: the same clone at `~/.claude/skills/claude-discord`.
+- **scope**: **project** (default, Enter) puts the plugin at
+  `<project>/.claude/skills/claude-discord`; **global** at
+  `~/.claude/skills/claude-discord`.
+- **method**: **link** (default, Enter) makes that path a symlink to the
+  machine's one source clone, `~/.claude-discord/source` (cloned from
+  `https://github.com/codeslake/claude-discord` when missing), so one `update`
+  moves every bot on the machine. **clone** makes that path its own git clone,
+  so a project can pin its own version.
+  The measured link problems do not bite: every hook and tool resolves its
+  real directory (`cd -P`, `readlink -f`) instead of trusting
+  `${CLAUDE_PLUGIN_ROOT}`, and the plugin declares no MCP server, so the
+  skipped `.mcp.json` does not matter.
+
+A git-tracked project (a worktree, a submodule or a subdirectory of a repo
+included) gets the path in the repo's `info/exclude`, added only when missing.
+When the project already has an install at either scope, setup uses it and
+asks nothing; both questions are validated before any other setup step
+writes anything.
 
 A plugin present in both places loads once, the global copy winning, and the
 project copy reports "shadowed" (measured). `setup` therefore refuses to
 install a project copy when a global one exists, and the reverse, naming the
-other path. Re-running `setup` is idempotent: an existing clone is kept and
-not re-cloned.
+other path. Re-running `setup` is idempotent: an existing link or clone is
+kept as it is.
 
 Project scope loads only when `~/.claude.json` has
 `projects[<path>].hasTrustDialogAccepted = true` for that exact path (a
@@ -94,19 +107,21 @@ changes rarely; `update` refreshes it when it differs.
 ## Bootstrap
 
 A machine with no clone yet runs the one-liner in the README:
-`git clone https://github.com/codeslake/claude-discord ~/.claude-discord/bootstrap && ~/.claude-discord/bootstrap/bin/claude-discord setup <bot>`.
-`setup` then makes the real clone at the chosen scope and installs the shim;
-the bootstrap clone is removed at the end of a successful setup.
+`git clone https://github.com/codeslake/claude-discord ~/.claude-discord/source && ~/.claude-discord/source/bin/claude-discord setup <bot>`.
+The first clone is the machine's source clone, so nothing is removed
+afterwards: `setup` links to it (method link) or clones from the repo URL
+(method clone), and installs the shim.
 
 ## Update
 
-`claude-discord update` runs, for the clone the shim resolved:
-`git -C <clone> pull --ff-only`, then the patch step, then the shim refresh,
+`claude-discord update` runs, for the clone the shim resolved (a link
+resolves to the source clone): `git -C <clone> pull --ff-only`, then the patch step, then the shim refresh,
 then prints the plugin version before and after and tells the operator to run
 `/reload-plugins` in running sessions (a bot does it through the self-reload
 skill). `update --all` does the same for every clone recorded in
 `~/.claude-discord/records/installs` (one path per line, written by `setup`,
-pruned when a path no longer exists).
+pruned when a path no longer exists), each real clone once however many
+links point at it.
 
 Versioning: `plugin.json` `version` is bumped in every commit that changes
 behaviour; `update` prints it, and `claude-discord --version` prints it with
