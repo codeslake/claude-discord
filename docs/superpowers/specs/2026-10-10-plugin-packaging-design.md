@@ -143,11 +143,23 @@ moment they are written. For this release `~/.claude-discord/hooks/tools/thread`
 stays as a symlink to the installed tool, so a session started by the old
 wrapper keeps working until its next start.
 
+What the old `install.sh` put under `~/.claude-discord/` is removed by
+`setup`: `hooks/` (except that one link), `rules/`, and the top-level
+`discord-chunk.ts` and `discord-proxy.ts`. What stays there is `runtime/`,
+`records/`, `scratch/` (bots' own notes) and the compat link, which the next
+release removes too. `~/.local/bin/claude-discord` is replaced by the shim.
+
 ## Patches on the official plugin
 
 The four patches (bot authors reach the allowFrom gate, `@everyone` ignored,
 fence-safe chunking, the proxy preload in `bunfig.toml`) move out of the start
-path into `claude-discord patch`:
+path into `claude-discord patch`, and a fifth joins them: the official
+plugin's `.mcp.json` gets `"env": {"DISCORD_STATE_DIR": "${DISCORD_STATE_DIR}"}`.
+Claude Code's 15-minute MCP failure cache keys on the server config hashed
+after `${VAR}` expansion (measured), and the official config carries no env,
+so today one bot's failed start skips the channel for every bot started on
+the machine in the next 15 minutes (issue #1 F1). With the env line each bot
+hashes differently. `patch` does all five:
 
 - applies to **every** version directory under
   `~/.claude/plugins/cache/claude-plugins-official/discord/*/`, since an
@@ -174,8 +186,14 @@ the backend monitor every five minutes.
   job record whose `respawnFlags` carry `DISCORD_STATE_DIR` (the same match
   refresh uses), else from the single bot in the project, else asks for
   `--name`.
+- If the session that `--resume` names is live, the start refuses and points
+  at `claude-discord refresh <bot>`: a second copy would put two sessions on
+  one token, and the old row could be revived by a fleet claim.
 - The positional form `claude-discord RVP --bg ...` keeps working this release
   and prints one deprecation line naming the new form.
+- Subcommands keep the bot positional: `setup <bot>`, `refresh <bot>`,
+  `health`, `update`, `patch`. The owner's order is about the launch mirroring
+  `claude`; `refresh` keeps refusing `--name`.
 - Every other argument still passes through to `claude` unchanged; the
   owner's launcher sets permission mode, effort and model.
 
@@ -202,9 +220,11 @@ previous release's `install.sh`, which re-registers the settings hooks.
   shim's resolution order; `setup --scope` both ways, the both-scopes refusal
   and idempotence; `register_hooks` removing old entries and nothing else;
   `hooks.json` naming only files that exist and are executable; the
-  SessionStart rule injection by mode; `patch` across two version dirs,
-  idempotence and the no-match exit; `--name` and `--resume` bot resolution
-  and the deprecation line.
+  SessionStart rule injection by mode; `patch` across two version dirs (all
+  five, including the `.mcp.json` env line), idempotence and the no-match
+  exit; `--name` and `--resume` bot resolution, the refusal to resume a live
+  session, and the deprecation line; `setup` removing the old
+  `~/.claude-discord/hooks` and `rules` copies while keeping the compat link.
 - `claude plugin validate` (or the equivalent load check) runs as a separate
   script outside the 40 s budget, as decided in issue #1 C1 Q1.
 - Before main, one live check on lmd42 with a non-critical bot: install,
