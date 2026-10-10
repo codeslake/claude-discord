@@ -87,7 +87,7 @@ never shows in `git status`. Project scope loads only when
 exact path: `setup` says so when it is missing and offers to write it (it never
 does silently).
 
-`setup` also installs the launcher, a 20-line shim at
+`setup` also installs the launcher, a short shim at
 `~/.local/bin/claude-discord`. It finds the wrapper for the current directory:
 `<project>/.claude/skills/claude-discord/bin/claude-discord` (the nearest
 ancestor holding `.claude/discord-agents` or that install), else
@@ -112,7 +112,9 @@ clone cannot fast-forward (local changes, a diverged branch, no network), the
 patches no longer match or the shim cannot be written, after trying the rest.
 A clone checked out at a tag or sha is pinned on purpose: it is reported as
 `pinned at <sha>, skipped` and is not a failure. The patch step and the shim come
-from the freshly pulled code (the source clone's when there is one).
+from the source clone's code when there is one (it is the machine's default and
+owns the shared `~/.claude-discord/runtime/`), else from the clone just pulled;
+so run `update --all` to move the source and a project's own clone together.
 The hook scripts and tools run from the clone on disk, so a running bot uses the
 new ones at its next hook call. What waits for `/reload-plugins` is the plugin's
 manifest and `hooks/hooks.json` (which hooks are registered) and, in a bot, the
@@ -145,11 +147,10 @@ runtime copy), so a project not yet migrated keeps working through them; they go
 in the next release. `~/.claude-discord/rules/` is removed.
 
 Rollback: the previous release's `./install.sh` writes through the links above
-into the source clone, so remove them and the plugin installs first. For each
-path in `~/.claude-discord/records/installs`: `rm` it when it is a link (a
-link install), `rm -rf` it when it is a clone. Then:
+into the source clone, so remove them and the plugin installs first:
 
 ```
+while IFS= read -r p; do if [ -L "$p" ]; then rm -f "$p"; elif [ -d "$p/.git" ]; then rm -rf "$p"; fi; done < ~/.claude-discord/records/installs
 rm -rf ~/.claude-discord/hooks ~/.claude-discord/discord-chunk.ts ~/.claude-discord/discord-proxy.ts   # only links remain there
 cd ~/.claude-discord/source && git checkout <previous tag> && ./install.sh
 ```

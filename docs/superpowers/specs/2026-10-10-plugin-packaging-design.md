@@ -92,7 +92,7 @@ missing, says so and offers to write it; it never writes it silently.
 
 The plugin's `bin/` is on PATH only for a session's Bash tool (measured), so
 a terminal needs a stable entry. `setup` installs `~/.local/bin/claude-discord`
-as a 20-line shim (`shim/claude-discord`, copied, not linked) that finds the
+as a short shim (`shim/claude-discord`, copied, not linked) that finds the
 wrapper for the current directory:
 
 1. `<project root>/.claude/skills/claude-discord/bin/claude-discord`, where the
