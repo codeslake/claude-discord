@@ -2633,7 +2633,9 @@ grep -q "already installed globally" <<<"$out" && [ ! -e "$XR/rbot" ] || { echo 
 rmdir "$GL"
 out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot --reset --scope global 2>&1) && { echo "FAIL: a project copy beside a global one must be refused"; exit 1; }
 grep -q "already installed for this project" <<<"$out" && [ -f "$XR/xbot/.env" ] || { echo "FAIL: wrong or late refusal, --reset must not run: $out"; exit 1; }
-for bad in "--scope bogus" "--method bogus" "--scope" "--method" "--mode --scope project"; do
+rc=0; (cd "$XP" && printf 'dev-manager\n\n' | bash "$S" setup xbot --mode --scope project >/dev/null 2>&1) || rc=$?
+[ "$rc" = 2 ] && [ "$(cat "$XR/xbot/mode")" = none ] || { echo "FAIL: --mode with --scope must be refused before the mode is written, rc=$rc"; exit 1; }
+for bad in "--scope bogus" "--method bogus" "--scope" "--method"; do
   # shellcheck disable=SC2086
   rc=0; (cd "$XP" && printf '\nn\n' | bash "$S" setup rbot $bad >/dev/null 2>&1) || rc=$?
   [ "$rc" = 2 ] && [ ! -e "$XR/rbot" ] || { echo "FAIL: 'setup rbot $bad' must exit 2 and write nothing, rc=$rc"; exit 1; }
@@ -2644,6 +2646,12 @@ out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot 2>&1)
 grep -q 'not trusted' <<<"$out" && [ "$(jq -r --arg p "$PHOME/scope proj" '.projects[$p] | if . == null then "unset" else "set" end' "$HOME/.claude.json")" = unset ] || { echo "FAIL: setup must say the project is not trusted and write nothing: $out"; exit 1; }
 (cd "$XP" && printf '\nn\n\ny\n' | bash "$S" setup xbot >/dev/null 2>&1)
 [ "$(jq -r --arg p "$PHOME/scope proj" '.projects[$p].hasTrustDialogAccepted' "$HOME/.claude.json")" = true ] && [ "$(jq -r .other "$HOME/.claude.json")" = 1 ] || { echo "FAIL: an explicit y must write trust and keep other keys"; exit 1; }
+# Reached through a symlink, the project is trusted by its physical path; a dangling install link is replaced.
+ln -s "$XP" "$HOME/xp link"; ln -sfn "$HOME/nowhere" "$XL"
+out=$(cd "$HOME/xp link" && printf '\nn\n\n' | bash "$S" setup xbot 2>&1)
+! grep -q 'not trusted' <<<"$out" || { echo "FAIL: trust must be read by the physical path: $out"; exit 1; }
+[ "$(readlink "$XL")" = "$HOME/.claude-discord/source" ] || { echo "FAIL: a dangling install link must be replaced: $out"; exit 1; }
+rm -f "$HOME/xp link"
 # clone + global, then a second bot elsewhere uses the global install on Enter (no refusal, no project copy); --mode installs nothing.
 rm -rf "$XP"
 GP="$HOME/g proj"; GP2="$HOME/g proj2"; mkdir -p "$GP" "$GP2"

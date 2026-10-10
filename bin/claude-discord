@@ -279,7 +279,9 @@ install_plugin() {  # uses $scope $method $pdir $gdir
   local repo=${CLAUDE_DISCORD_REPO:-https://github.com/codeslake/claude-discord}
   local src=$HOME/.claude-discord/source target ex pat here t
   case $scope in project) target=$pdir;; *) target=$gdir;; esac
-  if has_path "$target"; then
+  # A dangling link (its source removed) is a broken install, not one to keep.
+  [ -L "$target" ] && [ ! -e "$target" ] && rm -f "$target"
+  if [ -e "$target" ]; then
     echo "claude-discord: plugin already installed at $target, kept as it is"
   else
     [ -n "$method" ] || method=$(select_one Method link "link   the machine's one source clone, ~/.claude-discord/source (one update for every bot)" "clone  its own copy, so this install can pin a version")
@@ -301,7 +303,8 @@ install_plugin() {  # uses $scope $method $pdir $gdir
   fi
   mkdir -p "$HOME/.local/bin" "$HOME/.claude-discord/records"
   cmp -s "$target/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
-    install -m 755 "$target/shim/claude-discord" "$HOME/.local/bin/claude-discord"
+    install -m 755 "$target/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
+    { echo "claude-discord: could not install the shim from $target" >&2; return 1; }
   touch "$HOME/.claude-discord/records/installs"
   grep -qxF "$target" "$HOME/.claude-discord/records/installs" || printf '%s\n' "$target" >> "$HOME/.claude-discord/records/installs"
   # Keyed by the physical path, like refresh's check.
