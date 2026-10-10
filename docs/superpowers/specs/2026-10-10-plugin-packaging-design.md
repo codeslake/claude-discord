@@ -184,7 +184,7 @@ the copies would silently disable all of them, so for this release:
   its target left alone.
 - `rules/` is removed: only the old rule copies read it.
 - `runtime/`, `records/`, `scratch/` (bots' own notes) and `source/` stay.
-- The next release removes the links.
+- The next release removes the links, but only those no job record still names: a bot started by the old wrapper keeps `~/.claude-discord/hooks/tools/thread` in its saved `--append-system-prompt`, and a `claude respawn` replays it (measured on lmd42 2026-10-10: RVP and cswap). Grep `~/.claude/jobs/*/state.json` before deleting, or relaunch those bots through the wrapper first.
 
 `~/.local/bin/claude-discord` is replaced by the shim.
 
