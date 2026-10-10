@@ -1294,10 +1294,13 @@ echo "ok: twelve hooks of one session starting at once migrate once (noclobber m
 
 # on-session-start's patch run: a failure lands in the bot's health.log, not nowhere.
 mkdir -p "$PCACHE/0.0.99"; printf 'nothing to patch here\n' > "$PCACHE/0.0.99/server.ts"; rm -f "$GD/health.log"
-plugin_hook "$P2" gamma ss1 turn/on-session-start >/dev/null
+ssx() { printf '{"session_id":"%s","source":"%s"}' "$1" "$2" | CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$P2" DISCORD_STATE_DIR="$GD" bash "$PC/hooks/turn/on-session-start" >/dev/null; }
+ssx ss0 compact
+[ ! -e "$GD/health.log" ] || { echo "FAIL: a compaction keeps the running server, so on-session-start must not patch then: $(cat "$GD/health.log")"; exit 1; }
+ssx ss1 startup
 grep -q 'on-session-start: patch failed: .*0.0.99/server.ts: bot-authors no longer matches' "$GD/health.log" || { echo "FAIL: a failed patch at session start must be recorded in health.log: $(cat "$GD/health.log" 2>&1)"; exit 1; }
 rm -rf "$PCACHE/0.0.99" "$GD/health.log" "$GD/plugin-sessions"
-echo "ok: on-session-start records a failed patch run in the bot's health.log"
+echo "ok: on-session-start patches at a startup or resume (not a compaction) and records a failed patch run in the bot's health.log"
 
 # i. an explicit empty ackReaction means the owner disabled it; start must
 # leave it alone, never overwrite it back to the default.
