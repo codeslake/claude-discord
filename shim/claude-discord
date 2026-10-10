@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# ~/.local/bin/claude-discord: runs the claude-discord installed for the
+# current project (<project>/.claude/skills/claude-discord), else the global
+# one (~/.claude/skills/claude-discord). Copied there by `claude-discord setup`;
+# kept tiny so it rarely needs replacing.
+d=$PWD
+while :; do
+  if [ -x "$d/.claude/skills/claude-discord/bin/claude-discord" ]; then
+    exec "$d/.claude/skills/claude-discord/bin/claude-discord" "$@"
+  fi
+  [ -d "$d/.claude/discord-agents" ] && break   # this project's root, with no project copy
+  [ "$d" = / ] && break
+  d=$(dirname "$d")
+done
+g=$HOME/.claude/skills/claude-discord/bin/claude-discord
+[ -x "$g" ] && exec "$g" "$@"
+echo "claude-discord: not set up here. Install it with:" >&2
+echo "  git clone https://github.com/codeslake/claude-discord ~/.claude-discord/bootstrap && ~/.claude-discord/bootstrap/bin/claude-discord setup <bot>" >&2
+exit 1

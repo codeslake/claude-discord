@@ -48,6 +48,7 @@ bash -n "$D/tools/thread"
 bash -n "$D/tools/local-bots"
 bash -n "$D/hooks/autoresearchclaw/on-start"
 bash -n "$D/tools/arc-events"
+bash -n "$D/shim/claude-discord"
 # The plugin manifest and hooks.json: valid JSON, name claude-discord, and every
 # hook command names a script that exists in the repo and is executable.
 jq -e '.name == "claude-discord" and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$D/.claude-plugin/plugin.json" >/dev/null || { echo "FAIL: plugin.json needs name claude-discord and a semver version"; exit 1; }
@@ -134,6 +135,17 @@ mkdir -p "$HOME/.claude-discord"
 # and rules the projects reach. The hooks resolve plugin_root to the copy.
 PC="$HOME/plugin-copy"; mkdir -p "$PC"; cp -r "$D/hooks" "$D/rules" "$D/tools" "$D/runtime" "$D/bin" "$PC/"; PC=$(cd "$PC" && pwd -P)
 ln -s "$PC/hooks" "$HOME/.claude-discord/hooks"; ln -s "$PC/rules" "$HOME/.claude-discord/rules"
+# The shim runs the clone for the current project, else the global one.
+SH="$D/shim/claude-discord"; SP="$HOME/shim test/proj"; mkdir -p "$SP/.claude/skills/claude-discord/bin" "$SP/sub"
+printf '#!/bin/bash\necho project-copy "$@"\n' > "$SP/.claude/skills/claude-discord/bin/claude-discord"; chmod +x "$SP/.claude/skills/claude-discord/bin/claude-discord"
+mkdir -p "$HOME/.claude/skills/claude-discord/bin"; printf '#!/bin/bash\necho global-copy "$@"\n' > "$HOME/.claude/skills/claude-discord/bin/claude-discord"; chmod +x "$HOME/.claude/skills/claude-discord/bin/claude-discord"
+[ "$(cd "$SP/sub" && bash "$SH" --bg x)" = "project-copy --bg x" ] || { echo "FAIL: the shim must run the project's clone from a subdirectory"; exit 1; }
+[ "$(cd "$HOME" && bash "$SH" health)" = "global-copy health" ] || { echo "FAIL: outside a project the shim runs the global clone"; exit 1; }
+rm -rf "$HOME/.claude/skills/claude-discord"
+out=$(cd "$HOME" && bash "$SH" 2>&1) && { echo "FAIL: with no clone the shim must fail"; exit 1; }
+grep -q 'not set up' <<<"$out" || { echo "FAIL: the shim must say how to set up: $out"; exit 1; }
+rm -rf "$HOME/shim test" "$HOME/.claude/skills"
+echo "ok: the shim runs the project's clone (path with a space, from a subdirectory), else the global one, else explains"
 P="$HOME/project"; mkdir -p "$P"; cd "$P"; git init -q .
 TT=$PC/tools/thread   # the hooks name the thread tool by its absolute path in the plugin
 R="$P/.claude/discord-agents"
