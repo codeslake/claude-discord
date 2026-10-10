@@ -625,7 +625,24 @@ grep -q 'patch: .*0.0.7/server.ts: bot-authors no longer matches' <<<"$out" || {
 ! grep -q '0.0.[456]/server.ts: ' <<<"$out" || { echo "FAIL: only the moved dir may be reported: $out"; exit 1; }
 grep -qF "$HOME/.claude-discord/runtime/discord-proxy.ts" "$PCACHE/0.0.7/bunfig.toml" &&
   [ "$(jq -r '.mcpServers.discord.env.DISCORD_STATE_DIR' "$PCACHE/0.0.7/.mcp.json")" = '${DISCORD_STATE_DIR}' ] || { echo "FAIL: the patches that still match must be applied beside the moved one"; exit 1; }
-rm -rf "$PCACHE/0.0.5" "$PCACHE/0.0.6" "$PCACHE/0.0.7"
+# failure-cache: a .mcp.json without the discord server's command, and one that
+# is not JSON, are left byte-identical, named, exit 1; the file lists once.
+rm -rf "$PCACHE/0.0.7"
+for v in 0.0.8 0.0.9; do mkdir -p "$PCACHE/$v"; cp "$HOME/server.ts.pristine" "$PCACHE/$v/server.ts"; done
+printf '{"mcpServers":{"other":{"command":"x"}}}\n' > "$PCACHE/0.0.8/.mcp.json"
+printf '{"mcpServers": oops\n' > "$PCACHE/0.0.9/.mcp.json"
+cp "$PCACHE/0.0.8/.mcp.json" "$HOME/mcp8.orig"; cp "$PCACHE/0.0.9/.mcp.json" "$HOME/mcp9.orig"
+out=$(bash "$S" patch 2>&1) && { echo "FAIL: a .mcp.json the failure-cache patch cannot edit must exit 1: $out"; exit 1; }
+for v in 0.0.8 0.0.9; do
+  grep -q "patch: .*$v/.mcp.json: failure-cache no longer matches" <<<"$out" || { echo "FAIL: no failure-cache report for $v: $out"; exit 1; }
+  cmp -s "$HOME/mcp${v#0.0.}.orig" "$PCACHE/$v/.mcp.json" || { echo "FAIL: $v/.mcp.json must be left byte-identical"; exit 1; }
+  grep -q 'ignoreEveryone: true' "$PCACHE/$v/server.ts" || { echo "FAIL: the other patches must still be applied to $v"; exit 1; }
+done
+! grep '^claude-discord: patched' <<<"$out" | grep -q '\.mcp\.json' || { echo "FAIL: an unpatched .mcp.json must not be listed as patched: $out"; exit 1; }
+[ "$(grep '^claude-discord: patched' <<<"$out" | grep -o "$PCACHE/0.0.8/server.ts" | wc -l)" = 1 ] || { echo "FAIL: a patched file must be listed once: $out"; exit 1; }
+rm -f "$HOME/mcp8.orig" "$HOME/mcp9.orig"
+rm -rf "$PCACHE/0.0.8" "$PCACHE/0.0.9"
+rm -rf "$PCACHE/0.0.5" "$PCACHE/0.0.6"
 echo "ok: patch applies the five patches to every cached version, is idempotent and silent, and reports a moved pattern with exit 1"
 
 if command -v bun >/dev/null; then

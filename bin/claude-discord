@@ -1116,32 +1116,42 @@ fi
 # patch whose pattern moved; the others are still applied.
 patch_official() {
   local rt=$HOME/.claude-discord/runtime d f rc=0 changed=""
-  mkdir -p "$rt" && for f in discord-chunk.ts discord-proxy.ts; do
+  mark() { case " $changed " in *" $1 "*) ;; *) changed="$changed $1";; esac; }   # list a file once
+  mkdir -p "$rt" || return 1
+  for f in discord-chunk.ts discord-proxy.ts; do
     cmp -s "$self_root/runtime/$f" "$rt/$f" || cp "$self_root/runtime/$f" "$rt/$f"
   done
   for d in "$HOME"/.claude/plugins/cache/claude-plugins-official/discord/*/; do
     d=${d%/}; f=$d/server.ts   # no trailing slash, so messages name the file cleanly
     [ -f "$f" ] || continue
     if grep -q 'if (msg.author.bot) return' "$f"; then
-      perl -pi -e 's/^(\s*)if \(msg\.author\.bot\) return$/$1if (msg.author.id === client.user?.id) return/' "$f"; changed="$changed $f"
+      perl -pi -e 's/^(\s*)if \(msg\.author\.bot\) return$/$1if (msg.author.id === client.user?.id) return/' "$f"; mark "$f"
     elif ! grep -qF 'msg.author.id === client.user?.id' "$f"; then
       echo "claude-discord: patch: $f: bot-authors no longer matches" >&2; rc=1
     fi
     if grep -q 'msg.mentions.has(client.user))' "$f"; then
-      perl -pi -e 's/msg\.mentions\.has\(client\.user\)\)/msg.mentions.has(client.user, { ignoreEveryone: true }))/' "$f"; changed="$changed $f"
+      perl -pi -e 's/msg\.mentions\.has\(client\.user\)\)/msg.mentions.has(client.user, { ignoreEveryone: true }))/' "$f"; mark "$f"
     elif ! grep -qF 'ignoreEveryone: true' "$f"; then
       echo "claude-discord: patch: $f: ignore-everyone no longer matches" >&2; rc=1
     fi
     if grep -qE '^[[:space:]]*const chunks = chunk\(text, limit, mode\);?[[:space:]]*$' "$f"; then
-      CHUNK_TS=$rt/discord-chunk.ts perl -pi -e 's/^(\s*)const chunks = chunk\(text, limit, mode\)(;?\s*)$/$1const chunks = (await import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)$2/' "$f"; changed="$changed $f"
+      CHUNK_TS=$rt/discord-chunk.ts perl -pi -e 's/^(\s*)const chunks = chunk\(text, limit, mode\)(;?\s*)$/$1const chunks = (await import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)$2/' "$f"; mark "$f"
     elif ! grep -qF '.chunk(text, limit, mode)' "$f"; then
       echo "claude-discord: patch: $f: chunk no longer matches" >&2; rc=1
     fi
     [ "$(cat "$d/bunfig.toml" 2>/dev/null)" = "preload = [\"$rt/discord-proxy.ts\"]" ] ||
-      { printf 'preload = ["%s"]\n' "$rt/discord-proxy.ts" > "$d/bunfig.toml"; changed="$changed $d/bunfig.toml"; }
+      { printf 'preload = ["%s"]\n' "$rt/discord-proxy.ts" > "$d/bunfig.toml"; mark "$d/bunfig.toml"; }
     if [ -f "$d/.mcp.json" ] && ! jq -e '.mcpServers.discord.env.DISCORD_STATE_DIR' "$d/.mcp.json" >/dev/null 2>&1; then
-      jq_edit "$d/.mcp.json" '.mcpServers.discord.env = ((.mcpServers.discord.env // {}) + {DISCORD_STATE_DIR: "${DISCORD_STATE_DIR}"})'
-      changed="$changed $d/.mcp.json"
+      # Only a file that already defines the discord server is edited (jq would
+      # otherwise create a command-less one); jq_edit leaves bad JSON alone and
+      # returns 0, so the result is verified, not assumed.
+      jq -e '.mcpServers.discord.command' "$d/.mcp.json" >/dev/null 2>&1 &&
+        jq_edit "$d/.mcp.json" '.mcpServers.discord.env = ((.mcpServers.discord.env // {}) + {DISCORD_STATE_DIR: "${DISCORD_STATE_DIR}"})'
+      if jq -e '.mcpServers.discord.env.DISCORD_STATE_DIR' "$d/.mcp.json" >/dev/null 2>&1; then
+        mark "$d/.mcp.json"
+      else
+        echo "claude-discord: patch: $d/.mcp.json: failure-cache no longer matches" >&2; rc=1
+      fi
     fi
   done
   [ -z "$changed" ] || echo "claude-discord: patched$changed"
