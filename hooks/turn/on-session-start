@@ -46,6 +46,23 @@ read -r session_id source <<EOF2
 $(jq -r '"\(.session_id // "") \(.source // "")"' 2>/dev/null)
 EOF2
 [ -n "$session_id" ] && [ -n "$bot_name" ] || exit 0
+# The bot's standing context, at every source (a compaction or /clear drops
+# it): where its tools are, and for a dev-manager bot the dev-manager rule.
+# Context instead of a project rules file, so the project's other sessions do
+# not read a bot's rules. The patch run covers a start that did not go through
+# the wrapper (a daemon respawn, an auto-update since the last start).
+"$plugin_root/bin/claude-discord" patch >/dev/null 2>&1 || :
+tools=$plugin_root/tools
+ctx="CLAUDE_DISCORD_TOOLS=$tools"
+if [ "$bot_mode" = dev-manager ] && [ -f "$plugin_root/rules/dev-manager.md" ]; then
+  # Escape \, & and | so any path is a literal sed replacement.
+  esc=$(printf '%s' "$tools" | sed 's/[\\&|]/\\&/g')
+  rule=$(sed "s|@TOOLS@|$esc|g" "$plugin_root/rules/dev-manager.md") && ctx="$rule
+
+$ctx"
+fi
+jq -nc --arg c "$ctx" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}' 2>/dev/null || :
+
 t=$DISCORD_STATE_DIR/turns/$session_id
 case $source in
   compact|clear) rm -f "$t.primed" 2>/dev/null; exit 0 ;;

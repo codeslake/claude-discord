@@ -355,12 +355,12 @@ for stale in none 'none 1 1'; do
 done
 printf '111 222\n' > "$DSD/turns/sPrime"; : > "$DSD/turns/sPrime.replied"; : > "$DSD/turns/sPrime.pending"
 for src in startup resume; do
-  DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<"{\"session_id\":\"sPrime\",\"source\":\"$src\"}"
+  DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<"{\"session_id\":\"sPrime\",\"source\":\"$src\"}" >/dev/null
   [ ! -e "$DSD/turns/sPrime" ] && [ ! -e "$DSD/turns/sPrime.replied" ] && [ ! -e "$DSD/turns/sPrime.pending" ] && [ -f "$DSD/turns/sPrime.primed" ] || { echo "FAIL: a $src must clear a turn left over (no Stop ran) and keep the primed flag"; exit 1; }
   printf '111 222\n' > "$DSD/turns/sPrime"; : > "$DSD/turns/sPrime.replied"; : > "$DSD/turns/sPrime.pending"
 done
 rm -f "$DSD/turns/sPrime" "$DSD/turns/sPrime.replied" "$DSD/turns/sPrime.pending"
-DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<'{"session_id":"sPrime","source":"compact"}'
+DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<'{"session_id":"sPrime","source":"compact"}' >/dev/null
 [ ! -f "$DSD/turns/sPrime.primed" ] || { echo "FAIL: a compact must remove the primed flag"; exit 1; }
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$PP")
 [ -n "$out" ] || { echo "FAIL: the turn after a compact/clear must print the identity context again"; exit 1; }
@@ -368,6 +368,24 @@ RP='{"session_id":"sPrime","prompt":"<channel source=\"plugin:discord:discord\" 
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"$RP" | jq -r '.hookSpecificOutput.additionalContext')
 grep -q "handoff.md" <<<"$out" || { echo "FAIL: refresh must still fire on an already-primed session"; exit 1; }
 echo "ok: the identity context is injected once per session and once more after its text changed, on-session-start re-primes after a compaction/clear and clears a leftover turn (not the primed flag) at a startup/resume, and refresh still fires while primed"
+
+# SessionStart: a dev-manager bot gets the rule text and the tools path as
+# context at every source; another mode only the tools path; a non-bot nothing.
+# The hooks resolve plugin_root to the copy ($PC), so that is the path asserted.
+echo dev-manager > "$DSD/mode"
+for src in startup resume compact clear; do
+  out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<"{\"session_id\":\"sRule\",\"source\":\"$src\"}")
+  ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out") || { echo "FAIL: $src: not SessionStart JSON: $out"; exit 1; }
+  grep -qF "$(head -1 "$D/rules/dev-manager.md")" <<<"$ctx" && grep -qF "CLAUDE_DISCORD_TOOLS=$PC/tools" <<<"$ctx" ||
+    { echo "FAIL: $src: a dev-manager bot needs the rule and the tools path: $ctx"; exit 1; }
+done
+grep -qF "$PC/tools/local-bots" <<<"$ctx" && ! grep -qF '@TOOLS@' <<<"$ctx" || { echo "FAIL: the rule's @TOOLS@ must become the plugin's tools path: $ctx"; exit 1; }
+echo none > "$DSD/mode"
+ctx=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<'{"session_id":"sRule","source":"startup"}' | jq -r '.hookSpecificOutput.additionalContext')
+[ "$ctx" = "CLAUDE_DISCORD_TOOLS=$PC/tools" ] || { echo "FAIL: a plain bot gets only the tools path: $ctx"; exit 1; }
+out=$(bash "$H/on-session-start" <<<'{"session_id":"sRule","source":"startup"}')
+[ -z "$out" ] || { echo "FAIL: a non-bot session gets nothing: $out"; exit 1; }
+echo "ok: SessionStart injects the dev-manager rule (dev-manager only) and the tools path, at every source"
 
 # The pin: on-session-start adds this background job's id (CLAUDE_JOB_DIR's
 # basename) to <jobs root>/pins.json under the CLI's lock (mkdir pins.json.lock)
@@ -378,7 +396,8 @@ pin() {
   local st=${3:-'{"sessionId":"sPin"}'}
   mkdir -p "$J/$1"; printf '%s' "$st" 2>/dev/null > "$J/$1/state.json"
   out=$(CLAUDE_JOB_DIR="$J/$1" DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<"{\"session_id\":\"sPin\",\"source\":\"${2:-startup}\"}" 2>&1) || { echo "FAIL: on-session-start must never fail: $out"; exit 1; }
-  [ -z "$out" ] || { echo "FAIL: on-session-start must print nothing: $out"; exit 1; }
+  # Stdout and stderr merged: only the SessionStart context JSON may come out (not the patch run's output).
+  jq -e '.hookSpecificOutput.hookEventName == "SessionStart"' >/dev/null 2>&1 <<<"$out" || { echo "FAIL: on-session-start must print only its SessionStart context: $out"; exit 1; }
 }
 cli_pins() { jq -n '$ARGS.positional' --args "$@"; }   # the CLI's own format: JSON.stringify(ids, null, 2), no trailing newline
 pin AAAA0001; pin aaaa00011
@@ -2521,7 +2540,7 @@ mkdir -p "$IH/.claude-discord/hooks/autoresearchclaw" "$IH/.claude-discord/hooks
 HOME="$IH" bash "$D/install.sh" >/dev/null 2>&1 || { echo "FAIL: install.sh failed"; exit 1; }
 [ ! -e "$IH/.claude-discord/hooks/autoresearchclaw/watch" ] && [ ! -e "$IH/.claude-discord/hooks/turn/on-compact" ] && [ ! -e "$IH/.claude-discord/hooks/tools/old-tool" ] && [ ! -e "$IH/.claude-discord/rules/old.md" ] || { echo "FAIL: install.sh must remove what the repo no longer ships: $(cd "$IH/.claude-discord" && find . -type f)"; exit 1; }
 [ -x "$IH/.claude-discord/tools/thread" ] && [ -x "$IH/.claude-discord/tools/local-bots" ] && [ -x "$IH/.claude-discord/hooks/peers/thread-guard" ] || { echo "FAIL: install.sh must install the thread and local-bots helpers and the thread guard, executable"; exit 1; }
-grep -qF '~/.claude-discord/hooks/tools/local-bots' "$IH/.claude-discord/rules/dev-manager.md" && grep -qF 'Those sessions are not your peers' "$IH/.claude-discord/rules/dev-manager.md" || { echo "FAIL: the installed rule file must carry both local-bots notify bullets"; exit 1; }
+grep -qF '@TOOLS@/local-bots' "$IH/.claude-discord/rules/dev-manager.md" && grep -qF 'Those sessions are not your peers' "$IH/.claude-discord/rules/dev-manager.md" || { echo "FAIL: the installed rule file must carry both local-bots notify bullets"; exit 1; }
 [ "$(cat "$IH/.claude-discord/notes")" = mine ] && [ -x "$IH/.local/bin/claude-discord" ] || { echo "FAIL: install.sh must install the wrapper and leave other files alone"; exit 1; }
 for f in $(cd "$D" && ls hooks/*/* tools/* rules/*); do
   cmp -s "$D/$f" "$IH/.claude-discord/$f" || { echo "FAIL: install.sh must install $f"; exit 1; }

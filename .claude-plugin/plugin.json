@@ -1,6 +1,6 @@
 {
   "name": "claude-discord",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Runs Claude Code sessions behind their own Discord bots: turn hooks, peer guards, thread tools.",
   "author": {"name": "codeslake"},
   "license": "MIT"
