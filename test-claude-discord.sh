@@ -817,7 +817,7 @@ out=$(bash "$S" --bg --name alpha 2>&1)
 grep -q -- "^LAUNCHER .*--bg" <<<"$out" && grep -q -- "-n alpha" <<<"$out" || { echo "FAIL: name after a flag"; exit 1; }
 # A flag whose value is optional does not swallow the next flag.
 for flags in "--debug --model opus" "--remote-control --effort high"; do
-  out=$(bash "$S" $flags --name alpha 2>&1 || :)   # a swallowed flag makes the next word the name, and that bot does not exist
+  out=$(bash "$S" $flags --name alpha 2>&1 || :)   # a swallowed flag would leave its value out of the claude args
   grep -q -- "-n alpha" <<<"$out" && grep -q -- " $flags" <<<"$out" || { echo "FAIL: '$flags alpha' must start alpha with the flags as given: $out"; exit 1; }
 done
 rm -rf "$R/beta"                      # leave exactly one bot set up
@@ -862,21 +862,77 @@ grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: an explicit --name wins over th
 rm -rf "$JR/j2" "$JR/j3"
 
 # A live session is not resumed twice; no usable listing starts as before.
-agents_row() { printf '#!/bin/bash\ncase $1 in agents) echo %s;; *) echo "PLAIN $*";; esac\n' "'[{\"sessionId\":\"aaaaaaaa-1111-2222-3333-444444444444\",\"state\":\"$1\",\"cwd\":\"$P\"}]'" > "$HOME/bin/claude"; }
-agents_row working
-out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume aaaaaaaa-1111-2222-3333-444444444444 2>&1) && { echo "FAIL: resuming a live session must be refused"; exit 1; }
+# Rows as `claude agents --json` (no --all) lists them: live unless stopped, and
+# an idle bot sits at `done`. Matched by sessionId, resumeSessionId, or job id.
+RID=aaaaaaaa-1111-2222-3333-444444444444
+agents_rows() { printf '#!/bin/bash\ncase $1 in agents) echo %s;; *) echo "PLAIN $*";; esac\n' "'$1'" > "$HOME/bin/claude"; }
+refused() {  # $1 = resume value, $2 = what the case shows; the start must be refused, point at refresh, start nothing
+  out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --name alpha --resume "$1" 2>&1) && { echo "FAIL: $2: must be refused: $out"; exit 1; }
+  grep -q 'refresh alpha' <<<"$out" && ! grep -q PLAIN <<<"$out" || { echo "FAIL: $2: the refusal must point at refresh and start nothing: $out"; exit 1; }
+}
+started() {  # $1 = resume value, $2 = what the case shows
+  out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --name alpha --resume "$1" 2>&1 || :)
+  grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: $2: must start: $out"; exit 1; }
+}
+agents_rows "[{\"sessionId\":\"$RID\",\"state\":\"working\",\"cwd\":\"$P\"}]"
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume $RID 2>&1) && { echo "FAIL: resuming a live session (bot from its job record) must be refused"; exit 1; }
 grep -q 'refresh alpha' <<<"$out" && ! grep -q PLAIN <<<"$out" || { echo "FAIL: the refusal must point at refresh and start nothing: $out"; exit 1; }
-agents_row stopped
-out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume aaaaaaaa-1111-2222-3333-444444444444 2>&1)
-grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: a stopped session may be resumed: $out"; exit 1; }
+agents_rows "[{\"sessionId\":\"$RID\",\"state\":\"done\",\"cwd\":\"$P\"}]"
+refused $RID "an idle (done) bot is live"
+agents_rows "[{\"id\":\"jobid001\",\"sessionId\":\"dddddddd-0000-0000-0000-000000000000\",\"resumeSessionId\":\"$RID\",\"state\":\"working\",\"cwd\":\"$P\"}]"
+refused $RID "a row matched by resumeSessionId"
+agents_rows "[{\"sessionId\":\"$RID\",\"state\":\"working\",\"cwd\":\"$P\"}]"
+refused aaaaaaaa-1111-2222 "a 12+ character prefix"
+# a resumed job keeps its id while its sessionId changes: the resume value is the OLD transcript id
+agents_rows "[{\"id\":\"aaaaaaaa\",\"sessionId\":\"eeeeeeee-0000-0000-0000-000000000000\",\"state\":\"working\",\"cwd\":\"$P\"}]"
+refused $RID "a row matched by its job id"
+agents_rows "[{\"sessionId\":\"$RID\",\"state\":\"stopped\",\"cwd\":\"$P\"}]"
+started $RID "a stopped session may be resumed"
+agents_rows "[{\"sessionId\":\"99999999-0000-0000-0000-000000000000\",\"state\":\"working\",\"cwd\":\"$P\"}]"
+started $RID "another live session is none of this resume's business"
 printf '#!/bin/bash\ncase $1 in agents) exit 1;; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"
-out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume aaaaaaaa-1111-2222-3333-444444444444 2>&1)
-grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: a failing claude agents must not block the start: $out"; exit 1; }
-printf '#!/bin/bash\ncase $1 in agents) echo "{}";; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"
-out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume aaaaaaaa-1111-2222-3333-444444444444 2>&1)
-grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: a non-array claude agents listing must not block the start: $out"; exit 1; }
-rm -rf "$JR"; printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"
-echo "ok: --name/-n/--name= name the bot silently, the positional form warns, setup stays quiet; --resume finds the bot from its job record (ambiguity refused), by a bot's name; a live session is refused and a failing listing is not"
+started $RID "a failing claude agents"
+# {"x": row} makes `any(.[]; ...)` true, so only the type == "array" guard keeps this one starting
+agents_rows "{\"x\":{\"sessionId\":\"$RID\",\"state\":\"working\",\"cwd\":\"$P\"}}"
+started $RID "a listing that is not an array"
+agents_rows '"x"'
+started $RID "a listing that is a string"
+# A refused --resume consumes nothing: the handoff stays for the refresh the refusal points at.
+agents_rows "[{\"sessionId\":\"$RID\",\"state\":\"working\",\"cwd\":\"$P\"}]"
+printf 'HANDOFF\n' > "$R/alpha/handoff.md"
+refused $RID "a live session with a handoff waiting"
+[ -s "$R/alpha/handoff.md" ] && [ ! -e "$R/alpha/handoff.prev.md" ] || { echo "FAIL: a refused --resume must leave handoff.md in place"; exit 1; }
+rm -f "$R/alpha/handoff.md"
+
+# --name= and --name '' are as value-less as a trailing --name.
+out=$(bash "$S" --bg --name= 2>&1) && { echo "FAIL: --name= must be refused: $out"; exit 1; }
+grep -q -- '--name needs a bot name' <<<"$out" || { echo "FAIL: --name=: wrong error: $out"; exit 1; }
+out=$(bash "$S" --bg --name '' 2>&1) && { echo "FAIL: --name '' must be refused: $out"; exit 1; }
+grep -q -- '--name needs a bot name' <<<"$out" || { echo "FAIL: --name '': wrong error: $out"; exit 1; }
+
+# With a --name, a bare word is an argument for claude, not the bot.
+printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"
+out=$(bash "$S" -p hello --name beta 2>&1)
+grep -q -- '-n beta' <<<"$out" && grep -q -- ' -p hello' <<<"$out" || { echo "FAIL: '-p hello --name beta' must start beta and keep hello: $out"; exit 1; }
+out=$(bash "$S" alpha --name beta 2>&1)
+grep -q -- '-n beta' <<<"$out" && grep -q -- ' alpha' <<<"$out" && ! grep -q deprecated <<<"$out" || { echo "FAIL: 'alpha --name beta' must start beta, pass alpha through, and not warn: $out"; exit 1; }
+
+# The -r and -r= forms resolve the bot and pass the value through like --resume.
+for f in "-r aaaaaaaa" "-r=aaaaaaaa"; do
+  out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg $f 2>&1 || :)
+  grep -q -- '-n alpha' <<<"$out" && grep -q -- " $f" <<<"$out" || { echo "FAIL: '$f' must find bot alpha from its job record and pass through: $out"; exit 1; }
+done
+# A bot called like a short hex word is a bot name, not a prefix of another bot's session id.
+mkdir -p "$JR/j4"
+jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$R/alpha\"}}" '{sessionId: "dead1111-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JR/j4/state.json"
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume dead 2>&1) && { echo "FAIL: --resume dead (4 hex) must not match the record dead1111...: $out"; exit 1; }
+grep -q 'with --name' <<<"$out" || { echo "FAIL: --resume dead must fall through to the several-bots error: $out"; exit 1; }
+mkdir -p "$R/dead" && touch "$R/dead/.env"
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume dead 2>&1 || :)
+grep -q -- '-n dead' <<<"$out" && ! grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: --resume dead with a bot dead must go to the bot-name rule: $out"; exit 1; }
+rm -rf "$R/dead" "$JR"
+printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"
+echo "ok: --name/-n/--name= name the bot silently, the positional form warns, setup stays quiet, an empty --name is refused, a bare word beside --name goes to claude; --resume (also -r, -r=) finds the bot from its job record (8+ hex, ambiguity refused) or by a bot's name; a live session is refused whatever its state short of stopped, however it is matched, without consuming the handoff, and a failing or non-array listing is not"
 
 mkdir -p "$HOME/nobin"
 cp "$HOME/bin/claude-launcher" "$HOME/nobin/claude-launcher"
@@ -1153,6 +1209,9 @@ cp "$HOME/agents.full.json" "$HOME/agents.json"
 # it would delete what the start is reopening. It must survive, resolved from a
 # name (a transcript's basename is the session id) as well as passed through.
 PROJD="$HOME/.claude/projects/$(printf '%s' "$PD" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$PROJD"
+# A retired (done) session is listed only with --all; without it a done row is an idle live bot and
+# the start refuses to resume it. So the plain listing is empty here and --all carries the dead rows.
+cp "$HOME/agents.full.json" "$HOME/agents.all.json"; echo '[]' > "$HOME/agents.json"
 printf '{"type":"custom-title","customTitle":"my-dead-bot"}\n' > "$PROJD/dead-0002.jsonl"
 : > "$HOME/rm.log"
 start_dead --resume my-dead-bot
@@ -1177,6 +1236,7 @@ grep -q -- "--resume 8705916e -> 8705916e-3644-4000-8000-000000000099" <<<"$out"
 [ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "d0000002 f96ea453 " ] || { echo "FAIL: a --resume given the job's own short id must not delete that job: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
 rm -f "$PROJD/8705916e-3644-4000-8000-000000000099.jsonl"
 echo "ok: --resume given a job's short id, resolved to its stale original transcript, never removes that job"
+rm -f "$HOME/agents.all.json"; cp "$HOME/agents.full.json" "$HOME/agents.json"
 
 # The cap: 20 removals per start, the oldest first, so a long-neglected daemon
 # cannot stall a start; the five newest are left for the next one.

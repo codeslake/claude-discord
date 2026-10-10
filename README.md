@@ -27,7 +27,7 @@ enables it per session with `--settings`.
 
 ## Glossary
 
-- **session name**: the argument to `claude-discord <name>`. It becomes the
+- **session name**: the argument to `claude-discord --name <name>`. It becomes the
   Claude session's `--name`, the directory the bot's token lives in, and the
   identity in the system prompt. Not the Discord bot's display name; pick the
   same string for both so `@name` in the channel is unambiguous.
@@ -79,7 +79,7 @@ claude-discord setup beta             # only beta's token and mention policy: th
 claude-discord --name alpha           # start the session; the bot is online while it runs
 claude-discord --name alpha --resume  # any claude argument passes through
 claude-discord --bg --name alpha      # -n alpha and --name=alpha work too
-claude-discord --bg --resume 3bf66a89 # the bot comes from that session's job record, else from the one bot in the project
+claude-discord --bg --resume 3bf66a89 # the bot comes from that session's job record (8+ hex), else a value naming a bot (--resume alpha), else the one bot in the project
 claude-discord --name alpha --resume my-bot  # a session NAME or a short id also works, see below
                                       # (the positional "claude-discord alpha" still works and warns; a live session is not resumed, use refresh)
 claude-discord setup alpha --reset    # forget alpha's token and policy AND the shared IDs; ask everything again
@@ -243,7 +243,7 @@ session.
 - In the channel, `@alpha do X` reaches session alpha only. A reply to one of
   the bot's messages also counts as a mention.
 - Tool-permission prompts arrive as buttons in your DM with the bot.
-- The bot is online exactly while `claude-discord alpha` runs. Registering
+- The bot is online exactly while `claude-discord --name alpha` runs. Registering
   alone shows nothing.
 - With several bots in one channel, keep the default mention policy: with
   "respond without mention" on every bot, one human message gets one reply
@@ -416,7 +416,7 @@ environment; measured 2026-09-18, a fork made by `/bg` had no
   session, see Hooks above), so this only matters for a turn typed straight
   into the CLI after `/bg`. The transcript still holds everything said so far.
 - One token, one session. After `/bg` the foreground REPL exits; do not start
-  `claude-discord alpha` again while the background copy runs, or both answer
+  `claude-discord --name alpha` again while the background copy runs, or both answer
   every mention.
 - Every start also sets `worktree.bgIsolation: "none"` in `--settings`,
   turning off Claude Code's background-isolation guard for claude-discord

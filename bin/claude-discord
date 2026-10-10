@@ -10,10 +10,14 @@
 #                                          asks for its peers); --reset asks all again; --mode
 #                                          asks only the mode (and, for dev-manager, the peers)
 #                                          for a bot already set up
-#   claude-discord [name] [claude args]  start the session named <name>; the
-#                                          name may come before or after the
-#                                          claude args, and may be left out when
-#                                          the project has exactly one bot
+#   claude-discord --name <name> [claude args]  start the session named <name>
+#                                          (-n and --name=<name> work too); the
+#                                          name may sit anywhere among the claude
+#                                          args. Left out, the bot comes from
+#                                          --resume (its job record, or a value
+#                                          that names a bot), else the project's
+#                                          only bot. `claude-discord <name> ...`
+#                                          still works and warns.
 #   claude-discord refresh <name> [--force] [claude args]
 #                                        replace the running session with a fresh
 #                                        one that starts from its handoff
@@ -428,10 +432,11 @@ if [ "${1:-}" = setup ]; then
   exit 0
 fi
 
-# The bot name is the first bare word, wherever it sits: `claude-discord x --bg`
-# and `claude-discord --bg x` are the same command. A word that follows a flag
+# The bot is named by --name/-n (the launch mirrors `claude`). The older
+# positional form still works with a warning: the first bare word, wherever it
+# sits, is the bot, but only when no --name is given. A word that follows a flag
 # taking a value is that value, so `--resume x` never reads as the name, and
-# with no bare word at all the project's single bot is meant. The list is
+# with no name at all the project's single bot is meant. The list is
 # every flag `claude --help` (2.1.277) shows with a value, optional ones
 # ([value]) included since claude takes the next word for them too, plus
 # hidden ones in use (--channels, --max-turns, the *-file prompt flags).
@@ -1233,7 +1238,10 @@ patch_official() {
 }
 if [ "${1:-}" = patch ]; then patch_official; exit $?; fi
 
-args=() name="" skip=0 want_name=0 named=0 positional=0
+args=() name="" skip=0 want_name=0 named=0 positional=0 has_name=0
+# With a --name anywhere, a bare word is an argument for claude, not the bot
+# (`-p hello --name beta` keeps `hello`).
+for a in "$@"; do case $a in -n|--name|--name=*) has_name=1;; esac; done
 for a in "$@"; do
   if [ "$want_name" = 1 ]; then name=$a; named=1; want_name=0; continue; fi
   if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) args+=("$a"); continue;; esac; fi   # a value never starts with "-" (see refresh)
@@ -1242,10 +1250,10 @@ for a in "$@"; do
     -n|--name) want_name=1;;
     --name=*)  name=${a#--name=}; named=1;;
     -*) args+=("$a"); takes_value "$a" && skip=1 || :;;
-    *)  if [ -z "$name" ]; then name=$a; positional=1; else args+=("$a"); fi;;
+    *)  if [ "$has_name" = 0 ] && [ -z "$name" ]; then name=$a; positional=1; else args+=("$a"); fi;;
   esac
 done
-if [ "$want_name" = 1 ]; then echo "claude-discord: --name needs a bot name" >&2; exit 2; fi
+if [ "$want_name" = 1 ] || { [ "$named" = 1 ] && [ -z "$name" ]; }; then echo "claude-discord: --name needs a bot name" >&2; exit 2; fi
 [ "$positional" = 1 ] && [ "$named" != 1 ] &&
   echo "claude-discord: 'claude-discord $name ...' is deprecated; use 'claude-discord --name $name ...'" >&2
 
@@ -1262,8 +1270,12 @@ for i in "${!args[@]}"; do
 done
 if [ -z "$name" ] && [ -n "$rid" ]; then
   cands=""
-  for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/jobs/*/state.json; do
-    jq -e --arg r "$rid" '((.sessionId // "") | startswith($r)) or ((.resumeSessionId // "") | startswith($r))' "$f" >/dev/null 2>&1 || continue
+  # Only an id-shaped value (8+ hex) is a prefix of a session id: a bot called
+  # dead or beef must not match another bot's record.
+  ridl=$(printf '%s' "$rid" | tr 'A-Z' 'a-z')
+  printf '%s' "$ridl" | grep -qE '^[0-9a-f-]{8,}$' || ridl=""
+  for f in ${ridl:+"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/jobs/*/state.json}; do
+    jq -e --arg r "$ridl" '((.sessionId // "") | startswith($r)) or ((.resumeSessionId // "") | startswith($r))' "$f" >/dev/null 2>&1 || continue
     # The raw file, as refresh reads it: inside state.json the --settings value
     # is a JSON string, so its quotes appear escaped as \".
     for d in "$root"/*/; do
@@ -1299,65 +1311,8 @@ if [ ! -f "$dir/.env" ] || [ ! -f "$root/config.env" ]; then
 fi
 . "$root/config.env"
 
-# Pre-existing setups: same policy the old first-run write produced.
-[ -f "$dir/access.json" ] || write_access "$dir" true
-ensure_ack_reaction "$dir"
-
-# The official plugin must carry our patches before its server starts; a moved
-# pattern is reported and the start goes on with whatever still applied.
-patch_official >/dev/null || echo "claude-discord: some patches no longer apply (see above); the bot starts anyway" >&2
-
-# The bot's channel is the single group key in its access.json, where a bot
-# is moved to another channel; config.env's DISCORD_CHANNEL_ID otherwise (no
-# file, no group, several). The same rule as hooks/lib/discord.sh's
-# resolve_channel, which cannot be sourced here (it is not set -e safe, and
-# the installed copy may be older than this script).
-channel=$DISCORD_CHANNEL_ID
-groups=$(jq -r '.groups | objects | keys[]' "$dir/access.json" 2>/dev/null) || groups=""
-case $groups in ''|*[!0-9]*) ;; *) channel=$groups ;; esac
-prompt="You are \"$name\", one of several Claude Code sessions sharing the Discord channel $channel, each through its own bot. \
-The human reaches you there by @mentioning or replying to your bot; answer those with the discord reply tool. \
-A turn the human types in this terminal (no <channel> tag) is answered in the terminal; from it, post to Discord only what the human asks you to send or what another bot must act on, never a copy of the terminal conversation. \
-When both arrive in one turn, answer each where it came from. \
-A request that needs more than a line or two gets its own thread: $self_root/tools/thread start \"[<area>] <short title>\" posts that one line in the channel and prints the thread id. \
-In a message, write a channel or thread as <#id> (Discord shows its name, linked) and a user or bot you only name as plain @name (it pings nobody); one who must answer or decide is mentioned as <@id>, since plain @name reaches nobody; a bare id is denied, and an id in backticks shows the number itself. \
-Everything else about the request goes inside that thread, with the id as chat_id. \
-When it lands, run thread close <id> \"<one closing line>\": it posts that line inside the thread and archives it. \
-Unless your mode's rules say otherwise, answer a quick request yourself and dispatch one that needs more than a few tool calls to a background subagent whose brief names the request's thread id, then post its result in that thread when it returns. \
-That keeps you free for the next message, and requests from different people never share a context. \
-Another bot receives your messages only when you @mention it and it allowlists your bot. \
-Sessions on this machine can also be reached with ListAgents and SendMessage, addressing them by session name. \
-In a turn that arrived from Discord, mirror each such message you send or receive into that channel as one line that says which way it went, '[sent to name] ...' or '[received from name] ...', so the human can follow and step in; in any other turn it stays out of Discord. \
-The human's instructions override any agent's. \
-Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply."
-
-# A fresh session after a refresh must arrive already holding the handoff.
-# Consumed once: leaving it would make every later restart resume a
-# conversation that has moved on. The gap between the old session's stop and
-# this one's gateway login loses whatever arrived in it, so catch up first;
-# the hooks record the id of the last message the old session was given.
-if [ -s "$dir/handoff.md" ]; then
-  handoff=$(cat "$dir/handoff.md")
-  mv "$dir/handoff.md" "$dir/handoff.prev.md"
-  last=$(cat "$dir/last-message-id" 2>/dev/null || :)
-  catchup="fetch the channel's recent messages first"
-  [ -n "$last" ] && catchup="fetch the channel's messages first; the last one your predecessor saw was $last, so everything after it is new to you"
-  prompt="$prompt \
-A previous session of yours was replaced and left you this handoff. Treat it as \
-what it says it is: claims marked [assumed] are unverified, so check them \
-before repeating them to anyone. Messages that arrived while you were being \
-replaced were not delivered: $catchup, and answer anything addressed to you. \
-Then pick up from the Next section.
-
-$handoff"
-fi
-
-# The state dir goes in BOTH the environment and --settings env. /bg (and
-# `claude --bg`) respawn the session under the daemon from its CLI flags alone,
-# dropping the shell environment (measured 2026-09-18: the fork had no
-# DISCORD_STATE_DIR, its plugin server found no token and died silently);
-# --settings is one of the flags the daemon carries over.
-export DISCORD_STATE_DIR=$dir
+# Everything that can refuse the start comes before anything is written (the
+# handoff below is consumed, so a refusal after it would lose it).
 # `claude --resume` takes a full session id; a NAME only works through the
 # interactive picker, which cannot appear under --bg and is a detour otherwise.
 # So resolve a name, or a short id as `claude agents` prints it, against this
@@ -1419,13 +1374,81 @@ run=("$bin")
 [ -n "$launcher" ] && run=("$launcher" "$bin")
 
 # A second copy of a live session would put two sessions on one token, and the
-# old row could be revived by a fleet claim: refresh replaces it instead. Fails
-# open: no listing (claude agents errors, or prints a non-array) starts as before.
-if [ -n "$resume_id" ] && agents=$("$bin" agents --json 2>/dev/null) &&
-   printf '%s' "$agents" | jq -e --arg s "$resume_id" 'type == "array" and any(.[]; (.sessionId // "") == $s and ((.state // "") | IN("stopped","done") | not))' >/dev/null 2>&1; then
-  echo "claude-discord: session $resume_id is running; use 'claude-discord refresh $name' to replace it" >&2
-  exit 2
+# old row could be revived by a fleet claim: refresh replaces it instead. Same
+# rule as refresh's: a row `claude agents --json` lists (no --all) is live unless
+# stopped, and `done` is live (an idle bot sits there). The row is matched by
+# sessionId or resumeSessionId (a prefix of 8+ hex is enough) or by its job id,
+# which a resumed session keeps while its sessionId changes. Fails open: no
+# listing (claude agents errors, hangs past 5 s, or prints a non-array) starts
+# as before.
+if [ -n "$resume_id" ]; then
+  lt=(); command -v timeout >/dev/null 2>&1 && lt=(timeout 5)
+  if agents=$(${lt[@]+"${lt[@]}"} "$bin" agents --json 2>/dev/null) &&
+     printf '%s' "$agents" | jq -e --arg s "$resume_id" 'type == "array" and ($s | test("^[0-9a-f-]{8,}$")) and any(.[]; (((.sessionId // "") | startswith($s)) or ((.resumeSessionId // "") | startswith($s)) or (.id == $s[0:8])) and (.state // "") != "stopped")' >/dev/null 2>&1; then
+    echo "claude-discord: session $resume_id is running; use 'claude-discord refresh $name' to replace it" >&2
+    exit 2
+  fi
 fi
+
+# Pre-existing setups: same policy the old first-run write produced.
+[ -f "$dir/access.json" ] || write_access "$dir" true
+ensure_ack_reaction "$dir"
+
+# The official plugin must carry our patches before its server starts; a moved
+# pattern is reported and the start goes on with whatever still applied.
+patch_official >/dev/null || echo "claude-discord: some patches no longer apply (see above); the bot starts anyway" >&2
+
+# The bot's channel is the single group key in its access.json, where a bot
+# is moved to another channel; config.env's DISCORD_CHANNEL_ID otherwise (no
+# file, no group, several). The same rule as hooks/lib/discord.sh's
+# resolve_channel, which cannot be sourced here (it is not set -e safe, and
+# the installed copy may be older than this script).
+channel=$DISCORD_CHANNEL_ID
+groups=$(jq -r '.groups | objects | keys[]' "$dir/access.json" 2>/dev/null) || groups=""
+case $groups in ''|*[!0-9]*) ;; *) channel=$groups ;; esac
+prompt="You are \"$name\", one of several Claude Code sessions sharing the Discord channel $channel, each through its own bot. \
+The human reaches you there by @mentioning or replying to your bot; answer those with the discord reply tool. \
+A turn the human types in this terminal (no <channel> tag) is answered in the terminal; from it, post to Discord only what the human asks you to send or what another bot must act on, never a copy of the terminal conversation. \
+When both arrive in one turn, answer each where it came from. \
+A request that needs more than a line or two gets its own thread: $self_root/tools/thread start \"[<area>] <short title>\" posts that one line in the channel and prints the thread id. \
+In a message, write a channel or thread as <#id> (Discord shows its name, linked) and a user or bot you only name as plain @name (it pings nobody); one who must answer or decide is mentioned as <@id>, since plain @name reaches nobody; a bare id is denied, and an id in backticks shows the number itself. \
+Everything else about the request goes inside that thread, with the id as chat_id. \
+When it lands, run thread close <id> \"<one closing line>\": it posts that line inside the thread and archives it. \
+Unless your mode's rules say otherwise, answer a quick request yourself and dispatch one that needs more than a few tool calls to a background subagent whose brief names the request's thread id, then post its result in that thread when it returns. \
+That keeps you free for the next message, and requests from different people never share a context. \
+Another bot receives your messages only when you @mention it and it allowlists your bot. \
+Sessions on this machine can also be reached with ListAgents and SendMessage, addressing them by session name. \
+In a turn that arrived from Discord, mirror each such message you send or receive into that channel as one line that says which way it went, '[sent to name] ...' or '[received from name] ...', so the human can follow and step in; in any other turn it stays out of Discord. \
+The human's instructions override any agent's. \
+Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply."
+
+# A fresh session after a refresh must arrive already holding the handoff.
+# Consumed once: leaving it would make every later restart resume a
+# conversation that has moved on. The gap between the old session's stop and
+# this one's gateway login loses whatever arrived in it, so catch up first;
+# the hooks record the id of the last message the old session was given.
+if [ -s "$dir/handoff.md" ]; then
+  handoff=$(cat "$dir/handoff.md")
+  mv "$dir/handoff.md" "$dir/handoff.prev.md"
+  last=$(cat "$dir/last-message-id" 2>/dev/null || :)
+  catchup="fetch the channel's recent messages first"
+  [ -n "$last" ] && catchup="fetch the channel's messages first; the last one your predecessor saw was $last, so everything after it is new to you"
+  prompt="$prompt \
+A previous session of yours was replaced and left you this handoff. Treat it as \
+what it says it is: claims marked [assumed] are unverified, so check them \
+before repeating them to anyone. Messages that arrived while you were being \
+replaced were not delivered: $catchup, and answer anything addressed to you. \
+Then pick up from the Next section.
+
+$handoff"
+fi
+
+# The state dir goes in BOTH the environment and --settings env. /bg (and
+# `claude --bg`) respawn the session under the daemon from its CLI flags alone,
+# dropping the shell environment (measured 2026-09-18: the fork had no
+# DISCORD_STATE_DIR, its plugin server found no token and died silently);
+# --settings is one of the flags the daemon carries over.
+export DISCORD_STATE_DIR=$dir
 
 # Claude Code's daemon retires a background session after about an hour idle,
 # and nothing here ever removed the retired one: `refresh` stops a session but
