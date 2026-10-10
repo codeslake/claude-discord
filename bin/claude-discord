@@ -97,65 +97,27 @@ jq_edit() {  # $1 = file, the rest = jq arguments
   rm -f "$f.tmp.$$"
 }
 
-# Registers this project's hooks, all of them in settings.local.json, which is
-# gitignored and per machine, and none in settings.json, which a shared repo
-# tracks: writing our entries there on every bot start left such a repo dirty,
-# blocked its merge script and broke its own tests on a clean checkout
-# (2026-10-09). settings.local.json is still project-wide, so every session of
-# the checkout still runs them; they exit at once outside a Discord turn. Five
-# entries are the same for every bot on every machine: the four Discord-turn
-# hooks (identity/refresh, primed once per session; the reply flag; the
-# checkmark reaction; at session start, re-priming after a compact/clear and
-# clearing a turn left over from a startup/resume), which make a turn that
-# arrived over Discord be answered through the discord reply tool only, never
-# also typed into the CLI, and peers/thread-guard, which keeps Discord to
-# Discord turns and the channel to short lines, on a reply and on an edit
-# alike. Every other entry is registered only while its mode is among $1, the
-# modes of the bots THIS machine runs (the three peers hooks for dev-manager,
-# on-start for autoresearchclaw). Any entry of ours (a command under
-# .claude/discord-agents/hooks/) that a file should not hold is removed from
-# it: a mode hook no bot needs, a hook in settings.json (every earlier version
-# put the five every-bot entries there), one that no longer exists
-# (turn/on-compact became turn/on-session-start) or one under another event or
-# matcher (autoresearchclaw/on-start was startup|resume), along with a matcher
-# group or an event left empty by that. Each command guards on [ -x ], so a
-# machine without the hooks installed simply runs nothing.
-# Idempotent per entry, and a file is written only when it changes (Claude
-# Code writes its permission grants into settings.local.json).
-# Parallel arrays, not a packed "event|matcher|script" string, because a
-# matcher itself can contain "|" (startup|resume|compact|clear).
-register_hooks() {  # $1 = the project's bot modes, space-separated
-  local modes=" ${1:-} "
-  local events=(UserPromptSubmit PostToolUse Stop SessionStart PreToolUse PostToolUse PreToolUse PreToolUse SessionStart)
-  local matchers=("" "mcp__plugin_discord_discord__reply" "" "startup|resume|compact|clear" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply" "mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message" "Edit|Write|MultiEdit" "startup|resume|compact|clear")
-  local scripts=(turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/thread-guard peers/edit-gate autoresearchclaw/on-start)
-  local needs=("" "" "" "" dev-manager dev-manager "" dev-manager autoresearchclaw)   # the mode an entry needs; "" = every bot
-  local want='[]' i cmd file
-  for i in "${!events[@]}"; do
-    [ -z "${needs[i]}" ] || case $modes in *" ${needs[i]} "*) ;; *) continue ;; esac
-    cmd="h=\"\$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/${scripts[i]}\"; [ ! -x \"\$h\" ] || \"\$h\""
-    want=$(printf '%s' "$want" | jq -c --arg ev "${events[i]}" --arg m "${matchers[i]}" --arg cmd "$cmd" \
-      '. + [{ev: $ev, m: $m, cmd: $cmd}]') || return 0
-  done
+# The plugin's hooks.json registers every hook now. Entries earlier versions
+# wrote into the project's settings files (a command under
+# .claude/discord-agents/hooks/) would run each hook twice, so they are removed
+# from settings.json and settings.local.json, along with a matcher group or an
+# event left empty by that; every other entry stays. Settings hooks apply live
+# (measured), so a running bot drops them at once and gets the plugin's on
+# /reload-plugins. A file is written only when it changes (Claude Code writes
+# its permission grants into settings.local.json).
+remove_old_hooks() {
+  local file
   for file in settings.json settings.local.json; do
-    jq_edit "$PWD/.claude/$file" --argjson all "$want" --arg file "$file" '
-      (if $file == "settings.local.json" then $all else [] end) as $want
-      | ((.hooks | type) == "object" and (.hooks | tostring | contains("/.claude/discord-agents/hooks/"))) as $ours
-      | def stale($ev; $m): (.command? // "" | tostring) as $c
-          | ($c | contains("/.claude/discord-agents/hooks/"))
-            and ([$want[] | select(.ev == $ev and .m == $m) | .cmd] | index($c)) == null;
+    jq_edit "$PWD/.claude/$file" '
+      ((.hooks | type) == "object" and (.hooks | tostring | contains("/.claude/discord-agents/hooks/"))) as $ours
+      | def stale: (.command? // "" | tostring | contains("/.claude/discord-agents/hooks/"));
       (if (.hooks | type) != "object" then . else
-        .hooks |= with_entries(.key as $ev
-          | if (.value | type) == "array" and any(.value[]; (.matcher? // "") as $m | any(.hooks?[]?; stale($ev; $m))) then
-              .value |= map((.matcher? // "") as $m
-                | if any(.hooks?[]?; stale($ev; $m)) then (.hooks |= map(select(stale($ev; $m) | not))) | select(.hooks | length > 0) else . end)
-              | select(.value | length > 0)
-            else . end)
+        .hooks |= with_entries(
+          if (.value | type) == "array" and any(.value[]; any(.hooks?[]?; stale)) then
+            .value |= map(if any(.hooks?[]?; stale) then (.hooks |= map(select(stale | not))) | select(.hooks | length > 0) else . end)
+            | select(.value | length > 0)
+          else . end)
       end)
-      | reduce $want[] as $w (.;
-          if any(.hooks[$w.ev][]?.hooks?[]?; .command? == $w.cmd) then .
-          else .hooks[$w.ev] = ((.hooks[$w.ev] // []) + [(if $w.m == "" then {} else {matcher: $w.m} end) + {hooks: [{type: "command", command: $w.cmd}]}])
-          end)
       | if $ours and .hooks == {} then del(.hooks) else . end'   # emptied by us: leave no "hooks": {} diff behind
   done
 }
@@ -168,40 +130,27 @@ ensure_ack_reaction() {  # $1 = bot dir
   jq_edit "$1/access.json" 'if has("ackReaction") then . else . + {ackReaction: "👀"} end'
 }
 
-# A project's mode drops are the union over its bots' modes (<bot>/mode), so
-# one dev-manager bot keeps the dev-manager rule and the peers hooks in place
-# for the whole project. Whatever no bot's mode produces any more is removed:
-# every .claude/rules/claude-discord-*.md but the ones kept (that prefix is
-# claude-discord's own; no other file is touched), and every mode hook entry
-# (see register_hooks). Run by setup and every start; idempotent; never
-# aborts either.
-sync_mode_drops() {
-  local modes="" f keep="" rules=$PWD/.claude/rules src=$helpers/rules/dev-manager.md
-  for f in "$root"/*/mode; do
-    modes="$modes $(cat "$f" 2>/dev/null || :)"   # no bot yet: the glob stays literal, and set -e must not see cat fail
+# Takes out what earlier versions registered per project: the settings hooks
+# (see remove_old_hooks) and every .claude/rules/claude-discord-*.md (that
+# prefix is claude-discord's own; no other file is touched). The dev-manager
+# rule reaches a session through the plugin's SessionStart hook now. Only in a
+# project with a plugin install, because that install is what replaces them:
+# a project set up by the previous release and not yet by this one (setup
+# --mode and every start also come here) keeps its hooks and rule file, or its
+# bot would lose all of them. Idempotent; never aborts either caller.
+remove_old_registration() {
+  local f
+  [ -e "$PWD/.claude/skills/claude-discord" ] || [ -e "$HOME/.claude/skills/claude-discord" ] || return 0
+  for f in "$PWD"/.claude/rules/claude-discord-*.md; do
+    rm -f "$f" 2>/dev/null || echo "claude-discord: could not remove $f" >&2
   done
-  case " $modes " in *" dev-manager "*) keep=$rules/claude-discord-dev-manager.md;; esac
-  # autoresearchclaw drops no rule file: every session under the project
-  # loads one, the pipeline's own agent sessions included. Its only drop is
-  # the on-start hook (see register_hooks), which hands its rule to the
-  # bot's session as SessionStart context.
-  for f in "$rules"/claude-discord-*.md; do
-    [ "$f" = "$keep" ] || rm -f "$f" 2>/dev/null || echo "claude-discord: could not remove $f" >&2
-  done
-  if [ -n "$keep" ] && ! cmp -s "$src" "$keep"; then
-    if [ ! -f "$src" ]; then
-      echo "claude-discord: $src is missing; re-run install.sh" >&2
-    elif ! { mkdir -p "$rules" && cat "$src" > "$keep"; } 2>/dev/null; then
-      echo "claude-discord: could not write $keep" >&2
-    fi
-  fi
-  register_hooks "$modes"
+  remove_old_hooks
 }
 
-# Makes <project>/.claude/discord-agents/hooks a symlink to the installed
-# hooks, so install.sh reaches a session that is already running. Only when
-# the path is absent or already a symlink (broken or not); a real directory
-# there is left alone with a warning.
+# Makes <project>/.claude/discord-agents/hooks a symlink to the plugin's hooks,
+# so a settings entry an old peer committed still reaches them. Kept this
+# release, removed in the next. Only when the path is absent or already a
+# symlink (broken or not); a real directory there is left alone with a warning.
 ensure_hooks_symlink() {
   local link="$root/hooks"
   if [ -e "$link" ] && [ ! -L "$link" ]; then
@@ -209,7 +158,7 @@ ensure_hooks_symlink() {
     return 0
   fi
   mkdir -p "$root" 2>/dev/null || return 0
-  ln -sfn "$helpers/hooks" "$link" 2>/dev/null || echo "claude-discord: could not symlink $link" >&2
+  ln -sfn "$self_root/hooks" "$link" 2>/dev/null || echo "claude-discord: could not symlink $link" >&2
 }
 
 # select_one <label> <default> <option>...: prints the chosen option's first
@@ -307,12 +256,31 @@ install_plugin() {  # uses $scope $method $pdir $gdir
     { echo "claude-discord: could not install the shim from $target" >&2; return 1; }
   touch "$HOME/.claude-discord/records/installs"
   grep -qxF "$target" "$HOME/.claude-discord/records/installs" || printf '%s\n' "$target" >> "$HOME/.claude-discord/records/installs"
+  # The real directory behind a link, for what must outlive this project's link.
+  plugin_target=$(cd -P "$target" && pwd -P) || return 1
   # Keyed by the physical path, like refresh's check.
   if [ "$scope" = project ] && [ "$(jq -r --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted | if . == true then "yes" else "no" end' "$HOME/.claude.json" 2>/dev/null)" != yes ]; then
     echo "claude-discord: $PWD is not trusted in ~/.claude.json, so Claude Code will not load the plugin here." >&2
     read -rp "Mark this project trusted now? [y/N] " t || t=""
     case $t in y|Y) jq_edit "$HOME/.claude.json" --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted = true';; esac
   fi
+}
+
+# What install.sh used to put under ~/.claude-discord goes; scratch/, records/
+# and runtime/ stay, and so does ~/.claude-discord/source, the machine's one
+# clone. tools/thread keeps a compat link for one release, so a session
+# started by the old wrapper still finds the tool its prompt names; it points
+# at the real plugin ($self_root), not at one project's link. A symlink where
+# a directory used to be is removed as a link: it leads somewhere that is not
+# ours to empty.
+remove_old_install() {
+  local h=$helpers d
+  for d in hooks hooks/tools rules; do
+    [ ! -L "$h/$d" ] || rm -f "$h/$d"
+  done
+  rm -rf "$h/rules" "$h/hooks/turn" "$h/hooks/peers" "$h/hooks/lib" "$h/hooks/autoresearchclaw" "$h/hooks/tools"
+  rm -f "$h/discord-chunk.ts" "$h/discord-proxy.ts"
+  mkdir -p "$h/hooks/tools" && ln -sfn "$self_root/tools/thread" "$h/hooks/tools/thread"
 }
 
 if [ "${1:-}" = setup ]; then
@@ -435,9 +403,11 @@ if [ "${1:-}" = setup ]; then
   if [ "${3:-}" != --mode ]; then
     [ -n "$scope" ] || scope=$(select_one Scope project "project  this project only (.claude/skills/claude-discord)" "global  every project (~/.claude/skills/claude-discord)")
     install_plugin || exit $?
+    self_root=$plugin_target   # from here on, everything points at the real install
+    remove_old_install
   fi
   ensure_hooks_symlink
-  sync_mode_drops
+  remove_old_registration
   if [ "${3:-}" = --mode ]; then
     echo "claude-discord: $root/$name/mode set to $mode"
   else
@@ -1472,7 +1442,7 @@ prune_dead_sessions() {
 }
 
 ensure_hooks_symlink
-sync_mode_drops
+remove_old_registration
 prune_dead_sessions || :   # even its last line (a warning on a closed stderr) may not fail the start
 # worktree.bgIsolation "none" turns off Claude Code's background-isolation
 # guard for this session: measured on two machines, a session started with
