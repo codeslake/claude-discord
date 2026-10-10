@@ -809,8 +809,11 @@ cp "$HOME/.claude-discord/runtime/VERSION" "$HOME/rtv.before"; echo 99.0.0 > "$H
 echo stale > "$HOME/.claude-discord/runtime/discord-chunk.ts"; cp "$HOME/server.ts.pristine" "$PCACHE/0.0.5/server.ts"
 rc=0; out=$(bash "$S" patch 2>&1) || rc=$?
 [ "$rc" = 0 ] && [ "$(grep -c 'newer than this' <<<"$out")" = 1 ] && [ "$(cat "$HOME/.claude-discord/runtime/discord-chunk.ts")" = stale ] && cmp -s "$HOME/server.ts.pristine" "$PCACHE/0.0.5/server.ts" || { echo "FAIL: an older patch must leave a newer runtime and the cache alone and say so once (rc=$rc): $out"; exit 1; }
-cp "$HOME/rtv.before" "$HOME/.claude-discord/runtime/VERSION"; rm -f "$HOME/rtv.before"
+cp "$HOME/rtv.before" "$HOME/.claude-discord/runtime/VERSION"; mv "$HOME/rtv.before" "$HOME/rtv.ref"
 bash "$S" patch >/dev/null 2>&1 && cmp -s "$PC/runtime/discord-chunk.ts" "$HOME/.claude-discord/runtime/discord-chunk.ts" && grep -q 'ignoreEveryone: true' "$PCACHE/0.0.5/server.ts" || { echo "FAIL: the same version must refill the runtime and patch again"; exit 1; }
+echo junk > "$HOME/.claude-discord/runtime/VERSION"; echo stale > "$HOME/.claude-discord/runtime/discord-chunk.ts"
+bash "$S" patch >/dev/null 2>&1 && cmp -s "$PC/runtime/discord-chunk.ts" "$HOME/.claude-discord/runtime/discord-chunk.ts" && cmp -s "$HOME/rtv.ref" "$HOME/.claude-discord/runtime/VERSION" || { echo "FAIL: a garbled runtime/VERSION must not lock the runtime: it is refilled and restamped"; exit 1; }
+rm -f "$HOME/rtv.ref"
 # A dir the previous release patched imports the chunk helper and preloads the proxy from the old compat paths; patch re-points both to runtime/, once.
 perl -pi -e 's{import\("[^"]*"\)}{import("$ENV{HOME}/.claude-discord/discord-chunk.ts")}' "$PCACHE/0.0.6/server.ts"
 printf 'preload = ["%s/.claude-discord/discord-proxy.ts"]\n' "$HOME" > "$PCACHE/0.0.6/bunfig.toml"

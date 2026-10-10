@@ -231,14 +231,18 @@ src_link() { [ -L "$1" ] && [ "$1" -ef "$HOME/.claude-discord/source" ]; }
 # clones are per project. setup and update copy them from the real clone.
 # runtime/VERSION names the plugin version that wrote it. Two installs of
 # different versions share runtime/ and the patched cache, so an older one
-# leaves a newer copy alone (runtime_newer, said once by patch_official)
-# instead of flipping it back at every start.
+# leaves a newer copy alone (runtime_newer, said once per run; patch_official
+# then leaves the cache alone too) instead of flipping it back at every start.
+# Only a readable, strictly newer stamp wins: a garbled one is overwritten.
 sync_runtime() {
   local rt=$HOME/.claude-discord/runtime f mine have=""
   mine=$(plugin_version "$self_root")
   [ -d "$rt" ] || mkdir -p "$rt" || return 1
   [ ! -f "$rt/VERSION" ] || IFS= read -r have < "$rt/VERSION" || :
-  if [ -n "$have" ] && ! ver_ge "$mine" "$have"; then runtime_newer=$have; return 0; fi
+  if [ -n "$have" ] && [ "$have" != "$mine" ] && ver_ge "$have" "$mine"; then
+    [ -n "${runtime_newer:-}" ] || echo "claude-discord: ~/.claude-discord/runtime is from $have, newer than this $mine; the newer code owns it and patches the plugin cache, both left as they are" >&2
+    runtime_newer=$have; return 0
+  fi
   for f in discord-chunk.ts discord-proxy.ts; do
     cmp -s "$self_root/runtime/$f" "$rt/$f" || cp "$self_root/runtime/$f" "$rt/$f" || return 1
   done
@@ -1378,10 +1382,7 @@ patch_official() {
   local rt=$HOME/.claude-discord/runtime d f rc=0 changed=""
   mark() { case " $changed " in *" $1 "*) ;; *) changed="$changed $1";; esac; }   # list a file once
   sync_runtime || return 1
-  if [ -n "${runtime_newer:-}" ]; then
-    echo "claude-discord: patch: ~/.claude-discord/runtime is from $runtime_newer, newer than this $(plugin_version "$self_root"); the newer code patches the plugin cache, left as it is" >&2
-    return 0
-  fi
+  [ -z "${runtime_newer:-}" ] || return 0   # a newer version's runtime: that code patches the cache
   for d in "$HOME"/.claude/plugins/cache/claude-plugins-official/discord/*/; do
     d=${d%/}; f=$d/server.ts   # no trailing slash, so messages name the file cleanly
     [ -f "$f" ] || continue

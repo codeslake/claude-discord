@@ -53,7 +53,7 @@ EOF2
 # Context instead of a project rules file, so the project's other sessions do
 # not read a bot's rules. The patch run covers a start that did not go through
 # the wrapper (a daemon respawn, an auto-update since the last start).
-# A failure is kept in the bot's health.log (the line health reads), not dropped:
+# A failure is kept in the bot's health.log (beside health's own lines), not dropped:
 # a pattern the official plugin moved would otherwise go unseen. Not run where
 # there is no wrapper (the compat copy an old settings entry runs from).
 if [ -x "$plugin_root/bin/claude-discord" ] && ! pout=$("$plugin_root/bin/claude-discord" patch 2>&1); then
