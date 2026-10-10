@@ -58,8 +58,9 @@ EOF2
 # there is no wrapper (the compat copy an old settings entry runs from), and
 # only where a new server can start (startup, resume): a compaction or /clear
 # keeps the running channel server, so a patch there changes nothing it uses.
+# --compat: the same run rebuilds ~/.claude-discord/compat when it is stale.
 if case $source in startup|resume) true;; *) false;; esac &&
-   [ -x "$plugin_root/bin/claude-discord" ] && ! pout=$("$plugin_root/bin/claude-discord" patch 2>&1); then
+   [ -x "$plugin_root/bin/claude-discord" ] && ! pout=$("$plugin_root/bin/claude-discord" patch --compat 2>&1); then
   printf '%s on-session-start: patch failed: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${pout//$'\n'/ | }" >> "$DISCORD_STATE_DIR/health.log" 2>/dev/null || :
 fi
 tools=$plugin_root/tools

@@ -211,6 +211,7 @@ select_one() (
 # that exact path; setup asks before writing it.
 has_path() { [ -e "$1" ] || [ -L "$1" ]; }   # a dangling link counts
 plugin_version() { jq -r '.version // "?"' "$1/.claude-plugin/plugin.json" 2>/dev/null || echo "?"; }
+head_sha() { git -C "$1" rev-parse HEAD 2>/dev/null || :; }   # compat/VERSION's stamp (empty with no git)
 # ver_ge <a> <b>: a >= b for x.y.z versions; anything else is not.
 ver_ge() {
   local a1 a2 a3 b1 b2 b3
@@ -357,19 +358,39 @@ remove_old_install() {
 # sync_compat <plugin>: rebuilds ~/.claude-discord/compat from that plugin when
 # it differs (a write through a link included), in a new directory swapped in by
 # rename, so a hook already running from the old copy keeps its open file.
+# compat/VERSION holds the plugin's HEAD sha (head_sha), written last.
 # rename(2) cannot replace a non-empty directory, hence two renames; a settings
 # hook started between them finds no file and its entry's -x test skips it.
+# The second is perl's rename(2), not mv: with several bots starting at once,
+# mv would move this copy INTO a compat/ another writer has just put in place;
+# rename(2) fails instead, and that writer's complete copy stays.
 sync_compat() {
   local c=$helpers/compat n=$helpers/compat.new.$$ t
   rm -rf "$n" && mkdir -p "$n/hooks" || return 1
   for t in turn peers lib autoresearchclaw; do cp -R "$1/hooks/$t" "$n/hooks/" || { rm -rf "$n"; return 1; }; done
-  cp -R "$1/tools" "$1/rules" "$n/" || { rm -rf "$n"; return 1; }
+  cp -R "$1/tools" "$1/rules" "$n/" && head_sha "$1" > "$n/VERSION" || { rm -rf "$n"; return 1; }
   # Same files and the same executables (diff -r ignores modes, and an old settings entry skips a hook that is not -x).
   if [ -d "$c" ] && [ ! -L "$c" ] && diff -r "$c" "$n" >/dev/null 2>&1 &&
      [ "$(cd "$c" && find . -type f -perm -100 | sort)" = "$(cd "$n" && find . -type f -perm -100 | sort)" ]; then rm -rf "$n"; return 0; fi
   rm -rf "$c.old.$$"
-  { ! has_path "$c" || mv "$c" "$c.old.$$"; } && mv "$n" "$c" || { rm -rf "$n"; return 1; }
+  { ! has_path "$c" || mv "$c" "$c.old.$$"; } && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$n" "$c" ||
+    { rm -rf "$n"; [ -d "$c" ] && rm -rf "$c.old.$$"; return; }   # another writer's copy in place is not a failure
   rm -rf "$c.old.$$"
+}
+# compat_if_stale: run at a bot's startup and resume (on-session-start runs
+# `patch --compat`). A compat/ whose VERSION is not this plugin's HEAD sha (a
+# `git pull` by hand in the source clone, a copy older than the stamp) or
+# that holds a file newer than its VERSION (the previous release's install.sh
+# writing through the links) is rebuilt; none at all is left to setup. Only by
+# the plugin compat/ is built from, the source clone when there is one (as in
+# remove_old_install): a pinned clone must not flip it to its own version.
+compat_if_stale() {
+  local c=$helpers/compat have=""
+  [ -d "$c" ] && [ ! -L "$c" ] || return 0
+  [ ! -d "$helpers/source/hooks" ] || [ "$helpers/source" -ef "$self_root" ] || return 0
+  IFS= read -r have < "$c/VERSION" 2>/dev/null || :
+  [ "$have" != "$(head_sha "$self_root")" ] || [ -n "$(find "$c" -type f -newer "$c/VERSION" 2>/dev/null)" ] || return 0
+  sync_compat "$self_root" && { touch "$c/VERSION" 2>/dev/null || :; }   # an identical rebuild is not redone at every start
 }
 # Run by update from the freshly pulled code (this process holds the old functions).
 if [ "${1:-}" = compat ]; then remove_old_install; exit $?; fi
@@ -1431,7 +1452,10 @@ patch_official() {
   [ -z "$changed" ] || echo "claude-discord: patched$changed"
   return "$rc"
 }
-if [ "${1:-}" = patch ]; then patch_official; exit $?; fi
+if [ "${1:-}" = patch ]; then
+  crc=0; [ "${2:-}" != --compat ] || compat_if_stale || crc=1
+  patch_official; exit "$crc"
+fi
 
 # self_root is already the real clone (a link resolved through readlink and pwd -P).
 if [ "${1:-}" = --version ]; then

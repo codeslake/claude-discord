@@ -45,12 +45,23 @@ resolve_channel() {
 # A bot is the session its state dir belongs to: a `claude -p` started from a
 # bot's shell inherits DISCORD_STATE_DIR, and in another project it is not that
 # bot (Claude Code gives every hook CLAUDE_PROJECT_DIR, measured on 2.1.296).
-# The bot's own project, or anywhere under it: a bot started with --worktree
-# runs with CLAUDE_PROJECT_DIR set to its worktree inside the project.
+# The bot's own project, or a git worktree of it: a bot started with --worktree
+# runs with CLAUDE_PROJECT_DIR set to that worktree. Any other directory, under
+# the project or not, is another session.
 bot_project=${DISCORD_STATE_DIR:-}; bot_project=${bot_project%/}; bot_project=${bot_project%/.claude/discord-agents/*}
+# in_bot_worktree: CLAUDE_PROJECT_DIR is a linked worktree of the bot project
+# (the first entry, the main worktree, is the project itself or a repo around
+# it). Run only when the paths differ, so the bot's own sessions fork nothing;
+# a git that fails (a $HOME project that is no repo) answers no.
+in_bot_worktree() {
+  local l main=1
+  while IFS= read -r l; do
+    case $l in "worktree "?*) [ -z "$main" ] && [ "${l#worktree }" -ef "$CLAUDE_PROJECT_DIR" ] && return 0; main="";; esac
+  done <<<"$(git -C "$bot_project" worktree list --porcelain 2>/dev/null)"
+  return 1
+}
 if [ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ] &&
-   { [ -z "${CLAUDE_PROJECT_DIR:-}" ] || [ "$DISCORD_STATE_DIR/.." -ef "$CLAUDE_PROJECT_DIR/.claude/discord-agents" ] ||
-     case $(cd -P "$CLAUDE_PROJECT_DIR" 2>/dev/null && pwd)/ in "$(cd -P "$bot_project" 2>/dev/null && pwd)"/?*) true;; *) false;; esac; }; then
+   { [ -z "${CLAUDE_PROJECT_DIR:-}" ] || [ "$DISCORD_STATE_DIR/.." -ef "$CLAUDE_PROJECT_DIR/.claude/discord-agents" ] || in_bot_worktree; }; then
   bot_name=${DISCORD_STATE_DIR%/}; bot_name=${bot_name##*/}
   IFS= read -r bot_mode 2>/dev/null < "$DISCORD_STATE_DIR/mode" || :
 fi

@@ -43,13 +43,14 @@ wait_for_file() {  # $1 = path; up to 2s in 0.02s steps, for an async write to l
 bash -n "$S"
 # macOS runs the wrapper under /bin/bash 3.2, which this Linux suite never does:
 # refuse the bash 4+ constructs that would only fail there, in everything a Mac runs. A code line that can
-# never run on macOS ends in the comment `# bash4-ok: <why>`; the word anywhere else exempts nothing, and
-# a comment line is never code. Constructs: ${x,,} ${x^^} (with a pattern too, and on $1 $@ $*),
-# mapfile/readarray/coproc, declare/local/typeset -A or -n, [[ -v, ${a[-1]}, ;& and ;;&, ${x@Q}-style
+# never run on macOS ends in the comment `# bash4-ok: <why>` (no quote in <why>: a marker with a quote after
+# it may sit inside a string); the word anywhere else exempts nothing, and a comment line is never code.
+# Constructs: ${x,,} ${x^^} (with a pattern too, on $1 $@ $*, and through ${!ref,,}), mapfile/readarray/coproc
+# (in $( ) and before a < too), declare/local/typeset -A or -n, [[ -v, ${a[-1]}, ;& and ;;&, ${x@Q}-style
 # transforms, wait -n, |& and &>>.
 bash4_lint() {
-  grep -nHE '\$\{([A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?|[0-9]+|[@*])(,,?|\^\^?)[^}]*\}|(^|[;&|[:space:]])(mapfile|readarray|coproc)[[:space:]]|(declare|local|typeset)[[:space:]]+-[a-zA-Z]*[An]|\[\[[[:space:]]+-v[[:space:]]|\$\{[A-Za-z_][A-Za-z_0-9]*\[-[0-9]|;;?&([^&]|$)|\$\{[^}]*@[A-Za-z]\}|(^|[;&|[:space:]])wait[[:space:]]+-n|\|&|&>>' "$@" |
-    grep -vE '^[^:]*:[0-9]+:[[:space:]]*#|^[^:]*:[0-9]+:[[:space:]]*[^#[:space:]].*[[:space:]]# bash4-ok: '
+  grep -nHE '\$\{!?([A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?|[0-9]+|[@*])(,,?|\^\^?)[^}]*\}|(^|[;&|(`[:space:]])(mapfile|readarray|coproc)([[:space:]<]|$)|(declare|local|typeset)[[:space:]]+-[a-zA-Z]*[An]|\[\[[[:space:]]+-v[[:space:]]|\$\{[A-Za-z_][A-Za-z_0-9]*\[-[0-9]|;;?&([^&]|$)|\$\{[^}]*@[A-Za-z]\}|(^|[;&|[:space:]])wait[[:space:]]+-n|\|&|&>>' "$@" |
+    grep -vE '^[^:]*:[0-9]+:[[:space:]]*#|^[^:]*:[0-9]+:[[:space:]]*[^#[:space:]].*[[:space:]]# bash4-ok: [^"'"'"'`]*$'
 }
 # The lint itself: every construct is caught, a trailing marker exempts its line, the bare word does not.
 LF=$(mktemp); trap 'rm -f "$LF"' EXIT
@@ -68,11 +69,15 @@ a=${x@Q}
 wait -n
 cmd |& cat
 cmd &>> log
+a=$(mapfile -t x < f)
+readarray<f
+a=${!ref,,}
+echo "x # bash4-ok: y" ${a,,}
 echo bash4-ok ${y,,}
 z=${x,,}   # bash4-ok: Linux-only path
 # a comment with ${x,,} and bash4-ok
 EOF
-[ "$(bash4_lint "$LF" | wc -l | tr -d ' ')" = 15 ] || { echo "FAIL: the bash 4 lint must flag each of the 15 code lines and exempt only the trailing marker: $(bash4_lint "$LF")"; exit 1; }
+[ "$(bash4_lint "$LF" | wc -l | tr -d ' ')" = 19 ] || { echo "FAIL: the bash 4 lint must flag each of the 19 code lines and exempt only the trailing marker: $(bash4_lint "$LF")"; exit 1; }
 rm -f "$LF"; trap - EXIT
 if bash4_lint "$S" "$D/shim/claude-discord" "$D"/hooks/*/* "$D"/tools/*; then
   echo "FAIL: bash 4+ construct in the wrapper, shim, hooks or tools (macOS /bin/bash is 3.2)"; exit 1
@@ -1274,12 +1279,26 @@ plugin_hook "$P2" gamma g3
 # A claude -p started from the bot's shell inherits DISCORD_STATE_DIR; in another project it is no bot.
 out=$(tagged g4 506 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$HOME" bash "$PC/hooks/turn/on-prompt")
 [ -z "$out" ] && [ ! -e "$GD/turns/g4" ] && [ ! -e "$GD/plugin-sessions/g4" ] || { echo "FAIL: a session in another project is not the bot: $out"; exit 1; }
-# A bot started with --worktree runs with CLAUDE_PROJECT_DIR at its worktree inside the project: still the bot.
-mkdir -p "$P2/.claude/worktrees/wt1"
-out=$(tagged g5 507 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2/.claude/worktrees/wt1" bash "$PC/hooks/turn/on-prompt")
-[ -n "$out" ] && [ -e "$GD/turns/g5" ] || { echo "FAIL: a bot session in its project's worktree is still the bot: $out"; exit 1; }
-rm -rf "$P2/.claude/worktrees" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"
-echo "ok: an old-path hook runs with no marker (no marker directory, or another session's) and exits 0 doing nothing in a marked session, whatever CLAUDE_PLUGIN_ROOT says; the plugin's hook still runs there and keeps its marker fresh; a new marker prunes month-old ones; a session in another project is no bot"
+# A bot started with --worktree runs with CLAUDE_PROJECT_DIR at a git worktree of its project: still the bot.
+# A plain directory under the project is not, nor anything under a $HOME bot's project that is no repo; git
+# runs only when CLAUDE_PROJECT_DIR is not the bot's project (a stub git logs each call).
+GL="$HOME/git.log"; mkdir -p "$HOME/gitshim"; : > "$GL"
+printf '#!/bin/sh\necho "$*" >> "%s"\nexec %s "$@"\n' "$GL" "$(command -v git)" > "$HOME/gitshim/git"; chmod +x "$HOME/gitshim/git"
+(cd "$P2" && git init -q . && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m e && git worktree add -q --detach "$P2/.claude/worktrees/wt1") && : > "$GL"
+mkdir -p "$P2/.claude/plain"
+gp() { tagged "$1" "$2" | PATH="$HOME/gitshim:$PATH" CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="${4:-$GD}" CLAUDE_PROJECT_DIR="$3" bash "$PC/hooks/turn/on-prompt"; }
+out=$(gp g6 509 "$P2")
+[ -n "$out" ] && [ ! -s "$GL" ] || { echo "FAIL: a session in the bot's own project is the bot and runs no git: $(cat "$GL")"; exit 1; }
+out=$(gp g5 507 "$P2/.claude/worktrees/wt1")
+[ -n "$out" ] && [ -e "$GD/turns/g5" ] && [ "$(wc -l < "$GL" | tr -d ' ')" = 1 ] || { echo "FAIL: a bot session in a git worktree of its project is still the bot, for one git call: $out $(cat "$GL")"; exit 1; }
+out=$(gp g7 510 "$P2/.claude/plain")
+[ -z "$out" ] && [ ! -e "$GD/turns/g7" ] || { echo "FAIL: a plain directory under the bot's project is not the bot: $out"; exit 1; }
+mkdir -p "$HOME/.claude/discord-agents/hw" "$HOME/hproj"
+out=$(gp g8 511 "$HOME/hproj" "$HOME/.claude/discord-agents/hw")
+[ -z "$out" ] && [ ! -e "$HOME/.claude/discord-agents/hw/turns/g8" ] || { echo "FAIL: a \$HOME bot (no repo) is not the session of another project under \$HOME: $out"; exit 1; }
+git -C "$P2" worktree remove --force "$P2/.claude/worktrees/wt1"
+rm -rf "$P2/.git" "$P2/.claude/plain" "$P2/.claude/worktrees" "$HOME/.claude/discord-agents/hw" "$HOME/hproj" "$HOME/gitshim" "$GL" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"; rmdir "$HOME/.claude/discord-agents" 2>/dev/null || :
+echo "ok: an old-path hook runs with no marker (no marker directory, or another session's) and exits 0 doing nothing in a marked session, whatever CLAUDE_PLUGIN_ROOT says; the plugin's hook still runs there and keeps its marker fresh; a new marker prunes month-old ones; a session in another project, or in a plain directory under the bot's, is no bot, one in a git worktree of its project is (git runs only then)"
 
 # h7. one migration per session however many of its hooks start at once (noclobber on the marker). A slow jq
 # (0.3 s) keeps the first migration running while the others pass the marker check, so each of them would
@@ -2912,6 +2931,31 @@ rm -rf "$OH/hooks"; ln -s "$HOME/old-target/hooks" "$OH/hooks"; ln -s "$HOME/old
 rm -rf "$OP" "$UP" "$HOME/old-target"
 echo "ok: setup on an old install replaces the old hook, tool and runtime copies with links into the real plugin (an unmigrated project's hooks still resolve), removes the old rule copies (the project's rule file is the plugin's to remove), keeps scratch, runtime and the source clone, removes a symlinked hooks or rules as a link without touching its target, and an old install.sh writing through the links changes the compat copy, never the source clone"
 
+# compat/VERSION: a bot's startup (on-session-start runs patch --compat) rebuilds a compat/ whose stamp is not the
+# plugin's HEAD sha (a git pull by hand in the source clone) or that holds a file newer than the stamp (an old
+# install.sh writing through a link); a compaction does not; a plugin that is not the source clone never does; bots
+# starting together leave one complete copy and no temp dir.
+CB="$HOME/cbproj/.claude/discord-agents/cb"; mkdir -p "$CB"
+cbs() { printf '{"session_id":"%s","source":"%s"}' "$1" "$2" | CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$HOME/cbproj" DISCORD_STATE_DIR="$CB" bash "$PC/hooks/turn/on-session-start" >/dev/null; }
+[ "$(cat "$OH/compat/VERSION")" = "$(git -C "$PC" rev-parse HEAD)" ] || { echo "FAIL: setup must stamp compat/VERSION with the source's HEAD sha: $(cat "$OH/compat/VERSION")"; exit 1; }
+git -C "$SRC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m pulled-by-hand && git -C "$PC" pull -q --ff-only
+: > "$OH/compat/stale"; touch -d '1 hour ago' "$OH/compat/stale"
+cbs cb1 compact
+[ -e "$OH/compat/stale" ] || { echo "FAIL: a compaction must not rebuild compat/"; exit 1; }
+bash "$D/bin/claude-discord" patch --compat >/dev/null 2>&1 || :
+[ -e "$OH/compat/stale" ] || { echo "FAIL: a plugin other than the source clone must not rebuild compat/"; exit 1; }
+cbs cb1 startup
+[ ! -e "$OH/compat/stale" ] && [ "$(cat "$OH/compat/VERSION")" = "$(git -C "$PC" rev-parse HEAD)" ] || { echo "FAIL: a startup must rebuild a compat/ stamped by another commit: $(cat "$OH/compat/VERSION")"; exit 1; }
+touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
+cbs cb2 resume
+cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" || { echo "FAIL: a resume must rebuild a compat/ written through after its stamp"; exit 1; }
+touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
+for _ in 1 2 3 4 5 6; do bash "$S" patch --compat >/dev/null 2>&1 & done; wait
+cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* "$OH"/compat/compat.* 2>/dev/null)" ] ||
+  { echo "FAIL: six parallel refreshes must leave one complete compat/ and no temp dir: $(ls -d "$OH"/compat* "$OH"/compat/compat.* 2>&1)"; exit 1; }
+rm -rf "$HOME/cbproj"
+echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, and parallel refreshes leave one complete copy"
+
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.
 P5="$HOME/project5"; mkdir -p "$P5"; cd "$P5"
@@ -3074,7 +3118,7 @@ grep -qE '^claude-discord [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]{7,}\)$' <<<"$v" && [
 # The upstream moves: a new commit in the stand-in repo, with a new plugin version.
 # The pulled commit also changes what the patch verb prints, so the test can tell the pulled patch code from the code update was started with.
 jq '.version = "9.9.9"' "$SRC/.claude-plugin/plugin.json" > "$SRC/p.json" && mv "$SRC/p.json" "$SRC/.claude-plugin/plugin.json" &&
-  sed -i 's/^if \[ "\${1:-}" = patch \]; then patch_official;/if [ "${1:-}" = patch ]; then echo PATCH-CODE-V2 >\&2; patch_official;/' "$SRC/bin/claude-discord" && grep -q PATCH-CODE-V2 "$SRC/bin/claude-discord" &&
+  sed -i 's/^if \[ "\${1:-}" = patch \]; then$/& echo PATCH-CODE-V2 >\&2/' "$SRC/bin/claude-discord" && grep -q PATCH-CODE-V2 "$SRC/bin/claude-discord" &&
   git -C "$SRC" -c user.email=t@t -c user.name=t commit -qam bump || { echo "FAIL: could not bump the stand-in repo"; exit 1; }
 rm -rf "$HOME/.claude-discord/runtime" "$HOME/.claude-discord/compat"; echo stale > "$HOME/.local/bin/claude-discord"
 out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || { echo "FAIL: update failed: $out"; exit 1; }

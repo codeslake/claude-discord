@@ -180,7 +180,13 @@ tools links lead into `~/.claude-discord/compat/`, a plain copy (no git) of the
 plugin's hooks, tools and rules that `setup`, `install` and `update` refresh, so
 the previous release's `install.sh` writing through them never reaches a git
 clone; the `.ts` links lead into the runtime copy. `~/.claude-discord/rules/` is
-removed.
+removed. `compat/VERSION` holds the HEAD sha of the clone it was copied from;
+a bot's startup or resume (its `on-session-start` hook, run from the source
+clone when the machine has one) rebuilds `compat/` when that sha is not its
+own (a `git pull` by hand in `~/.claude-discord/source`) or a
+file there is newer than `VERSION` (`install.sh` wrote through a link). The new
+copy is built beside it and renamed into place, so bots starting together never
+see a half-written one.
 
 Rollback: remove the plugin installs (or they keep loading next to the
 re-registered settings hooks) and the links above (`./install.sh` would write
@@ -477,7 +483,12 @@ Which plugin runs them:
 - Every script's first line exits 0 when `DISCORD_STATE_DIR` is unset (no
   fork, nothing sourced), and `edit-gate` also exits there for a bot that is
   not a dev-manager, so a session that is not a bot pays two execve and no fork per event.
-  A session inheriting `DISCORD_STATE_DIR` in another project is not the bot. The
+  A session inheriting `DISCORD_STATE_DIR` in another project is not the bot,
+  and neither is one in a subdirectory of the bot's project; one in a git
+  worktree of that project (a bot started with `--worktree`) is. Only then
+  does a hook run `git worktree list`: a session in the project itself forks
+  nothing for this, and a `git` that fails (a `$HOME` project that is no repo)
+  means not the bot. The
   four `turn/` hooks and `peers/thread-guard` are for every bot; `mention-guard`,
   `checkin` and `edit-gate` do nothing in a session whose bot is not a
   dev-manager, and also nothing without `peers.json`; `thread-guard` guards
@@ -496,7 +507,18 @@ Which plugin runs them:
   file stays, and a `hooks` key left empty is dropped. `.claude/discord-agents/hooks` in the project stays a symlink to the
   plugin's `hooks/` for this release (a peer's committed settings may still
   name it; the next release removes it). To switch the hooks off, uninstall the
-  plugin (delete its install path) or disable it in `/plugin`.
+  plugin (delete its install path) or disable it in `/plugin`, where it is
+  listed as `discord-agents`. In a session that already ran the plugin,
+  disabling it (or revoking the project's trust) leaves that session with no
+  claude-discord hooks at all: its `plugin-sessions/` marker makes the old
+  settings entries exit at once. A new session has no marker for its id and
+  runs the old entries while they remain. Enable the plugin again to give
+  the first session its hooks back.
+- A bot that is set up but has not run the plugin since (idle, so no
+  `plugin-sessions/` marker) keeps the project's old settings entries in
+  place: no migration removes them until every bot of the project has a
+  marker. That is harmless: in a session the plugin runs in, the gate makes
+  each of them exit at once.
 
 The identity/mention-rule context is long, so `on-prompt` injects it once per
 session (a `turns/<session_id>.primed` marker holding the bot's mode and
