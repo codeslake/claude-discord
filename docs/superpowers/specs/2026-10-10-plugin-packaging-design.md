@@ -286,7 +286,7 @@ the backend monitor every five minutes.
   refusal also names `claude stop <job id>`, after which `--resume` works.
 - The positional form `claude-discord RVP --bg ...` keeps working this release
   and prints one deprecation line naming the new form. Beside `--name` it is
-  refused (`claude-discord <bot> --name <other>`: a bare word naming a set-up
+  refused (`claude-discord <bot> --name <other>`: a first bare word naming a set-up
   bot), naming both forms, instead of starting `<other>` with `<bot>` as a
   prompt.
 - Subcommands keep the bot positional: `setup <bot>`, `refresh <bot>`,

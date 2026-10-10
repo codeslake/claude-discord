@@ -32,7 +32,7 @@ strip_old_hooks() {
   grep -qF /.claude/discord-agents/hooks/ "$f" 2>/dev/null || return 0   # nothing of ours: no jq forks
   while [ -L "$f" ] && [ "$n" -lt 40 ]; do   # the target, by hand: readlink -f is missing on older macOS
     l=$(readlink "$f") || return 1
-    case $l in /*) f=$l;; *) f=${f%/*}/$l;; esac
+    case $l in /*) f=$l;; *) case $f in */*) f=${f%/*}/$l;; *) f=$l;; esac;; esac   # relative to the link's dir (. for a bare name)
     n=$((n + 1))
   done
   t=$f.tmp.$$

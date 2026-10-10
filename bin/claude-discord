@@ -17,13 +17,14 @@
 #                                          --resume (its job record, or a value
 #                                          that names a bot), else the project's
 #                                          only bot. `claude-discord <name> ...`
-#                                          still works and warns.
+#                                          still works and warns; beside --name
+#                                          it is refused.
 #   claude-discord refresh <name> [--force] [claude args]
 #                                        replace the running session with a fresh
 #                                        one that starts from its handoff
 #   claude-discord install [--scope project|global] [--method link|clone]
 #                                        the plugin, the shim, runtime/ and compat/ for this
-#                                        project (or globally), asking nothing about a bot;
+#                                        project (or globally); reads no stdin at all;
 #                                        safe to re-run (the bootstrap's command)
 #   claude-discord update [--all]        git pull --ff-only the clone this runs from (--all:
 #                                        every recorded install, each real clone once; a
@@ -1485,7 +1486,7 @@ if [ "${1:-}" = update ]; then
   exit "$rc"
 fi
 
-args=() name="" skip=0 want_name=0 named=0 positional=0 has_name=0
+args=() name="" skip=0 want_name=0 named=0 positional=0 has_name=0 bare=0
 # With a --name anywhere, a bare word is an argument for claude, not the bot
 # (`-p hello --name beta` keeps `hello`).
 for a in "$@"; do case $a in -n|--name|--name=*) has_name=1;; esac; done
@@ -1499,8 +1500,10 @@ for a in "$@"; do
     -*) args+=("$a"); takes_value "$a" && skip=1 || :;;
     *)  if [ "$has_name" = 0 ] && [ -z "$name" ]; then name=$a; positional=1
         else
-          # A set-up bot's name as a bare word beside --name is the old positional form mixed with the new one.
-          case $a in */*|.|..) ;; *) [ ! -f "$root/$a/.env" ] || { echo "claude-discord: '$a' and --name both name a bot; use 'claude-discord --name <bot> ...' (the positional 'claude-discord <bot> ...' is the old form), never both" >&2; exit 2; };; esac
+          # A set-up bot's name as the first bare word (the one the positional form takes) beside --name is
+          # the old form mixed with the new one; a later bare word is claude's.
+          bare=$((bare + 1))
+          case $a in */*|.|..) ;; *) [ "$bare" != 1 ] || [ ! -f "$root/$a/.env" ] || { echo "claude-discord: '$a' and --name both name a bot; use 'claude-discord --name <bot> ...' (the positional 'claude-discord <bot> ...' is the old form), never both" >&2; exit 2; };; esac
           args+=("$a")
         fi;;
   esac

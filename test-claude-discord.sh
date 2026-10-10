@@ -1072,6 +1072,8 @@ grep -q -- '--name needs a bot name' <<<"$out" || { echo "FAIL: --name '': wrong
 printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"
 rc=0; out=$(bash "$S" alpha --name beta 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -qF "'alpha' and --name both name a bot" <<<"$out" && ! grep -q 'PLAIN\|LAUNCHER' <<<"$out" || { echo "FAIL: a positional bot beside --name must be refused naming both forms (rc=$rc): $out"; exit 1; }
+rc=0; out=$(bash "$S" --bg alpha --name beta 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -qF "'alpha' and --name both name a bot" <<<"$out" || { echo "FAIL: '--bg alpha --name beta' is the positional form too and must be refused (rc=$rc): $out"; exit 1; }
 out=$(bash "$S" -p hello --name beta 2>&1)
 grep -q -- '-n beta' <<<"$out" && grep -q -- ' -p hello' <<<"$out" || { echo "FAIL: '-p hello --name beta' must start beta and keep hello: $out"; exit 1; }
 
@@ -1090,7 +1092,7 @@ out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume dead 2>&1 || :)
 grep -q -- '-n dead' <<<"$out" && ! grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: --resume dead with a bot dead must go to the bot-name rule: $out"; exit 1; }
 rm -rf "$R/dead" "$JR"
 printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"
-echo "ok: --name/-n/--name= name the bot silently, the positional form warns, setup stays quiet, an empty --name is refused, a bare word beside --name goes to claude unless it names a set-up bot (refused: both forms); --resume (also -r, -r=) finds the bot from its job record (8+ hex, ambiguity refused) or by a bot's name; a live session is refused whatever its state short of stopped, however it is matched, without consuming the handoff, and a failing or non-array listing is not"
+echo "ok: --name/-n/--name= name the bot silently, the positional form warns, setup stays quiet, an empty --name is refused, a bare word beside --name goes to claude unless it is the first bare word and names a set-up bot (refused: both forms); --resume (also -r, -r=) finds the bot from its job record (8+ hex, ambiguity refused) or by a bot's name; a live session is refused whatever its state short of stopped, however it is matched, without consuming the handoff, and a failing or non-array listing is not"
 
 mkdir -p "$HOME/nobin"
 cp "$HOME/bin/claude-launcher" "$HOME/nobin/claude-launcher"
@@ -1221,6 +1223,10 @@ i0=$(ls -i "$HOME/dotrepo/settings.json" | awk '{print $1}')
 cmd=${err##*remove them by hand: }; eval "$cmd"
 ! grep -q '/.claude/discord-agents/hooks/' "$HOME/dotrepo/settings.json" "$HOME/.claude/settings.json" && [ -L "$P2/.claude/settings.json" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] || { echo "FAIL: the printed command must remove the entries, through the symlink: $(cat "$HOME/dotrepo/settings.json")"; exit 1; }
 [ "$(ls -i "$HOME/dotrepo/settings.json" | awk '{print $1}')" != "$i0" ] || { echo "FAIL: by hand, a symlink's target must be replaced by a rename, not written in place"; exit 1; }
+# By hand from the link's own directory: a bare name with a relative target resolves from there.
+echo '{}' > "$HOME/dotrepo/settings.json"; plant_old "$HOME/dotrepo/settings.json"; ln -s dotrepo/settings.json "$HOME/rel.json"
+(cd "$HOME" && bash "$PC/hooks/lib/old-hooks.sh" rel.json) && [ -L "$HOME/rel.json" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] || { echo "FAIL: by hand, a bare-name link with a relative target must edit that target"; exit 1; }
+rm -f "$HOME/rel.json"
 rm -f "$P2/.claude/settings.json" "$HOME/.claude/settings.json" "$P2/dot.before" "$P2/global.before"; rm -rf "$HOME/dotrepo"
 echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"
 echo "ok: a first run never edits a symlinked settings.json, the user-global one (a bot in \$HOME included) or anything under a symlinked .claude; setup names them, warns they still serve unmigrated bots, and its command renames a new target in under the link"
