@@ -61,10 +61,10 @@ The install path stays `.claude/skills/claude-discord` and the CLI stays
 
 ## Install scopes
 
-`setup` and `install` ask two questions once per project (`--scope project|global` and
-`--method link|clone` for scripts; owner decision 2026-10-10), and `setup` asks
-them, installs, and only then asks the bot questions (R17), so a failed clone
-writes no bot file:
+`setup` asks two questions once per project (`--scope project|global` and
+`--method link|clone` for scripts; owner decision 2026-10-10), installs, and
+only then asks the bot questions (R17), so a failed clone writes no bot file
+(`install` asks neither, see below):
 
 - **scope**: **project** (default, Enter) puts the plugin at
   `<project>/.claude/skills/claude-discord`; **global** at
@@ -87,8 +87,11 @@ writes anything.
 
 `claude-discord install [--scope project|global] [--method link|clone]` does
 the install part alone: the plugin, the shim, `runtime/`, the compat copy and
-the install record, asking nothing about a bot. It is safe to re-run, and it
-is the bootstrap's command.
+the install record. It reads no stdin at all, so a bootstrap script's stdin is
+left alone: an install already there decides the scope, else project; the
+method is link unless `--method` says otherwise; an untrusted project gets a
+one-line hint (accept the trust dialog, or answer y in `setup`), never a
+question. It is safe to re-run, and it is the bootstrap's command.
 
 Every setup prompt's Enter keeps the bot's current value (the token, the
 mention policy read from its `access.json`, the mode, the peers list). Stdin
@@ -97,15 +100,20 @@ which prompt went unanswered and exits 2; the mode and peers prompts take their
 default.
 
 A plugin present in both places loads once, the global copy winning, and the
-project copy reports "shadowed" (measured). `setup` therefore refuses to
-install a project copy when a global one exists, and the reverse, naming the
-other path. Re-running `setup` is idempotent: an existing link or clone is
-kept as it is.
+project copy reports "shadowed" (measured). Two links to the source clone are
+the same code, so both scopes may hold an install when both are links to
+`~/.claude-discord/source` (a new one beside an existing link is made a link).
+When a clone is involved on either side, `setup` and `install` refuse before
+writing anything, naming the other path. A bot in `$HOME` (`pwd -P` equals
+`cd -P $HOME`) has `~/.claude` as its project `.claude`, so its install is the
+global one, and setup says so. Re-running `setup` is idempotent: an existing
+link or clone is kept as it is.
 
 Project scope loads only when `~/.claude.json` has
 `projects[<path>].hasTrustDialogAccepted = true` for that exact path (a
 trusted parent is not enough; measured). `setup` checks it and, when it is
 missing, says so and offers to write it; it never writes it silently.
+`install` only prints the hint.
 
 ## The launcher
 
@@ -135,6 +143,12 @@ from the project directory, then `claude-discord setup <bot>` per bot.
 The first clone is the machine's source clone, so nothing is removed
 afterwards: `install` links to it (method link) or clones from the repo URL
 (method clone), and installs the shim.
+
+Every clone and pull runs with `GIT_TERMINAL_PROMPT=0` (a script never hangs
+on a credential prompt) under `timeout 120` where `timeout` exists. They use
+the ambient git config and environment; a proxy is set per clone, e.g.
+`git -C ~/.claude-discord/source config http.proxy <url>` (a machine where a
+direct path is forbidden, such as lmd79).
 
 ## Update
 
@@ -223,7 +237,12 @@ the copies would silently disable all of them, so for this release:
 The four patches (bot authors reach the allowFrom gate, `@everyone` ignored,
 fence-safe chunking, the proxy preload in `bunfig.toml`) move out of the start
 path into `claude-discord patch`, and a fifth joins them: the official
-plugin's `.mcp.json` gets `"env": {"DISCORD_STATE_DIR": "${DISCORD_STATE_DIR}"}`.
+plugin's `.mcp.json` gets `"env": {"CLAUDE_DISCORD_BOT": "${DISCORD_STATE_DIR:-}"}`
+(R19). Our own key, not the server's `DISCORD_STATE_DIR`: unset, a plain
+`${DISCORD_STATE_DIR}` stays a literal string and masks the server's default
+state dir for a user of the official plugin without claude-discord, while
+`${VAR:-}` expands to an empty string (measured, 2.1.296). An earlier
+release's `"DISCORD_STATE_DIR": "${DISCORD_STATE_DIR}"` line is removed.
 Claude Code's 15-minute MCP failure cache keys on the server config hashed
 after `${VAR}` expansion (measured), and the official config carries no env,
 so today one bot's failed start skips the channel for every bot started on
@@ -240,10 +259,15 @@ hashes differently. `patch` does all five:
   name when a pattern no longer matches;
 - imports the runtime files from a stable copy at `~/.claude-discord/runtime/`
   (copied by `setup`/`update` from the real clone), because the official
-  plugin's cache is machine-wide while clones are per project.
+  plugin's cache is machine-wide while clones are per project;
+- never downgrades: `runtime/VERSION` names the plugin version that wrote
+  the runtime copy, and a wrapper older than a readable stamp leaves the
+  runtime and the cache alone (one line saying so) instead of flipping them
+  back at every start of two installs of different versions.
 
 Callers: the wrapper's start (as today), the plugin's SessionStart hook (so a
-respawn or an auto-update before the start is covered), and, in the next spec,
+respawn or an auto-update before the start is covered; a failure there is
+appended to the bot's `health.log`, not discarded), and, in the next spec,
 the backend monitor every five minutes.
 
 ## CLI
@@ -257,9 +281,14 @@ the backend monitor every five minutes.
   `--name`.
 - If the session that `--resume` names is live, the start refuses and points
   at `claude-discord refresh <bot>`: a second copy would put two sessions on
-  one token, and the old row could be revived by a fleet claim.
+  one token, and the old row could be revived by a fleet claim. A dead
+  session the agent list still shows as done counts as live too, so the
+  refusal also names `claude stop <job id>`, after which `--resume` works.
 - The positional form `claude-discord RVP --bg ...` keeps working this release
-  and prints one deprecation line naming the new form.
+  and prints one deprecation line naming the new form. Beside `--name` it is
+  refused (`claude-discord <bot> --name <other>`: a bare word naming a set-up
+  bot), naming both forms, instead of starting `<other>` with `<bot>` as a
+  prompt.
 - Subcommands keep the bot positional: `setup <bot>`, `refresh <bot>`,
   `health`, `update`, `patch`. The owner's order is about the launch mirroring
   `claude`; `refresh` keeps refusing `--name`.
@@ -282,17 +311,27 @@ Per machine, by its operator (dkim's boxes: dong-dev-bot):
    and its UserPromptSubmit hook fires on the next prompt; a hook removed
    from `settings.local.json` stops on the very next prompt.
 3. The migration happens on the plugin's first hook run in that session, the
-   first moment the plugin is known to be loaded there. Every hook calls
-   `plugin_gate` (`hooks/lib/discord.sh`) first. A plugin hook
+   first moment the plugin is known to be loaded there. Every hook's first
+   line exits 0 without `DISCORD_STATE_DIR` (no fork, nothing sourced), and
+   `edit-gate`, which a global install runs on every edit on the machine,
+   also exits there for a bot that is not a dev-manager. A session is a bot
+   only in its own project: a `claude -p` that inherits `DISCORD_STATE_DIR`
+   in another project (`$DISCORD_STATE_DIR/..` is not
+   `$CLAUDE_PROJECT_DIR/.claude/discord-agents`) is not. Every hook then calls
+   `plugin_gate` (`hooks/lib/discord.sh`). A plugin hook
    (`CLAUDE_PLUGIN_ROOT` set and the script under it) in a bot session
    (`DISCORD_STATE_DIR` set) reads `session_id` from its stdin JSON (a bash
    match, no jq) and checks for `$DISCORD_STATE_DIR/plugin-sessions/<session_id>`
-   (one `[ -e ]`). On the first run it creates that marker (noclobber, so one
-   of an event's parallel hooks wins), prunes markers older than 30 days, and
+   (one `[ -e ]`; a hook that finds it touches it, so a live session's marker
+   stays fresh). On the first run it creates that marker (noclobber, so one
+   of an event's parallel hooks wins), prunes markers no hook touched for 30
+   days, and
    removes this project's own old entries: from
    `$CLAUDE_PROJECT_DIR/.claude/settings.json` and `settings.local.json` only
    when each is a regular file (`[ -f ] && [ ! -L ]`) and is not
-   `~/.claude/settings.json` (a bot in `$HOME`), and the
+   `~/.claude/settings.json` (a bot in `$HOME`), and only when the project's
+   `.claude` (and its `rules/`) resolves inside the project (a `.claude` that
+   is a link into a dotfiles tree is not the project's own), and the
    `.claude/rules/claude-discord-*.md` files (`hooks/lib/old-hooks.sh`). A
    regular file is replaced by renaming a mode-preserving copy, so Claude Code,
    which re-reads settings live, never reads it half written. A symlinked
@@ -311,8 +350,13 @@ plugin may not edit its file (a symlinked settings.json, the user-global
 settings.json, as on lmd79), the same happens once at the first event of every
 new session (a startup, a `/clear`, which brings a new session id). `setup`
 names such files on stderr with the command that removes the entries by hand,
-`bash <plugin>/hooks/lib/old-hooks.sh <file>...` (it writes through a symlink;
-the owner commits it where the file lives).
+`bash <plugin>/hooks/lib/old-hooks.sh <file>...` (for a symlink it renames a
+new copy over the resolved target, so the link stays; the owner commits it
+where the file lives). Those entries still serve every bot on the machine, and
+on every machine sharing that file, whose plugin is not loaded yet: removing
+them early silently takes ✅, mention-guard, edit-gate and thread-guard from
+those bots (dong #3). The hint says so: run it only once each of those bots has
+a `<bot dir>/plugin-sessions/` marker.
 
 The plugin's SessionStart hook does NOT run on a reload, only at the next real
 start, compact or clear. That is harmless here: the dev-manager rule text is

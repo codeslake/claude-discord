@@ -71,18 +71,20 @@ install, from the project directory:
 git clone https://github.com/codeslake/claude-discord ~/.claude-discord/source && ~/.claude-discord/source/bin/claude-discord install
 ```
 
-then `claude-discord setup <bot>` there for each bot. `install` asks nothing
-about a bot and is safe to re-run (a bootstrap script calls it); it installs or
+then `claude-discord setup <bot>` there for each bot. `install` reads no stdin
+at all and is safe to re-run (a bootstrap script calls it); it installs or
 refreshes the plugin, the shim, `~/.claude-discord/runtime/`, the compat copy
-(see Migrating) and the install record. `~/.claude-discord/source` is the
-machine's **source clone**; nothing is removed from it afterwards. `install`
-and `setup` ask two questions once per project, before any bot question, so a
+(see Migrating) and the install record. Without flags it takes the install
+already there, else scope project and method link, and in an untrusted
+project it prints a one-line hint instead of asking. `~/.claude-discord/source`
+is the machine's **source clone**; nothing is removed from it afterwards.
+`setup` asks two questions once per project, before any bot question, so a
 failed clone writes no bot file (Enter takes the default; `--scope` and
 `--method` answer them for a script):
 
 | Question | Choices |
 |---|---|
-| scope (`--scope project\|global`) | **project** (default): the plugin at `<project>/.claude/skills/claude-discord`, loaded only there. **global**: `~/.claude/skills/claude-discord`, loaded in every project. A plugin present at both scopes loads once (the global copy wins), so `setup` refuses to add one scope beside the other and names the existing path |
+| scope (`--scope project\|global`) | **project** (default): the plugin at `<project>/.claude/skills/claude-discord`, loaded only there. **global**: `~/.claude/skills/claude-discord`, loaded in every project. A plugin present at both scopes loads once (the global copy wins), so both scopes may hold an install only when both are links to the source clone (the same code); with a clone on either side `setup` and `install` refuse and name the existing path. A bot in `$HOME` gets the global install (its project `.claude` is `~/.claude`), and setup says so |
 | method (`--method link\|clone`) | **link** (default): that path is a symlink to the source clone, so one `claude-discord update` moves every bot on the machine. **clone**: its own git clone, so this install can pin a version (`git -C <path> checkout <tag>`) and `update` moves it separately |
 
 A project that already has an install at either scope uses it and asks
@@ -91,7 +93,7 @@ repository the project install is added to the repo's `info/exclude`, so it
 never shows in `git status`. Project scope loads only when
 `~/.claude.json` has `projects[<path>].hasTrustDialogAccepted = true` for that
 exact path: `setup` says so when it is missing and offers to write it (it never
-does silently).
+does silently); `install` only says so.
 
 `setup` also installs the launcher, a short shim at
 `~/.local/bin/claude-discord`. It finds the wrapper for the current directory:
@@ -130,6 +132,9 @@ through the self-reload skill. `~/.claude-discord/runtime/` holds the
 two runtime files the patched official plugin imports (`discord-chunk.ts`,
 `discord-proxy.ts`), copied there from the clone by `setup` and `update`, because
 the official plugin's cache is machine-wide while clones are per project.
+`runtime/VERSION` names the version that wrote them: an older wrapper (a
+pinned clone, say) leaves a newer runtime and the patched cache alone and says
+so, instead of flipping them back at its every start.
 
 ### Migrating from the previous release
 
@@ -160,8 +165,13 @@ A settings file the plugin never edits keeps its old entries: a symlinked
 `~/.claude/settings.json`. In a session the plugin runs in they exit at once,
 but the first event of every new session still runs them once beside the
 plugin's. `setup` names such a file with the command that removes the entries
-by hand (`bash <plugin>/hooks/lib/old-hooks.sh <file>...`, which writes through
-a symlink); commit the change where that file lives.
+by hand (`bash <plugin>/hooks/lib/old-hooks.sh <file>...`; for a symlink it
+renames a new copy over the target, so the link stays); commit the change
+where that file lives. **Those entries still serve every bot on this machine,
+and on every machine sharing that file (a dotfiles repo), whose plugin is not
+loaded yet:** removing them early silently takes ✅, mention-guard, edit-gate
+and thread-guard from those bots. Run the command only once each of them has a
+`<bot dir>/plugin-sessions/` marker.
 
 For this release `~/.claude-discord/hooks/{turn,peers,lib,autoresearchclaw}`,
 `hooks/tools/*` and the two `.ts` files stay as links, so a project not yet
@@ -208,9 +218,13 @@ claude-discord update [--all]         # see Install
 The launch mirrors `claude`: `--name`/`-n` IS the bot and the session name, and
 every other argument passes through to `claude` unchanged. `--resume <id|name>`
 finds the bot from that session's job record (else a value naming a bot, else
-the project's only bot, else it asks for `--name`) and refuses a live session.
-The positional form `claude-discord alpha ...` still works this release and
-prints one deprecation line. The subcommands (`setup`, `refresh`, `health`,
+the project's only bot, else it asks for `--name`) and refuses a live session,
+naming both ways out: `claude-discord refresh <bot>` to replace it, or, when
+that session is dead but `claude agents` still lists it as done,
+`claude stop <job id>` (the id the refusal prints) and then the same
+`--resume`. The positional form `claude-discord alpha ...` still works this
+release and prints one deprecation line; beside `--name`
+(`claude-discord alpha --name beta`) it is refused, naming both forms. The subcommands (`setup`, `refresh`, `health`,
 `update`, `patch`) keep the bot positional.
 
 The setup prompts (piped answers are one line per prompt; stdin ending before
@@ -332,7 +346,8 @@ in the channel steers a run, and gates are answered in the run's terminal.
   compact and clear. A `.claude/rules/` file would be loaded by every session
   under the project, AutoResearchClaw's own backend `claude` calls included,
   and they are not the bot. A `claude` started from the bot session's own
-  Bash inherits its `DISCORD_STATE_DIR` and gets the context too.
+  Bash inherits its `DISCORD_STATE_DIR` and, in the same project, gets the
+  context too; in another project it is not the bot.
 
 ## Resuming by name
 
@@ -459,8 +474,10 @@ Which plugin runs them:
   `~/.claude/skills/claude-discord` (scope global); see Install. A newly
   installed plugin loads in a running session on `/reload-plugins`, and its
   `UserPromptSubmit` hook fires from the next prompt.
-- Every script exits 0 at once when `DISCORD_STATE_DIR` is unset or its mode
-  does not match, so a session that is not a bot pays one exec per event. The
+- Every script's first line exits 0 when `DISCORD_STATE_DIR` is unset (no
+  fork, nothing sourced), and `edit-gate` also exits there for a bot that is
+  not a dev-manager, so a session that is not a bot pays one exec per event.
+  A session inheriting `DISCORD_STATE_DIR` in another project is not the bot. The
   four `turn/` hooks and `peers/thread-guard` are for every bot; `mention-guard`,
   `checkin` and `edit-gate` do nothing in a session whose bot is not a
   dev-manager, and also nothing without `peers.json`; `thread-guard` guards
@@ -742,6 +759,13 @@ everywhere; the wrapper only wires it in (via the plugin's `bunfig.toml`) when
 the file exists. Your proxy must forward `discord.com` and `discord.gg`; the
 CDN domains carry real certificates and can stay direct.
 
+`setup`, `install` and `update` clone and pull with the ambient git config
+and environment, with `GIT_TERMINAL_PROMPT=0` (no credential prompt to hang a
+script) and under `timeout 120` where it exists. Where git must go through a
+proxy, set it per clone, e.g.
+`git -C ~/.claude-discord/source config http.proxy http://proxy:8080` (a
+first clone takes `git -c http.proxy=<url> clone ...`).
+
 ## If your `claude` is wrapped
 
 `claude-discord` is bash: it runs the `claude` binary on `PATH`, never a shell
@@ -767,7 +791,7 @@ rest of Claude Code.
 | Every bot in the channel answers one message | someone wrote `@everyone`/`@here` with a wrapper older than 2026-09-18, or the mention policy is off on all of them |
 | `no bot '<name>' under ./.claude/discord-agents` | no setup in THIS directory; `cd` to the project you set it up in, or run setup here |
 | `bot name must be a plain directory name` | the name contained `/`, or was `.`/`..` |
-| `bot name 'hooks'` (or `'checkin'`) `is reserved` | those names are claude-discord's own directories under `.claude/discord-agents/`; pick another |
+| `bot name 'hooks'` (or `'checkin'`) `is reserved` | those names are claude-discord's own directories under `.claude/discord-agents/`; pick another. A subcommand's name (`setup`, `install`, `update`, `patch`, `compat`, `refresh`, `health`) is reserved too |
 | Two bots answer each other forever | the mention policy is off on both; turn it back on for at least one |
 | `Over 500 characters in the channel: start a thread ...` | the bot tried to put a long answer in the channel; `thread start "[<area>] <short title>"`, then post it inside the thread |
 | `A mirror line says which way it went ...` | a line opens with `->` or `<-`; write `[sent to name] ...` or `[received from name] ...` |
