@@ -1155,6 +1155,14 @@ for f in settings.json settings.local.json; do
   [ "$(jq -c . "$P2/.claude/$f")" = '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' ] || { echo "FAIL: $f must keep the project's own key and hook and none of ours: $(cat "$P2/.claude/$f")"; exit 1; }
 done
 [ "$(cat "$P2/.claude/rules/other.md")" = mine ] || { echo "FAIL: a foreign rule file must survive"; exit 1; }
+# Two bots in one project: the first to load the plugin leaves the project's entries for the other.
+plant_old "$P2/.claude/settings.local.json"; cp "$P2/.claude/settings.local.json" "$P2/sl.two"
+mkdir -p "$P2/.claude/discord-agents/delta"; : > "$P2/.claude/discord-agents/delta/.env"
+plugin_hook "$P2" gamma c8
+cmp -s "$P2/.claude/settings.local.json" "$P2/sl.two" || { echo "FAIL: while another bot in the project has no plugin marker, its old entries must stay"; exit 1; }
+plugin_hook "$P2" delta d1
+! grep -q '/.claude/discord-agents/hooks/' "$P2/.claude/settings.local.json" || { echo "FAIL: once every bot in the project ran the plugin, the old entries go"; exit 1; }
+rm -rf "$P2/.claude/discord-agents/delta" "$P2/sl.two"
 # Once per session: the same session's next run removes nothing, even what came back.
 plant_old "$P2/.claude/settings.local.json"; cp "$P2/.claude/settings.local.json" "$P2/sl.before"
 plugin_hook "$P2" gamma c1
