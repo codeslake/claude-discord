@@ -1164,7 +1164,7 @@ if [ "${1:-}" = refresh ]; then
   # whatever handoff.prev.md an EARLIER refresh left behind, handing the next
   # session a stale handoff -- worse than none.
   had_handoff=no; [ ! -s "$dir/handoff.md" ] || had_handoff=yes
-  "$self" --bg "$name" ${fresh[@]+"${fresh[@]}"} ${kickoff[@]+"${kickoff[@]}"} && exit 0
+  "$self" --bg --name "$name" ${fresh[@]+"${fresh[@]}"} ${kickoff[@]+"${kickoff[@]}"} && exit 0
   rc=$?
   if [ "$had_handoff" = yes ] && [ ! -s "$dir/handoff.md" ] && [ -s "$dir/handoff.prev.md" ]; then
     mv "$dir/handoff.prev.md" "$dir/handoff.md" &&
@@ -1233,25 +1233,59 @@ patch_official() {
 }
 if [ "${1:-}" = patch ]; then patch_official; exit $?; fi
 
-args=() name="" skip=0
+args=() name="" skip=0 want_name=0 named=0 positional=0
 for a in "$@"; do
+  if [ "$want_name" = 1 ]; then name=$a; named=1; want_name=0; continue; fi
   if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) args+=("$a"); continue;; esac; fi   # a value never starts with "-" (see refresh)
   case $a in
-    # The wrapper names the session after the bot (-n below); a later --name
-    # wins and the bot then goes by another name (DY-DevBot's alphabot ran as
-    # researchbot, 2026-10-09).
-    -n|--name|--name=*) echo "claude-discord: the session is named after the bot; drop $a" >&2; exit 2;;
+    # --name/-n IS the bot name, and the session is named after it (-n below).
+    -n|--name) want_name=1;;
+    --name=*)  name=${a#--name=}; named=1;;
     -*) args+=("$a"); takes_value "$a" && skip=1 || :;;
-    *)  if [ -z "$name" ]; then name=$a; else args+=("$a"); fi;;
+    *)  if [ -z "$name" ]; then name=$a; positional=1; else args+=("$a"); fi;;
   esac
 done
+if [ "$want_name" = 1 ]; then echo "claude-discord: --name needs a bot name" >&2; exit 2; fi
+[ "$positional" = 1 ] && [ "$named" != 1 ] &&
+  echo "claude-discord: 'claude-discord $name ...' is deprecated; use 'claude-discord --name $name ...'" >&2
+
+# --resume <id|name> with no --name: the bot is the one whose job record carries
+# its DISCORD_STATE_DIR (every launch passes it in --settings; the daemon keeps
+# it), else the one the value itself names.
+rid=""
+for i in "${!args[@]}"; do
+  case ${args[i]} in
+    --resume|-r) rid=${args[i+1]:-};;
+    --resume=*)  rid=${args[i]#--resume=};;
+    -r=*)        rid=${args[i]#-r=};;
+  esac
+done
+if [ -z "$name" ] && [ -n "$rid" ]; then
+  cands=""
+  for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/jobs/*/state.json; do
+    jq -e --arg r "$rid" '((.sessionId // "") | startswith($r)) or ((.resumeSessionId // "") | startswith($r))' "$f" >/dev/null 2>&1 || continue
+    # The raw file, as refresh reads it: inside state.json the --settings value
+    # is a JSON string, so its quotes appear escaped as \".
+    for d in "$root"/*/; do
+      d=${d%/}
+      grep -qF -- "DISCORD_STATE_DIR\\\": \\\"$d\\\"" "$f" || continue
+      case " $cands " in *" ${d##*/} "*) ;; *) cands="$cands ${d##*/}";; esac
+    done
+  done
+  case $cands in
+    '') ;;
+    ' '*' '*) echo "claude-discord: --resume $rid matches sessions of several bots ($cands ); name the one with --name" >&2; exit 2;;
+    *) name=${cands# };;
+  esac
+  case $rid in */*) ;; *) [ -n "$name" ] || { [ -f "$root/$rid/.env" ] && name=$rid; } || :;; esac
+fi
 if [ -z "$name" ]; then
   bots=()
   for d in "$root"/*/; do [ -f "$d/.env" ] && bots+=("$(basename "$d")"); done
   case ${#bots[@]} in
     1) name=${bots[0]};;
     0) echo "claude-discord: no bot set up in $root; run 'claude-discord setup <name>' in this directory first" >&2; exit 1;;
-    *) echo "claude-discord: this directory has several bots (${bots[*]}); name the one to start" >&2; exit 2;;
+    *) echo "claude-discord: this directory has several bots (${bots[*]}); name the one to start with --name" >&2; exit 2;;
   esac
 fi
 case $name in
@@ -1383,6 +1417,15 @@ launcher=${CLAUDE_DISCORD_LAUNCHER:-${CLAUDE_CODE_PROCESS_WRAPPER:-}}
 [ -n "$launcher" ] || launcher=$(jq -r '.env.CLAUDE_CODE_PROCESS_WRAPPER // empty' "$HOME/.claude/settings.json" 2>/dev/null) || :
 run=("$bin")
 [ -n "$launcher" ] && run=("$launcher" "$bin")
+
+# A second copy of a live session would put two sessions on one token, and the
+# old row could be revived by a fleet claim: refresh replaces it instead. Fails
+# open: no listing (claude agents errors, or prints a non-array) starts as before.
+if [ -n "$resume_id" ] && agents=$("$bin" agents --json 2>/dev/null) &&
+   printf '%s' "$agents" | jq -e --arg s "$resume_id" 'type == "array" and any(.[]; (.sessionId // "") == $s and ((.state // "") | IN("stopped","done") | not))' >/dev/null 2>&1; then
+  echo "claude-discord: session $resume_id is running; use 'claude-discord refresh $name' to replace it" >&2
+  exit 2
+fi
 
 # Claude Code's daemon retires a background session after about an hour idle,
 # and nothing here ever removed the retired one: `refresh` stops a session but

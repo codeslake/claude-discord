@@ -76,11 +76,12 @@ Run everything from the project directory; that is where the state goes.
 cd ~/work/my-project
 claude-discord setup alpha            # channel ID, your user ID, allowed IDs, alpha's token, mention policy
 claude-discord setup beta             # only beta's token and mention policy: the IDs are shared
-claude-discord alpha                  # start the session; the bot is online while it runs
-claude-discord alpha --resume         # any claude argument passes through
-claude-discord --bg alpha             # the name may sit before the flags too
-claude-discord --bg --resume my-bot   # with one bot in the project, its name may be left out
-claude-discord alpha --resume my-bot  # a session NAME or a short id also works, see below
+claude-discord --name alpha           # start the session; the bot is online while it runs
+claude-discord --name alpha --resume  # any claude argument passes through
+claude-discord --bg --name alpha      # -n alpha and --name=alpha work too
+claude-discord --bg --resume 3bf66a89 # the bot comes from that session's job record, else from the one bot in the project
+claude-discord --name alpha --resume my-bot  # a session NAME or a short id also works, see below
+                                      # (the positional "claude-discord alpha" still works and warns; a live session is not resumed, use refresh)
 claude-discord setup alpha --reset    # forget alpha's token and policy AND the shared IDs; ask everything again
 claude-discord setup alpha --mode     # change only alpha's mode (and, for dev-manager, its peers); needs alpha already set up
 claude-discord refresh alpha          # replace the running session with a fresh one, from its handoff
@@ -400,7 +401,7 @@ broadcast in the channel does not wake every session.
 
 ## Background sessions
 
-`/bg` inside the session, or `claude-discord alpha --bg` from the start, moves
+`/bg` inside the session, or `claude-discord --name alpha --bg` from the start, moves
 the session under Claude's background daemon; the bot stays online and
 @mentions keep arriving. The daemon restarts a session from its command-line
 flags alone and drops the shell environment, so the wrapper passes the state

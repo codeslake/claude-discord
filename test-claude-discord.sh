@@ -588,21 +588,21 @@ echo "ok: setup rejects '..' as bot name, project .claude untouched"
 out=$(printf '' | bash "$S" setup hooks 2>&1) && { echo "FAIL: setup hooks should have been refused, it collides with the hooks symlink"; exit 1; }
 rc=$?
 [ "$rc" -eq 2 ] && grep -qF "bot name 'hooks' is reserved for the hooks directory" <<<"$out" || { echo "FAIL: setup hooks must be refused by the reserved-name guard specifically (exit 2, its own message), got rc=$rc: $out"; exit 1; }
-out=$(bash "$S" hooks 2>&1) && { echo "FAIL: starting a bot named hooks should have been refused"; exit 1; }
+out=$(bash "$S" --name hooks 2>&1) && { echo "FAIL: starting a bot named hooks should have been refused"; exit 1; }
 rc=$?
 [ "$rc" -eq 2 ] && grep -qF "bot name 'hooks' is reserved for the hooks directory" <<<"$out" || { echo "FAIL: starting a bot named hooks must be refused by the reserved-name guard specifically (exit 2, its own message), got rc=$rc: $out"; exit 1; }
 out=$(printf '' | bash "$S" setup checkin 2>&1) && { echo "FAIL: setup checkin should have been refused"; exit 1; }
 rc=$?
 [ "$rc" -eq 2 ] && grep -qF "bot name 'checkin' is reserved for the checkin directory" <<<"$out" || { echo "FAIL: setup checkin must be refused by the reserved-name guard, got rc=$rc: $out"; exit 1; }
-out=$(bash "$S" checkin 2>&1) && { echo "FAIL: starting a bot named checkin should have been refused"; exit 1; }
+out=$(bash "$S" --name checkin 2>&1) && { echo "FAIL: starting a bot named checkin should have been refused"; exit 1; }
 rc=$?
 [ "$rc" -eq 2 ] && grep -qF "bot name 'checkin' is reserved for the checkin directory" <<<"$out" || { echo "FAIL: starting a bot named checkin must be refused by the reserved-name guard, got rc=$rc: $out"; exit 1; }
 echo "ok: the bot names 'hooks' and 'checkin' are reserved and rejected by both setup and start, by the reserved-name guard specifically"
 
-bash "$S" gamma >/dev/null 2>&1 && { echo "FAIL: run without setup should refuse"; exit 1; }
+bash "$S" --name gamma >/dev/null 2>&1 && { echo "FAIL: run without setup should refuse"; exit 1; }
 echo "ok: run refuses without setup"
 
-out=$(bash "$S" alpha 2>&1)
+out=$(bash "$S" --name alpha 2>&1)
 grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out"
 ! grep -q "Other bots in the channel can hear you." <<<"$out" || { echo "FAIL: the system prompt must not claim other bots hear every message"; exit 1; }
 grep -qF "Another bot receives your messages only when you @mention it and it allowlists your bot." <<<"$out" || { echo "FAIL: the system prompt must say how bots reach each other now"; exit 1; }
@@ -618,7 +618,7 @@ grep -q "$HOME/.claude-discord/runtime/discord-proxy.ts" "$HOME/fakeplugin/bunfi
 grep -q -- "--settings {\"enabledPlugins\": {\"discord@claude-plugins-official\": true}, \"env\": {\"DISCORD_STATE_DIR\": \"$R/alpha\"}, \"worktree\": {\"bgIsolation\": \"none\"}}" <<<"$out"
 echo "ok: run goes through claude-launcher, patches server.ts (bot + @everyone), preload from ~/.claude-discord, state dir and worktree.bgIsolation:none in --settings env; the mention rule keeps its new wording in the system prompt"
 
-bash "$S" alpha >/dev/null 2>&1
+bash "$S" --name alpha >/dev/null 2>&1
 [ "$(grep -c 'client.user?.id) return' "$HOME/fakeplugin/server.ts")" = 1 ]
 [ "$(grep -c 'ignoreEveryone' "$HOME/fakeplugin/server.ts")" = 1 ]
 echo "ok: both patches are idempotent"
@@ -633,14 +633,14 @@ echo "ok: the chunk() call is pointed at the helper once, and a second start doe
 cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.patched"
 printf 'async function reply() {\n  const chunks = splitReply(text)\n}\n' > "$HOME/fakeplugin/server.ts"
 cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.orig"
-out=$(bash "$S" alpha 2>&1)
+out=$(bash "$S" --name alpha 2>&1)
 cmp -s "$HOME/server.ts.orig" "$HOME/fakeplugin/server.ts"
 grep -q "^LAUNCHER " <<<"$out" || { echo "FAIL: a moved chunk() call must not stop the start: $out"; exit 1; }
 grep -q "patch: .*0.0.4/server.ts: chunk no longer matches" <<<"$out" && grep -q "some patches no longer apply (see above); the bot starts anyway" <<<"$out" || { echo "FAIL: the start must name the moved chunk pattern: $out"; exit 1; }
 echo "ok: a server.ts without the chunk() call is left as is, the start goes on and says which patch no longer matches"
 # A trailing ; or CRLF must still be recognised: patched, not skipped silently.
 printf 'async function reply() {\n  const chunks = chunk(text, limit, mode);\r\n}\n' > "$HOME/fakeplugin/server.ts"
-out=$(bash "$S" alpha 2>&1)
+out=$(bash "$S" --name alpha 2>&1)
 grep -qF "const chunks = (await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chunk(text, limit, mode);" "$HOME/fakeplugin/server.ts" || { echo "FAIL: a chunk() call ending in ; and CRLF was not patched"; exit 1; }
 ! grep -q "chunking patch not applied" <<<"$out" || { echo "FAIL: a patchable chunk() call warned"; exit 1; }
 echo "ok: a chunk() call ending in ; and CRLF is patched, not skipped silently"
@@ -763,7 +763,7 @@ else
   echo "ok: discord-chunk.ts checks skipped (no bun)"
 fi
 
-out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" alpha 2>&1)
+out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" --name alpha 2>&1)
 grep -q "^PLAIN --channels plugin:discord@claude-plugins-official" <<<"$out"
 echo "ok: without CLAUDE_DISCORD_LAUNCHER the plain claude on PATH is used"
 
@@ -786,38 +786,38 @@ PROJ="$HOME/.claude/projects/$(printf '%s' "$P" | sed 's/[^A-Za-z0-9]/-/g')"
 mkdir -p "$PROJ"
 printf '{"type":"custom-title","customTitle":"old-name"}\n{"type":"custom-title","customTitle":"my-session"}\n' > "$PROJ/11111111-2222-3333-4444-555555555555.jsonl"
 printf '{"type":"custom-title","customTitle":"other"}\n' > "$PROJ/99999999-8888-7777-6666-555555555555.jsonl"
-out=$(bash "$S" alpha --resume my-session 2>&1)
+out=$(bash "$S" --name alpha --resume my-session 2>&1)
 grep -q -- "--resume 11111111-2222-3333-4444-555555555555" <<<"$out" || { echo "FAIL: name was not resolved to a session id"; exit 1; }
-out=$(bash "$S" alpha --resume=11111111 2>&1)
+out=$(bash "$S" --name alpha --resume=11111111 2>&1)
 grep -q -- "--resume=11111111-2222-3333-4444-555555555555" <<<"$out" || { echo "FAIL: short id was not expanded"; exit 1; }
-out=$(bash "$S" alpha --resume 99999999-8888-7777-6666-555555555555 2>&1)
+out=$(bash "$S" --name alpha --resume 99999999-8888-7777-6666-555555555555 2>&1)
 grep -q -- "--resume 99999999-8888-7777-6666-555555555555" <<<"$out" || { echo "FAIL: a full id must pass through untouched"; exit 1; }
-out=$(bash "$S" alpha --resume no-such-name 2>&1)
+out=$(bash "$S" --name alpha --resume no-such-name 2>&1)
 grep -q -- "--resume no-such-name" <<<"$out" || { echo "FAIL: an unknown name must pass through"; exit 1; }
 grep -q "old-name" <<<"$out" && { echo "FAIL: matched a stale title"; exit 1; }
 echo "ok: --resume accepts a session name, a short id, and passes ids and unknown names through"
 
-out=$(env -u CLAUDE_DISCORD_LAUNCHER CLAUDE_CODE_PROCESS_WRAPPER="$HOME/bin/claude-launcher" bash "$S" alpha 2>&1)
+out=$(env -u CLAUDE_DISCORD_LAUNCHER CLAUDE_CODE_PROCESS_WRAPPER="$HOME/bin/claude-launcher" bash "$S" --name alpha 2>&1)
 grep -q "^LAUNCHER " <<<"$out" || { echo "FAIL: CLAUDE_CODE_PROCESS_WRAPPER was ignored"; exit 1; }
 echo "ok: CLAUDE_CODE_PROCESS_WRAPPER is used when CLAUDE_DISCORD_LAUNCHER is unset"
 
 echo '{"env":{"CLAUDE_CODE_PROCESS_WRAPPER":"'"$HOME"'/bin/claude-launcher"}}' > "$HOME/.claude/settings.json"
-out=$(env -u CLAUDE_DISCORD_LAUNCHER -u CLAUDE_CODE_PROCESS_WRAPPER bash "$S" alpha 2>&1)
+out=$(env -u CLAUDE_DISCORD_LAUNCHER -u CLAUDE_CODE_PROCESS_WRAPPER bash "$S" --name alpha 2>&1)
 grep -q -- "^LAUNCHER $HOME/bin/claude --channels" <<<"$out" || { echo "FAIL: settings.json's env.CLAUDE_CODE_PROCESS_WRAPPER was not used"; exit 1; }
 echo "ok: settings.json's env.CLAUDE_CODE_PROCESS_WRAPPER runs the wrapper with the claude bin path as \$1 when nothing else is set"
 
 echo '{"env":{}}' > "$HOME/.claude/settings.json"
-out=$(env -u CLAUDE_DISCORD_LAUNCHER -u CLAUDE_CODE_PROCESS_WRAPPER bash "$S" alpha 2>&1)
+out=$(env -u CLAUDE_DISCORD_LAUNCHER -u CLAUDE_CODE_PROCESS_WRAPPER bash "$S" --name alpha 2>&1)
 grep -q "^PLAIN " <<<"$out" || { echo "FAIL: a settings.json without the key should fall through to plain claude"; exit 1; }
 echo "ok: settings.json present without the key still runs plain claude"
 rm -f "$HOME/.claude/settings.json"
 
 # The name may sit anywhere, or be left out when the project has one bot.
-out=$(bash "$S" --bg alpha 2>&1)
+out=$(bash "$S" --bg --name alpha 2>&1)
 grep -q -- "^LAUNCHER .*--bg" <<<"$out" && grep -q -- "-n alpha" <<<"$out" || { echo "FAIL: name after a flag"; exit 1; }
 # A flag whose value is optional does not swallow the next flag.
 for flags in "--debug --model opus" "--remote-control --effort high"; do
-  out=$(bash "$S" $flags alpha 2>&1 || :)   # a swallowed flag makes the next word the name, and that bot does not exist
+  out=$(bash "$S" $flags --name alpha 2>&1 || :)   # a swallowed flag makes the next word the name, and that bot does not exist
   grep -q -- "-n alpha" <<<"$out" && grep -q -- " $flags" <<<"$out" || { echo "FAIL: '$flags alpha' must start alpha with the flags as given: $out"; exit 1; }
 done
 rm -rf "$R/beta"                      # leave exactly one bot set up
@@ -830,9 +830,57 @@ grep -q "several bots" <<<"$out" || { echo "FAIL: wrong error for two bots"; exi
 rm -rf "$R/beta"
 echo "ok: name before or after the flags (an optional-value flag does not swallow the next flag), inferred when the project has one bot, refused when it has two"
 
+# --name/-n IS the bot name; the positional form still works and warns once.
+for f in "--name alpha" "-n alpha" "--name=alpha"; do
+  out=$(bash "$S" $f 2>&1)
+  grep -q -- '-n alpha' <<<"$out" && ! grep -q deprecated <<<"$out" || { echo "FAIL: '$f' must start bot alpha silently: $out"; exit 1; }
+done
+out=$(bash "$S" alpha 2>&1)
+grep -q -- '-n alpha' <<<"$out" && grep -q "deprecated; use 'claude-discord --name alpha" <<<"$out" || { echo "FAIL: the positional form must work and warn: $out"; exit 1; }
+out=$(printf 'tokB\nn\n' | bash "$S" setup beta --scope project 2>&1)
+! grep -q deprecated <<<"$out" || { echo "FAIL: setup <bot> keeps the bot positional and must not warn: $out"; exit 1; }
+
+# --resume with no name: the bot comes from the job record (id prefix), else
+# from a value that names a bot, else the usual rules; two bots never get one
+# picked silently.
+JR="$HOME/.claude/jobs"; mkdir -p "$JR/j1" "$JR/j2" "$JR/j3"
+jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$R/alpha\"}}" '{sessionId: "aaaaaaaa-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JR/j1/state.json"
+jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$R/beta\"}}" '{sessionId: "bbbbbbbb-1111-2222-3333-444444444444", resumeSessionId: "cccccccc-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JR/j2/state.json"
+jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$R/beta\"}}" '{sessionId: "aaaaaaaa-9999-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JR/j3/state.json"
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume aaaaaaaa-1111-2222-3333-444444444444 2>&1)
+grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: --resume must find bot alpha from the job record: $out"; exit 1; }
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume cccccccc 2>&1)
+grep -q -- '-n beta' <<<"$out" || { echo "FAIL: --resume must match a job's resumeSessionId prefix to bot beta: $out"; exit 1; }
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume beta 2>&1)
+grep -q -- '-n beta' <<<"$out" || { echo "FAIL: --resume <bot name> must pick that bot: $out"; exit 1; }
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume aaaaaaaa 2>&1) && { echo "FAIL: a prefix shared by two bots' jobs must be refused: $out"; exit 1; }
+grep -q -- '--name' <<<"$out" && ! grep -q PLAIN <<<"$out" || { echo "FAIL: the ambiguity refusal must ask for --name and start nothing: $out"; exit 1; }
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume ffffffff 2>&1) && { echo "FAIL: two bots and an unknown --resume id must be refused: $out"; exit 1; }
+grep -q -- 'with --name' <<<"$out" && ! grep -q PLAIN <<<"$out" || { echo "FAIL: the error must name --name: $out"; exit 1; }
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --name alpha --resume aaaaaaaa 2>&1)
+grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: an explicit --name wins over the ambiguous job match: $out"; exit 1; }
+rm -rf "$JR/j2" "$JR/j3"
+
+# A live session is not resumed twice; no usable listing starts as before.
+agents_row() { printf '#!/bin/bash\ncase $1 in agents) echo %s;; *) echo "PLAIN $*";; esac\n' "'[{\"sessionId\":\"aaaaaaaa-1111-2222-3333-444444444444\",\"state\":\"$1\",\"cwd\":\"$P\"}]'" > "$HOME/bin/claude"; }
+agents_row working
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume aaaaaaaa-1111-2222-3333-444444444444 2>&1) && { echo "FAIL: resuming a live session must be refused"; exit 1; }
+grep -q 'refresh alpha' <<<"$out" && ! grep -q PLAIN <<<"$out" || { echo "FAIL: the refusal must point at refresh and start nothing: $out"; exit 1; }
+agents_row stopped
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume aaaaaaaa-1111-2222-3333-444444444444 2>&1)
+grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: a stopped session may be resumed: $out"; exit 1; }
+printf '#!/bin/bash\ncase $1 in agents) exit 1;; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume aaaaaaaa-1111-2222-3333-444444444444 2>&1)
+grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: a failing claude agents must not block the start: $out"; exit 1; }
+printf '#!/bin/bash\ncase $1 in agents) echo "{}";; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume aaaaaaaa-1111-2222-3333-444444444444 2>&1)
+grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: a non-array claude agents listing must not block the start: $out"; exit 1; }
+rm -rf "$JR"; printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"
+echo "ok: --name/-n/--name= name the bot silently, the positional form warns, setup stays quiet; --resume finds the bot from its job record (ambiguity refused), by a bot's name; a live session is refused and a failing listing is not"
+
 mkdir -p "$HOME/nobin"
 cp "$HOME/bin/claude-launcher" "$HOME/nobin/claude-launcher"
-out=$(PATH="$HOME/nobin:/usr/bin:/bin" CLAUDE_DISCORD_LAUNCHER=claude-launcher bash "$S" alpha 2>&1) && { echo "FAIL: should refuse without claude on PATH"; exit 1; }
+out=$(PATH="$HOME/nobin:/usr/bin:/bin" CLAUDE_DISCORD_LAUNCHER=claude-launcher bash "$S" --name alpha 2>&1) && { echo "FAIL: should refuse without claude on PATH"; exit 1; }
 rc=$?
 [ "$rc" -eq 127 ] || { echo "FAIL: expected exit 127, got $rc"; exit 1; }
 grep -q "claude is not on PATH" <<<"$out"
@@ -851,7 +899,7 @@ jq -n '{dmPolicy:"allowlist", allowFrom:["2"], groups:{"1":{requireMention:true,
 # b. no plugin install in this project: a start registers nothing (the
 # plugin's hooks.json does) and adds the missing ackReaction and hooks symlink.
 [ ! -e "$P2/.claude/settings.local.json" ]
-bash "$S" gamma >/dev/null 2>&1
+bash "$S" --name gamma >/dev/null 2>&1
 [ ! -e "$P2/.claude/settings.local.json" ] && [ ! -e "$P2/.claude/settings.json" ] || { echo "FAIL: a start must write no settings file"; exit 1; }
 [ "$(jq -r '.ackReaction' "$P2/.claude/discord-agents/gamma/access.json")" = "👀" ]
 [ -L "$P2/.claude/discord-agents/hooks" ] || { echo "FAIL: start must create the hooks symlink"; exit 1; }
@@ -866,7 +914,7 @@ echo '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type
 cp "$P2/.claude/settings.json" "$P2/.claude/settings.local.json"
 plant_old "$P2/.claude/settings.json"; plant_old "$P2/.claude/settings.local.json"
 cp "$P2/.claude/settings.json" "$P2/sj.before"; cp "$P2/.claude/settings.local.json" "$P2/sl.before"
-bash "$S" gamma >/dev/null 2>&1
+bash "$S" --name gamma >/dev/null 2>&1
 printf 'none\n' | bash "$S" setup gamma --mode >/dev/null
 cmp -s "$P2/.claude/settings.json" "$P2/sj.before" && cmp -s "$P2/.claude/settings.local.json" "$P2/sl.before" && [ -f "$P2/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: without a plugin install a start and setup --mode must leave the old hooks and rule file"; exit 1; }
 printf '\nn\nnone\n' | bash "$S" setup gamma --scope project >/dev/null
@@ -882,7 +930,7 @@ echo "ok: with no plugin install the old settings hooks and rule file stay (star
 # reaches the exec; stderr names the file.
 printf 'not json' > "$P2/.claude/settings.local.json"
 cp "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before"
-out=$(bash "$S" gamma 2>"$P2/stderr.log")
+out=$(bash "$S" --name gamma 2>"$P2/stderr.log")
 cmp -s "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before" || { echo "FAIL: invalid-JSON settings.local.json must be left untouched"; exit 1; }
 rm -f "$P2/.claude/settings.local.json.before"
 grep -qF "$P2/.claude/settings.local.json" "$P2/stderr.log" || { echo "FAIL: stderr must name the invalid settings file"; exit 1; }
@@ -894,7 +942,7 @@ echo "ok: invalid-JSON settings.local.json is left untouched, warned on stderr n
 # leave the file as it was, and must not leave a temp file behind.
 echo '{}' > "$P2/.claude/settings.local.json"; plant_old "$P2/.claude/settings.local.json"; chmod 444 "$P2/.claude/settings.local.json"
 cp "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before"
-out=$(bash "$S" gamma 2>"$P2/stderr.log")
+out=$(bash "$S" --name gamma 2>"$P2/stderr.log")
 chmod 644 "$P2/.claude/settings.local.json"
 cmp -s "$P2/.claude/settings.local.json" "$P2/.claude/settings.local.json.before" || { echo "FAIL: a read-only settings.local.json must be left untouched"; exit 1; }
 rm -f "$P2/.claude/settings.local.json.before"
@@ -908,7 +956,7 @@ echo "ok: a read-only settings.local.json is left untouched, no temp file is lef
 # and the start still execs.
 for shape in '[]' '{"hooks":{"UserPromptSubmit":{}}}' ''; do
   printf '%s' "$shape" > "$P2/.claude/settings.local.json"
-  out=$(bash "$S" gamma 2>&1)
+  out=$(bash "$S" --name gamma 2>&1)
   # A file jq cannot walk at all is named in a warning; the others have nothing to remove and say nothing.
   [ "$shape" != '[]' ] || grep -qF "$P2/.claude/settings.local.json" <<<"$out" || { echo "FAIL: stderr must name settings.local.json holding []: $out"; exit 1; }
   [ "$(cat "$P2/.claude/settings.local.json")" = "$shape" ] && grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: settings.local.json '$shape' must be left as it was and the start must exec: $out"; exit 1; }
@@ -919,23 +967,23 @@ echo "ok: a settings.local.json with nothing of ours to remove ([], a non-array 
 rm -f "$P2/.claude/settings.local.json"
 echo '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' > "$P2/.claude/settings.json"
 plant_old "$P2/.claude/settings.json"; cp "$P2/.claude/settings.json" "$P2/.claude/settings.local.json"
-bash "$S" gamma >/dev/null 2>&1
+bash "$S" --name gamma >/dev/null 2>&1
 for f in settings.json settings.local.json; do
   [ "$(jq -c . "$P2/.claude/$f")" = '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' ] || { echo "FAIL: $f must keep the unrelated key and hook and none of ours: $(jq -c . "$P2/.claude/$f")"; exit 1; }
 done
 # A settings.json that held only our entries goes back to its other keys: no
 # "hooks": {} is left behind as a diff.
 echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"; plant_old "$P2/.claude/settings.json"
-bash "$S" gamma >/dev/null 2>&1
+bash "$S" --name gamma >/dev/null 2>&1
 [ "$(jq -c . "$P2/.claude/settings.json")" = '{"enabledPlugins":{"x":true}}' ] || { echo "FAIL: a hooks key we emptied must be dropped: $(jq -c . "$P2/.claude/settings.json")"; exit 1; }
-echo '{"hooks":{}}' > "$P2/.claude/settings.json"; bash "$S" gamma >/dev/null 2>&1
+echo '{"hooks":{}}' > "$P2/.claude/settings.json"; bash "$S" --name gamma >/dev/null 2>&1
 [ "$(jq -c . "$P2/.claude/settings.json")" = '{"hooks":{}}' ] || { echo "FAIL: a hooks key the project left empty itself must stay: $(cat "$P2/.claude/settings.json")"; exit 1; }
 echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"
 echo "ok: a start takes every entry an earlier release registered out of both settings files (the project's own key and hook stay, a hooks key we emptied goes)"
 
 # h3. the next start leaves both files byte-identical.
 cp "$P2/.claude/settings.json" "$P2/sj.before"; cp "$P2/.claude/settings.local.json" "$P2/sl.before"
-bash "$S" gamma >/dev/null 2>&1
+bash "$S" --name gamma >/dev/null 2>&1
 cmp -s "$P2/.claude/settings.json" "$P2/sj.before" && cmp -s "$P2/.claude/settings.local.json" "$P2/sl.before" || { echo "FAIL: a second start must leave settings.json and settings.local.json byte-identical"; exit 1; }
 rm -f "$P2/sj.before" "$P2/sl.before"
 echo "ok: a second start leaves settings.json and settings.local.json byte-identical"
@@ -945,7 +993,7 @@ echo "ok: a second start leaves settings.json and settings.local.json byte-ident
 mkdir -p "$P2/.claude/discord-agents/delta"
 printf 'DISCORD_BOT_TOKEN=tokD\n' > "$P2/.claude/discord-agents/delta/.env"
 jq -n '{dmPolicy:"allowlist", allowFrom:["2"], ackReaction:"", groups:{"1":{requireMention:true, allowFrom:["2"]}}}' > "$P2/.claude/discord-agents/delta/access.json"
-bash "$S" delta >/dev/null 2>&1
+bash "$S" --name delta >/dev/null 2>&1
 [ "$(jq -r '.ackReaction' "$P2/.claude/discord-agents/delta/access.json")" = "" ] || { echo "FAIL: an explicit empty ackReaction must be left alone"; exit 1; }
 echo "ok: an explicit empty ackReaction (disabled by the owner) is left alone"
 
@@ -955,7 +1003,7 @@ P3="$HOME/project3"; mkdir -p "$P3/.claude/discord-agents/eps"; cd "$P3"
 printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$P3/.claude/discord-agents/config.env"
 printf 'DISCORD_BOT_TOKEN=tokE\n' > "$P3/.claude/discord-agents/eps/.env"
 mkdir -p "$P3/.claude/discord-agents/hooks"; echo marker > "$P3/.claude/discord-agents/hooks/MARKER"
-out=$(bash "$S" eps 2>&1)
+out=$(bash "$S" --name eps 2>&1)
 [ -f "$P3/.claude/discord-agents/hooks/MARKER" ] || { echo "FAIL: a real hooks directory must not be touched"; exit 1; }
 [ ! -L "$P3/.claude/discord-agents/hooks" ] || { echo "FAIL: a real hooks directory must not become a symlink"; exit 1; }
 grep -q "is not a symlink, leaving it alone" <<<"$out" || { echo "FAIL: a real hooks directory must warn on stderr"; exit 1; }
@@ -1024,7 +1072,7 @@ jq -n --arg cwd "$PDP" '
             kind:"background", name:"dead", cwd:$cwd, state:.value, startedAt:1758250000000}))' \
   > "$HOME/agents.full.json"
 start_dead() {  # $out = the start's output; a start that FAILS must say so, not die silently under set -e
-  out=$(bash "$S" dead ${1+"$@"} 2>&1) || { echo "FAIL: housekeeping must never fail the start (exit $?): $out"; exit 1; }
+  out=$(bash "$S" --name dead ${1+"$@"} 2>&1) || { echo "FAIL: housekeeping must never fail the start (exit $?): $out"; exit 1; }
 }
 cp "$HOME/agents.full.json" "$HOME/agents.json"
 : > "$HOME/agents.rc"; : > "$HOME/rm.rc"; : > "$HOME/rm.log"; : > "$HOME/agents.calls"
@@ -1267,10 +1315,10 @@ echo "ok: re-run: empty token keeps it, mode by number, empty/unknown mode keeps
 printf 'tokP\nn\nnone\n' | bash "$S" setup plain --scope project >/dev/null
 [ "$(cat "$R4/plain/mode")" = none ] && [ ! -e "$RULE" ] || { echo "FAIL: the bots' modes must bring back neither the rule file nor a hook"; exit 1; }
 cp "$D/rules/dev-manager.md" "$RULE"; echo x > "$P4/.claude/rules/claude-discord-old.md"
-bash "$S" mgr >/dev/null 2>&1
+bash "$S" --name mgr >/dev/null 2>&1
 [ ! -e "$RULE" ] && [ ! -e "$P4/.claude/rules/claude-discord-old.md" ] && [ "$(cat "$P4/.claude/rules/other.md")" = mine ] || { echo "FAIL: start must remove every claude-discord-*.md and keep a foreign rule file"; exit 1; }
 cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
-bash "$S" mgr >/dev/null 2>&1
+bash "$S" --name mgr >/dev/null 2>&1
 cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: a second start must change nothing"; exit 1; }
 echo "ok: a start removes a leftover claude-discord-*.md whatever the modes, keeps a foreign rule file, and is idempotent"
 
@@ -1279,7 +1327,7 @@ echo "ok: a start removes a leftover claude-discord-*.md whatever the modes, kee
 # matcher in settings.local.json. A start takes ours out of both files (the
 # user's own hook and key stay).
 plant_old "$SJ"; plant_old "$SL"
-bash "$S" mgr >/dev/null 2>&1
+bash "$S" --name mgr >/dev/null 2>&1
 [ "$(jq -c . "$SJ")" = "$(jq -c . "$P4/user.before")" ] || { echo "FAIL: start must take every entry of ours out of settings.json and leave the rest: $(jq -c . "$SJ")"; exit 1; }
 cmp -s "$SL" "$P4/local.before" || { echo "FAIL: start must take every entry of ours, thread-guard under both matchers included, out of settings.local.json: $(jq -c . "$SL")"; exit 1; }
 echo "ok: a start takes every hook an earlier version registered out of both settings files (the user's own hook and key stay)"
@@ -1742,12 +1790,12 @@ cp "$R4/mgr/access.json" "$P4/access.before"
 jq '.groups = {"4343": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"ch1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"800\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'in channel 4343\.' <<<"$out" || { echo "FAIL: on-prompt must name the access.json channel: $out"; exit 1; }
-out=$(bash "$S" mgr 2>&1)
+out=$(bash "$S" --name mgr 2>&1)
 grep -q 'sharing the Discord channel 4343,' <<<"$out" || { echo "FAIL: the start prompt must name the access.json channel: $out"; exit 1; }
 jq '.groups = {"4343": .groups["42"], "4444": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"ch2","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"801\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'in channel 42\.' <<<"$out" || { echo "FAIL: with several groups the identity falls back to config.env's channel: $out"; exit 1; }
-out=$(bash "$S" mgr 2>&1)
+out=$(bash "$S" --name mgr 2>&1)
 grep -q 'sharing the Discord channel 42,' <<<"$out" || { echo "FAIL: with several groups the start prompt falls back to config.env's channel: $out"; exit 1; }
 cp "$P4/access.before" "$R4/mgr/access.json"
 echo "ok: a bot moved by editing its access.json identifies with that channel (on-prompt and the start prompt); with several groups both fall back to config.env"
@@ -1788,6 +1836,7 @@ echo 1550600000000000000 > "$R/alpha/last-message-id"
 (cd / && DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh --model x >/dev/null)
 for _ in $(seq 300); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.05; done
 grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: refresh never started a session; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
+[ -f "$R/alpha/refresh.log" ] && ! grep -q deprecated "$R/alpha/refresh.log" || { echo "FAIL: refresh relaunches with --name and must not print the deprecation line; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
 [ "$(grep -c '^STOP ' "$HOME/claude.calls")" = 2 ] || { echo "FAIL: expected the live and the blocked session stopped: $(cat "$HOME/claude.calls")"; exit 1; }
 grep -q '^STOP live1111$' "$HOME/claude.calls" && grep -q '^STOP blkd5555$' "$HOME/claude.calls" || { echo "FAIL: stopped the wrong sessions"; exit 1; }
 [ "$(tail -1 "$HOME/claude.calls" | cut -c1-5)" = PLAIN ] || { echo "FAIL: stop must come before start"; exit 1; }
@@ -1831,17 +1880,18 @@ grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: refresh must start after sto
 rm -rf "$JD"
 echo "ok: refresh finds a renamed bot session by its job record, stops every live match, and leaves a child session of the bot's shell alone"
 
-# The wrapper names the session after the bot, so --name (which would win
-# over its -n) is refused up front, by refresh before it stops anything.
+# refresh names the session after the bot, so --name (which would win over its
+# -n) is refused up front, before it stops anything. A launch takes --name as
+# the bot name, so a value-less one is the only error left there.
 rm -f "$HOME/claude.calls"; printf 'x\n' > "$R/alpha/handoff.md"
 for f in "-n x" "--name x" "--name=x"; do
   out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha $f 2>&1) && { echo "FAIL: refresh $f must be refused"; exit 1; }
   grep -q 'named after the bot' <<<"$out" || { echo "FAIL: refresh $f: wrong error: $out"; exit 1; }
-  out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" alpha --bg $f 2>&1) && { echo "FAIL: a launch with $f must be refused"; exit 1; }
-  grep -q 'named after the bot' <<<"$out" || { echo "FAIL: launch $f: wrong error: $out"; exit 1; }
 done
+out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" --bg --name 2>&1) && { echo "FAIL: --name with no value must be refused"; exit 1; }
+grep -q -- '--name needs a bot name' <<<"$out" || { echo "FAIL: --name with no value: wrong error: $out"; exit 1; }
 [ ! -f "$HOME/claude.calls" ] || { echo "FAIL: a refused --name must stop and start nothing: $(cat "$HOME/claude.calls")"; exit 1; }
-echo "ok: -n/--name is refused by refresh and by a launch, before anything is stopped or started"
+echo "ok: refresh refuses -n/--name before anything is stopped or started; a launch refuses a --name with no value"
 
 # A stop that does not take: the old process stays up, so nothing may start.
 sleep 300 & OLD=$!
