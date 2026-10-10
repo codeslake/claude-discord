@@ -48,6 +48,19 @@ bash -n "$D/hooks/tools/thread"
 bash -n "$D/hooks/tools/local-bots"
 bash -n "$D/hooks/autoresearchclaw/on-start"
 bash -n "$D/hooks/autoresearchclaw/events"
+# The plugin manifest and hooks.json: valid JSON, name claude-discord, and every
+# hook command names a script that exists in the repo and is executable.
+jq -e '.name == "claude-discord" and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$D/.claude-plugin/plugin.json" >/dev/null || { echo "FAIL: plugin.json needs name claude-discord and a semver version"; exit 1; }
+cmds=$(jq -r '.hooks[][] .hooks[] .command' "$D/hooks/hooks.json") || { echo "FAIL: hooks.json is not valid"; exit 1; }
+[ "$(printf '%s\n' "$cmds" | wc -l | tr -d ' ')" = 9 ] || { echo "FAIL: hooks.json must register the nine hooks: $cmds"; exit 1; }
+while IFS= read -r c; do
+  # quoted, so a plugin root with a space in its path still runs
+  case $c in '"${CLAUDE_PLUGIN_ROOT}/hooks/'*'"') ;; *) echo "FAIL: hook command must be \"\${CLAUDE_PLUGIN_ROOT}/hooks/...\" (quoted): $c"; exit 1;; esac
+  f=${c#'"${CLAUDE_PLUGIN_ROOT}/'}; f=$D/${f%'"'}
+  [ -x "$f" ] || { echo "FAIL: hooks.json names a missing or non-executable $f"; exit 1; }
+done <<<"$cmds"
+jq -e '.hooks.PreToolUse[] | select(.matcher == "mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message") | .hooks[] | select(.command | endswith("peers/thread-guard\""))' "$D/hooks/hooks.json" >/dev/null || { echo "FAIL: thread-guard must cover reply and edit_message"; exit 1; }
+echo "ok: plugin.json and hooks.json are valid and every hook command exists"
 [ "$(grep -c "if (msg.author.bot) return" "$S")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in the wrapper"; exit 1; }
 # KILL_AT_EXIT: pids this test started (fake workers), so a failed assertion
 # cannot leave one running.

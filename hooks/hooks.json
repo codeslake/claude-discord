@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-prompt\""}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "mcp__plugin_discord_discord__reply", "hooks": [
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-reply\""},
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/peers/checkin\""}
+      ]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-stop\""}]}
+    ],
+    "SessionStart": [
+      {"matcher": "startup|resume|compact|clear", "hooks": [
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-session-start\""},
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/autoresearchclaw/on-start\""}
+      ]}
+    ],
+    "PreToolUse": [
+      {"matcher": "mcp__plugin_discord_discord__reply", "hooks": [
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/peers/mention-guard\""}
+      ]},
+      {"matcher": "mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message", "hooks": [
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/peers/thread-guard\""}
+      ]},
+      {"matcher": "Edit|Write|MultiEdit", "hooks": [
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/peers/edit-gate\""}
+      ]}
+    ]
+  }
+}
