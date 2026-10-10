@@ -51,11 +51,12 @@ jq -e '.name == "claude-discord" and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+
 cmds=$(jq -r '.hooks[][] .hooks[] .command' "$D/hooks/hooks.json") || { echo "FAIL: hooks.json is not valid"; exit 1; }
 [ "$(printf '%s\n' "$cmds" | wc -l | tr -d ' ')" = 9 ] || { echo "FAIL: hooks.json must register the nine hooks: $cmds"; exit 1; }
 while IFS= read -r c; do
-  case $c in '${CLAUDE_PLUGIN_ROOT}/hooks/'*) ;; *) echo "FAIL: hook command must start with \${CLAUDE_PLUGIN_ROOT}/hooks/: $c"; exit 1;; esac
-  f=$D/${c#'${CLAUDE_PLUGIN_ROOT}/'}
+  # quoted, so a plugin root with a space in its path still runs
+  case $c in '"${CLAUDE_PLUGIN_ROOT}/hooks/'*'"') ;; *) echo "FAIL: hook command must be \"\${CLAUDE_PLUGIN_ROOT}/hooks/...\" (quoted): $c"; exit 1;; esac
+  f=${c#'"${CLAUDE_PLUGIN_ROOT}/'}; f=$D/${f%'"'}
   [ -x "$f" ] || { echo "FAIL: hooks.json names a missing or non-executable $f"; exit 1; }
 done <<<"$cmds"
-jq -e '.hooks.PreToolUse[] | select(.matcher == "mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message") | .hooks[] | select(.command | endswith("peers/thread-guard"))' "$D/hooks/hooks.json" >/dev/null || { echo "FAIL: thread-guard must cover reply and edit_message"; exit 1; }
+jq -e '.hooks.PreToolUse[] | select(.matcher == "mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message") | .hooks[] | select(.command | endswith("peers/thread-guard\""))' "$D/hooks/hooks.json" >/dev/null || { echo "FAIL: thread-guard must cover reply and edit_message"; exit 1; }
 echo "ok: plugin.json and hooks.json are valid and every hook command exists"
 ```
 
@@ -82,32 +83,32 @@ Expected: `FAIL: plugin.json needs name claude-discord ...` (file missing).
 {
   "hooks": {
     "UserPromptSubmit": [
-      {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-prompt"}]}
+      {"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-prompt\""}]}
     ],
     "PostToolUse": [
       {"matcher": "mcp__plugin_discord_discord__reply", "hooks": [
-        {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-reply"},
-        {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/peers/checkin"}
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-reply\""},
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/peers/checkin\""}
       ]}
     ],
     "Stop": [
-      {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-stop"}]}
+      {"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-stop\""}]}
     ],
     "SessionStart": [
       {"matcher": "startup|resume|compact|clear", "hooks": [
-        {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-session-start"},
-        {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/autoresearchclaw/on-start"}
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-session-start\""},
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/autoresearchclaw/on-start\""}
       ]}
     ],
     "PreToolUse": [
       {"matcher": "mcp__plugin_discord_discord__reply", "hooks": [
-        {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/peers/mention-guard"}
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/peers/mention-guard\""}
       ]},
       {"matcher": "mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message", "hooks": [
-        {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/peers/thread-guard"}
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/peers/thread-guard\""}
       ]},
       {"matcher": "Edit|Write|MultiEdit", "hooks": [
-        {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/peers/edit-gate"}
+        {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/peers/edit-gate\""}
       ]}
     ]
   }
@@ -157,7 +158,7 @@ git mv discord-proxy.ts runtime/discord-proxy.ts
 In `test-claude-discord.sh` line 12 replace
 `D=$(dirname "$S")   # repo root: where hooks/ and install.sh live`
 with
-`D=$(cd "$(dirname "$S")/.." && pwd)   # repo root = plugin root: the wrapper is bin/claude-discord`
+`D=$(cd "$(dirname "$S")/.." && pwd -P)   # repo root = plugin root (bin/claude-discord); -P matches the hooks' plugin_root`
 
 and replace every `"$D/hooks/tools/thread"`, `"$D/hooks/tools/local-bots"`, `"$D/hooks/autoresearchclaw/events"` with `"$D/tools/thread"`, `"$D/tools/local-bots"`, `"$D/tools/arc-events"`:
 
@@ -165,6 +166,13 @@ and replace every `"$D/hooks/tools/thread"`, `"$D/hooks/tools/local-bots"`, `"$D
 sed -i 's#"\$D/hooks/tools/thread"#"$D/tools/thread"#g; s#"\$D/hooks/tools/local-bots"#"$D/tools/local-bots"#g; s#"\$D/hooks/autoresearchclaw/events"#"$D/tools/arc-events"#g' test-claude-discord.sh
 grep -n 'hooks/tools\|autoresearchclaw/events' test-claude-discord.sh   # every remaining hit is reviewed by hand
 ```
+
+Also replace the suite's install stand-in (lines 115-117): instead of copying `$D/hooks` and `$D/rules` into `$HOME/.claude-discord/`, link them, so every hook the suite runs through `$R/hooks` resolves `plugin_root` to `$D`:
+```bash
+mkdir -p "$HOME/.claude-discord"
+ln -s "$D/hooks" "$HOME/.claude-discord/hooks"; ln -s "$D/rules" "$HOME/.claude-discord/rules"
+```
+(the two `: > discord-*.ts` stand-ins move to `$HOME/.claude-discord/runtime/` in Task 3). The test at line 457 that moves `hooks/lib/discord.sh` aside must then move the repo file and restore it in a `trap`, or copy the tree first; prefer copying `$D` to `$HOME/plugin-copy` once and linking that, so no test ever renames a file in the working tree.
 
 - [ ] **Step 3: Write the failing test for the resolved tool path** (in the on-prompt identity assertion at `test-claude-discord.sh:193`, replace `~/.claude-discord/hooks/tools/thread` with the resolved path)
 
@@ -186,7 +194,9 @@ Expected: FAIL on the identity text (still names `~/.claude-discord/hooks/tools/
 # The plugin root, from this file's own location (hooks/lib/discord.sh), with
 # symlinks resolved: tools and rules are named by absolute path in the text a
 # session reads, so it must be the real install, wherever setup put it.
-plugin_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd -P) || plugin_root=""
+# cd -P: the hooks are often reached through the project's discord-agents/hooks
+# symlink, and a logical `..` from there would land in discord-agents/.
+plugin_root=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd -P) || plugin_root=""
 thread_tool=$plugin_root/tools/thread
 ```
 
@@ -196,7 +206,13 @@ thread_tool=$plugin_root/tools/thread
 
 `hooks/autoresearchclaw/on-start:20`: `rule=$plugin_root/rules/autoresearchclaw.md`.
 
-`rules/autoresearchclaw.md:9`: replace `~/.claude-discord/hooks/autoresearchclaw/events` with `"$CLAUDE_DISCORD_TOOLS/arc-events"` and add one line above the loop: ``(`$CLAUDE_DISCORD_TOOLS` is printed in your session context.)`` — Task 6 injects that line.
+`rules/autoresearchclaw.md:9`: replace `~/.claude-discord/hooks/autoresearchclaw/events` with the placeholder `@ARC_EVENTS@`. `hooks/autoresearchclaw/on-start` substitutes it before emitting the rule, since the rule's Bash loop needs a real path (a context line is not an env var):
+```bash
+rule=$plugin_root/rules/autoresearchclaw.md
+[ -f "$rule" ] || exit 0
+sed "s#@ARC_EVENTS@#$plugin_root/tools/arc-events#g" "$rule" | jq -Rsc '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: .}}' 2>/dev/null
+```
+and the existing autoresearchclaw context test (suite ~1615, `ARC_RULE`) asserts the emitted text contains `$D/tools/arc-events` and no `@ARC_EVENTS@`.
 
 `bin/claude-discord`, after `plugin=discord@claude-plugins-official` (line 62):
 ```bash
@@ -482,7 +498,11 @@ git commit -m "shim: ~/.local/bin launcher that runs the project's clone, else t
 # setup installs the plugin: a real clone (no link) at the chosen scope,
 # excluded from the project's git, the shim on PATH, the install recorded;
 # both scopes at once is refused; a re-run keeps the clone.
-SRC="$HOME/src.git"; git clone -q --bare "$D" "$SRC"   # a local stand-in for GitHub
+# A local stand-in for GitHub built from the WORKING TREE (a bare clone of $D
+# would carry only committed HEAD, so a red-green cycle could not see the edit).
+SRC="$HOME/src.git"; ST="$HOME/src-tree"; mkdir -p "$ST"
+(cd "$D" && git ls-files -co --exclude-standard -z | xargs -0 -I{} cp --parents {} "$ST/")
+(cd "$ST" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm stand-in) && git clone -q --bare "$ST" "$SRC" && rm -rf "$ST"
 export CLAUDE_DISCORD_REPO=$SRC
 SP="$HOME/scope proj"; mkdir -p "$SP"; (cd "$SP" && git init -q .)
 jq -n --arg p "$SP" '{projects: {($p): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
@@ -563,7 +583,7 @@ and, after the mode prompt (before `ensure_hooks_symlink`):
   fi
   install_plugin "$scope" || exit $?
 ```
-The suite's earlier setup calls feed answers on stdin; add `--scope project` to each existing `setup` invocation in the suite (`grep -n 'setup ' test-claude-discord.sh`), with `CLAUDE_DISCORD_REPO` set once near the top to the bare stand-in so no call reaches the network.
+Near the top of the suite, mark the main project trusted so no setup asks: `jq -n --arg p "$P" '{projects: {($p): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"` (right after `P=` is set). The suite's earlier setup calls feed answers on stdin; add `--scope project` to each existing `setup` invocation in the suite (`grep -n 'setup ' test-claude-discord.sh`), with `CLAUDE_DISCORD_REPO` set once near the top to the bare stand-in so no call reaches the network.
 
 - [ ] **Step 4: Run the suite** — Expected: `ALL PASS`.
 
@@ -613,28 +633,21 @@ echo "ok: setup on an old install removes our settings entries (keeping others),
 
 - [ ] **Step 3: Implement**
 
-Replace `register_hooks` with:
+Replace the registration with removal by reusing `register_hooks`' proven filter: it already strips every entry of ours that `$want` does not hold (that is how `settings.json` is handled today), so an empty `$want` for BOTH files removes them all and nothing else. Give `register_hooks` a second argument and use it:
 ```bash
-# The plugin's hooks.json registers every hook now; what earlier versions wrote
-# into the project's settings files would run each hook a second time. Removes
-# every entry whose command names /.claude/discord-agents/hooks/ from both
-# files, a matcher group or event emptied by that, and a "hooks" left empty;
-# nothing else. Settings hooks apply live (measured), so a running bot drops
-# them at once and picks up the plugin's on /reload-plugins.
-remove_old_hooks() {
-  local file
-  for file in settings.json settings.local.json; do
-    [ -f "$PWD/.claude/$file" ] || continue
-    jq_edit "$PWD/.claude/$file" '
-      if (.hooks | type) != "object" then . else
-        .hooks |= with_entries(.value |= (if type == "array" then
-            map(.hooks |= map(select((.command? // "" | tostring | contains("/.claude/discord-agents/hooks/")) | not)) | select((.hooks // []) | length > 0))
-          else . end) | select((.value | type) != "array" or (.value | length > 0)))
-        | if .hooks == {} then del(.hooks) else . end
-      end'
-  done
-}
+register_hooks() {  # $1 = the project's bot modes; $2 = "none": register nothing, remove every entry of ours
 ```
+and inside the jq call add `--arg none "${2:-}"` and change the first line of the filter to
+`(if $file == "settings.local.json" and $none != "none" then $all else [] end) as $want`. Then:
+```bash
+# The plugin's hooks.json registers every hook now; entries earlier versions
+# wrote into the project's settings files would run each hook twice. Settings
+# hooks apply live (measured), so a running bot drops them at once and picks
+# up the plugin's on /reload-plugins.
+remove_old_hooks() { register_hooks "" none; }
+```
+The existing stale-removal tests stay valid; the `has_hooks` assertions flip to "no entry of ours" (`! grep -q /.claude/discord-agents/hooks/ <file>`).
+
 In `sync_mode_drops`, drop the rule-file copy (`keep`, `src`, the `cat` block); keep only the removal loop with `keep=""` (removes every `claude-discord-*.md`) and replace `register_hooks "$modes"` with `remove_old_hooks`.
 
 `ensure_hooks_symlink`: keep this release (old peers' committed settings may point at it) but point the link at the clone's hooks: `ln -sfn "$self_root/hooks" "$link"`.
@@ -724,9 +737,12 @@ for i in "${!args[@]}"; do case ${args[i]} in --resume|-r) rid=${args[i+1]:-};; 
 if [ -z "$name" ] && [ -n "$rid" ]; then
   for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/jobs/*/state.json; do
     jq -e --arg r "$rid" '((.sessionId // "") | startswith($r)) or ((.resumeSessionId // "") | startswith($r))' "$f" >/dev/null 2>&1 || continue
-    b=$(jq -r '.respawnFlags[]? ' "$f" 2>/dev/null | grep -o "DISCORD_STATE_DIR\": \"$root/[^\"]*\"" | head -1) || b=""
-    b=${b%\"}; b=${b##*/}
-    [ -n "$b" ] && { name=$b; break; }
+    # The raw file, as refresh reads it: inside state.json the --settings value
+    # is a JSON string, so its quotes appear escaped as \".
+    for d in "$root"/*/; do
+      d=${d%/}
+      grep -qF -- "DISCORD_STATE_DIR\\\": \\\"$d\\\"" "$f" && { name=${d##*/}; break 2; }
+    done
   done
 fi
 ```
@@ -738,7 +754,7 @@ if [ -n "$resume_id" ] && agents=$("$bin" agents --json 2>/dev/null) &&
   exit 2
 fi
 ```
-(The `$bin` lookup at line 1278 must move above this check.) Keep `refresh` refusing `--name` (its own parser, lines ~941-952) unchanged.
+(The `$bin` lookup at line 1278 must move above this check.) Keep `refresh` refusing `--name` (its own parser, lines ~941-952) unchanged, but change its relaunch (line 1095) from `"$self" --bg "$name" ...` to `"$self" --bg --name "$name" ...`, or every refresh prints the deprecation line; the refresh tests that grep the launch line (`-n alpha`) still pass.
 
 - [ ] **Step 4: Run the suite** — Expected: `ALL PASS`.
 
