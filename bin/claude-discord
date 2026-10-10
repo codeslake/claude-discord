@@ -366,7 +366,7 @@ remove_old_install() {
 # rename(2) fails instead, and that writer's complete copy stays.
 # A failed swap puts our old copy back; another writer's compat.old.* means it is mid-swap: success.
 sync_compat() {
-  local c=$helpers/compat n=$helpers/compat.new.$$ t
+  local c=$helpers/compat n=$helpers/compat.new.$$ t v="" have=""
   rm -rf "$n" && mkdir -p "$n/hooks" || return 1
   for t in turn peers lib autoresearchclaw; do cp -R "$1/hooks/$t" "$n/hooks/" || { rm -rf "$n"; return 1; }; done
   cp -R "$1/tools" "$1/rules" "$n/" && head_sha "$1" > "$n/VERSION" || { rm -rf "$n"; return 1; }
@@ -375,8 +375,9 @@ sync_compat() {
      [ "$(cd "$c" && find . -type f -perm -100 | sort)" = "$(cd "$n" && find . -type f -perm -100 | sort)" ]; then rm -rf "$n"; return 0; fi
   rm -rf "$c.old.$$"
   { ! has_path "$c" || mv "$c" "$c.old.$$"; } && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$n" "$c" ||
-    { rm -rf "$n"
-      if [ -d "$c" ]; then rm -rf "$c.old.$$"; return 0; fi   # another writer's copy in place is not a failure
+    { IFS= read -r v < "$n/VERSION" || :; rm -rf "$n"
+      if [ -d "$c" ]; then   # another writer's copy of this commit in place is not a failure; ours left unreplaced (mv refused) is
+        rm -rf "$c.old.$$"; IFS= read -r have < "$c/VERSION" 2>/dev/null || :; [ -n "$v" ] && [ "$have" = "$v" ]; return; fi
       [ ! -d "$c.old.$$" ] || { mv "$c.old.$$" "$c"; return 1; }   # our swap failed: put the old copy back
       for t in "$c".old.*; do [ -d "$t" ] && return 0; done   # another writer is between its two renames
       return 1; }
@@ -387,12 +388,13 @@ sync_compat() {
 # `git pull` by hand in the source clone, a copy older than the stamp) or
 # that holds a file newer than its VERSION (the previous release's install.sh
 # writing through the links) is rebuilt; none at all is left to setup. Only by
-# the plugin compat/ is built from, the source clone when there is one (as in
-# remove_old_install): a pinned clone must not flip it to its own version.
+# the source clone compat/ is built from (as in remove_old_install): with no
+# source clone, compat/ is built by setup and update only, else two clones of
+# different versions would flip it back and forth at each bot start.
 compat_if_stale() {
   local c=$helpers/compat have=""
   [ -d "$c" ] && [ ! -L "$c" ] || return 0
-  [ ! -d "$helpers/source/hooks" ] || [ "$helpers/source" -ef "$self_root" ] || return 0
+  [ "$helpers/source" -ef "$self_root" ] || return 0
   IFS= read -r have < "$c/VERSION" 2>/dev/null || :
   [ "$have" != "$(head_sha "$self_root")" ] || [ -n "$(find "$c" -type f -newer "$c/VERSION" 2>/dev/null)" ] || return 0
   sync_compat "$self_root" && { touch "$c/VERSION" 2>/dev/null || :; }   # an identical rebuild is not redone at every start
@@ -1459,7 +1461,7 @@ patch_official() {
 }
 if [ "${1:-}" = patch ]; then
   crc=0; [ "${2:-}" != --compat ] || compat_if_stale || crc=1
-  patch_official; exit "$crc"
+  patch_official || crc=1; exit "$crc"
 fi
 
 # self_root is already the real clone (a link resolved through readlink and pwd -P).

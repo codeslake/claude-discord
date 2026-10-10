@@ -1359,9 +1359,17 @@ out=$(gp g7 510 "$P2/.claude/plain")
 mkdir -p "$HOME/.claude/discord-agents/hw" "$HOME/hproj"
 out=$(gp g8 511 "$HOME/hproj" "$HOME/.claude/discord-agents/hw")
 [ -z "$out" ] && [ ! -e "$HOME/.claude/discord-agents/hw/turns/g8" ] || { echo "FAIL: a \$HOME bot (no repo) is not the session of another project under \$HOME: $out"; exit 1; }
+# A bot project in a subdirectory of a repo: git lists the repo's worktrees, so a linked worktree's root is not the bot, the project's directory in it is.
+SR="$HOME/sdr"; SD="$SR/sub/.claude/discord-agents/sdb"; mkdir -p "${SD%/*}" && cp -R "$GD" "$SD" && : > "$SR/sub/f"
+(cd "$SR" && git init -q . && git add sub/f && git -c user.email=t@t -c user.name=t commit -qm e && git worktree add -q --detach "$HOME/sdr-wt") || { echo "FAIL: could not build the subdirectory-bot repo"; exit 1; }
+out=$(gp g9 512 "$HOME/sdr-wt" "$SD")
+[ -z "$out" ] && [ ! -e "$SD/turns/g9" ] || { echo "FAIL: the root of a worktree of the repo around a subdirectory bot is not the bot: $out"; exit 1; }
+out=$(gp g10 513 "$HOME/sdr-wt/sub" "$SD")
+[ -n "$out" ] && [ -e "$SD/turns/g10" ] || { echo "FAIL: a subdirectory bot's directory in a worktree of its repo is the bot: $out"; exit 1; }
+rm -rf "$SR" "$HOME/sdr-wt"
 git -C "$P2" worktree remove --force "$P2/.claude/worktrees/wt1"
 rm -rf "$P2/.git" "$P2/.claude/plain" "$P2/.claude/worktrees" "$HOME/.claude/discord-agents/hw" "$HOME/hproj" "$HOME/gitshim" "$GL" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"; rmdir "$HOME/.claude/discord-agents" 2>/dev/null || :
-echo "ok: an old-path hook runs with no marker (no marker directory, or another session's) and exits 0 doing nothing in a marked session, whatever CLAUDE_PLUGIN_ROOT says; the plugin's hook still runs there and keeps its marker fresh; a new marker prunes month-old ones; a session in another project, or in a plain directory under the bot's, is no bot, one in a git worktree of its project is (git runs only then)"
+echo "ok: an old-path hook runs with no marker (no marker directory, or another session's) and exits 0 doing nothing in a marked session, whatever CLAUDE_PLUGIN_ROOT says; the plugin's hook still runs there and keeps its marker fresh; a new marker prunes month-old ones; a session in another project, or in a plain directory under the bot's, is no bot, one in a git worktree of its project is (git runs only then), and for a bot in a subdirectory of a repo, the worktree's subdirectory, not its root"
 
 # h7. one migration per session however many of its hooks start at once (noclobber on the marker). A slow jq
 # (0.3 s) keeps the first migration running while the others pass the marker check, so each of them would
@@ -2995,6 +3003,8 @@ cbs cb1 compact
 [ -e "$OH/compat/stale" ] || { echo "FAIL: a compaction must not rebuild compat/"; exit 1; }
 bash "$D/bin/claude-discord" patch --compat >/dev/null 2>&1 || :
 [ -e "$OH/compat/stale" ] || { echo "FAIL: a plugin other than the source clone must not rebuild compat/"; exit 1; }
+mv "$OH/source" "$OH/source.off"; bash "$D/bin/claude-discord" patch --compat >/dev/null 2>&1 || :; mv "$OH/source.off" "$OH/source"
+[ -e "$OH/compat/stale" ] || { echo "FAIL: with no source clone, a bot start must not rebuild compat/ (setup and update do)"; exit 1; }
 cbs cb1 startup
 [ ! -e "$OH/compat/stale" ] && [ "$(cat "$OH/compat/VERSION")" = "$(git -C "$PC" rev-parse HEAD)" ] || { echo "FAIL: a startup must rebuild a compat/ stamped by another commit: $(cat "$OH/compat/VERSION")"; exit 1; }
 touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
@@ -3015,10 +3025,15 @@ rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 rm "$SB/perl"; printf '#!/bin/sh\ncase $1 in */compat) /bin/mv "$1" "$1.old.99999"; exit 1;; esac\nexec /bin/mv "$@"\n' > "$SB/mv"; chmod +x "$SB/mv"
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] && [ -d "$OH/compat.old.99999" ] && [ ! -e "$OH/compat" ] || { echo "FAIL: another writer's compat.old.* must make a failed mv a success (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-mv "$OH/compat.old.99999" "$OH/compat"; rm -rf "$SB"
+mv "$OH/compat.old.99999" "$OH/compat"
+# Our mv refused for a non-race reason (permissions): compat/ stays unreplaced, so the run fails.
+printf '#!/bin/sh\ncase $1 in */compat) exit 1;; esac\nexec /bin/mv "$@"\n' > "$SB/mv"; echo other-sha > "$OH/compat/VERSION"
+rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
+[ "$rc" != 0 ] && [ "$(cat "$OH/compat/VERSION")" = other-sha ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] || { echo "FAIL: a refused mv that leaves compat/ unreplaced must fail (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
+rm -rf "$SB"
 bash "$S" patch --compat >/dev/null 2>&1   # leave a fresh compat/
 rm -rf "$HOME/cbproj"
-echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, and a failed swap restores the old copy (another writer mid-swap is no failure)"
+echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, a failed swap restores the old copy (another writer mid-swap is no failure), a refused mv fails, and with no source clone no bot start rebuilds it"
 
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.

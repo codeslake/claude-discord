@@ -49,14 +49,22 @@ resolve_channel() {
 # runs with CLAUDE_PROJECT_DIR set to that worktree. Any other directory, under
 # the project or not, is another session.
 bot_project=${DISCORD_STATE_DIR:-}; bot_project=${bot_project%/}; bot_project=${bot_project%/.claude/discord-agents/*}
-# in_bot_worktree: CLAUDE_PROJECT_DIR is a linked worktree of the bot project
-# (the first entry, the main worktree, is the project itself or a repo around
-# it). Run only when the paths differ, so the bot's own sessions fork nothing;
-# a git that fails (a $HOME project that is no repo) answers no.
+# in_bot_worktree: CLAUDE_PROJECT_DIR is the bot project's directory in a
+# linked worktree: <worktree><prefix>, prefix being the project's path under the
+# first entry, the main worktree (empty when the project is the repo root; git
+# prints that entry resolved, so the walk up compares with -ef). Run only when
+# the paths differ, so the bot's own sessions fork nothing; a git that fails (a
+# $HOME project that is no repo) answers no.
 in_bot_worktree() {
-  local l main=1
+  local l p pre="" main=1
   while IFS= read -r l; do
-    case $l in "worktree "?*) [ -z "$main" ] && [ "${l#worktree }" -ef "$CLAUDE_PROJECT_DIR" ] && return 0; main="";; esac
+    case $l in "worktree "?*)
+      if [ -n "$main" ]; then
+        p=$bot_project; main=""
+        while [ -n "$p" ] && ! [ "$p" -ef "${l#worktree }" ]; do case $p in */*) pre=/${p##*/}$pre; p=${p%/*};; *) p="";; esac; done
+        [ -n "$p" ] || return 1   # the bot project is not under this repo's main worktree
+      elif [ "${l#worktree }$pre" -ef "$CLAUDE_PROJECT_DIR" ]; then return 0; fi;;
+    esac
   done <<<"$(git -C "$bot_project" worktree list --porcelain 2>/dev/null)"
   return 1
 }
