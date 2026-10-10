@@ -552,7 +552,7 @@ grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out
 ! grep -q "Other bots in the channel can hear you." <<<"$out" || { echo "FAIL: the system prompt must not claim other bots hear every message"; exit 1; }
 grep -qF "Another bot receives your messages only when you @mention it and it allowlists your bot." <<<"$out" || { echo "FAIL: the system prompt must say how bots reach each other now"; exit 1; }
 grep -qF "Sessions on this machine can also be reached with ListAgents and SendMessage" <<<"$out" || { echo "FAIL: the system prompt must keep SendMessage for same-machine sessions"; exit 1; }
-grep -qF 'thread start "[<area>] <short title>" posts that one line in the channel' <<<"$out" && grep -qF "dispatch one that needs more than a few tool calls to a background subagent whose brief names the request's thread id" <<<"$out" || { echo "FAIL: the system prompt must carry the thread and orchestrator rules for every bot"; exit 1; }
+grep -qF "$D/tools/thread start \"[<area>] <short title>\" posts that one line in the channel" <<<"$out" && grep -qF "dispatch one that needs more than a few tool calls to a background subagent whose brief names the request's thread id" <<<"$out" || { echo "FAIL: the system prompt must carry the thread and orchestrator rules for every bot"; exit 1; }
 ! grep -q "Bots cannot hear each other" <<<"$out" || { echo "FAIL: the stale 'Bots cannot hear each other' claim is still in the system prompt"; exit 1; }
 grep -q "Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply." <<<"$out"
 ! grep -q "never @mention it" <<<"$out"
@@ -1492,6 +1492,12 @@ grep -qF '"auto_archive_duration":1440' <<<"$(call 2)" || { echo "FAIL: auto_arc
 grep -q 'tokM' "$CURL_LOG" && { echo "FAIL: the bot token appeared in curl's argv (visible in ps/cmdline)"; exit 1; }
 [ "$(grep -cF 'Authorization: Bot tokM' "$CURL_STDIN_LOG")" = 2 ] || { echo "FAIL: both calls must send the token via stdin (-H @-): $(cat "$CURL_STDIN_LOG")"; exit 1; }
 [ "$(cat "$R4/mgr/open-threads")" = 1234 ] || { echo "FAIL: thread start must list the thread in open-threads: $(cat "$R4/mgr/open-threads")"; exit 1; }
+# Through the compat symlink at a hooks/tools/ path (Task 7 leaves one for
+# running sessions): the lib must still be found, or there is no token.
+mkdir -p "$HOME/compat/hooks/tools"; ln -sf "$T" "$HOME/compat/hooks/tools/thread"
+replies '200 {"id":"1235"}' '201 {"id":"1235"}'
+out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$HOME/compat/hooks/tools/thread" start '[guard] via link' 2>&1) && [ "$out" = 1235 ] || { echo "FAIL: tools/thread through a symlink must find hooks/lib/discord.sh: $out"; exit 1; }
+sed -i '/^1235$/d' "$R4/mgr/open-threads"; echo "ok: tools/thread run through a hooks/tools/ symlink still finds the lib"
 # Any bot starts a thread from a turn with no Discord message in it (plain is
 # a mode-none bot), listed as terminal: no Discord message to answer.
 replies '200 {"id":"6"}' '201 {"id":"6"}'

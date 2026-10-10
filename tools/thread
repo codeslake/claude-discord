@@ -32,7 +32,10 @@
 # or a bad argument. Exit 1: Discord refused, named by HTTP status and error
 # code only -- never the token, never the response body.
 set -u
-. "${0%/*}/../hooks/lib/discord.sh" 2>/dev/null || :
+# Through a symlink (the compat link at hooks/tools/thread), ${0%/*} is the link's
+# directory, not the plugin's: resolve the real script first.
+here=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd -P)
+. "$here/../hooks/lib/discord.sh" 2>/dev/null || :
 [ -z "${bot_name:-}" ] || { resolve_channel; load_token; }
 
 status=000 resp=""
