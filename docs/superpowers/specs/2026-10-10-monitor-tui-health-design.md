@@ -61,7 +61,10 @@ the TUI takes no lock and two TUIs are two harmless readers of one file.
 A manager bot's machine notices, within one pass, any bot on its ledger hosts
 that stopped answering, and tells that bot's owner in `#bot-health-check`
 once, with a command that fixes it, without a human running anything and
-without an OS scheduler.
+without an OS scheduler. No host needs a timer or
+systemd (lmd79's container has none and runs no scheduled job since
+2026-10-09); a host is only ssh'd into by a manager's monitor, and on lmd79
+the monitor starts only after its container move.
 
 Success means:
 
@@ -275,7 +278,7 @@ logged. The key is `host|project|bot` for a bot, `host|-` for a host.
 | finding | from | probe | hold |
 |---|---|---|---|
 | `down` | health | no plugin server for the bot, nothing unanswered | 5 min (two passes): a pass that lands inside a `refresh` sees `down` for seconds |
-| `stale` | health | oldest addressed message unanswered 15 min, no live turn (health's own filters: allowFrom, requireMention, replies, turn-file and `claude agents` holds) | none: the 15 min is already in the probe |
+| `stale` | health | oldest addressed message unanswered 15 min, no live turn, AND no reply by the bot anywhere in its channel or threads since that message arrived (health's own filters: allowFrom, requireMention, replies, turn-file and `claude agents` holds) | none: the 15 min is already in the probe |
 | `duplicate` | health | more than one plugin server on the bot's token | 5 min |
 | `unreachable` | health | Discord answered 401/403 for the bot's token or channel | 5 min |
 | `nostate` | health | unanswered and `claude agents` silent for 6 runs | none: already 30 min |
@@ -285,6 +288,10 @@ logged. The key is `host|project|bot` for a bot, `host|-` for a host.
 | `hostdown` | monitor | ssh exit non-zero, and again with `-o ControlPath=none` (a stale master refuses falsely) | 30 min: the Macs are laptops and sleep |
 | `blind` | monitor | ssh ran but no valid document (claude-discord missing or too old for `--all`, health crashed) | 5 min |
 
+A bot that replied anywhere after the unanswered message is lagging, not
+stuck, and stays `ok`: dong-dev-bot measured the old alert's false positive on
+lmd79 (2026-10-09), a live session answering other threads reported
+`stale ... refresh` for one message 62 min behind. A test covers that case.
 `busy` is not a finding. While a host is `noreach`, `hostdown` or `blind`,
 its bots' states are frozen: such a pass says nothing about them, so it
 neither posts nor recovers them. A bot that leaves the list (its `.env`
@@ -295,10 +302,16 @@ ConnectTimeout=8 <host> ...` and judged by exit status, never by output.
 
 Coverage gap: without `/proc` (macOS) `health` counts servers as `unknown`,
 so `down` and `duplicate` cannot be seen on the Macs today; `stale` still
-can. This spec adds a macOS count through `ps -Eww -o pid,command` (macOS
-`ps -E` prints the environment of the user's processes) matching the same
-argv and `DISCORD_STATE_DIR` rule, to be measured on wmac before it is
-trusted. Until it is, a Mac row reads `servers: unknown` in the TUI.
+can. This spec adds a macOS count with the same argv-first rule: candidates
+from `ps -axww -o pid=,command=` (argv only; the argv test as on Linux),
+then `ps -axEww -o command= -p <pids>` for those pids, where a token
+`DISCORD_STATE_DIR=<dir>` after the argv text names the bot. Measured on
+wmac (macOS 15.7.4, 2026-10-10): without `-ax` ps lists only processes with
+a terminal, so a `--bg` server is missing (0 of 1); with `-ax` a real
+`bun run --cwd <...>/discord/0.0.4 ... start` started from another ssh
+session showed its `DISCORD_STATE_DIR`. Apple platform binaries (e.g.
+`/usr/bin/perl`) show no environment, which does not matter because the
+server is bun.
 
 ## Alert message format
 
@@ -307,9 +320,11 @@ POST time, sent to curl on stdin as `health` does, never argv) to
 `POST /channels/1558283274487341137/messages`. The channel id is a constant
 in the wrapper: both owners' managers share it (6091915116). 429 is honoured
 (`retry_after` under 10 s waits in the pass, longer waits for the next
-pass). Labels follow the project's Discord language rule (Korean), as
-recommended in open question 5 and pending the owner's answer; the detail
-and the command stay as produced (English).
+pass). Label language is configurable: `ALERT_LANG=ko|en` in the manager
+project's `.claude/discord-agents/config.env`, default `ko` (owner
+2026-10-10: "configurable하게 해 일단 한글로하고"); an unknown value falls back
+to `ko`. Only the labels change; the detail and the command stay as produced
+(English), so the text a human copies is exact.
 
 Finding (pings the bot's owner, `allowed_mentions: {users: [owner_id]}`):
 
@@ -420,11 +435,11 @@ patch.
   Expected addition: about 3 s of wall time.
 - **Outside the budget.** `tests/tui/test_tui.py`, Textual pilot tests over
   fixture state files (all ok, findings, monitor stopped, failed POST, a
-  Mac row with `servers: unknown`), run with `uv run`, like the plugin load
+  Mac row with a `ps -ax` server count), run with `uv run`, like the plugin load
   check in sub-project 1.
 - **Measurements before relying on them** (the plan's first tasks): a real
   SessionStart hook's ancestry on lmd42 (`--bg` and foreground) and on a
-  Mac; `ps -Eww` server counting on wmac; perl flock and fd inheritance on
+  Mac; `ps -ax` server counting on wmac (done 2026-10-10); perl flock and fd inheritance on
   macOS bash 3.2.
 - **Live check before main:** on lmd42 with ledger `local, wmac, pmac`, stop
   a non-critical bot; one `[down]` message within 10 min, one recovery line
@@ -459,21 +474,17 @@ patch.
    30 min will fire on an ordinary night. Recommendation: keep the 30 min
    hold but post `hostdown` only for hosts marked always-on in the ledger
    (`lmd42`, `lmd79`); a laptop's unreachability is shown in the TUI only.
-2. **macOS `down`/`duplicate`.** Until `ps -Eww` counting is measured on
-   wmac, Macs get `stale` only. Recommendation: ship with the gap stated in
-   the TUI and the README, and add the macOS count in the same release once
-   measured, rather than blocking the release on it.
-3. **Inbound on `#bot-health-check`.** Should a message there (an owner
-   replying to an alert) wake the manager session? Recommendation: no; the
-   channel stays write-only for the monitor, and humans talk to the manager
-   in its own channel.
-4. **TUI dependencies.** `uv run --script` with inline metadata needs `uv`
-   on the manager machine (present on lmd42; not verified on the Macs).
-   Recommendation: require `uv` for the TUI only, with a clear message when
-   it is missing; the monitor and alerts do not depend on it.
-5. **Alert language.** Recommendation: Korean labels (`사유`, `복구`) per the
-   project's Discord rule, with `health`'s detail and the command left in
-   English as produced, so the text a human copies is exact.
+
+Answered 2026-10-10:
+2. macOS `down`/`duplicate`: owner "wmac에서 해봐". Measured; the count is in
+   this release (see "Coverage gap" above, `ps -ax` required).
+3. Inbound on `#bot-health-check`: owner "알림채널로만써". Write-only for the
+   monitor; no session is woken by a message there.
+4. TUI dependencies: owner "해". `uv` is required for the TUI only, with a
+   clear message when missing; present on lmd42, wmac (0.12.1) and pmac
+   (0.11.31), measured 2026-10-10.
+5. Alert language: owner "configurable하게 해 일단 한글로하고". `ALERT_LANG`,
+   default `ko` (see "Alert message format").
 
 ## Review
 
