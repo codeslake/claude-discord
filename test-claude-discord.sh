@@ -2953,8 +2953,21 @@ touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.
 for _ in 1 2 3 4 5 6; do bash "$S" patch --compat >/dev/null 2>&1 & done; wait
 cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* "$OH"/compat/compat.* 2>/dev/null)" ] ||
   { echo "FAIL: six parallel refreshes must leave one complete compat/ and no temp dir: $(ls -d "$OH"/compat* "$OH"/compat/compat.* 2>&1)"; exit 1; }
+# A failed swap: perl's rename fails after our mv took compat/ away (a non-race failure) -> the old copy goes back and the run fails;
+# our mv fails because another writer has moved compat/ to compat.old.<its pid> and not yet renamed its copy in -> not a failure.
+SB="$HOME/swapfail-stubs"; mkdir -p "$SB"
+printf '#!/bin/sh\nexit 1\n' > "$SB/perl"; chmod +x "$SB/perl"
+touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
+rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
+[ "$rc" != 0 ] && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] ||
+  { echo "FAIL: a failed rename must put the old compat/ back and fail (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
+rm "$SB/perl"; printf '#!/bin/sh\ncase $1 in */compat) /bin/mv "$1" "$1.old.99999"; exit 1;; esac\nexec /bin/mv "$@"\n' > "$SB/mv"; chmod +x "$SB/mv"
+rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] && [ -d "$OH/compat.old.99999" ] && [ ! -e "$OH/compat" ] || { echo "FAIL: another writer's compat.old.* must make a failed mv a success (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
+mv "$OH/compat.old.99999" "$OH/compat"; rm -rf "$SB"
+bash "$S" patch --compat >/dev/null 2>&1   # leave a fresh compat/
 rm -rf "$HOME/cbproj"
-echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, and parallel refreshes leave one complete copy"
+echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, and a failed swap restores the old copy (another writer mid-swap is no failure)"
 
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.

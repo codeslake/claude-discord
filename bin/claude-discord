@@ -364,6 +364,7 @@ remove_old_install() {
 # The second is perl's rename(2), not mv: with several bots starting at once,
 # mv would move this copy INTO a compat/ another writer has just put in place;
 # rename(2) fails instead, and that writer's complete copy stays.
+# A failed swap puts our old copy back; another writer's compat.old.* means it is mid-swap: success.
 sync_compat() {
   local c=$helpers/compat n=$helpers/compat.new.$$ t
   rm -rf "$n" && mkdir -p "$n/hooks" || return 1
@@ -374,7 +375,11 @@ sync_compat() {
      [ "$(cd "$c" && find . -type f -perm -100 | sort)" = "$(cd "$n" && find . -type f -perm -100 | sort)" ]; then rm -rf "$n"; return 0; fi
   rm -rf "$c.old.$$"
   { ! has_path "$c" || mv "$c" "$c.old.$$"; } && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$n" "$c" ||
-    { rm -rf "$n"; [ -d "$c" ] && rm -rf "$c.old.$$"; return; }   # another writer's copy in place is not a failure
+    { rm -rf "$n"
+      if [ -d "$c" ]; then rm -rf "$c.old.$$"; return 0; fi   # another writer's copy in place is not a failure
+      [ ! -d "$c.old.$$" ] || { mv "$c.old.$$" "$c"; return 1; }   # our swap failed: put the old copy back
+      for t in "$c".old.*; do [ -d "$t" ] && return 0; done   # another writer is between its two renames
+      return 1; }
   rm -rf "$c.old.$$"
 }
 # compat_if_stale: run at a bot's startup and resume (on-session-start runs
