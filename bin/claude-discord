@@ -314,7 +314,7 @@ install_plugin() {  # uses $scope $method $pdir $gdir
 }
 
 # What install.sh used to put under ~/.claude-discord becomes links into the
-# real plugin ($self_root, the resolved install, not one project's link):
+# real plugin (the source clone when there is one, else $self_root, the resolved install, not one project's link):
 # hooks/{turn,peers,lib,autoresearchclaw}, every tool under hooks/tools, and the
 # two runtime .ts files (the bunfig preload an old bot's MCP server names; they
 # link to the stable runtime/ copy, which sync_runtime fills, so they never dangle).
@@ -328,6 +328,8 @@ install_plugin() {  # uses $scope $method $pdir $gdir
 # are removed with rm -rf, which on a link removes only the link.
 remove_old_install() {
   local h=$helpers real=$self_root t f bad=0
+  # The machine-wide source clone when there is one: a clone-method (possibly pinned) project must not pull every unmigrated project onto its version, nor leave the links dangling when it is removed.
+  [ ! -d "$h/source/hooks" ] || real=$h/source
   [ ! -L "$h/hooks" ] || rm -f "$h/hooks"
   [ ! -e "$h/rules" ] && [ ! -L "$h/rules" ] || rm -rf "$h/rules"
   [ -d "$h/hooks/tools" ] && [ ! -L "$h/hooks/tools" ] || { rm -rf "$h/hooks/tools"; mkdir -p "$h/hooks/tools" || bad=1; }
@@ -391,6 +393,11 @@ if [ "${1:-}" = setup ]; then
       echo "claude-discord: already installed globally at $gdir; remove it or use --scope global" >&2; exit 2
     elif [ "$scope" = global ] && has_path "$pdir"; then
       echo "claude-discord: already installed for this project at $pdir; remove it or use --scope project" >&2; exit 2
+    elif [ "$scope" = global ] && ! has_path "$gdir"; then
+      # A new global copy would shadow every project install the machine records (the global one wins).
+      while IFS= read -r p || [ -n "$p" ]; do
+        [ -z "$p" ] || [ ! -e "$p" ] || { echo "claude-discord: a project install exists at $p, which a global install would shadow; remove it or use --scope project" >&2; exit 2; }
+      done < <(cat "$HOME/.claude-discord/records/installs" 2>/dev/null)
     fi
   fi
   umask 077
@@ -1264,6 +1271,7 @@ fi
 #   bot-authors     let other bots reach access.json's allowFrom gate
 #   ignore-everyone @everyone/@here wake no bot
 #   chunk           fence-safe chunking, imported from the stable runtime copy
+#                   (an import of any other path is rewritten to it)
 #   proxy           bunfig preload pinning fetch and WebSocket to HTTPS_PROXY
 #   failure-cache   a per-bot env in .mcp.json, so Claude Code's 15-minute MCP
 #                   failure cache (keyed on the config hashed after ${VAR}
@@ -1290,7 +1298,11 @@ patch_official() {
     fi
     if grep -qE '^[[:space:]]*const chunks = chunk\(text, limit, mode\);?[[:space:]]*$' "$f"; then
       CHUNK_TS=$rt/discord-chunk.ts perl -pi -e 's/^(\s*)const chunks = chunk\(text, limit, mode\)(;?\s*)$/$1const chunks = (await import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)$2/' "$f"; mark "$f"
-    elif ! grep -qF '.chunk(text, limit, mode)' "$f"; then
+    elif grep -qF "import(\"$rt/discord-chunk.ts\")).chunk(text, limit, mode)" "$f"; then :
+    elif grep -qE 'import\("[^"]*"\)\)\.chunk\(text, limit, mode\)' "$f"; then
+      # An earlier release imported it from another path (~/.claude-discord/discord-chunk.ts, a compat link that goes in a later release).
+      CHUNK_TS=$rt/discord-chunk.ts perl -pi -e 's/import\("[^"]*"\)\)\.chunk\(text, limit, mode\)/import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)/' "$f"; mark "$f"
+    else
       echo "claude-discord: patch: $f: chunk no longer matches" >&2; rc=1
     fi
     [ "$(cat "$d/bunfig.toml" 2>/dev/null)" = "preload = [\"$rt/discord-proxy.ts\"]" ] ||

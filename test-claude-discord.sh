@@ -737,6 +737,16 @@ done
 ! grep -qF "$PCACHE/0.0.4" <<<"$out" || { echo "FAIL: the already patched 0.0.4 must not be reported as changed: $out"; exit 1; }
 out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch run must be silent and exit 0: $out"; exit 1; }
 [ -f "$HOME/.claude-discord/runtime/discord-chunk.ts" ] && [ -f "$HOME/.claude-discord/runtime/discord-proxy.ts" ] || { echo "FAIL: patch must keep the runtime copy"; exit 1; }
+# A dir the previous release patched imports the chunk helper and preloads the proxy from the old compat paths; patch re-points both to runtime/, once.
+perl -pi -e 's{import\("[^"]*"\)}{import("$ENV{HOME}/.claude-discord/discord-chunk.ts")}' "$PCACHE/0.0.6/server.ts"
+printf 'preload = ["%s/.claude-discord/discord-proxy.ts"]\n' "$HOME" > "$PCACHE/0.0.6/bunfig.toml"
+grep -qF "$HOME/.claude-discord/discord-chunk.ts" "$PCACHE/0.0.6/server.ts" || { echo "FAIL: the old-path fixture was not planted"; exit 1; }
+out=$(bash "$S" patch 2>&1) || { echo "FAIL: patch over an old-path import must exit 0: $out"; exit 1; }
+grep -qF "(await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chunk(text, limit, mode)" "$PCACHE/0.0.6/server.ts" && ! grep -qF "$HOME/.claude-discord/discord-chunk.ts" "$PCACHE/0.0.6/server.ts" &&
+  [ "$(cat "$PCACHE/0.0.6/bunfig.toml")" = "preload = [\"$HOME/.claude-discord/runtime/discord-proxy.ts\"]" ] &&
+  grep -qF "$PCACHE/0.0.6/server.ts" <<<"$out" && grep -qF "$PCACHE/0.0.6/bunfig.toml" <<<"$out" || { echo "FAIL: patch must re-point an old chunk import and proxy preload to runtime/: $out"; exit 1; }
+out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch after the rewrite must change nothing: $out"; exit 1; }
+echo "ok: patch rewrites a chunk import and a proxy preload left at the old paths to runtime/, and a second run is silent"
 # A moved pattern: exit 1 naming file and patch, the other patches still applied.
 mkdir -p "$PCACHE/0.0.7"
 printf 'client.on(x, msg => {\n  if (msg.author.isBot()) return\n})\n' > "$PCACHE/0.0.7/server.ts"
@@ -1574,6 +1584,8 @@ out=$(tguard "$(body 43 "$A501")")   # 43: a thread of channel 42, not the chann
 [ -z "$out" ] || { echo "FAIL: the same long text sent to a thread id must pass: $out"; exit 1; }
 out=$(tguard "$(body 42 "$A501")" plain)
 [ "$(reason <<<"$out")" = "$TG_REASON" ] || { echo "FAIL: thread-guard must deny for a mode-none bot too: $out"; exit 1; }
+out=$(env -u DISCORD_STATE_DIR bash "$G/thread-guard" <<<"$(body 42 "$A501 see 1550575144320110662")"); rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] || { echo "FAIL: thread-guard must exit 0 silently for a session that is not a bot (rc=$rc): $out"; exit 1; }
 mkdir -p "$HOME/arcbot/bot"; echo autoresearchclaw > "$HOME/arcbot/bot/mode"; cp "$R4/plain/access.json" "$HOME/arcbot/bot/"   # channel 42
 out=$(tguard "$(body 42 "$A501")" '' "$HOME/arcbot/bot")
 [ -z "$out" ] || { echo "FAIL: an autoresearchclaw bot's channel report must pass thread-guard: $out"; exit 1; }
@@ -2667,6 +2679,8 @@ OP="$HOME/old proj"; OH="$HOME/.claude-discord"; UP="$HOME/unmigrated proj"
 rm -rf "$OH/hooks" "$OH/rules" "$OH/discord-chunk.ts" "$OH/discord-proxy.ts"
 mkdir -p "$OP/.claude/rules" "$OP/.claude/discord-agents" "$OH/scratch/b" "$OH/rules" "$OH/runtime" "$OH/hooks/tools"
 for t in turn peers lib autoresearchclaw; do mkdir -p "$OH/hooks/$t"; echo old > "$OH/hooks/$t/stale"; done
+# The previous release's rule told an ARC bot to loop on ~/.claude-discord/hooks/autoresearchclaw/events.
+printf '#!/bin/sh\necho old\n' > "$OH/hooks/autoresearchclaw/events"; chmod +x "$OH/hooks/autoresearchclaw/events"
 (cd "$OP" && git init -q .)
 : > "$OH/scratch/b/note"; : > "$OH/runtime/discord-proxy.ts"; echo old > "$OH/hooks/tools/local-bots"; echo old > "$OH/hooks/tools/old-tool"; : > "$OH/rules/dev-manager.md"; echo old > "$OH/discord-chunk.ts"; echo old > "$OH/discord-proxy.ts"
 : > "$OP/.claude/rules/claude-discord-dev-manager.md"
@@ -2676,12 +2690,12 @@ echo '{}' > "$UP/.claude/settings.local.json"; plant_old "$UP/.claude/settings.l
 jq -n --arg p "$OP" --arg p5 "$PHOME/project5" '{projects: {($p): {hasTrustDialogAccepted: true}, ($p5): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
 (cd "$OP" && printf '900\n111\n\ntokO\nn\ndev-manager\n\n' | bash "$S" setup obot --scope project >/dev/null)
 [ ! -e "$OH/rules" ] || { echo "FAIL: the old rule copies must go"; exit 1; }
-for f in hooks/turn/on-prompt hooks/turn/on-reply hooks/turn/on-stop hooks/turn/on-session-start hooks/peers/mention-guard hooks/peers/checkin hooks/peers/thread-guard hooks/peers/edit-gate hooks/autoresearchclaw/on-start hooks/lib/discord.sh hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events discord-chunk.ts discord-proxy.ts; do
-  case $f in hooks/tools/*) want=$PC/tools/${f##*/};; hooks/*) want=$PC/$f;; *) want=$PHOME/.claude-discord/runtime/$f;; esac   # the .ts links go through the stable runtime copy
+for f in hooks/turn/on-prompt hooks/turn/on-reply hooks/turn/on-stop hooks/turn/on-session-start hooks/peers/mention-guard hooks/peers/checkin hooks/peers/thread-guard hooks/peers/edit-gate hooks/autoresearchclaw/on-start hooks/autoresearchclaw/events hooks/lib/discord.sh hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events discord-chunk.ts discord-proxy.ts; do
+  case $f in hooks/tools/*) want=$PC/tools/${f##*/};; hooks/autoresearchclaw/events) want=$PC/tools/arc-events;; hooks/*) want=$PC/$f;; *) want=$PHOME/.claude-discord/runtime/$f;; esac   # the .ts links go through the stable runtime copy
   [ -f "$OH/$f" ] && [ "$(readlink -f "$OH/$f")" = "$want" ] || { echo "FAIL: ~/.claude-discord/$f must resolve to the real plugin's $want: $(readlink -f "$OH/$f")"; exit 1; }
 done
 cmp -s "$PC/runtime/discord-chunk.ts" "$OH/runtime/discord-chunk.ts" && cmp -s "$PC/runtime/discord-proxy.ts" "$OH/runtime/discord-proxy.ts" || { echo "FAIL: setup must fill ~/.claude-discord/runtime from the real plugin (the fixture's stale copy included)"; exit 1; }
-for f in hooks/turn/on-prompt hooks/peers/thread-guard hooks/autoresearchclaw/on-start hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events; do
+for f in hooks/turn/on-prompt hooks/peers/thread-guard hooks/autoresearchclaw/on-start hooks/autoresearchclaw/events hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events; do
   [ -x "$OH/$f" ] || { echo "FAIL: ~/.claude-discord/$f must be an executable"; exit 1; }
 done
 for t in turn peers lib autoresearchclaw; do
@@ -2758,6 +2772,11 @@ grep -q "already installed globally" <<<"$out" && [ ! -e "$XR/rbot" ] || { echo 
 rmdir "$GL"
 out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot --reset --scope global 2>&1) && { echo "FAIL: a project copy beside a global one must be refused"; exit 1; }
 grep -q "already installed for this project" <<<"$out" && [ -f "$XR/xbot/.env" ] || { echo "FAIL: wrong or late refusal, --reset must not run: $out"; exit 1; }
+# A new global copy would shadow every recorded project install (the global one wins), so it is refused naming one.
+mkdir -p "$HOME/gr proj"
+out=$(cd "$HOME/gr proj" && printf '\nn\n' | bash "$S" setup grbot --scope global 2>&1) && { echo "FAIL: a global install beside another project's install must be refused"; exit 1; }
+grep -q "a project install exists at .*claude/skills/claude-discord" <<<"$out" && [ ! -e "$HOME/gr proj/.claude/discord-agents/grbot" ] && [ ! -e "$GL" ] || { echo "FAIL: wrong or late refusal: $out"; exit 1; }
+rm -rf "$HOME/gr proj"
 rc=0; (cd "$XP" && printf 'dev-manager\n\n' | bash "$S" setup xbot --mode --scope project >/dev/null 2>&1) || rc=$?
 [ "$rc" = 2 ] && [ "$(cat "$XR/xbot/mode")" = none ] || { echo "FAIL: --mode with --scope must be refused before the mode is written, rc=$rc"; exit 1; }
 for bad in "--scope bogus" "--method bogus" "--scope" "--method"; do
@@ -2780,11 +2799,17 @@ rm -f "$HOME/xp link"
 # clone + global, then a second bot elsewhere uses the global install on Enter (no refusal, no project copy); --mode installs nothing.
 rm -rf "$XP"
 GP="$HOME/g proj"; GP2="$HOME/g proj2"; mkdir -p "$GP" "$GP2"
+# A global install is refused while a project install is recorded: park the records for this part, put them back after.
+RECS=$HOME/.claude-discord/records/installs; cp "$RECS" "$HOME/installs.parked"; : > "$RECS"
 (cd "$GP" && printf '900\n111\n\ntokG\nn\n' | bash "$S" setup gbot --scope global --method clone >/dev/null) || { echo "FAIL: setup --scope global --method clone failed"; exit 1; }
 [ -d "$GL/.git" ] && [ ! -L "$GL" ] && [ ! -e "$GP/.claude/skills" ] || { echo "FAIL: global clone must be a real clone at ~/.claude/skills and leave the project alone"; exit 1; }
+# The machine-wide compat links stay on the source clone, not on this clone-method install (it may be pinned, and may go). Run the clone's own wrapper: it is the one whose self_root is the clone.
+(cd "$GP" && printf '\nn\n' | bash "$GL/bin/claude-discord" setup gbot >/dev/null 2>&1) || { echo "FAIL: a re-run of the global clone's own wrapper failed"; exit 1; }
+[ "$(readlink "$HOME/.claude-discord/hooks/tools/thread")" = "$PHOME/.claude-discord/source/tools/thread" ] && [ "$(readlink "$HOME/.claude-discord/hooks/turn")" = "$PHOME/.claude-discord/source/hooks/turn" ] || { echo "FAIL: a clone-method setup must leave the compat links on the source: $(readlink "$HOME/.claude-discord/hooks/tools/thread")"; exit 1; }
 (cd "$GP2" && printf '900\n111\n\ntokG2\nn\n\nproject\n' | bash "$S" setup gbot2 >/dev/null 2>&1) || { echo "FAIL: a second bot on a globally installed machine must not be refused"; exit 1; }
 [ ! -e "$GP2/.claude/skills" ] || { echo "FAIL: with a global install the project must get no copy"; exit 1; }
 rm -rf "$GL"
+{ cat "$HOME/installs.parked" "$RECS"; } | awk '!seen[$0]++' > "$RECS.new" && mv "$RECS.new" "$RECS" && rm -f "$HOME/installs.parked"
 (cd "$GP2" && printf 'none\n' | bash "$S" setup gbot2 --mode >/dev/null)
 [ ! -e "$GL" ] && [ ! -e "$GP2/.claude/skills" ] || { echo "FAIL: setup --mode must install nothing"; exit 1; }
 # A project in a subdirectory of a repo, and in a git worktree of it, is excluded with the right path.

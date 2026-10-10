@@ -2,7 +2,7 @@
 # SessionStart hook (matcher: startup|resume|compact|clear), registered while
 # some bot in the project is in autoresearchclaw mode. For such a bot's
 # session, prints the SessionStart JSON whose additionalContext is the whole
-# installed ~/.claude-discord/rules/autoresearchclaw.md: the per-iteration
+# plugin's rules/autoresearchclaw.md: the per-iteration
 # report, the discussion rule, what never leaves the machine. At every
 # source, since a compaction or /clear drops that context from the
 # transcript. It arrives as context, not as a project .claude/rules file,

@@ -141,6 +141,8 @@ On each machine, once:
    load from the plugin on the next prompt; no restart.
 3. `claude-discord --version` and `claude-discord health` confirm.
 
+With a GLOBAL install, a project not yet migrated runs both its old settings hooks and the plugin's hooks until that project's next setup or start. Run `setup` in each project right after a global install.
+
 For this release `~/.claude-discord/hooks/{turn,peers,lib,autoresearchclaw}`,
 `hooks/tools/*` and the two `.ts` files stay as links into the plugin (and the
 runtime copy), so a project not yet migrated keeps working through them; they go
@@ -152,7 +154,7 @@ into the source clone, so remove them and the plugin installs first:
 ```
 while IFS= read -r p; do if [ -L "$p" ]; then rm -f "$p"; elif [ -d "$p/.git" ]; then rm -rf "$p"; fi; done < ~/.claude-discord/records/installs
 rm -rf ~/.claude-discord/hooks ~/.claude-discord/discord-chunk.ts ~/.claude-discord/discord-proxy.ts   # only links remain there
-cd ~/.claude-discord/source && git checkout <previous tag> && ./install.sh
+cd ~/.claude-discord/source && git checkout 2d22fca && ./install.sh   # 2d22fca: the last release before the plugin
 ```
 
 (`rm -rf` on a link removes the link, not its target.)
@@ -272,7 +274,7 @@ in the channel steers a run, and gates are answered in the run's terminal.
 - **Trigger.** An iteration ends when a run (`artifacts/rc-*/`) writes a new
   `stage-15/decision.md` (PROCEED, PIVOT or REFINE); a run ends when it
   writes `pipeline_summary.json`, aborted and failed runs included.
-- **`hooks/autoresearchclaw/events`** prints one line per new event,
+- **`tools/arc-events`** prints one line per new event,
   `iteration-end <path>` or `run-end <path>` (relative to the project), and
   nothing otherwise. What it has seen is `.claude/discord-agents/<bot>/arc-seen`,
   one `<path> <cksum>` line per file and content: a relaunch that rewrites

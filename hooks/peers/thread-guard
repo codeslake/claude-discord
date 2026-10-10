@@ -41,7 +41,8 @@ deny() {
   exit 0
 }
 
-[ -z "$bot_name" ] || resolve_channel
+[ -n "$bot_name" ] || exit 0   # not a bot session (a global plugin reaches every session on the machine)
+resolve_channel
 input=$(cat 2>/dev/null) || exit 0
 
 # A turn with no Discord message in it (typed in the terminal, or woken by a
