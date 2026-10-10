@@ -265,8 +265,52 @@ select_one() (
   echo "${opts[cur]%% *}"
 )
 
+# Installs the plugin by cloning this repo into the skills dir of the chosen
+# scope: a real directory, never a link (a link makes ${CLAUDE_PLUGIN_ROOT}
+# name the link and skips a .mcp.json outside the project; measured). A plugin
+# in both scopes loads once with the global copy winning, so the other scope
+# is refused. Re-running keeps an existing clone. Project scope loads only
+# when ~/.claude.json trusts that exact path; setup asks before writing it.
+install_plugin() {  # $1 = project|global
+  local repo=${CLAUDE_DISCORD_REPO:-https://github.com/codeslake/claude-discord}
+  local pdir=$PWD/.claude/skills/claude-discord gdir=$HOME/.claude/skills/claude-discord target other t
+  case $1 in
+    project) target=$pdir other=$gdir;;
+    global) target=$gdir other=$pdir;;
+    *) echo "claude-discord: --scope must be project or global, got '$1'" >&2; return 2;;
+  esac
+  if [ -e "$other" ]; then
+    [ "$1" = project ] && echo "claude-discord: already installed globally at $other; remove it or use --scope global" >&2
+    [ "$1" = global ] && echo "claude-discord: already installed for this project at $other; remove it or use --scope project" >&2
+    return 2
+  fi
+  if [ ! -d "$target/.git" ]; then
+    mkdir -p "$(dirname "$target")" && git clone -q "$repo" "$target" || { echo "claude-discord: could not clone $repo into $target" >&2; return 1; }
+  fi
+  if [ "$1" = project ] && [ -d "$PWD/.git" ]; then
+    grep -qxF '/.claude/skills/claude-discord/' "$PWD/.git/info/exclude" 2>/dev/null ||
+      printf '/.claude/skills/claude-discord/\n' >> "$PWD/.git/info/exclude"
+  fi
+  mkdir -p "$HOME/.local/bin" "$HOME/.claude-discord/records"
+  cmp -s "$target/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
+    install -m 755 "$target/shim/claude-discord" "$HOME/.local/bin/claude-discord"
+  touch "$HOME/.claude-discord/records/installs"
+  grep -qxF "$target" "$HOME/.claude-discord/records/installs" || printf '%s\n' "$target" >> "$HOME/.claude-discord/records/installs"
+  if [ "$1" = project ] && [ "$(jq -r --arg p "$PWD" '.projects[$p].hasTrustDialogAccepted // false' "$HOME/.claude.json" 2>/dev/null)" != true ]; then
+    echo "claude-discord: $PWD is not trusted in ~/.claude.json, so Claude Code will not load the plugin here." >&2
+    read -rp "Mark this project trusted now? [y/N] " t || t=""
+    case $t in y|Y) jq_edit "$HOME/.claude.json" --arg p "$PWD" '.projects[$p].hasTrustDialogAccepted = true';; esac
+  fi
+}
+
 if [ "${1:-}" = setup ]; then
-  name=${2:?usage: claude-discord setup <name> [--reset|--mode]}
+  name=${2:?usage: claude-discord setup <name> [--scope project|global] [--reset|--mode]}
+  # --scope may sit anywhere after the name; the rest keeps its place so ${3:-} still sees --reset/--mode.
+  scope="" rest=()
+  for a in "${@:3}"; do
+    case $a in --scope=*) scope=${a#--scope=};; --scope) scope=__next;; *) [ "$scope" = __next ] && scope=$a || rest+=("$a");; esac
+  done
+  set -- "$1" "$2" ${rest[@]+"${rest[@]}"}
   case $name in
     ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
     hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
@@ -343,6 +387,11 @@ if [ "${1:-}" = setup ]; then
        then .groups |= map_values(.allowFrom = ((.allowFrom // []) as $a | $a + ($ids - $a)))
        else . end'
     echo "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed."
+  fi
+  # --mode touches only the mode file, so it never installs or asks for a scope.
+  if [ "${3:-}" != --mode ]; then
+    [ -n "$scope" ] || scope=$(select_one Scope project "project  this project only (.claude/skills/claude-discord)" "global  every project (~/.claude/skills/claude-discord)")
+    install_plugin "$scope" || exit $?
   fi
   ensure_hooks_symlink
   sync_mode_drops

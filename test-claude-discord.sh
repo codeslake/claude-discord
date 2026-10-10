@@ -149,10 +149,19 @@ grep -q 'not set up' <<<"$out" || { echo "FAIL: the shim must say how to set up:
 rm -rf "$HOME/shim test" "$HOME/.claude/skills"
 echo "ok: the shim runs the project's clone (path with a space, from a subdirectory), else the global one, else explains"
 P="$HOME/project"; mkdir -p "$P"; cd "$P"; git init -q .
+# A local stand-in for GitHub, built from the WORKING TREE (a clone of $D would
+# carry only committed HEAD, so a red-green cycle could not see an edit). Every
+# setup below clones it, so it exists from the first one; the network is never
+# reached. The main project is trusted so no setup asks.
+SRC="$HOME/src-repo"; mkdir -p "$SRC"
+(cd "$D" && git ls-files -co --exclude-standard -z | tar --null -T - -cf - | tar -xf - -C "$SRC") &&
+  (cd "$SRC" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm stand-in) || { echo "FAIL: could not build the stand-in repo"; exit 1; }
+export CLAUDE_DISCORD_REPO=$SRC
+jq -n --arg h "$HOME" '[$h + "/project", $h + "/project-moved", $h + "/project4"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
 TT=$PC/tools/thread   # the hooks name the thread tool by its absolute path in the plugin
 R="$P/.claude/discord-agents"
 
-printf '1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alpha >/dev/null
+printf '1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alpha --scope project >/dev/null
 [ "$(jq -r '.groups["1550575144320110662"].requireMention' "$R/alpha/access.json")" = false ]
 [ "$(jq -c '.groups["1550575144320110662"].allowFrom' "$R/alpha/access.json")" = '["111","222","333"]' ]
 [ "$(jq -c '.allowFrom' "$R/alpha/access.json")" = '["111"]' ]
@@ -167,7 +176,7 @@ has_hooks "$P/.claude/settings.local.json"
 [ "$(readlink "$R/hooks")" = "$HOME/.claude-discord/hooks" ] || { echo "FAIL: hooks symlink must point at the installed copy"; exit 1; }
 echo "ok: setup also registers the four discord-turn hooks and the hooks symlink (after access.json is written)"
 
-printf 'tokB\nn\n' | bash "$S" setup beta >/dev/null
+printf 'tokB\nn\n' | bash "$S" setup beta --scope project >/dev/null
 [ "$(jq -r '.groups["1550575144320110662"].requireMention' "$R/beta/access.json")" = true ]
 echo "ok: second bot asks only token+mention and reuses shared IDs"
 
@@ -177,7 +186,7 @@ PM="$HOME/project-moved"; mkdir -p "$PM"; cd "$PM"
 RM="$PM/.claude/discord-agents"
 
 # A fresh setup still writes config.env's channel group (unchanged behaviour).
-printf '55\n11\n\ntokZ\nn\n' | bash "$S" setup moved >/dev/null
+printf '55\n11\n\ntokZ\nn\n' | bash "$S" setup moved --scope project >/dev/null
 [ "$(jq -c '.groups | keys' "$RM/moved/access.json")" = '["55"]' ] || { echo "FAIL: a fresh setup must write config.env's channel group: $(jq -c . "$RM/moved/access.json")"; exit 1; }
 echo "ok: a fresh setup still writes config.env's channel group"
 
@@ -188,7 +197,7 @@ echo "ok: a fresh setup still writes config.env's channel group"
 # channel (55) must not reappear as a second group.
 jq '.groups = {"777": (.groups["55"] + {allowFrom: (.groups["55"].allowFrom + ["444"])})} | .ackReaction = ""' \
   "$RM/moved/access.json" > "$RM/moved/access.json.tmp" && cat "$RM/moved/access.json.tmp" > "$RM/moved/access.json" && rm -f "$RM/moved/access.json.tmp"
-printf '\ny\n\n' | bash "$S" setup moved >/dev/null   # token empty keeps it, y = respond without mention, mode empty keeps it
+printf '\ny\n\n' | bash "$S" setup moved --scope project >/dev/null   # token empty keeps it, y = respond without mention, mode empty keeps it
 grep -q '^DISCORD_BOT_TOKEN=tokZ$' "$RM/moved/.env" || { echo "FAIL: an empty token on a re-run must keep the current token"; exit 1; }
 [ "$(jq -c '.groups | keys' "$RM/moved/access.json")" = '["777"]' ] || { echo "FAIL: a re-run must not add config.env's channel as a second group, and must keep the moved one: $(jq -c . "$RM/moved/access.json")"; exit 1; }
 [ "$(jq -c '.groups["777"].allowFrom' "$RM/moved/access.json")" = '["11","444"]' ] || { echo "FAIL: a re-run must keep the moved group's allowFrom: $(jq -c . "$RM/moved/access.json")"; exit 1; }
@@ -199,15 +208,15 @@ echo "ok: a setup re-run on a bot whose access.json group was moved by hand keep
 # Same, in dev-manager mode: a peer added on the re-run must reach the moved
 # group's allowFrom, not a freshly-created group keyed by config.env's
 # channel, and only once.
-printf 'tokY\nn\ndev-manager\n\n' | bash "$S" setup movedmgr >/dev/null
+printf 'tokY\nn\ndev-manager\n\n' | bash "$S" setup movedmgr --scope project >/dev/null
 jq '.groups = {"777": .groups["55"]}' "$RM/movedmgr/access.json" > "$RM/movedmgr/access.json.tmp" && cat "$RM/movedmgr/access.json.tmp" > "$RM/movedmgr/access.json" && rm -f "$RM/movedmgr/access.json.tmp"
-printf '\ny\n\npeerz:501:601:host\n' | bash "$S" setup movedmgr >/dev/null
+printf '\ny\n\npeerz:501:601:host\n' | bash "$S" setup movedmgr --scope project >/dev/null
 [ "$(jq -c '.groups | keys' "$RM/movedmgr/access.json")" = '["777"]' ] || { echo "FAIL: dev-manager re-run must not recreate config.env's channel group: $(jq -c . "$RM/movedmgr/access.json")"; exit 1; }
 [ "$(jq -c '.groups["777"].allowFrom' "$RM/movedmgr/access.json")" = '["11","501"]' ] || { echo "FAIL: the peer must join the moved group's allowFrom, once: $(jq -c . "$RM/movedmgr/access.json")"; exit 1; }
 echo "ok: dev-manager re-run adds a peer to the moved group's allowFrom, not to a group keyed by config.env's channel"
 
 cd "$P"
-printf '999\n111\n\ntokA2\nn\n' | bash "$S" setup alpha --reset >/dev/null
+printf '999\n111\n\ntokA2\nn\n' | bash "$S" setup alpha --scope project --reset >/dev/null
 grep -q "^DISCORD_CHANNEL_ID='999'$" "$R/config.env"
 grep -q "^DISCORD_BOT_TOKEN=tokA2$" "$R/alpha/.env"
 [ "$(jq -c '.groups | keys' "$R/alpha/access.json")" = '["999"]' ] || { echo "FAIL: --reset must rewrite access.json from config.env's new channel: $(jq -c . "$R/alpha/access.json")"; exit 1; }
@@ -805,7 +814,7 @@ rm -rf "$R/beta"                      # leave exactly one bot set up
 out=$(bash "$S" --bg --resume my-session 2>&1)
 grep -q -- "-n alpha" <<<"$out" || { echo "FAIL: single bot was not inferred"; exit 1; }
 grep -q -- "--resume 11111111-2222-3333-4444-555555555555" <<<"$out" || { echo "FAIL: --resume value was read as the name"; exit 1; }
-printf 'tokB\nn\n' | bash "$S" setup beta >/dev/null
+printf 'tokB\nn\n' | bash "$S" setup beta --scope project >/dev/null
 out=$(bash "$S" --bg 2>&1) && { echo "FAIL: two bots and no name should refuse"; exit 1; }
 grep -q "several bots" <<<"$out" || { echo "FAIL: wrong error for two bots"; exit 1; }
 rm -rf "$R/beta"
@@ -1249,7 +1258,7 @@ echo mine > "$P4/.claude/rules/other.md"
 echo '{"permissions":{"allow":["Bash(ls)"]},"hooks":{"PostToolUse":[{"matcher":"mcp__plugin_discord_discord__reply","hooks":[{"type":"command","command":"my-own-hook"}]}]}}' > "$SJ"
 cp "$SJ" "$P4/user.before"
 echo '{"permissions":{"allow":["Bash(git status)"]}}' > "$SL"
-out=$(printf '42\n111\n\ntokM\nn\ndev-manager\ndong:900:800:wmac, junyong:901:801:lmd42,mgr:902:803:here,bad:x:1:2\n' | bash "$S" setup mgr 2>"$P4/err")
+out=$(printf '42\n111\n\ntokM\nn\ndev-manager\ndong:900:800:wmac, junyong:901:801:lmd42,mgr:902:803:here,bad:x:1:2\n' | bash "$S" setup mgr --scope project 2>"$P4/err")
 [ "$(cat "$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: mode by name was not stored"; exit 1; }
 [ "$(jq -c '.peers' "$R4/peers.json")" = '[{"name":"dong","bot_id":"900","owner_id":"800","machine":"wmac"},{"name":"junyong","bot_id":"901","owner_id":"801","machine":"lmd42"},{"name":"mgr","bot_id":"902","owner_id":"803","machine":"here"}]' ] || { echo "FAIL: peers.json wrong: $(cat "$R4/peers.json")"; exit 1; }
 grep -qF 'bad:x:1:2' "$P4/err" || { echo "FAIL: a malformed peer entry must be warned about"; exit 1; }
@@ -1266,28 +1275,28 @@ has_hooks "$SL" && has_peers_hooks "$SL" || { echo "FAIL: settings.local.json mu
 echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned), the group allowFrom, the rule file (conditional first line), every hook in settings.local.json and none in settings.json"
 
 cp "$R4/peers.json" "$P4/peers.before"; cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
-printf '\nn\n2\n\n' | bash "$S" setup mgr >/dev/null
+printf '\nn\n2\n\n' | bash "$S" setup mgr --scope project >/dev/null
 grep -q '^DISCORD_BOT_TOKEN=tokM$' "$R4/mgr/.env" || { echo "FAIL: an empty token on a re-run must keep the current token"; exit 1; }
 [ "$(cat "$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: mode by number was not stored"; exit 1; }
 cmp -s "$R4/peers.json" "$P4/peers.before" || { echo "FAIL: an empty peers answer must keep peers.json as it was"; exit 1; }
 cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: a re-run with nothing new must leave both settings files byte-identical"; exit 1; }
 [ "$(jq -c '.groups["42"].allowFrom' "$R4/mgr/access.json")" = '["111","900","901"]' ] || { echo "FAIL: a re-run rewrites access.json, and the kept peers must be re-added"; exit 1; }
-printf '\nn\n2\ndong2:900:810:pmac\n' | bash "$S" setup mgr >/dev/null
+printf '\nn\n2\ndong2:900:810:pmac\n' | bash "$S" setup mgr --scope project >/dev/null
 [ "$(jq -c '[.peers[] | select(.bot_id == "900")]' "$R4/peers.json")" = '[{"name":"dong2","bot_id":"900","owner_id":"810","machine":"pmac"}]' ] && [ "$(jq '.peers | length' "$R4/peers.json")" = 3 ] || { echo "FAIL: peers must merge by bot_id: $(cat "$R4/peers.json")"; exit 1; }
-printf '\nn\n\ndong:900:800:wmac\n' | bash "$S" setup mgr >/dev/null
+printf '\nn\n\ndong:900:800:wmac\n' | bash "$S" setup mgr --scope project >/dev/null
 [ "$(cat "$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: an empty mode answer must keep the current mode"; exit 1; }
 [ "$(jq -r '.peers[] | select(.bot_id == "900") | .name' "$R4/peers.json")" = dong ] || { echo "FAIL: merge back"; exit 1; }
-err=$(printf '\nn\nbogus\n\n' | bash "$S" setup mgr 2>&1 >/dev/null)
+err=$(printf '\nn\nbogus\n\n' | bash "$S" setup mgr --scope project 2>&1 >/dev/null)
 [ "$(cat "$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: an unknown mode answer must keep the default (the current mode)"; exit 1; }
 grep -q bogus <<<"$err" || { echo "FAIL: an unknown mode answer must be warned about"; exit 1; }
 cp "$R4/peers.json" "$P4/peers.before"
 jq '.peers += [{"bot_id":"905"}]' "$P4/peers.before" > "$R4/peers.json"
-printf '\nn\n2\n\n' | bash "$S" setup mgr >/dev/null
+printf '\nn\n2\n\n' | bash "$S" setup mgr --scope project >/dev/null
 [ "$(jq -c '.groups["42"].allowFrom' "$R4/mgr/access.json")" = '["111","900","901","905"]' ] || { echo "FAIL: a peer without a name must not empty the allowFrom update: $(jq -c . "$R4/mgr/access.json")"; exit 1; }
 cp "$P4/peers.before" "$R4/peers.json"
 echo "ok: re-run: empty token keeps it, mode by number, empty/unknown mode keeps the current one (unknown warned), empty peers keeps the list, peers merge by bot_id, a nameless peer still reaches allowFrom"
 
-printf 'tokP\nn\nnone\n' | bash "$S" setup plain >/dev/null
+printf 'tokP\nn\nnone\n' | bash "$S" setup plain --scope project >/dev/null
 [ "$(cat "$R4/plain/mode")" = none ] && [ -f "$RULE" ] && has_peers_hooks "$SL" || { echo "FAIL: one dev-manager bot is enough to keep the dev-manager drops (union over bots)"; exit 1; }
 echo stale > "$RULE"; echo x > "$P4/.claude/rules/claude-discord-old.md"
 bash "$S" mgr >/dev/null 2>&1
@@ -1651,7 +1660,7 @@ echo "ok: thread start posts the channel line and opens its thread (auto_archive
 # user's own hook inside our edit-gate group must survive the cleanup.
 jq '(.hooks.PreToolUse[] | select(.matcher == "Edit|Write|MultiEdit") | .hooks) += [{"type":"command","command":"mine-in-group"}]' "$SL" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SL" && rm -f "$P4/s.tmp"
 cp "$SJ" "$P4/settings.before"
-printf '\nn\n1\n' | bash "$S" setup mgr >/dev/null
+printf '\nn\n1\n' | bash "$S" setup mgr --scope project >/dev/null
 [ "$(cat "$R4/mgr/mode")" = none ] || { echo "FAIL: mode none by number"; exit 1; }
 [ ! -e "$RULE" ] || { echo "FAIL: switching to none must remove the dev-manager rule"; exit 1; }
 [ "$(cat "$P4/.claude/rules/other.md")" = mine ] || { echo "FAIL: a foreign .claude/rules file must survive"; exit 1; }
@@ -1669,10 +1678,10 @@ echo "ok: switching to none removes the rule file and every dev-manager peers ho
 # drops).
 CMD_ARC='h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/autoresearchclaw/on-start"; [ ! -x "$h" ] || "$h"'
 arc_entries() { jq --arg c "$CMD_ARC" '[.hooks[]?[]?.hooks[]? | select(.command == $c)] | length' "$1"; }
-printf '\nn\n2\n' | bash "$S" setup mgr >/dev/null   # EOF at the peers prompt: same as empty
+printf '\nn\n2\n' | bash "$S" setup mgr --scope project >/dev/null   # EOF at the peers prompt: same as empty
 has_peers_hooks "$SL" && [ -f "$RULE" ] || { echo "FAIL: back to dev-manager must restore its drops"; exit 1; }
 ! grep -q 'hooks/autoresearchclaw/' "$SL" "$SJ" || { echo "FAIL: on-start without an autoresearchclaw bot"; exit 1; }
-printf '\nn\nautoresearchclaw\n' | bash "$S" setup mgr >/dev/null
+printf '\nn\nautoresearchclaw\n' | bash "$S" setup mgr --scope project >/dev/null
 [ "$(cat "$R4/mgr/mode")" = autoresearchclaw ] || { echo "FAIL: mode autoresearchclaw"; exit 1; }
 [ -z "$(find "$P4/.claude/rules" -name 'claude-discord-*')" ] || { echo "FAIL: autoresearchclaw must drop no rule file"; exit 1; }
 [ -z "$(mode_peers "$SL" "$SJ")" ] || { echo "FAIL: autoresearchclaw must register no dev-manager peers hook"; exit 1; }
@@ -1818,7 +1827,7 @@ echo "ok: a bot moved by editing its access.json identifies with that channel (o
 # No bot is autoresearchclaw any more: on-start goes from both files (an
 # earlier copy planted in settings.json too).
 jq --arg c "$CMD_ARC" '.hooks.SessionStart += [{matcher: "startup|resume", hooks: [{type: "command", command: $c}]}]' "$SJ" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SJ" && rm -f "$P4/s.tmp"
-printf '\nn\n1\n' | bash "$S" setup mgr >/dev/null
+printf '\nn\n1\n' | bash "$S" setup mgr --scope project >/dev/null
 ! grep -q 'hooks/autoresearchclaw/' "$SJ" "$SL" && has_hooks "$SL" || { echo "FAIL: without an autoresearchclaw bot on-start must go from both settings files, the turn hooks stay: $(cat "$SJ" "$SL")"; exit 1; }
 echo "ok: once no bot is autoresearchclaw, on-start is removed from both settings files"
 
@@ -2056,7 +2065,8 @@ printf 'x\n' > "$R/alpha/handoff.md"
 env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null 2>&1
 for _ in $(seq 200); do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; sleep 0.05; done
 grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: the trust check must fail open when jq cannot parse the file; log: $(cat "$R/alpha/refresh.log")"; exit 1; }
-rm -f "$HOME/.claude.json"
+# The projects set up from here on are trusted, so no setup asks; none is a refresh target.
+jq -n --arg h "$HOME" '[$h + "/health-project", $h + "/single-project", $h + "/working-project", $h + "/notify-project", $h + "/project5"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
 echo "ok: the trust check fails open on a file that is not JSON (jq exits non-zero and prints nothing)"
 
 # --- refresh: a failed launch puts the handoff back ------------------------
@@ -2130,11 +2140,11 @@ seed_guild() { printf '900 5\n' > "$1/channel-guild"; }
 # The bots. Names are chosen so the glob order health walks them in is the
 # order their answers are queued below. allowFrom is 111 and 222 (from
 # config.env); 999 is outside it.
-printf '900\n111\n222\ntokH\nn\n' | bash "$S" setup b1ok >/dev/null
+printf '900\n111\n222\ntokH\nn\n' | bash "$S" setup b1ok --scope project >/dev/null
 for b in b2stale b3down b4busy b6dup b7reply b8cap; do
-  printf 'tok%s\nn\n' "$b" | bash "$S" setup "$b" >/dev/null
+  printf 'tok%s\nn\n' "$b" | bash "$S" setup "$b" --scope project >/dev/null
 done
-printf 'tokb5all\ny\n' | bash "$S" setup b5all >/dev/null   # requireMention false
+printf 'tokb5all\ny\n' | bash "$S" setup b5all --scope project >/dev/null   # requireMention false
 for b in b1ok b2stale b3down b4busy b5all b6dup b7reply; do
   echo "$ID_SEEN" > "$HR/$b/last-message-id"; seed_id "$HR/$b"; seed_guild "$HR/$b"
 done
@@ -2323,7 +2333,7 @@ echo "ok: one health run judges every bot in the project -- ok (own messages, an
 # padding cost more than the case did. The multi-bot fixture above stays for
 # what it is actually for -- proving that one run judges every bot at once.
 SP="$HOME/single-project"; mkdir -p "$SP"; cd "$SP"
-printf '900\n111\n222\ntokS\nn\n' | bash "$S" setup sbot >/dev/null
+printf '900\n111\n222\ntokS\nn\n' | bash "$S" setup sbot --scope project >/dev/null
 SD="$SP/.claude/discord-agents/sbot"
 echo "$ID_SEEN" > "$SD/last-message-id"; seed_id "$SD"; seed_guild "$SD"
 start_server "$SD"
@@ -2451,7 +2461,7 @@ cd "$HP"
 # through the eight-bot fixture meant eight bots' worth of queued replies per
 # case for one bot's worth of assertion.
 WP="$HOME/working-project"; mkdir -p "$WP"; cd "$WP"
-printf '900\n111\n222\ntokW\nn\n' | bash "$S" setup wbot >/dev/null
+printf '900\n111\n222\ntokW\nn\n' | bash "$S" setup wbot --scope project >/dev/null
 WD="$WP/.claude/discord-agents/wbot"
 echo "$ID_SEEN" > "$WD/last-message-id"; seed_id "$WD"; seed_guild "$WD"
 start_server "$WD"
@@ -2502,7 +2512,7 @@ echo "ok: a session the daemon calls working holds the alert whatever the turn f
 # health only reports: it posts nothing to Discord, even for a bot that is a
 # finding, and the --notify that used to post alerts is refused.
 NP="$HOME/notify-project"; mkdir -p "$NP"; cd "$NP"
-printf '900\n111\n222\ntokN\nn\n' | bash "$S" setup nbot >/dev/null
+printf '900\n111\n222\ntokN\nn\n' | bash "$S" setup nbot --scope project >/dev/null
 ND="$NP/.claude/discord-agents/nbot"
 echo "$ID_SEEN" > "$ND/last-message-id"; seed_id "$ND"; seed_guild "$ND"
 start_server "$ND"
@@ -2575,7 +2585,7 @@ rc=$?
 [ ! -e "$R5" ] || { echo "FAIL: --mode on an unset bot must create nothing (no bot dir, .gitignore or config.env): $(find "$R5")"; exit 1; }
 echo "ok: --mode on a bot that is not set up exits 2 with a hint and creates nothing"
 
-printf '1\n222\n\ntokF\nn\n' | bash "$S" setup five >/dev/null   # mode kept at its default, none
+printf '1\n222\n\ntokF\nn\n' | bash "$S" setup five --scope project >/dev/null   # mode kept at its default, none
 cp "$R5/five/.env" "$P5/five.env.before"; cp "$R5/five/access.json" "$P5/five.access.before"
 printf 'autoresearchclaw\n' | bash "$S" setup five --mode >/dev/null
 [ "$(cat "$R5/five/mode")" = autoresearchclaw ] || { echo "FAIL: --mode fed only the mode answer did not switch the mode"; exit 1; }
@@ -2594,6 +2604,30 @@ printf 'dev-manager\npeerx:700:800:host\n' | bash "$S" setup five --mode >/dev/n
 [ "$(jq -c '.peers' "$R5/peers.json" 2>/dev/null)" = '[{"name":"peerx","bot_id":"700","owner_id":"800","machine":"host"}]' ] || { echo "FAIL: --mode to dev-manager must record the peer: $(cat "$R5/peers.json" 2>&1)"; exit 1; }
 [ "$(jq -c '.groups["1"].allowFrom' "$R5/five/access.json")" = '["222","700"]' ] || { echo "FAIL: the peer must reach access.json's allowFrom: $(jq -c . "$R5/five/access.json")"; exit 1; }
 echo "ok: --mode to dev-manager also asks the peers question and records a peer in peers.json and access.json's allowFrom"
+
+# setup installs the plugin: a real clone (no link) at the chosen scope,
+# excluded from the project's git, the shim on PATH, the install recorded;
+# both scopes at once is refused; a re-run keeps the clone.
+XP="$HOME/scope proj"; mkdir -p "$XP"; (cd "$XP" && git init -q .)
+jq -n --arg p "$XP" '{projects: {($p): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
+(cd "$XP" && printf '900\n111\n\ntokS\nn\n' | bash "$S" setup xbot --scope project >/dev/null) || { echo "FAIL: setup --scope project failed"; exit 1; }
+[ -d "$XP/.claude/skills/claude-discord/.git" ] && [ ! -L "$XP/.claude/skills/claude-discord" ] || { echo "FAIL: project scope must be a real clone"; exit 1; }
+grep -qxF '/.claude/skills/claude-discord/' "$XP/.git/info/exclude" || { echo "FAIL: the clone must be excluded from the project's git"; exit 1; }
+cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" || { echo "FAIL: setup must install the shim"; exit 1; }
+grep -qxF "$XP/.claude/skills/claude-discord" "$HOME/.claude-discord/records/installs" || { echo "FAIL: setup must record the install"; exit 1; }
+head=$(git -C "$XP/.claude/skills/claude-discord" rev-parse HEAD)
+(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot --scope project >/dev/null)
+[ "$(git -C "$XP/.claude/skills/claude-discord" rev-parse HEAD)" = "$head" ] && [ "$(grep -c '/.claude/skills/claude-discord/' "$XP/.git/info/exclude")" = 1 ] || { echo "FAIL: a re-run must keep the clone and the single exclude line"; exit 1; }
+mkdir -p "$HOME/.claude/skills/claude-discord"
+out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot --scope project 2>&1) && { echo "FAIL: a global copy beside a project copy must be refused"; exit 1; }
+grep -q "already installed globally" <<<"$out" || { echo "FAIL: wrong refusal: $out"; exit 1; }
+rmdir "$HOME/.claude/skills/claude-discord"
+jq -n '{projects: {}}' > "$HOME/.claude.json"
+out=$(cd "$XP" && printf '\nn\n' | bash "$S" setup xbot --scope project 2>&1)
+grep -q 'not trusted' <<<"$out" || { echo "FAIL: setup must say the project is not trusted: $out"; exit 1; }
+[ "$(jq -r --arg p "$XP" '.projects[$p].hasTrustDialogAccepted // "unset"' "$HOME/.claude.json")" = unset ] || { echo "FAIL: setup must never write trust without asking"; exit 1; }
+rm -rf "$XP"
+echo "ok: setup clones the plugin at project scope (path with a space), excludes it, installs the shim, records it, keeps it on re-run, refuses two scopes, and reports untrusted without writing"
 
 # Nothing this suite started is still running: no process runs from its
 # HOME (hooks, stubs, the fake worker).
