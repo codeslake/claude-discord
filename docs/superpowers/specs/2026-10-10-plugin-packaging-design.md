@@ -205,10 +205,18 @@ Per machine, by its operator (dkim's boxes: dong-dev-bot):
    in the same run, remove the old settings hook entries and the old rule
    file. Hooks in settings files apply live (measured), so from this moment a
    running bot has no claude-discord hooks.
-2. Each running bot runs `/reload-plugins` (self-reload skill), which loads
-   the plugin's `hooks.json` (measured). The gap between 1 and 2 is seconds.
-   A message that lands in the gap gets no ✅ and no turn record; the next
-   message heals both.
+2. Each running bot runs `/reload-plugins` (self-reload skill). Measured on
+   2.1.296, interactive and `--bg`: a plugin directory created after the
+   session started loads on `/reload-plugins` with no restart and no respawn,
+   and its UserPromptSubmit hook fires on the next prompt; a hook removed
+   from `settings.local.json` stops on the very next prompt. The gap between
+   1 and 2 is seconds. A message that lands in the gap gets no ✅ and no turn
+   record; the next message heals both.
+   The plugin's SessionStart hook does NOT run on a reload, only at the next
+   real start, compact or clear. That is harmless here: the dev-manager rule
+   text is already in the running session's context from the old rule file
+   (removing the file does not unload it), and the official plugin was
+   patched by the wrapper when the bot started.
 3. `claude-discord --version` and `health` confirm each bot.
 
 Rollback: `git -C <clone> checkout <previous tag>` and `setup` again, or the
