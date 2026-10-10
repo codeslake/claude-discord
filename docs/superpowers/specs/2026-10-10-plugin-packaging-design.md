@@ -154,15 +154,29 @@ rule file.
 No text hard-codes `~/.claude-discord/hooks/tools/...` any more. The wrapper's
 system prompt, the on-prompt identity text and thread-guard's deny message
 name `$CLAUDE_PLUGIN_ROOT/tools/thread` resolved to an absolute path at the
-moment they are written. For this release `~/.claude-discord/hooks/tools/thread`
-stays as a symlink to the installed tool, so a session started by the old
-wrapper keeps working until its next start.
+moment they are written, and the rule text names `$CLAUDE_DISCORD_TOOLS`,
+which the SessionStart hook states in the session's context.
 
-What the old `install.sh` put under `~/.claude-discord/` is removed by
-`setup`: `hooks/` (except that one link), `rules/`, and the top-level
-`discord-chunk.ts` and `discord-proxy.ts`. What stays there is `runtime/`,
-`records/`, `scratch/` (bots' own notes) and the compat link, which the next
-release removes too. `~/.local/bin/claude-discord` is replaced by the shim.
+What the old `install.sh` put under `~/.claude-discord/` is replaced by
+`setup` (ruling R8). A project set up by the previous release and not yet by
+this one keeps its settings hook entries, and those resolve through
+`.claude/discord-agents/hooks` to `~/.claude-discord/hooks`; a session started
+by the old wrapper also names `~/.claude-discord/hooks/tools/thread`. Deleting
+the copies would silently disable all of them, so for this release:
+
+- `~/.claude-discord/hooks/{turn,peers,lib,autoresearchclaw}`, every tool under
+  `hooks/tools/*`, and the top-level `discord-chunk.ts` and `discord-proxy.ts`
+  become **links**: the hooks and tools into the real plugin (the source
+  clone, or the clone itself, never a project's own link), the two `.ts`
+  files into the stable runtime copy `~/.claude-discord/runtime/`, which
+  `setup` fills first so the links never dangle. A real directory or file
+  there is replaced; a symlink at `hooks/` itself is removed as a link and
+  its target left alone.
+- `rules/` is removed: only the old rule copies read it.
+- `runtime/`, `records/`, `scratch/` (bots' own notes) and `source/` stay.
+- The next release removes the links.
+
+`~/.local/bin/claude-discord` is replaced by the shim.
 
 ## Patches on the official plugin
 
@@ -185,8 +199,8 @@ hashes differently. `patch` does all five:
 - idempotent, silent when nothing changed, exit 1 with the file and the patch
   name when a pattern no longer matches;
 - imports the runtime files from a stable copy at `~/.claude-discord/runtime/`
-  (copied by `setup`/`update` from the clone), because the official plugin's
-  cache is machine-wide while clones are per project.
+  (copied by `setup`/`update` from the real clone), because the official
+  plugin's cache is machine-wide while clones are per project.
 
 Callers: the wrapper's start (as today), the plugin's SessionStart hook (so a
 respawn or an auto-update before the start is covered), and, in the next spec,
@@ -246,8 +260,10 @@ previous release's `install.sh`, which re-registers the settings hooks.
   SessionStart rule injection by mode; `patch` across two version dirs (all
   five, including the `.mcp.json` env line), idempotence and the no-match
   exit; `--name` and `--resume` bot resolution, the refusal to resume a live
-  session, and the deprecation line; `setup` removing the old
-  `~/.claude-discord/hooks` and `rules` copies while keeping the compat link.
+  session, and the deprecation line; `setup` replacing the old
+  `~/.claude-discord/hooks` and `.ts` copies with compat links (R8) and
+  removing `rules`; `update` and `update --all` (one pull per real clone,
+  removed projects pruned); `--version`.
 - `claude plugin validate` (or the equivalent load check) runs as a separate
   script outside the 40 s budget, as decided in issue #1 C1 Q1.
 - Before main, one live check on lmd42 with a non-critical bot: install,

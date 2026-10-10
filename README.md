@@ -20,6 +20,7 @@ Origin: written by d.kim4, extended here.
 | `curl` (optional) | the ✅ reaction on a finished reply, and the `tools/thread` helper; without it no reaction is sent and no thread can be opened, everything else still works |
 | `python3` (optional, stdlib only) | `thread-guard` rewrites a markdown table in a reply into an aligned code block; without it a reply with a table is denied instead |
 | `perl` | patches the plugin at every start, and detaches a `refresh` in its own session (macOS has no `setsid`) |
+| `git` | `setup` clones claude-discord, `update` pulls it |
 
 Disable the plugin globally after installing it: enabled globally, every
 session without a bot token tries to start a Discord server. The wrapper
@@ -35,6 +36,11 @@ enables it per session with `--settings`.
   ID is asked once and reused.
 - **access.json**: the plugin's allowlist. Written at setup time; the plugin
   re-reads it on every inbound message, so hand edits apply without a restart.
+- **`$CLAUDE_DISCORD_TOOLS`**: the plugin's `tools/` directory (`thread`,
+  `local-bots`, `arc-events`). Not a shell variable: the plugin's SessionStart
+  hook states `CLAUDE_DISCORD_TOOLS=<path>` in a bot session's context, and the
+  commands in this README are run with that path. From a terminal use
+  `<clone>/tools`, e.g. `~/.claude-discord/source/tools`.
 - **project**: the directory you run `claude-discord` from. All state lives in
   `./.claude/discord-agents/` there, so a bot belongs to a project. With exactly
   one bot set up, naming it is optional; with several, the name is required.
@@ -56,17 +62,79 @@ enables it per session with `--settings`.
 
 ## Install
 
+claude-discord is a Claude Code plugin: the repo itself is the plugin (hooks,
+rules, tools and the launcher), and `setup` puts one copy of it where Claude
+Code loads it. A machine's first install:
+
 ```
-./install.sh
+git clone https://github.com/codeslake/claude-discord ~/.claude-discord/source && ~/.claude-discord/source/bin/claude-discord setup <bot>
 ```
 
-puts `claude-discord` in `~/.local/bin/` and the helpers (`discord-proxy.ts`,
-`hooks/`, `rules/`) in `~/.claude-discord/`. Re-run it after a pull. It also
-removes every file under `~/.claude-discord/hooks/<topic>/` and
-`~/.claude-discord/rules/` that the repo no longer ships (an earlier
-version's `autoresearchclaw/watch` or `turn/on-compact`; `hooks/tools/` is
-swept like any other topic directory); nothing else there
-is touched.
+`~/.claude-discord/source` is the machine's **source clone**; nothing is removed
+from it afterwards. `setup` asks two questions once per project (Enter takes the
+default; `--scope` and `--method` answer them for a script):
+
+| Question | Choices |
+|---|---|
+| scope (`--scope project\|global`) | **project** (default): the plugin at `<project>/.claude/skills/claude-discord`, loaded only there. **global**: `~/.claude/skills/claude-discord`, loaded in every project. A plugin present at both scopes loads once (the global copy wins), so `setup` refuses to add one scope beside the other and names the existing path |
+| method (`--method link\|clone`) | **link** (default): that path is a symlink to the source clone, so one `claude-discord update` moves every bot on the machine. **clone**: its own git clone, so this install can pin a version (`git -C <path> checkout <tag>`) and `update` moves it separately |
+
+A project that already has an install at either scope uses it and asks
+nothing; re-running `setup` keeps an existing link or clone as it is. In a git
+repository the project install is added to the repo's `info/exclude`, so it
+never shows in `git status`. Project scope loads only when
+`~/.claude.json` has `projects[<path>].hasTrustDialogAccepted = true` for that
+exact path: `setup` says so when it is missing and offers to write it (it never
+does silently).
+
+`setup` also installs the launcher, a 20-line shim at
+`~/.local/bin/claude-discord`. It finds the wrapper for the current directory:
+`<project>/.claude/skills/claude-discord/bin/claude-discord` (the nearest
+ancestor holding `.claude/discord-agents` or that install), else
+`~/.claude/skills/claude-discord/bin/claude-discord`, else it says claude-discord
+is not set up here. Each project therefore runs the version installed for it.
+Put `~/.local/bin` on your `PATH`.
+
+### Update, version, patch
+
+```
+claude-discord update          # git pull --ff-only the clone this runs from (a link resolves to the source clone), re-patch, refresh the shim
+claude-discord update --all    # every recorded install, each real clone once however many links point at it; a removed project is pruned
+claude-discord --version       # claude-discord <version> (<short sha>) of that clone
+claude-discord patch           # patch every cached copy of the official discord plugin (also done at each start and by update)
+```
+
+`update` prints `claude-discord <clone>: <old> -> <new>` and exits 1 when a
+clone cannot fast-forward (local changes, a diverged branch, no network), the
+patches no longer match or the shim cannot be written, after trying the rest.
+Running sessions keep the code they loaded: run `/reload-plugins` in each (a bot
+does it through the self-reload skill). `~/.claude-discord/runtime/` holds the
+two runtime files the patched official plugin imports (`discord-chunk.ts`,
+`discord-proxy.ts`), copied there from the clone by `setup` and `update`, because
+the official plugin's cache is machine-wide while clones are per project.
+
+### Migrating from the previous release
+
+On each machine, once:
+
+1. `git clone` the source (above) and run `claude-discord setup <bot>` in each
+   project (the existing bot's answers are kept; only the install questions are
+   new). It installs the plugin, removes the settings hook entries and the
+   `.claude/rules/claude-discord-*.md` file the old release wrote into the
+   project, and replaces the old `~/.claude-discord/hooks`, `rules` and
+   `discord-*.ts` copies. Settings hooks apply live, so from here a running bot
+   has no claude-discord hooks until step 2.
+2. Run `/reload-plugins` in each running bot (the self-reload skill). Its hooks
+   load from the plugin on the next prompt; no restart.
+3. `claude-discord --version` and `claude-discord health` confirm.
+
+For this release `~/.claude-discord/hooks/{turn,peers,lib,autoresearchclaw}`,
+`hooks/tools/*` and the two `.ts` files stay as links into the plugin (and the
+runtime copy), so a project not yet migrated keeps working through them; they go
+in the next release. `~/.claude-discord/rules/` is removed.
+
+Rollback: check out the previous release tag and run its `./install.sh`, which
+puts the old copies and the settings hooks back.
 
 ## Usage
 
@@ -86,7 +154,16 @@ claude-discord setup alpha --reset    # forget alpha's token and policy AND the 
 claude-discord setup alpha --mode     # change only alpha's mode (and, for dev-manager, its peers); needs alpha already set up
 claude-discord refresh alpha          # replace the running session with a fresh one, from its handoff
 claude-discord health                 # is every bot in this project still answering? see below
+claude-discord update [--all]         # see Install
 ```
+
+The launch mirrors `claude`: `--name`/`-n` IS the bot and the session name, and
+every other argument passes through to `claude` unchanged. `--resume <id|name>`
+finds the bot from that session's job record (else a value naming a bot, else
+the project's only bot, else it asks for `--name`) and refuses a live session.
+The positional form `claude-discord alpha ...` still works this release and
+prints one deprecation line. The subcommands (`setup`, `refresh`, `health`,
+`update`, `patch`) keep the bot positional.
 
 The setup prompts:
 
@@ -114,7 +191,7 @@ empty for the default (the current mode on a re-run).
 | Mode | What it installs |
 |---|---|
 | `none` | nothing beyond the hooks every bot gets (the Discord-turn hooks and `thread-guard`) |
-| `dev-manager` | for bots that change claude-discord together with peer bots on other machines: the rule `.claude/rules/claude-discord-dev-manager.md` (from `rules/dev-manager.md`) and the three dev-manager peers hooks below |
+| `dev-manager` | for bots that change claude-discord together with peer bots on other machines: the rule `rules/dev-manager.md`, which the plugin's SessionStart hook gives this bot's session as context, and the three dev-manager peers hooks below |
 | `autoresearchclaw` | for a bot next to AutoResearchClaw runs in the project: the `autoresearchclaw/on-start` hook, which gives the bot's session `rules/autoresearchclaw.md`, so it reports each research iteration to the channel (see AutoResearchClaw reports below). No rule file in the project: every session under the project loads one, the pipeline's own agent sessions included. Give it to one bot per project: two such bots each report every iteration |
 
 A dev-manager's setup also asks for its peers as
@@ -127,19 +204,20 @@ alone: it already admits every author, peers included, and adding ids to it
 would narrow "everyone" down to "peers only" without saying so. Peers need
 this bot's id in their own `allowFrom` too; ask their owners.
 
-What a project gets is the union over its bots' modes, re-synced by `setup`
-and by every start: one dev-manager bot keeps the rule and the peers hooks in
-place. Once no bot needs them they are removed: every
-`.claude/rules/claude-discord-*.md` that no mode produces (that prefix belongs
-to claude-discord; name your own rules differently), and every mode hook
-entry (see Hooks: which file holds what) from both settings files, along
-with a matcher group or an event left empty by that. Nothing else in either
-place is touched.
+All of the plugin's hooks are registered unconditionally by its `hooks/hooks.json`;
+each script exits at once unless the session is a bot (`DISCORD_STATE_DIR` set) whose
+mode matches, so a mode takes effect on the next event and a non-bot session in the
+project pays one exec per event. `setup` and every start remove what the previous
+release wrote per project: the hook entries under `.claude/discord-agents/hooks/` in
+both settings files (with a matcher group or an event left empty by that) and every
+`.claude/rules/claude-discord-*.md` (that prefix belongs to claude-discord; name your
+own rules differently), only in a project that has a plugin install. Nothing else in
+either place is touched.
 
-The dev-manager rule file is loaded by every session in the project (subdirectory
-sessions and plain `claude` sessions included), so it opens by telling a
-session to ignore it unless its Discord-turn context has the `Dev manager:`
-line, which `on-prompt` adds for a dev-manager bot only.
+The dev-manager rule reaches only a dev-manager bot's session, as SessionStart
+`additionalContext` (startup, resume, compact and clear). It is not a project rule
+file because every session in the project loads those, subdirectory and plain
+`claude` sessions included.
 
 Every bot keeps one request per Discord thread (see Expected behaviour
 below). The dev-manager rule adds what is its own: an item is a defect, a
@@ -155,7 +233,7 @@ under `~/.claude-discord/scratch/<bot name>/` when they must survive, in
 Once a change to claude-discord itself is on main and installed here, that
 same rule has a dev-manager tell the machine's OTHER claude-discord bots --
 not its peers, its machine's other bots, in whatever other project runs one
--- `~/.claude-discord/hooks/tools/local-bots` prints them: every other live
+-- `$CLAUDE_DISCORD_TOOLS/local-bots` prints them: every other live
 bot session on this machine, one line per session as `<name><TAB><project
 dir>`, sorted by name. Discovery is `claude agents --json` (active sessions
 only: `--all` would add completed ones, retired bots among them; no filter on
@@ -199,7 +277,7 @@ in the channel steers a run, and gates are answered in the run's terminal.
   bots: one digest of its recent iterations, critique both ways, at most
   three messages each, then one summary for both owners.
 - **Why SessionStart context, not a project rule.** The rules
-  (`rules/autoresearchclaw.md`, installed to `~/.claude-discord/rules/`) reach
+  (`rules/autoresearchclaw.md`, read from the plugin) reach
   the session through `on-start` as SessionStart context, at startup, resume,
   compact and clear. A `.claude/rules/` file would be loaded by every session
   under the project, AutoResearchClaw's own backend `claude` calls included,
@@ -278,7 +356,7 @@ session.
   are exempt from all of this.
 - One request, one thread, for every bot whatever its mode. The session
   prompt (and `on-prompt`'s context, which survives `/bg`) tells it:
-  `~/.claude-discord/hooks/tools/thread start "[<area>] <short title>"` posts
+  `$CLAUDE_DISCORD_TOOLS/thread start "[<area>] <short title>"` posts
   that one short line in the channel, opens a thread on it
   (`auto_archive_duration` 1440) and prints the thread id; the full answer
   goes inside, with that id as `chat_id`. The line comes first on purpose:
@@ -304,12 +382,12 @@ A message that arrives over Discord should be answered through the discord
 reply tool only, not also typed into the CLI (that would waste a reply on a
 channel nobody types into). Four hooks handle that, plus identity, a
 "refresh" handoff trigger, and a ✅ reaction once a turn actually replies.
-Each entry in the project's settings (see below for which file) execs the script directly
-(`h="$CLAUDE_PROJECT_DIR/.claude/discord-agents/hooks/<topic>/<name>"; [ ! -x "$h" ] || "$h"`),
-so a machine without the hooks installed simply runs nothing. Scripts live
+The plugin's `hooks/hooks.json` registers all nine, each as
+`"${CLAUDE_PLUGIN_ROOT}/hooks/<topic>/<name>"` with no shell wrapper; no hook
+entry is written into a project's settings files. Scripts live
 under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
-`lib/discord.sh` and `tools/thread`/`tools/local-bots` are not registered:
-the first is sourced by every script below, the other two are run by the
+`lib/discord.sh` and the scripts in `tools/` are not registered:
+the first is sourced by every script below, the others are run by the
 session (see Modes and Expected behaviour above).
 
 | Event | Matcher | Script | What |
@@ -317,66 +395,52 @@ session (see Modes and Expected behaviour above).
 | UserPromptSubmit | | `turn/on-prompt` | On a Discord turn (a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag), records that tag's chat_id/message_id/user_id for `on-stop` and `mention-guard` and the sender's display name per id in `user-names` (it labels that id in the People line), and marks the message pending until a reply (`turns/<session_id>.pending`) (only the leading tag is trusted: the plugin does not escape `<` in message text, so anything after it could be forged; a message arriving mid-turn comes as a prompt of its own and is appended) and, once per session (see below), adds an additionalContext entry with the bot's identity, the mention rule, the thread rule, the orchestrator rule and a People line (every id the channel lets in, from `access.json`, config.env's owner and the 20 who wrote here most recently (`user-names`), as `<@id>`, named once that id has written), so a bot can call a person who is not in the turn; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply, and clears the pending mark. |
 | Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it. If a Discord message is still pending (no reply, `thread start` or closing line came after it), sends the turn back once (`decision: block`) so the answer reaches Discord and not only the terminal; the second stop (`stop_hook_active`) closes it, which is also how a mention that asked nothing ends. Clears the per-turn files whenever it closes a turn. |
-| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | After a compact or `/clear`, clears the per-session "primed" flag, so the next Discord turn injects the identity context again. At a startup or resume, clears the per-turn files a turn whose Stop never ran (an interrupt, a kill) left behind, keeping the primed flag (a resumed conversation still holds that context), then pins a background session's job (see Background sessions below). An `on-compact` entry an earlier version registered is replaced. |
+| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Runs `claude-discord patch` (a respawn, or an auto-update of the official plugin since the last start, is covered), and gives the session `CLAUDE_DISCORD_TOOLS=<path>` as additionalContext, plus `rules/dev-manager.md` for a dev-manager bot. After a compact or `/clear`, clears the per-session "primed" flag, so the next Discord turn injects the identity context again. At a startup or resume, clears the per-turn files a turn whose Stop never ran (an interrupt, a kill) left behind, keeping the primed flag (a resumed conversation still holds that context), then pins a background session's job (see Background sessions below). |
 | PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/mention-guard` | dev-manager only. Denies a reply that names a peer (a whole word, case-insensitive) without its `<@bot_id>` or `<@!bot_id>`, or that answers a peer without mentioning it: the author of the message in `reply_to` when that is set, else of the turn's last message. A bot only receives messages that mention it. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `peers/checkin` | dev-manager only. A reply that mentions a peer (`<@bot_id>` or `<@!bot_id>`) touches `.claude/discord-agents/checkin/<session_id>`. |
 | PreToolUse | `mcp__plugin_discord_discord__reply\|mcp__plugin_discord_discord__edit_message` | `peers/thread-guard` | Every bot; an edit is checked like a reply, since it puts text in Discord too. A turn with no Discord message in it may post (it was denied until 2026-10-07). First denies a mirror line that opens with an arrow and a session or bot name (`-> name:`, `<- name:`; a Korean label such as `-> 수정:` is prose), every bot: it says `[sent to name]` or `[received from name]`. No bare ids: a 17-20 digit number outside code, a mention, a URL or a word (a file name) denies the reply, naming each one, with no lookup: the bot that wrote it knows what it is and rewrites it as `<#id>` (a channel or thread, its name linked), plain `@name` (a user or bot it only names; it pings nobody), `<@id>` (one who must answer or decide) or the number in backticks (shown as is). Discord renders no markdown table, so a table outside a fenced code block is rewritten into a fenced code block with its columns aligned by display width (a Korean character counts 2), alignment colons honoured and `**`, `__` and backticks stripped from the cells; a table with a line over 72 columns (a guess at a phone's code-block width) becomes one `header: value · ...` line per row instead, also in a fenced code block. The reply goes out through `updatedInput`, the whole input with only `text` changed. Then, for every bot but autoresearchclaw, whose rule posts one report per iteration in the channel: denies a reply to the CHANNEL (a `chat_id` equal to the bot's channel; a thread has an id of its own) longer than 500 characters once converted, counted in characters and not bytes, so the long text goes in the request's thread and the channel keeps one line. |
 | PreToolUse | `Edit\|Write\|MultiEdit` | `peers/edit-gate` | dev-manager only. Denies an edit under a path whose realpath contains `/claude-discord/` unless the session checked in within the last 60 minutes; an allowed edit renews the check-in. Paths git ignores (a bot's state such as the refresh `handoff.md`, `.superpowers/`) pass. Bash and git edits are not seen; the rule asks for the same announcement by hand. |
-| SessionStart | `startup\|resume\|compact\|clear` | `autoresearchclaw/on-start` | autoresearchclaw only. Prints the installed `rules/autoresearchclaw.md` as the session's additionalContext (nothing when the file is missing); starts no process. An entry an earlier version registered with `startup\|resume` is replaced. See AutoResearchClaw reports above. |
+| SessionStart | `startup\|resume\|compact\|clear` | `autoresearchclaw/on-start` | autoresearchclaw only. Prints the plugin's `rules/autoresearchclaw.md` as the session's additionalContext (nothing when the file is missing); starts no process. See AutoResearchClaw reports above. |
 
-Which file holds what:
+Which plugin runs them:
 
-- Every hook entry goes into `.claude/settings.local.json`, Claude Code's
-  per-machine settings file (keep it out of git), and none into
-  `.claude/settings.json`. The four `turn/` hooks and `peers/thread-guard` are
-  the same for every bot on every machine; the mode hooks (the other three
-  `peers/` hooks while some bot in the project is a dev-manager,
-  `autoresearchclaw/on-start` while one is autoresearchclaw; see Modes)
-  depend on the bots THIS machine runs. Writing any of them into a tracked
-  `settings.json` left a shared repo dirty on every bot start, blocked its
-  merge script and broke its own tests on a clean checkout (reported
-  2026-10-09). `settings.local.json` is still project-wide, not per bot: every
-  session in that checkout, bot or not, still runs these hooks, which exit at
-  once outside a Discord turn. Registering them per bot needs the plugin.
-- Cleanup removes stale entries of ours (commands under
-  `.claude/discord-agents/hooks/`) from both files, so the entries an earlier
-  version put into `settings.json` move over to `settings.local.json` on the
-  next start. Every other key and hook in `settings.json` stays as it was,
-  and a `hooks` key left empty is dropped. In a repo that committed the old
-  entries, that first start removes them from the tracked file once: commit
-  that removal.
-
-Both `setup` and the start path register them, so a bot set up before this
-existed gets them on its next start too. `mention-guard`, `checkin` and
-`edit-gate` do nothing in a session whose bot is not a dev-manager, and also
-nothing without `peers.json`; `thread-guard` guards every channel reply but an autoresearchclaw bot's;
-`autoresearchclaw/on-start` does nothing for a bot in another mode. `on-prompt`
-also records each message's sender (`user_id`) for `mention-guard`, and
-gives a dev-manager its peers' mentions and the working rule once per
-session. Registration is idempotent per entry,
-leaves every other key in either file alone, and writes a file only when it
-changes (Claude Code keeps its permission grants in `settings.local.json`); a
-session already running picks up a hook added to its settings files without
-a restart. To remove them, delete their entries from `.hooks` in those
-files.
+- A hook is in effect once the plugin loads: at the project's
+  `.claude/skills/claude-discord` (scope project, trusted project only) or
+  `~/.claude/skills/claude-discord` (scope global); see Install. A newly
+  installed plugin loads in a running session on `/reload-plugins`, and its
+  `UserPromptSubmit` hook fires from the next prompt.
+- Every script exits 0 at once when `DISCORD_STATE_DIR` is unset or its mode
+  does not match, so a session that is not a bot pays one exec per event. The
+  four `turn/` hooks and `peers/thread-guard` are for every bot; `mention-guard`,
+  `checkin` and `edit-gate` do nothing in a session whose bot is not a
+  dev-manager, and also nothing without `peers.json`; `thread-guard` guards
+  every channel reply but an autoresearchclaw bot's; `autoresearchclaw/on-start`
+  does nothing for a bot in another mode. `on-prompt` also records each
+  message's sender (`user_id`) for `mention-guard`, and gives a dev-manager its
+  peers' mentions and the working rule once per session.
+- Hooks, tools and the launcher resolve their real directory (`cd -P`,
+  `readlink -f`) instead of trusting `${CLAUDE_PLUGIN_ROOT}`, which is why the
+  link method works.
+- `setup` and every start remove what the previous release registered (the
+  entries under `.claude/discord-agents/hooks/` in `settings.json` and
+  `settings.local.json`), only in a project that has a plugin install. Every
+  other key and hook in either file stays, and a `hooks` key left empty is
+  dropped. `.claude/discord-agents/hooks` in the project stays a symlink to the
+  plugin's `hooks/` for this release (a peer's committed settings may still
+  name it; the next release removes it). To switch the hooks off, uninstall the
+  plugin (delete its install path) or disable it in `/plugin`.
 
 The identity/mention-rule context is long, so `on-prompt` injects it once per
 session (a `turns/<session_id>.primed` marker holding the bot's mode and
 the context text), not on every turn -- a compaction or `/clear`
 drops it from the transcript, which is what `on-session-start` is for, and a
-changed mode or a changed text injects it again. So after `./install.sh`
+changed mode or a changed text injects it again. So after `claude-discord update`
 changes the context, a running bot re-primes by itself on its next Discord
 turn, once. The session prompt (`--append-system-prompt`) is fixed when the
 session starts and still needs a restart (`claude-discord refresh <bot>`, or
 stop and start). The "refresh" handoff still fires on every matching
 message regardless of the primed state, since it is a specific command, not
 boilerplate.
-
-Both also make `.claude/discord-agents/hooks` in the project a symlink to
-`~/.claude-discord/hooks/` (only when that path is absent or already a
-symlink; a real directory there is left alone with a warning), so
-`./install.sh` after a pull reaches a session that is already running too --
-no restart needed there either.
 
 The 👀 reaction on receipt is not a hook: it is the plugin's own
 `ackReaction` in `access.json`, added the same never-overwrite-when-present
@@ -621,7 +685,7 @@ version installed.
 
 bun's `fetch` honours `HTTPS_PROXY`; bun's `WebSocket` does not, so the Discord
 gateway connection alone goes direct and dies on TLS interception.
-`~/.claude-discord/discord-proxy.ts` is a bun preload that pins both to
+`~/.claude-discord/runtime/discord-proxy.ts` is a bun preload that pins both to
 `HTTPS_PROXY`. It does nothing when the variable is unset, so it is safe
 everywhere; the wrapper only wires it in (via the plugin's `bunfig.toml`) when
 the file exists. Your proxy must forward `discord.com` and `discord.gg`; the
@@ -647,8 +711,8 @@ rest of Claude Code.
 |---|---|
 | Bot online but silent when a teammate @mentions it | their user ID is not in the group `allowFrom`; add it at setup, answer `all` there, or edit `access.json` (an empty `allowFrom` admits everyone) |
 | Bot cannot read message text | Message Content Intent is off in the Developer Portal |
-| Gateway connection fails behind a proxy | `discord-proxy.ts` missing from `~/.claude-discord/`, or `HTTPS_PROXY` unset in the shell that ran `claude-discord` |
-| Bot answers in the foreground, silent after `/bg` | wrapper older than 2026-09-18 (state dir not in `--settings`); reinstall |
+| Gateway connection fails behind a proxy | `discord-proxy.ts` missing from `~/.claude-discord/runtime/` (`claude-discord update` or `patch` refills it), or `HTTPS_PROXY` unset in the shell that ran `claude-discord` |
+| Bot answers in the foreground, silent after `/bg` | wrapper older than 2026-09-18 (state dir not in `--settings`); run `claude-discord update` |
 | Every bot in the channel answers one message | someone wrote `@everyone`/`@here` with a wrapper older than 2026-09-18, or the mention policy is off on all of them |
 | `no bot '<name>' under ./.claude/discord-agents` | no setup in THIS directory; `cd` to the project you set it up in, or run setup here |
 | `bot name must be a plain directory name` | the name contained `/`, or was `.`/`..` |
@@ -659,7 +723,9 @@ rest of Claude Code.
 | `Discord does not render markdown tables: rewrite it as a list, ...` | `thread-guard` found a table it would not rewrite: the reply has an odd number of ``` marks (a lone ``` in prose, or a fence that never closes), or `python3` is missing or failed. Close every fence or drop the stray mark; put `python3` on the bot's PATH |
 | After Claude Code upgraded itself, a bot breaks its rules: long answers or raw tables in the channel, no thread, no reactions | the worker that came up after the daemon's self-restart for the upgrade runs no hooks at all, the user's own included, with no error (Claude Code, seen on 2.1.280 → 2.1.281, a respawned worker; an adopted one was fine). Check: the bot's `last-message-id` is older than its last Discord turn, and no `Discord turn.` context arrived. Fix: `claude-discord refresh <bot>` |
 | `Before changing claude-discord, announce on Discord ...` | a dev-manager edited claude-discord without mentioning a peer in the last 60 minutes; announce the change, then edit |
-| `claude-discord: ~/.claude-discord/rules/dev-manager.md is missing` | wrapper newer than the installed helpers; re-run `./install.sh` |
+| `claude-discord: not set up here` (from the shim) | no plugin install for this project or globally; run `claude-discord setup <bot>` (the bootstrap line in Install if the shim is missing) |
+| `claude-discord: ... pull failed` | `update` could not fast-forward that clone: local changes, a diverged branch (a clone-method install that pinned a version) or no network; the other clones were still updated |
+| The hooks do not run in a project | the plugin is not loaded there: the project is not trusted in `~/.claude.json` (scope project), the install path is a dangling link (re-run `setup`), or the session started before `setup` and has not run `/reload-plugins` |
 | `refresh` says `handoff.md is missing or empty` | the session did not write it; ask it to, or pass `--force` |
 | `refresh` says `<dir> is not a trusted workspace` | `claude --bg` refuses to start in a workspace whose trust was never accepted, and the foreground path does not, so a bot moved to the background with `/bg` can run for weeks without meeting that gate. Run `claude` in the project once and accept the prompt, then retry; `--force` refreshes anyway. The check reads `hasTrustDialogAccepted` and fails **open**, so anything but an explicit `false` proceeds |
 | `refresh` says `start failed, so <bot>'s handoff was put back` | the fresh session did not come up (the line above it says why). The launch consumes `handoff.md` before starting claude, so it is moved back and the retry is not refused for want of one |
@@ -671,12 +737,12 @@ rest of Claude Code.
 | `health` says `cannot count plugin servers on this machine` | no `/proc` (macOS); the behavioural signal still works, only the cause cannot be named |
 | `claude-discord health: <bot> nostate` | `claude agents` has not answered for six runs, so whether a turn is running cannot be told, and the unanswered message is no longer being held. The daemon is probably unwell: run `claude agents` by hand |
 | `refresh` says `no running session of <name> ... started in <dir>` | the session was started elsewhere, or is a foreground one renamed with `/rename` (only background sessions have a job record); `claude agents` shows it, stop it by hand, then `refresh --force` |
-| The agent view still lists dead sessions of my bot | a start removes only its own (the session and, if it had one, its worktree): another name's, another project's and the one a `--resume` names are left alone on purpose, and only 20 go per start (oldest first), so start again for the next 20. Otherwise the wrapper predates 2026-09-19 (reinstall), or `claude agents --json --all` is not answering: run it by hand |
+| The agent view still lists dead sessions of my bot | a start removes only its own (the session and, if it had one, its worktree): another name's, another project's and the one a `--resume` names are left alone on purpose, and only 20 go per start (oldest first), so start again for the next 20. Otherwise the wrapper predates 2026-09-19 (`claude-discord update`), or `claude agents --json --all` is not answering: run it by hand |
 | No report after an iteration | the bot's `mode` is not `autoresearchclaw`; the session has no standing watch running `events` (ask it to start one); the session started before the mode was set (the rules arrive at session start: restart or `/clear` it); or the runs are not under `artifacts/rc-*/` of the project the bot was set up in. `<bot>/arc-seen` lists what `events` has already reported (running `events` by hand records what it prints, so the watch will not see it again) |
 
 ## Test
 
-`./test-claude-discord.sh ./claude-discord` runs the wrapper against a
+`./test-claude-discord.sh ./bin/claude-discord` runs the wrapper against a
 throwaway HOME with a stub plugin and stub `claude`; it touches nothing real
 and prints `ALL PASS`. It runs on Linux only: it finds its stand-in plugin
 servers through `/proc`, and assumes GNU `wc`, `sed` and a `/tmp` that is not a

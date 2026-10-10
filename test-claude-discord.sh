@@ -110,12 +110,12 @@ EOF
 chmod +x "$HOME/bin/curl"
 # `sleep`, stubbed by duration so the suite stays inside its 40 s budget
 # (CLAUDE.md) without dropping an assertion; any other duration is real:
-#   0.5  refresh's wait for the old session to exit (20 rounds): 0.05 s.
+#   0.5  refresh's wait for the old session to exit (20 rounds): 0.02 s.
 #   3    refresh's pause for the old gateway to let go: not slept.
 cat > "$HOME/bin/sleep" <<'EOF'
 #!/bin/bash
 case $* in
-  0.5) exec /bin/sleep 0.05 ;;
+  0.5) exec /bin/sleep 0.02 ;;
   3) exit 0 ;;
   *) exec /bin/sleep "$@" ;;
 esac
@@ -321,9 +321,10 @@ grep -qx '111 Own 5 er' "$DSD/user-names" && printf '%s' "$out" | jq -r '.hookSp
 cp "$DSD/access.json" "$DSD/access.json.keep"; jq '.groups["999"].allowFrom = [] | .allowFrom = []' "$DSD/access.json.keep" > "$DSD/access.json"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1m","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"999\" message_id=\"224\" user=\"Mx (owner), \"q\"\" user_id=\"77\" ts=\"t\">\nhi\n</channel>"}')
 printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext' | grep -q '^People in this channel .*Mx owner q <@77>' || { echo "FAIL: with an empty allowFrom, whoever wrote must be listed, its name without \" ( ) ,: $(cat "$DSD/user-names") / $out"; exit 1; }
-# 25 writers: the file keeps the newest 20, the one who wrote last is last.
-for i in $(seq 1 25); do DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"{\"session_id\":\"s1m\",\"prompt\":\"<channel source=\\\"plugin:discord:discord\\\" chat_id=\\\"999\\\" message_id=\\\"3$i\\\" user=\\\"p$i\\\" user_id=\\\"50$i\\\" ts=\\\"t\\\">\\nhi\\n</channel>\"}" >/dev/null; done
-[ "$(wc -l < "$DSD/user-names")" = 20 ] && [ "$(tail -n 1 "$DSD/user-names")" = '5025 p25' ] && ! grep -q '^77 ' "$DSD/user-names" || { echo "FAIL: user-names must keep the newest 20, newest last: $(cat "$DSD/user-names")"; exit 1; }
+# 21 writers: the file keeps the newest 20, the one who wrote last is last. Twenty of them are written straight into the file, so one real prompt takes it past the cap.
+for i in $(seq 1 20); do printf '50%s p%s\n' "$i" "$i"; done >> "$DSD/user-names"
+i=21; DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"{\"session_id\":\"s1m\",\"prompt\":\"<channel source=\\\"plugin:discord:discord\\\" chat_id=\\\"999\\\" message_id=\\\"3$i\\\" user=\\\"p$i\\\" user_id=\\\"50$i\\\" ts=\\\"t\\\">\\nhi\\n</channel>\"}" >/dev/null
+[ "$(wc -l < "$DSD/user-names")" = 20 ] && [ "$(tail -n 1 "$DSD/user-names")" = '5021 p21' ] && ! grep -q '^77 ' "$DSD/user-names" || { echo "FAIL: user-names must keep the newest 20, newest last: $(cat "$DSD/user-names")"; exit 1; }
 mv -f "$DSD/access.json.keep" "$DSD/access.json"
 rm -f "$DSD/user-names" "$DSD"/turns/s1[nm] "$DSD"/turns/s1[nm].pending "$DSD"/turns/s1[nm].primed
 echo "ok: on-prompt names the channel's people (access.json, config.env's owner, everyone who has written) as <@id>, labelled with the name each last wrote under, stripped of < > @ \" ( ) ,, the 20 newest writers kept"
@@ -2672,9 +2673,10 @@ jq -n --arg p "$OP" --arg p5 "$PHOME/project5" '{projects: {($p): {hasTrustDialo
 (cd "$OP" && printf '900\n111\n\ntokO\nn\ndev-manager\n\n' | bash "$S" setup obot --scope project >/dev/null)
 [ ! -e "$OH/rules" ] || { echo "FAIL: the old rule copies must go"; exit 1; }
 for f in hooks/turn/on-prompt hooks/turn/on-reply hooks/turn/on-stop hooks/turn/on-session-start hooks/peers/mention-guard hooks/peers/checkin hooks/peers/thread-guard hooks/peers/edit-gate hooks/autoresearchclaw/on-start hooks/lib/discord.sh hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events discord-chunk.ts discord-proxy.ts; do
-  case $f in hooks/tools/*) want=$PC/tools/${f##*/};; hooks/*) want=$PC/$f;; *) want=$PC/runtime/$f;; esac
+  case $f in hooks/tools/*) want=$PC/tools/${f##*/};; hooks/*) want=$PC/$f;; *) want=$PHOME/.claude-discord/runtime/$f;; esac   # the .ts links go through the stable runtime copy
   [ -f "$OH/$f" ] && [ "$(readlink -f "$OH/$f")" = "$want" ] || { echo "FAIL: ~/.claude-discord/$f must resolve to the real plugin's $want: $(readlink -f "$OH/$f")"; exit 1; }
 done
+cmp -s "$PC/runtime/discord-chunk.ts" "$OH/runtime/discord-chunk.ts" && cmp -s "$PC/runtime/discord-proxy.ts" "$OH/runtime/discord-proxy.ts" || { echo "FAIL: setup must fill ~/.claude-discord/runtime from the real plugin (the fixture's stale copy included)"; exit 1; }
 for f in hooks/turn/on-prompt hooks/peers/thread-guard hooks/autoresearchclaw/on-start hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events; do
   [ -x "$OH/$f" ] || { echo "FAIL: ~/.claude-discord/$f must be an executable"; exit 1; }
 done
@@ -2790,11 +2792,51 @@ done
 grep -qxF '/sub/.claude/skills/claude-discord' "$SG/.git/info/exclude" || { echo "FAIL: a subdirectory project needs its prefix in the exclude pattern"; exit 1; }
 echo "ok: setup installs the plugin as a link or a clone at project or global scope, asks nothing when an install exists, refuses the other scope and bad flags before writing, excludes it in subdirectories and worktrees, records it, and writes trust only on y"
 
+# --version and update. UP is a project linked to the source (so are the earlier projects the records still hold), UC a clone-method install.
+UP="$HOME/up proj"; UC="$HOME/up clone"; mkdir -p "$UP" "$UC"; for w in "$UP" "$UC"; do (cd "$w" && git init -q .); done
+jq -n --arg a "$PHOME/up proj" --arg c "$PHOME/up clone" '{projects: {($a): {hasTrustDialogAccepted: true}, ($c): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
+(cd "$UP" && printf '900\n111\n\ntokU\nn\n' | bash "$S" setup ubot --scope project >/dev/null)
+(cd "$UC" && printf '900\n111\n\ntokU\nn\n' | bash "$S" setup ubot --scope project --method clone >/dev/null)
+C="$UP/.claude/skills/claude-discord"; CC="$UC/.claude/skills/claude-discord"
+[ -L "$C" ] && [ ! -L "$CC" ] || { echo "FAIL: fixture: the default method links, --method clone does not"; exit 1; }
+v=$(cd "$UP" && bash "$C/bin/claude-discord" --version)
+grep -qE '^claude-discord [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]{7,}\)$' <<<"$v" && [[ $v == *"($(git -C "$PC" rev-parse --short HEAD))" ]] || { echo "FAIL: --version through a link must print the version and the source's sha: $v"; exit 1; }
+# The upstream moves: a new commit in the stand-in repo, with a new plugin version.
+jq '.version = "9.9.9"' "$SRC/.claude-plugin/plugin.json" > "$SRC/p.json" && mv "$SRC/p.json" "$SRC/.claude-plugin/plugin.json" &&
+  git -C "$SRC" -c user.email=t@t -c user.name=t commit -qam bump || { echo "FAIL: could not bump the stand-in repo"; exit 1; }
+rm -rf "$HOME/.claude-discord/runtime"; echo stale > "$HOME/.local/bin/claude-discord"
+out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || { echo "FAIL: update failed: $out"; exit 1; }
+grep -q -- '-> 9.9.9' <<<"$out" && grep -q '/reload-plugins' <<<"$out" && [ "$(grep -c -- "$PC" <<<"$out")" = 1 ] || { echo "FAIL: update must pull the source behind the link once and ask for /reload-plugins: $out"; exit 1; }
+[ "$(jq -r .version "$PC/.claude-plugin/plugin.json")" = 9.9.9 ] && [ "$(jq -r .version "$CC/.claude-plugin/plugin.json")" != 9.9.9 ] || { echo "FAIL: update must pull the source and only the source"; exit 1; }
+[ -s "$HOME/.claude-discord/runtime/discord-chunk.ts" ] && [ -s "$HOME/.claude-discord/runtime/discord-proxy.ts" ] && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" || { echo "FAIL: update must refill the runtime copy and refresh the shim"; exit 1; }
+# --all: every recorded link and the clone, the source pulled once, a project removed since setup pruned, live records kept.
+git -C "$SRC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m again
+printf '%s\n' "$HOME/gone proj/.claude/skills/claude-discord" >> "$HOME/.claude-discord/records/installs"
+links=0; while IFS= read -r r; do [ "$(cd -P "$r" 2>/dev/null && pwd -P)" != "$PC" ] || links=$((links + 1)); done < "$HOME/.claude-discord/records/installs"
+[ "$links" -ge 3 ] || { echo "FAIL: fixture: the records should hold several links to the source, got $links"; exit 1; }
+out=$(cd "$UP" && bash "$C/bin/claude-discord" update --all 2>&1) || { echo "FAIL: update --all failed: $out"; exit 1; }
+[ "$(grep -c -- "$PC" <<<"$out")" = 1 ] && [ "$(grep -c -- "$CC" <<<"$out")" = 1 ] && [ "$(grep -c -- ' -> ' <<<"$out")" = 2 ] || { echo "FAIL: update --all must pull each real clone once: $out"; exit 1; }
+[ "$(git -C "$CC" rev-parse HEAD)" = "$(git -C "$SRC" rev-parse HEAD)" ] && ! grep -qF 'gone proj' "$HOME/.claude-discord/records/installs" && [ "$(wc -l < "$HOME/.claude-discord/records/installs" | tr -d ' ')" = "$((links + 1))" ] || { echo "FAIL: update --all must update the clone install, prune the removed project and keep the others"; exit 1; }
+# A clone that cannot fast-forward is reported with exit 1 and does not stop the others.
+git -C "$CC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local
+git -C "$SRC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m remote
+rc=0; out=$(cd "$UP" && bash "$C/bin/claude-discord" update --all 2>&1) || rc=$?
+[ "$rc" = 1 ] && grep -q "$CC: pull failed" <<<"$out" && [ "$(git -C "$PC" rev-parse HEAD)" = "$(git -C "$SRC" rev-parse HEAD)" ] || { echo "FAIL: a diverged clone must exit 1, named, after the others were pulled (rc=$rc): $out"; exit 1; }
+# A shim that cannot be refreshed is reported with exit 1 on its own.
+git -C "$CC" reset -q --hard '@{u}'
+echo stale > "$HOME/.local/bin/claude-discord"; chmod 555 "$HOME/.local/bin"
+rc=0; out=$(cd "$UP" && bash "$C/bin/claude-discord" update --all 2>&1) || rc=$?
+chmod 755 "$HOME/.local/bin"
+[ "$rc" = 1 ] && grep -q 'could not install the shim' <<<"$out" && ! grep -q 'pull failed' <<<"$out" || { echo "FAIL: an unwritable shim must exit 1 with a message (rc=$rc): $out"; exit 1; }
+bash "$C/bin/claude-discord" update --bogus >/dev/null 2>&1 && { echo "FAIL: update takes only --all"; exit 1; }
+rm -rf "$UP" "$UC"
+echo "ok: --version prints the version and the clone's sha (a link's is the source's); update pulls the source behind a link once, refills the runtime copy and the shim and asks for /reload-plugins; --all pulls each real clone once, prunes a removed project and exits 1 on a diverged clone or an unwritable shim"
+
 # Nothing this suite started is still running: no process runs from its
 # HOME (hooks, stubs, the fake worker).
-strays() { ps -eo pid=,args= | while read -r pid args; do case $args in *"$HOME/"*) echo "$pid $args";; esac; done; }
-for _ in $(seq 20); do [ -z "$(strays)" ] && break; sleep 0.1; done
-[ -z "$(strays)" ] || { echo "FAIL: processes left behind: $(strays)"; exit 1; }
+strays() { ps -eo pid=,args= | grep "[/]${HOME#/}/" || :; }   # the [/] keeps grep out of its own match
+for _ in $(seq 20); do left=$(strays); [ -z "$left" ] && break; sleep 0.1; done
+[ -z "$left" ] || { echo "FAIL: processes left behind: $(strays)"; exit 1; }
 echo "ok: no process is left behind"
 
 echo "ALL PASS"

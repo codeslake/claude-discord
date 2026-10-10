@@ -21,6 +21,10 @@
 #   claude-discord refresh <name> [--force] [claude args]
 #                                        replace the running session with a fresh
 #                                        one that starts from its handoff
+#   claude-discord update [--all]        git pull --ff-only the clone this runs from (--all:
+#                                        every recorded install, each real clone once), then
+#                                        patch and refresh the shim
+#   claude-discord --version             version and short sha of the clone
 #   claude-discord health [--json]
 #                                        is every bot in this project still
 #                                        answering? exit 1 on a finding
@@ -61,7 +65,8 @@ helpers=$HOME/.claude-discord
 plugin=discord@claude-plugins-official
 # This script lives at <plugin root>/bin/claude-discord; the plugin's tools
 # and rules are named from here, resolved through any symlink to the real copy.
-self_root=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd -P)
+self_path=$(readlink -f "$0" 2>/dev/null || echo "$0")
+self_root=$(cd "${self_path%/*}/.." && pwd -P)   # ${..%/*}, not dirname: one fork less on every call
 
 # access.json is written at setup time, so every answer lives in the file the
 # plugin reads and nothing else needs persisting. The run path below keeps a
@@ -123,6 +128,7 @@ jq_edit() {  # $1 = file, the rest = jq arguments
 remove_old_hooks() {
   local file
   for file in settings.json settings.local.json; do
+    [ -e "$PWD/.claude/$file" ] || continue   # nothing to remove from a file that is not there (and no jq forks)
     jq_edit "$PWD/.claude/$file" '
       ((.hooks | type) == "object" and (.hooks | tostring | contains("/.claude/discord-agents/hooks/"))) as $ours
       | def stale: (.command? // "" | tostring | contains("/.claude/discord-agents/hooks/"));
@@ -142,6 +148,7 @@ remove_old_hooks() {
 # disabled it and is left alone.
 ensure_ack_reaction() {  # $1 = bot dir
   [ -f "$1/access.json" ] || return 0
+  grep -q '"ackReaction"' "$1/access.json" && return 0   # present (even ""): nothing to add, and no jq forks
   jq_edit "$1/access.json" 'if has("ackReaction") then . else . + {ackReaction: "👀"} end'
 }
 
@@ -157,6 +164,7 @@ remove_old_registration() {
   local f
   [ -e "$PWD/.claude/skills/claude-discord" ] || [ -e "$HOME/.claude/skills/claude-discord" ] || return 0
   for f in "$PWD"/.claude/rules/claude-discord-*.md; do
+    [ -e "$f" ] || [ -L "$f" ] || continue   # an unmatched glob stays literal: no rm fork on every start
     rm -f "$f" 2>/dev/null || echo "claude-discord: could not remove $f" >&2
   done
   remove_old_hooks
@@ -172,6 +180,7 @@ ensure_hooks_symlink() {
     echo "claude-discord: $link exists and is not a symlink, leaving it alone" >&2
     return 0
   fi
+  [ -L "$link" ] && [ "$link" -ef "$self_root/hooks" ] && return 0   # already right: no forks on every start
   mkdir -p "$root" 2>/dev/null || return 0
   ln -sfn "$self_root/hooks" "$link" 2>/dev/null || echo "claude-discord: could not symlink $link" >&2
 }
@@ -239,6 +248,28 @@ select_one() (
 # kind is kept as it is. Project scope loads only when ~/.claude.json trusts
 # that exact path; setup asks before writing it.
 has_path() { [ -e "$1" ] || [ -L "$1" ]; }   # a dangling link counts
+
+# The runtime files the patched official plugin imports live at a stable path,
+# ~/.claude-discord/runtime/, because the plugin cache is machine-wide while
+# clones are per project. setup and update copy them from the real clone.
+sync_runtime() {
+  local rt=$HOME/.claude-discord/runtime f
+  [ -d "$rt" ] || mkdir -p "$rt" || return 1
+  for f in discord-chunk.ts discord-proxy.ts; do
+    cmp -s "$self_root/runtime/$f" "$rt/$f" || cp "$self_root/runtime/$f" "$rt/$f" || return 1
+  done
+}
+
+# Drops recorded installs whose path is gone (a dangling link counts as gone).
+prune_installs() {
+  local f=$HOME/.claude-discord/records/installs p keep=""
+  [ -f "$f" ] || return 0
+  while IFS= read -r p || [ -n "$p" ]; do
+    [ -z "$p" ] || [ ! -e "$p" ] || keep="$keep$p"$'\n'
+  done < "$f"
+  printf '%s' "$keep" > "$f.tmp.$$" && { cmp -s "$f.tmp.$$" "$f" || cat "$f.tmp.$$" > "$f"; }
+  rm -f "$f.tmp.$$"
+}
 install_plugin() {  # uses $scope $method $pdir $gdir
   local repo=${CLAUDE_DISCORD_REPO:-https://github.com/codeslake/claude-discord}
   local src=$HOME/.claude-discord/source target ex pat here t
@@ -259,8 +290,7 @@ install_plugin() {  # uses $scope $method $pdir $gdir
   fi
   # A git-tracked project (worktree, submodule or subdirectory too) keeps the
   # install out of git status; no trailing slash, so it matches a link as well.
-  if [ "$scope" = project ] && git -C "$PWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    ex=$(git -C "$PWD" rev-parse --git-path info/exclude) here=$(git -C "$PWD" rev-parse --show-prefix)
+  if [ "$scope" = project ] && { read -r t && read -r ex && read -r here; } < <(git -C "$PWD" rev-parse --is-inside-work-tree --git-path info/exclude --show-prefix 2>/dev/null) && [ "$t" = true ]; then   # one git call: inside a work tree?, the exclude file, the prefix
     case $ex in /*) ;; *) ex=$PWD/$ex;; esac
     pat=/${here}.claude/skills/claude-discord
     grep -qxF "$pat" "$ex" 2>/dev/null || { mkdir -p "$(dirname "$ex")" && printf '%s\n' "$pat" >> "$ex"; }
@@ -271,6 +301,7 @@ install_plugin() {  # uses $scope $method $pdir $gdir
     { echo "claude-discord: could not install the shim from $target" >&2; return 1; }
   touch "$HOME/.claude-discord/records/installs"
   grep -qxF "$target" "$HOME/.claude-discord/records/installs" || printf '%s\n' "$target" >> "$HOME/.claude-discord/records/installs"
+  prune_installs
   # The real directory behind a link, for what must outlive this project's link.
   plugin_target=$(cd -P "$target" && pwd -P) || return 1
   # Keyed by the physical path, like refresh's check.
@@ -284,28 +315,36 @@ install_plugin() {  # uses $scope $method $pdir $gdir
 # What install.sh used to put under ~/.claude-discord becomes links into the
 # real plugin ($self_root, the resolved install, not one project's link):
 # hooks/{turn,peers,lib,autoresearchclaw}, every tool under hooks/tools, and the
-# two runtime .ts files (the bunfig preload an old bot's MCP server names).
+# two runtime .ts files (the bunfig preload an old bot's MCP server names; they
+# link to the stable runtime/ copy, which sync_runtime fills, so they never dangle).
 # Links stay for one release, because a project set up by the previous release
 # and not yet by this one keeps its settings hooks, and those resolve through
 # .claude/discord-agents/hooks -> ~/.claude-discord/hooks; deleting the copies
 # would silently turn every one of them into a no-op. The next release removes
 # the links. rules/ goes (only the old rule copies read it); scratch/, records/,
-# runtime/ and source/ are not touched. A symlink at hooks/ itself is removed as
+# source/ are not touched (runtime/ is refreshed). A symlink at hooks/ itself is removed as
 # a link (R2): it leads somewhere that is not ours to empty. The other paths
 # are removed with rm -rf, which on a link removes only the link.
 remove_old_install() {
   local h=$helpers real=$self_root t f bad=0
   [ ! -L "$h/hooks" ] || rm -f "$h/hooks"
-  rm -rf "$h/rules" "$h/hooks/tools"
-  mkdir -p "$h/hooks/tools" || bad=1
+  [ ! -e "$h/rules" ] && [ ! -L "$h/rules" ] || rm -rf "$h/rules"
+  [ -d "$h/hooks/tools" ] && [ ! -L "$h/hooks/tools" ] || { rm -rf "$h/hooks/tools"; mkdir -p "$h/hooks/tools" || bad=1; }
+  for f in "$h"/hooks/tools/* "$h"/hooks/tools/.[!.]*; do   # an old copy or a link to a tool the plugin no longer ships goes
+    { [ -e "$f" ] || [ -L "$f" ]; } && ! { [ -L "$f" ] && [ "$f" -ef "$real/tools/${f##*/}" ]; } && { rm -rf "$f" || bad=1; }
+  done
+  sync_runtime || bad=1
   for t in turn peers lib autoresearchclaw; do
+    [ -L "$h/hooks/$t" ] && [ "$h/hooks/$t" -ef "$real/hooks/$t" ] && continue   # already linked (every setup after the first)
     rm -rf "${h:?}/hooks/$t" && ln -s "$real/hooks/$t" "$h/hooks/$t" || bad=1
   done
   for f in "$real"/tools/*; do
+    [ -L "$h/hooks/tools/${f##*/}" ] && [ "$h/hooks/tools/${f##*/}" -ef "$f" ] && continue
     ln -sfn "$f" "$h/hooks/tools/${f##*/}" || bad=1
   done
   for f in discord-chunk.ts discord-proxy.ts; do
-    ln -sfn "$real/runtime/$f" "$h/$f" || bad=1
+    [ -L "$h/$f" ] && [ "$h/$f" -ef "$h/runtime/$f" ] && continue
+    ln -sfn "$h/runtime/$f" "$h/$f" || bad=1
   done
   [ "$bad" = 0 ] || { echo "claude-discord: could not link the old install paths under $h to $real" >&2; return 1; }
 }
@@ -1234,10 +1273,7 @@ fi
 patch_official() {
   local rt=$HOME/.claude-discord/runtime d f rc=0 changed=""
   mark() { case " $changed " in *" $1 "*) ;; *) changed="$changed $1";; esac; }   # list a file once
-  mkdir -p "$rt" || return 1
-  for f in discord-chunk.ts discord-proxy.ts; do
-    cmp -s "$self_root/runtime/$f" "$rt/$f" || cp "$self_root/runtime/$f" "$rt/$f"
-  done
+  sync_runtime || return 1
   for d in "$HOME"/.claude/plugins/cache/claude-plugins-official/discord/*/; do
     d=${d%/}; f=$d/server.ts   # no trailing slash, so messages name the file cleanly
     [ -f "$f" ] || continue
@@ -1275,6 +1311,48 @@ patch_official() {
   return "$rc"
 }
 if [ "${1:-}" = patch ]; then patch_official; exit $?; fi
+
+plugin_version() { jq -r '.version // "?"' "$1/.claude-plugin/plugin.json" 2>/dev/null || echo "?"; }
+# self_root is already the real clone (a link resolved through readlink and pwd -P).
+if [ "${1:-}" = --version ]; then
+  echo "claude-discord $(plugin_version "$self_root") ($(git -C "$self_root" rev-parse --short HEAD 2>/dev/null || echo nogit))"
+  exit 0
+fi
+
+# update: fast-forwards the clone this command runs from, or with --all every
+# recorded install, then re-patches the official plugin and refreshes the shim.
+# A link resolves to the clone behind it (cd -P), so the clones that many links
+# share are pulled once. Running sessions keep the code they loaded until
+# /reload-plugins.
+if [ "${1:-}" = update ]; then
+  case ${2:-} in ''|--all) ;; *) echo "usage: claude-discord update [--all]" >&2; exit 2;; esac
+  clones=("$self_root") rc=0
+  if [ "${2:-}" = --all ]; then
+    clones=() seen=$'\n'
+    prune_installs   # a project removed since setup drops out here
+    if [ -f "$helpers/records/installs" ]; then
+      while IFS= read -r c || [ -n "$c" ]; do
+        c=$(cd -P "$c" 2>/dev/null && pwd -P) || continue
+        case $seen in *$'\n'"$c"$'\n'*) continue;; esac
+        seen="$seen$c"$'\n'
+        clones+=("$c")
+      done < "$helpers/records/installs"
+    fi
+    [ "${#clones[@]}" -gt 0 ] || echo "claude-discord: no recorded install to update"
+  fi
+  for c in ${clones[@]+"${clones[@]}"}; do
+    old=$(plugin_version "$c")
+    git -C "$c" pull -q --ff-only || { echo "claude-discord: $c: pull failed (local changes, diverged, or no network)" >&2; rc=1; continue; }
+    echo "claude-discord $c: $old -> $(plugin_version "$c")"
+  done
+  patch_official || rc=1
+  mkdir -p "$HOME/.local/bin"
+  cmp -s "$self_root/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
+    install -m 755 "$self_root/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
+    { echo "claude-discord: could not install the shim from $self_root" >&2; rc=1; }
+  echo "claude-discord: run /reload-plugins in running sessions (a bot: the self-reload skill)"
+  exit "$rc"
+fi
 
 args=() name="" skip=0 want_name=0 named=0 positional=0 has_name=0
 # With a --name anywhere, a bare word is an argument for claude, not the bot

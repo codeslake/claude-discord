@@ -15,7 +15,7 @@ bot_mode=""
 # session reads, so it must be the real install, wherever setup put it.
 # cd -P: the hooks are often reached through the project's discord-agents/hooks
 # symlink, and a logical `..` from there would land in discord-agents/.
-plugin_root=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd -P) || plugin_root=""
+plugin_root=$(cd -P "${BASH_SOURCE[0]%/*}/../.." 2>/dev/null && pwd -P) || plugin_root=""   # ${..%/*}: sourced by path, one fork less than dirname
 thread_tool=$plugin_root/tools/thread
 
 # resolve_channel: sets bot_channel to the bot's channel. That is the single
