@@ -266,21 +266,33 @@ install_plugin() {  # uses $scope $method $pdir $gdir
   fi
 }
 
-# What install.sh used to put under ~/.claude-discord goes; scratch/, records/
-# and runtime/ stay, and so does ~/.claude-discord/source, the machine's one
-# clone. tools/thread keeps a compat link for one release, so a session
-# started by the old wrapper still finds the tool its prompt names; it points
-# at the real plugin ($self_root), not at one project's link. A symlink where
-# a directory used to be is removed as a link: it leads somewhere that is not
-# ours to empty.
+# What install.sh used to put under ~/.claude-discord becomes links into the
+# real plugin ($self_root, the resolved install, not one project's link):
+# hooks/{turn,peers,lib,autoresearchclaw}, every tool under hooks/tools, and the
+# two runtime .ts files (the bunfig preload an old bot's MCP server names).
+# Links stay for one release, because a project set up by the previous release
+# and not yet by this one keeps its settings hooks, and those resolve through
+# .claude/discord-agents/hooks -> ~/.claude-discord/hooks; deleting the copies
+# would silently turn every one of them into a no-op. The next release removes
+# the links. rules/ goes (only the old rule copies read it); scratch/, records/,
+# runtime/ and source/ are not touched. A symlink at hooks/ itself is removed as
+# a link (R2): it leads somewhere that is not ours to empty. The other paths
+# are removed with rm -rf, which on a link removes only the link.
 remove_old_install() {
-  local h=$helpers d
-  for d in hooks hooks/tools rules; do
-    [ ! -L "$h/$d" ] || rm -f "$h/$d"
+  local h=$helpers real=$self_root t f bad=0
+  [ ! -L "$h/hooks" ] || rm -f "$h/hooks"
+  rm -rf "$h/rules" "$h/hooks/tools"
+  mkdir -p "$h/hooks/tools" || bad=1
+  for t in turn peers lib autoresearchclaw; do
+    rm -rf "${h:?}/hooks/$t" && ln -s "$real/hooks/$t" "$h/hooks/$t" || bad=1
   done
-  rm -rf "$h/rules" "$h/hooks/turn" "$h/hooks/peers" "$h/hooks/lib" "$h/hooks/autoresearchclaw" "$h/hooks/tools"
-  rm -f "$h/discord-chunk.ts" "$h/discord-proxy.ts"
-  mkdir -p "$h/hooks/tools" && ln -sfn "$self_root/tools/thread" "$h/hooks/tools/thread"
+  for f in "$real"/tools/*; do
+    ln -sfn "$f" "$h/hooks/tools/${f##*/}" || bad=1
+  done
+  for f in discord-chunk.ts discord-proxy.ts; do
+    ln -sfn "$real/runtime/$f" "$h/$f" || bad=1
+  done
+  [ "$bad" = 0 ] || { echo "claude-discord: could not link the old install paths under $h to $real" >&2; return 1; }
 }
 
 if [ "${1:-}" = setup ]; then
@@ -404,7 +416,7 @@ if [ "${1:-}" = setup ]; then
     [ -n "$scope" ] || scope=$(select_one Scope project "project  this project only (.claude/skills/claude-discord)" "global  every project (~/.claude/skills/claude-discord)")
     install_plugin || exit $?
     self_root=$plugin_target   # from here on, everything points at the real install
-    remove_old_install
+    remove_old_install || exit $?
   fi
   ensure_hooks_symlink
   remove_old_registration

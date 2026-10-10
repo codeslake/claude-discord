@@ -909,6 +909,8 @@ echo "ok: a read-only settings.local.json is left untouched, no temp file is lef
 for shape in '[]' '{"hooks":{"UserPromptSubmit":{}}}' ''; do
   printf '%s' "$shape" > "$P2/.claude/settings.local.json"
   out=$(bash "$S" gamma 2>&1)
+  # A file jq cannot walk at all is named in a warning; the others have nothing to remove and say nothing.
+  [ "$shape" != '[]' ] || grep -qF "$P2/.claude/settings.local.json" <<<"$out" || { echo "FAIL: stderr must name settings.local.json holding []: $out"; exit 1; }
   [ "$(cat "$P2/.claude/settings.local.json")" = "$shape" ] && grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" || { echo "FAIL: settings.local.json '$shape' must be left as it was and the start must exec: $out"; exit 1; }
 done
 echo "ok: a settings.local.json with nothing of ours to remove ([], a non-array event value, 0 bytes) is left as it was and the start still execs claude"
@@ -1222,6 +1224,9 @@ echo '{"permissions":{"allow":["Bash(ls)"]},"hooks":{"PostToolUse":[{"matcher":"
 cp "$SJ" "$P4/user.before"
 echo '{"permissions":{"allow":["Bash(git status)"]}}' > "$SL"
 plant_old "$SJ"; plant_old "$SL"
+# A user's own hook in the same matcher group as one of ours: only ours may go, the hook and its group stay.
+jq '(.hooks.PreToolUse[] | select(.matcher == "Edit|Write|MultiEdit") | .hooks) += [{"type":"command","command":"mine-in-group"}]' "$SL" > "$P4/s.tmp" && cat "$P4/s.tmp" > "$SL" && rm -f "$P4/s.tmp"
+SL_EXPECT='{"permissions":{"allow":["Bash(git status)"]},"hooks":{"PreToolUse":[{"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":"mine-in-group"}]}]}}'
 cp "$D/rules/dev-manager.md" "$RULE"
 out=$(printf '42\n111\n\ntokM\nn\ndev-manager\ndong:900:800:wmac, junyong:901:801:lmd42,mgr:902:803:here,bad:x:1:2\n' | bash "$S" setup mgr --scope project 2>"$P4/err")
 [ "$(cat "$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: mode by name was not stored"; exit 1; }
@@ -1232,7 +1237,7 @@ grep -qF 'bad:x:1:2' "$P4/err" || { echo "FAIL: a malformed peer entry must be w
 grep -qF "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed." <<<"$out" || { echo "FAIL: the both-directions note is missing"; exit 1; }
 [ ! -e "$RULE" ] && [ "$(cat "$P4/.claude/rules/other.md")" = mine ] || { echo "FAIL: setup must remove the old rule file and keep a foreign one"; exit 1; }
 [ "$(jq -c . "$SJ")" = "$(jq -c . "$P4/user.before")" ] || { echo "FAIL: setup must take every entry of ours out of settings.json and leave the rest: $(jq -c . "$SJ")"; exit 1; }
-[ "$(jq -c . "$SL")" = '{"permissions":{"allow":["Bash(git status)"]}}' ] || { echo "FAIL: settings.local.json must lose every entry of ours and keep the permission grants: $(cat "$SL")"; exit 1; }
+[ "$(jq -c . "$SL")" = "$SL_EXPECT" ] || { echo "FAIL: settings.local.json must lose every entry of ours and keep the permission grants and a user's hook that shared a group with ours: $(cat "$SL")"; exit 1; }
 [ "$(jq -c '.permissions' "$SJ")" = '{"allow":["Bash(ls)"]}' ] && grep -q my-own-hook "$SJ" || { echo "FAIL: unrelated settings keys and the user's own hook must survive"; exit 1; }
 [ "$(jq -c '.permissions' "$SL")" = '{"allow":["Bash(git status)"]}' ] || { echo "FAIL: settings.local.json's permission grants must survive"; exit 1; }
 echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned), the group allowFrom, and takes the old rule file and every settings hook of ours away, writing none"
@@ -2471,31 +2476,52 @@ echo "ok: health installs no timer (--install-timer and --proxy are refused), an
 stop_servers
 cd "$P"
 
-# A machine with the old install: setup removes what install.sh put under
-# ~/.claude-discord, keeps the bots' scratch, records, runtime and the source
-# clone, and leaves one compat link for tools/thread, pointing at the real plugin.
-OP="$HOME/old proj"; OH="$HOME/.claude-discord"
-mkdir -p "$OP/.claude/rules" "$OP/.claude/discord-agents" "$OH/scratch/b" "$OH/hooks/turn" "$OH/hooks/tools" "$OH/rules" "$OH/runtime"
+# A machine with the old install: setup replaces what install.sh put under
+# ~/.claude-discord with links into the real plugin (a project set up by the
+# previous release and not yet by this one still reaches its hooks through
+# there), removes the old rule copies, keeps the bots' scratch, records, runtime
+# and the source clone.
+OP="$HOME/old proj"; OH="$HOME/.claude-discord"; UP="$HOME/unmigrated proj"
+# Earlier setups in this suite already linked these paths; back to real copies first, so the fixture writes nowhere else.
+rm -rf "$OH/hooks" "$OH/rules" "$OH/discord-chunk.ts" "$OH/discord-proxy.ts"
+mkdir -p "$OP/.claude/rules" "$OP/.claude/discord-agents" "$OH/scratch/b" "$OH/rules" "$OH/runtime" "$OH/hooks/tools"
+for t in turn peers lib autoresearchclaw; do mkdir -p "$OH/hooks/$t"; echo old > "$OH/hooks/$t/stale"; done
 (cd "$OP" && git init -q .)
-: > "$OH/scratch/b/note"; : > "$OH/runtime/discord-proxy.ts"; : > "$OH/hooks/turn/on-prompt"; : > "$OH/hooks/tools/local-bots"; : > "$OH/rules/dev-manager.md"; : > "$OH/discord-chunk.ts"; : > "$OH/discord-proxy.ts"
+: > "$OH/scratch/b/note"; : > "$OH/runtime/discord-proxy.ts"; echo old > "$OH/hooks/tools/local-bots"; echo old > "$OH/hooks/tools/old-tool"; : > "$OH/rules/dev-manager.md"; echo old > "$OH/discord-chunk.ts"; echo old > "$OH/discord-proxy.ts"
 : > "$OP/.claude/rules/claude-discord-dev-manager.md"
+# The previous release's project: its settings hook runs a script through .claude/discord-agents/hooks -> ~/.claude-discord/hooks.
+mkdir -p "$UP/.claude/discord-agents"; ln -s "$OH/hooks" "$UP/.claude/discord-agents/hooks"
+echo '{}' > "$UP/.claude/settings.local.json"; plant_old "$UP/.claude/settings.local.json"
 jq -n --arg p "$OP" '{projects: {($p): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
 (cd "$OP" && printf '900\n111\n\ntokO\nn\ndev-manager\n\n' | bash "$S" setup obot --scope project >/dev/null)
-[ ! -e "$OH/rules" ] && [ ! -e "$OH/discord-chunk.ts" ] && [ ! -e "$OH/discord-proxy.ts" ] && [ ! -e "$OH/hooks/turn" ] && [ ! -e "$OH/hooks/tools/local-bots" ] || { echo "FAIL: the old install must go: $(cd "$OH" && find . -path ./source -prune -o -print)"; exit 1; }
+[ ! -e "$OH/rules" ] || { echo "FAIL: the old rule copies must go"; exit 1; }
+for f in hooks/turn/on-prompt hooks/turn/on-reply hooks/turn/on-stop hooks/turn/on-session-start hooks/peers/mention-guard hooks/peers/checkin hooks/peers/thread-guard hooks/peers/edit-gate hooks/autoresearchclaw/on-start hooks/lib/discord.sh hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events discord-chunk.ts discord-proxy.ts; do
+  case $f in hooks/tools/*) want=$PC/tools/${f##*/};; hooks/*) want=$PC/$f;; *) want=$PC/runtime/$f;; esac
+  [ -f "$OH/$f" ] && [ "$(readlink -f "$OH/$f")" = "$want" ] || { echo "FAIL: ~/.claude-discord/$f must resolve to the real plugin's $want: $(readlink -f "$OH/$f")"; exit 1; }
+done
+for f in hooks/turn/on-prompt hooks/peers/thread-guard hooks/autoresearchclaw/on-start hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events; do
+  [ -x "$OH/$f" ] || { echo "FAIL: ~/.claude-discord/$f must be an executable"; exit 1; }
+done
+for t in turn peers lib autoresearchclaw; do
+  [ -L "$OH/hooks/$t" ] && [ ! -e "$OH/hooks/$t/stale" ] && [ ! -e "$PC/hooks/$t/stale" ] || { echo "FAIL: the old hooks/$t copy must be replaced by a link, not written through"; exit 1; }
+done
+[ ! -e "$OH/hooks/tools/old-tool" ] && [ ! -e "$PC/tools/old-tool" ] || { echo "FAIL: an old tool copy must go"; exit 1; }
+# The unmigrated project's kept entry still names an executable file after another project's setup.
+[ -x "$UP/.claude/discord-agents/hooks/peers/thread-guard" ] && [ -x "$UP/.claude/discord-agents/hooks/turn/on-prompt" ] && grep -q '/.claude/discord-agents/hooks/peers/thread-guard' "$UP/.claude/settings.local.json" || { echo "FAIL: another project's setup must not disable an unmigrated project's hooks"; exit 1; }
 [ -e "$OH/scratch/b/note" ] && [ -e "$OH/runtime/discord-proxy.ts" ] && [ -d "$OH/source/.git" ] || { echo "FAIL: scratch, runtime and the source clone must stay"; exit 1; }
 [ ! -e "$OP/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: the old rule file must go"; exit 1; }
 # The link is to the real plugin (the machine's source clone), not to this project's link; it keeps working when that link goes.
 [ "$(readlink "$OH/hooks/tools/thread")" = "$PHOME/.claude-discord/source/tools/thread" ] || { echo "FAIL: the compat thread link must point at the real plugin: $(readlink "$OH/hooks/tools/thread")"; exit 1; }
 rm -f "$OP/.claude/skills/claude-discord"
-[ -x "$OH/hooks/tools/thread" ] || { echo "FAIL: the compat link must outlive the project's install link"; exit 1; }
-# A symlink where the old copies were (the suite's old stand-in, a dev checkout) goes as a link; its target keeps its files.
+[ -x "$OH/hooks/tools/thread" ] && [ -x "$OH/hooks/turn/on-prompt" ] || { echo "FAIL: the compat links must outlive the project's install link"; exit 1; }
+# A symlink at hooks/ or rules/ (a dev checkout) goes as a link; its target keeps its files and is not written through.
 mkdir -p "$HOME/old-target/hooks/turn" "$HOME/old-target/rules"; : > "$HOME/old-target/hooks/turn/on-prompt"; : > "$HOME/old-target/rules/dev-manager.md"
 rm -rf "$OH/hooks"; ln -s "$HOME/old-target/hooks" "$OH/hooks"; ln -s "$HOME/old-target/rules" "$OH/rules"
 (cd "$OP" && printf '\nn\nnone\n' | bash "$S" setup obot --scope project >/dev/null)
 [ ! -L "$OH/hooks" ] && [ ! -e "$OH/rules" ] && [ -e "$HOME/old-target/hooks/turn/on-prompt" ] && [ -e "$HOME/old-target/rules/dev-manager.md" ] || { echo "FAIL: a symlinked hooks or rules must be removed as a link, its target untouched"; exit 1; }
-[ -x "$OH/hooks/tools/thread" ] && [ -z "$(ls "$HOME/old-target/hooks/tools" 2>/dev/null)" ] || { echo "FAIL: the compat link must be a real file tree of its own, not written through the old link"; exit 1; }
-rm -rf "$OP" "$HOME/old-target"
-echo "ok: setup on an old install removes the old copies and rule file, keeps scratch, runtime and the source clone, leaves a compat thread link to the real plugin, and removes a symlinked hooks or rules as a link without touching its target"
+[ -x "$OH/hooks/tools/thread" ] && [ -x "$OH/hooks/turn/on-prompt" ] && [ -z "$(ls "$HOME/old-target/hooks/tools" 2>/dev/null)" ] && [ "$(ls "$HOME/old-target/hooks/turn")" = on-prompt ] || { echo "FAIL: the links must be made in a real hooks directory, not written through the old link"; exit 1; }
+rm -rf "$OP" "$UP" "$HOME/old-target"
+echo "ok: setup on an old install replaces the old hook, tool and runtime copies with links into the real plugin (an unmigrated project's hooks still resolve), removes the old rule copies and rule file, keeps scratch, runtime and the source clone, and removes a symlinked hooks or rules as a link without touching its target"
 
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.
