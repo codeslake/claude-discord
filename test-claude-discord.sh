@@ -140,7 +140,9 @@ SH="$D/shim/claude-discord"; SP="$HOME/shim test/proj"; mkdir -p "$SP/.claude/sk
 printf '#!/bin/bash\necho project-copy "$@"\n' > "$SP/.claude/skills/claude-discord/bin/claude-discord"; chmod +x "$SP/.claude/skills/claude-discord/bin/claude-discord"
 mkdir -p "$HOME/.claude/skills/claude-discord/bin"; printf '#!/bin/bash\necho global-copy "$@"\n' > "$HOME/.claude/skills/claude-discord/bin/claude-discord"; chmod +x "$HOME/.claude/skills/claude-discord/bin/claude-discord"
 [ "$(cd "$SP/sub" && bash "$SH" --bg x)" = "project-copy --bg x" ] || { echo "FAIL: the shim must run the project's clone from a subdirectory"; exit 1; }
-[ "$(cd "$HOME" && bash "$SH" health)" = "global-copy health" ] || { echo "FAIL: outside a project the shim runs the global clone"; exit 1; }
+# A nested project with discord-agents but no clone of its own: the walk stops there and runs the global clone, not the outer project's.
+mkdir -p "$SP/sub/inner/.claude/discord-agents"
+[ "$(cd "$SP/sub/inner" && bash "$SH" health)" = "global-copy health" ] || { echo "FAIL: a project without its own clone runs the global one"; exit 1; }
 rm -rf "$HOME/.claude/skills/claude-discord"
 out=$(cd "$HOME" && bash "$SH" 2>&1) && { echo "FAIL: with no clone the shim must fail"; exit 1; }
 grep -q 'not set up' <<<"$out" || { echo "FAIL: the shim must say how to set up: $out"; exit 1; }
