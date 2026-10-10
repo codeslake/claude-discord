@@ -39,16 +39,11 @@
 #                             from `.env.CLAUDE_CODE_PROCESS_WRAPPER` in
 #                             ~/.claude/settings.json; unset too, plain `claude`
 #                             on PATH.
-#   ~/.claude-discord/discord-proxy.ts
-#                             optional. bun's WebSocket ignores HTTPS_PROXY,
-#                             so behind a corporate proxy the Discord gateway
-#                             dies on TLS interception; this preload pins it to
-#                             HTTPS_PROXY. Only wired in when the file exists.
-#   ~/.claude-discord/discord-chunk.ts
-#                             optional. The plugin splits long replies at a fixed
-#                             offset, mid-`code span` or mid-fence; this chunker
-#                             keeps backticks and fences balanced. The plugin's
-#                             chunk() call is pointed at it when the file exists.
+#   claude-discord patch      patches every cached copy of the official discord
+#                             plugin (also run at each start): bots hear each
+#                             other, @everyone wakes none, long replies split
+#                             fence-safe (runtime/discord-chunk.ts), the gateway
+#                             follows HTTPS_PROXY (runtime/discord-proxy.ts).
 # Needs: bun, jq, and `claude plugin install discord@claude-plugins-official`.
 set -euo pipefail
 
@@ -1104,6 +1099,56 @@ if [ "${1:-}" = refresh ]; then
   exit "$rc"
 fi
 
+# Patches the official discord plugin's install(s) so bots can work together.
+# Every version dir in the cache, not just the active one: an auto-update adds
+# an unpatched dir while bots run on the old one, and the next start, respawn
+# or config-changing /reload-plugins uses the new one (measured, 2.1.296).
+# Five patches, each idempotent because its pattern is gone once applied:
+#   bot-authors     let other bots reach access.json's allowFrom gate
+#   ignore-everyone @everyone/@here wake no bot
+#   chunk           fence-safe chunking, imported from the stable runtime copy
+#   proxy           bunfig preload pinning fetch and WebSocket to HTTPS_PROXY
+#   failure-cache   a per-bot env in .mcp.json, so Claude Code's 15-minute MCP
+#                   failure cache (keyed on the config hashed after ${VAR}
+#                   expansion) no longer blocks every bot for one bot's failure
+# The runtime files are copied to ~/.claude-discord/runtime/ because the plugin
+# cache is machine-wide while clones are per project. Exit 1 names the file and
+# patch whose pattern moved; the others are still applied.
+patch_official() {
+  local rt=$HOME/.claude-discord/runtime d f rc=0 changed=""
+  mkdir -p "$rt" && for f in discord-chunk.ts discord-proxy.ts; do
+    cmp -s "$self_root/runtime/$f" "$rt/$f" || cp "$self_root/runtime/$f" "$rt/$f"
+  done
+  for d in "$HOME"/.claude/plugins/cache/claude-plugins-official/discord/*/; do
+    d=${d%/}; f=$d/server.ts   # no trailing slash, so messages name the file cleanly
+    [ -f "$f" ] || continue
+    if grep -q 'if (msg.author.bot) return' "$f"; then
+      perl -pi -e 's/^(\s*)if \(msg\.author\.bot\) return$/$1if (msg.author.id === client.user?.id) return/' "$f"; changed="$changed $f"
+    elif ! grep -qF 'msg.author.id === client.user?.id' "$f"; then
+      echo "claude-discord: patch: $f: bot-authors no longer matches" >&2; rc=1
+    fi
+    if grep -q 'msg.mentions.has(client.user))' "$f"; then
+      perl -pi -e 's/msg\.mentions\.has\(client\.user\)\)/msg.mentions.has(client.user, { ignoreEveryone: true }))/' "$f"; changed="$changed $f"
+    elif ! grep -qF 'ignoreEveryone: true' "$f"; then
+      echo "claude-discord: patch: $f: ignore-everyone no longer matches" >&2; rc=1
+    fi
+    if grep -qE '^[[:space:]]*const chunks = chunk\(text, limit, mode\);?[[:space:]]*$' "$f"; then
+      CHUNK_TS=$rt/discord-chunk.ts perl -pi -e 's/^(\s*)const chunks = chunk\(text, limit, mode\)(;?\s*)$/$1const chunks = (await import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)$2/' "$f"; changed="$changed $f"
+    elif ! grep -qF '.chunk(text, limit, mode)' "$f"; then
+      echo "claude-discord: patch: $f: chunk no longer matches" >&2; rc=1
+    fi
+    [ "$(cat "$d/bunfig.toml" 2>/dev/null)" = "preload = [\"$rt/discord-proxy.ts\"]" ] ||
+      { printf 'preload = ["%s"]\n' "$rt/discord-proxy.ts" > "$d/bunfig.toml"; changed="$changed $d/bunfig.toml"; }
+    if [ -f "$d/.mcp.json" ] && ! jq -e '.mcpServers.discord.env.DISCORD_STATE_DIR' "$d/.mcp.json" >/dev/null 2>&1; then
+      jq_edit "$d/.mcp.json" '.mcpServers.discord.env = ((.mcpServers.discord.env // {}) + {DISCORD_STATE_DIR: "${DISCORD_STATE_DIR}"})'
+      changed="$changed $d/.mcp.json"
+    fi
+  done
+  [ -z "$changed" ] || echo "claude-discord: patched$changed"
+  return "$rc"
+}
+if [ "${1:-}" = patch ]; then patch_official; exit $?; fi
+
 args=() name="" skip=0
 for a in "$@"; do
   if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) args+=("$a"); continue;; esac; fi   # a value never starts with "-" (see refresh)
@@ -1140,38 +1185,9 @@ fi
 [ -f "$dir/access.json" ] || write_access "$dir" true
 ensure_ack_reaction "$dir"
 
-# A plugin update replaces its directory, so put the proxy preload back every
-# time; a machine without the preload gets no bunfig and bun's defaults.
-install=$(jq -r --arg p "$plugin" '.plugins[$p][0].installPath' "$HOME/.claude/plugins/installed_plugins.json")
-if [ -f "$helpers/discord-proxy.ts" ]; then
-  printf 'preload = ["%s"]\n' "$helpers/discord-proxy.ts" > "$install/bunfig.toml"
-else
-  rm -f "$install/bunfig.toml"
-fi
-
-# Upstream drops every message whose author is a bot, so two bots can never
-# hear each other. Narrow that to "my own messages" and let access.json's
-# allowFrom decide which other bots get through. Same re-apply-every-start
-# reasoning as bunfig.toml; idempotent because the pattern is gone once patched.
-grep -q 'if (msg.author.bot) return' "$install/server.ts" &&
-  perl -pi -e 's/^(\s*)if \(msg\.author\.bot\) return$/$1if (msg.author.id === client.user?.id) return/' "$install/server.ts"
-# discord.js counts @everyone/@here as a mention of every bot, so one broadcast
-# wakes every session in the channel. A session is addressed by its own bot only.
-grep -q 'msg.mentions.has(client.user))' "$install/server.ts" &&
-  perl -pi -e 's/msg\.mentions\.has\(client\.user\)\)/msg.mentions.has(client.user, { ignoreEveryone: true }))/' "$install/server.ts"
-# The plugin splits a long reply at a fixed offset, which can land inside a
-# `code span` or a ``` fence and leave Discord rendering the rest as code.
-# Point its one chunk() call at the balanced chunker instead; only the call
-# line is touched, so the plugin's own function and version stay as shipped.
-# Idempotent because the call is gone once patched. A plugin update that moves
-# the call is a visible miss on stderr, never a broken edit.
-if [ -f "$helpers/discord-chunk.ts" ]; then
-  if grep -qE '^[[:space:]]*const chunks = chunk\(text, limit, mode\);?[[:space:]]*$' "$install/server.ts"; then
-    CHUNK_TS=$helpers/discord-chunk.ts perl -pi -e 's/^(\s*)const chunks = chunk\(text, limit, mode\)(;?\s*)$/$1const chunks = (await import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)$2/' "$install/server.ts"
-  elif ! grep -qF '.chunk(text, limit, mode)' "$install/server.ts"; then
-    echo "claude-discord: server.ts has no chunk() call to patch; chunking patch not applied, long replies keep the plugin's fixed-offset split" >&2
-  fi
-fi
+# The official plugin must carry our patches before its server starts; a moved
+# pattern is reported and the start goes on with whatever still applied.
+patch_official >/dev/null || echo "claude-discord: some patches no longer apply (see above); the bot starts anyway" >&2
 
 # The bot's channel is the single group key in its access.json, where a bot
 # is moved to another channel; config.env's DISCORD_CHANNEL_ID otherwise (no

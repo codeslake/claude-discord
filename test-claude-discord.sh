@@ -66,9 +66,12 @@ echo "ok: plugin.json and hooks.json are valid and every hook command exists"
 # cannot leave one running.
 KILL_AT_EXIT=""
 export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'kill $KILL_AT_EXIT 2>/dev/null || :; rm -rf /tmp/claude-discord-test-$$' EXIT
-mkdir -p "$HOME/.claude/plugins" "$HOME/fakeplugin" "$HOME/bin"
-echo '{"plugins":{"discord@claude-plugins-official":[{"installPath":"'"$HOME"'/fakeplugin"}]}}' > "$HOME/.claude/plugins/installed_plugins.json"
+# The fake plugin sits in the cache layout the patch verb walks; $HOME/fakeplugin
+# is a link to its one version dir, which the assertions read through.
+FAKEDIR="$HOME/.claude/plugins/cache/claude-plugins-official/discord/0.0.4"
+mkdir -p "$FAKEDIR" "$HOME/bin"; ln -s "$FAKEDIR" "$HOME/fakeplugin"
 printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(msg)\n})\nfunction isAddressed(msg) {\n  if (client.user && msg.mentions.has(client.user)) return true\n}\nasync function reply(text, limit, mode) {\n        const chunks = chunk(text, limit, mode)\n}\n' "'messageCreate'" > "$HOME/fakeplugin/server.ts"
+cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.pristine"
 printf '#!/bin/bash\necho "LAUNCHER $*"\n' > "$HOME/bin/claude-launcher"; chmod +x "$HOME/bin/claude-launcher"
 printf '#!/bin/bash\necho "PLAIN $*"\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
 CURL_LOG="$HOME/curl.log"; : > "$CURL_LOG"
@@ -125,7 +128,7 @@ chmod +x "$HOME/bin/fake-worker"
 export PATH="$HOME/bin:$PATH"
 export CURL_LOG CURL_STDIN_LOG CURL_REPLIES
 export CLAUDE_DISCORD_LAUNCHER=claude-launcher
-mkdir -p "$HOME/.claude-discord"; : > "$HOME/.claude-discord/discord-proxy.ts"; : > "$HOME/.claude-discord/discord-chunk.ts"
+mkdir -p "$HOME/.claude-discord"
 # Stand-in for the plugin install: a copy of the repo tree (the missing-lib test
 # renames a file inside it, never in the working tree), linked in as the hooks
 # and rules the projects reach. The hooks resolve plugin_root to the copy.
@@ -559,7 +562,7 @@ grep -q "Mention a bot as <@id> only when you need it to act or answer; if you w
 grep -q "if (msg.author.id === client.user?.id) return" "$HOME/fakeplugin/server.ts"
 ! grep -q "if (msg.author.bot) return" "$HOME/fakeplugin/server.ts"
 grep -q "msg.mentions.has(client.user, { ignoreEveryone: true }))" "$HOME/fakeplugin/server.ts"
-grep -q "$HOME/.claude-discord/discord-proxy.ts" "$HOME/fakeplugin/bunfig.toml"
+grep -q "$HOME/.claude-discord/runtime/discord-proxy.ts" "$HOME/fakeplugin/bunfig.toml"
 grep -q -- "--settings {\"enabledPlugins\": {\"discord@claude-plugins-official\": true}, \"env\": {\"DISCORD_STATE_DIR\": \"$R/alpha\"}, \"worktree\": {\"bgIsolation\": \"none\"}}" <<<"$out"
 echo "ok: run goes through claude-launcher, patches server.ts (bot + @everyone), preload from ~/.claude-discord, state dir and worktree.bgIsolation:none in --settings env; the mention rule keeps its new wording in the system prompt"
 
@@ -569,35 +572,61 @@ bash "$S" alpha >/dev/null 2>&1
 echo "ok: both patches are idempotent"
 
 CALL='const chunks = chunk(text, limit, mode)'
-PATCHED="const chunks = (await import(\"$HOME/.claude-discord/discord-chunk.ts\")).chunk(text, limit, mode)"
+PATCHED="const chunks = (await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chunk(text, limit, mode)"
 [ "$(grep -cF "$PATCHED" "$HOME/fakeplugin/server.ts")" = 1 ]
 ! grep -qF "$CALL" "$HOME/fakeplugin/server.ts" || { echo "FAIL: the chunk() call is still in server.ts after the start"; exit 1; }
 [ "$(grep -c 'const chunks' "$HOME/fakeplugin/server.ts")" = 1 ]
 echo "ok: the chunk() call is pointed at the helper once, and a second start does not patch again"
 
 cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.patched"
-printf 'async function reply() {\n        %s\n}\n' "$CALL" > "$HOME/fakeplugin/server.ts"
-cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.orig"
-mv "$HOME/.claude-discord/discord-chunk.ts" "$HOME/discord-chunk.ts.held"
-out=$(bash "$S" alpha 2>&1)
-cmp -s "$HOME/server.ts.orig" "$HOME/fakeplugin/server.ts"
-! grep -q "chunking patch not applied" <<<"$out" || { echo "FAIL: no helper file must not warn"; exit 1; }
-mv "$HOME/discord-chunk.ts.held" "$HOME/.claude-discord/discord-chunk.ts"
-echo "ok: no helper file -> server.ts keeps the plugin's chunk() call, no warning"
-
 printf 'async function reply() {\n  const chunks = splitReply(text)\n}\n' > "$HOME/fakeplugin/server.ts"
 cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.orig"
 out=$(bash "$S" alpha 2>&1)
 cmp -s "$HOME/server.ts.orig" "$HOME/fakeplugin/server.ts"
-grep -q "claude-discord: server.ts has no chunk() call to patch; chunking patch not applied" <<<"$out"
-echo "ok: a server.ts without the chunk() call is left as is and the start says the chunking patch was not applied"
+grep -q "^LAUNCHER " <<<"$out" || { echo "FAIL: a moved chunk() call must not stop the start: $out"; exit 1; }
+grep -q "patch: .*0.0.4/server.ts: chunk no longer matches" <<<"$out" && grep -q "some patches no longer apply (see above); the bot starts anyway" <<<"$out" || { echo "FAIL: the start must name the moved chunk pattern: $out"; exit 1; }
+echo "ok: a server.ts without the chunk() call is left as is, the start goes on and says which patch no longer matches"
 # A trailing ; or CRLF must still be recognised: patched, not skipped silently.
 printf 'async function reply() {\n  const chunks = chunk(text, limit, mode);\r\n}\n' > "$HOME/fakeplugin/server.ts"
 out=$(bash "$S" alpha 2>&1)
-grep -qF "const chunks = (await import(\"$HOME/.claude-discord/discord-chunk.ts\")).chunk(text, limit, mode);" "$HOME/fakeplugin/server.ts" || { echo "FAIL: a chunk() call ending in ; and CRLF was not patched"; exit 1; }
+grep -qF "const chunks = (await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chunk(text, limit, mode);" "$HOME/fakeplugin/server.ts" || { echo "FAIL: a chunk() call ending in ; and CRLF was not patched"; exit 1; }
 ! grep -q "chunking patch not applied" <<<"$out" || { echo "FAIL: a patchable chunk() call warned"; exit 1; }
 echo "ok: a chunk() call ending in ; and CRLF is patched, not skipped silently"
 cp "$HOME/server.ts.patched" "$HOME/fakeplugin/server.ts"; rm -f "$HOME/server.ts.orig" "$HOME/server.ts.patched"
+
+# patch: every discord version dir in the cache, idempotent, the .mcp.json env
+# line for the failure cache, a moved pattern reported with exit 1. 0.0.4 is the
+# fake plugin above, already patched by the starts; 0.0.5 and 0.0.6 are clean.
+PCACHE="$HOME/.claude/plugins/cache/claude-plugins-official/discord"
+for v in 0.0.5 0.0.6; do
+  mkdir -p "$PCACHE/$v"
+  cp "$HOME/server.ts.pristine" "$PCACHE/$v/server.ts"
+  printf '{"mcpServers":{"discord":{"command":"bun","args":["run","--cwd","${CLAUDE_PLUGIN_ROOT}","start"]}}}\n' > "$PCACHE/$v/.mcp.json"
+done
+out=$(bash "$S" patch 2>&1) || { echo "FAIL: patch on clean and patched version dirs must exit 0: $out"; exit 1; }
+for v in 0.0.5 0.0.6; do
+  grep -q 'msg.author.id === client.user?.id' "$PCACHE/$v/server.ts" &&
+  grep -q 'ignoreEveryone: true' "$PCACHE/$v/server.ts" &&
+  grep -qF "(await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chunk(text, limit, mode)" "$PCACHE/$v/server.ts" &&
+  grep -qF "$HOME/.claude-discord/runtime/discord-proxy.ts" "$PCACHE/$v/bunfig.toml" &&
+  [ "$(jq -r '.mcpServers.discord.env.DISCORD_STATE_DIR' "$PCACHE/$v/.mcp.json")" = '${DISCORD_STATE_DIR}' ] &&
+  grep -qF "$PCACHE/$v/server.ts" <<<"$out" ||
+  { echo "FAIL: patch must apply all five patches to $v and name its files: $out"; exit 1; }
+done
+! grep -qF "$PCACHE/0.0.4" <<<"$out" || { echo "FAIL: the already patched 0.0.4 must not be reported as changed: $out"; exit 1; }
+out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch run must be silent and exit 0: $out"; exit 1; }
+[ -f "$HOME/.claude-discord/runtime/discord-chunk.ts" ] && [ -f "$HOME/.claude-discord/runtime/discord-proxy.ts" ] || { echo "FAIL: patch must keep the runtime copy"; exit 1; }
+# A moved pattern: exit 1 naming file and patch, the other patches still applied.
+mkdir -p "$PCACHE/0.0.7"
+printf 'client.on(x, msg => {\n  if (msg.author.isBot()) return\n})\n' > "$PCACHE/0.0.7/server.ts"
+printf '{"mcpServers":{"discord":{"command":"bun"}}}\n' > "$PCACHE/0.0.7/.mcp.json"
+out=$(bash "$S" patch 2>&1) && { echo "FAIL: a pattern that no longer matches must exit 1"; exit 1; }
+grep -q 'patch: .*0.0.7/server.ts: bot-authors no longer matches' <<<"$out" || { echo "FAIL: wrong no-match report: $out"; exit 1; }
+! grep -q '0.0.[456]/server.ts: ' <<<"$out" || { echo "FAIL: only the moved dir may be reported: $out"; exit 1; }
+grep -qF "$HOME/.claude-discord/runtime/discord-proxy.ts" "$PCACHE/0.0.7/bunfig.toml" &&
+  [ "$(jq -r '.mcpServers.discord.env.DISCORD_STATE_DIR' "$PCACHE/0.0.7/.mcp.json")" = '${DISCORD_STATE_DIR}' ] || { echo "FAIL: the patches that still match must be applied beside the moved one"; exit 1; }
+rm -rf "$PCACHE/0.0.5" "$PCACHE/0.0.6" "$PCACHE/0.0.7"
+echo "ok: patch applies the five patches to every cached version, is idempotent and silent, and reports a moved pattern with exit 1"
 
 if command -v bun >/dev/null; then
   { printf 'import { chunk } from "%s/runtime/discord-chunk.ts"\n' "$D"; cat <<'EOF'
@@ -668,11 +697,6 @@ fi
 out=$(env -u CLAUDE_DISCORD_LAUNCHER bash "$S" alpha 2>&1)
 grep -q "^PLAIN --channels plugin:discord@claude-plugins-official" <<<"$out"
 echo "ok: without CLAUDE_DISCORD_LAUNCHER the plain claude on PATH is used"
-
-rm -f "$HOME/.claude-discord/discord-proxy.ts"
-bash "$S" alpha >/dev/null 2>&1
-[ ! -f "$HOME/fakeplugin/bunfig.toml" ]
-echo "ok: no preload file -> no bunfig.toml (bun defaults)"
 
 printf 'x\n' > "$P/.claude/marker"
 bash "$S" setup .. --reset </dev/null >/dev/null 2>&1 && { echo "FAIL: .. accepted"; exit 1; }
