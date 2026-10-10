@@ -22,8 +22,9 @@
 #                                        replace the running session with a fresh
 #                                        one that starts from its handoff
 #   claude-discord update [--all]        git pull --ff-only the clone this runs from (--all:
-#                                        every recorded install, each real clone once), then
-#                                        patch and refresh the shim
+#                                        every recorded install, each real clone once; a
+#                                        clone on a detached HEAD is skipped), then the
+#                                        pulled code's patch and shim
 #   claude-discord --version             version and short sha of the clone
 #   claude-discord health [--json]
 #                                        is every bot in this project still
@@ -1341,15 +1342,23 @@ if [ "${1:-}" = update ]; then
     [ "${#clones[@]}" -gt 0 ] || echo "claude-discord: no recorded install to update"
   fi
   for c in ${clones[@]+"${clones[@]}"}; do
+    # A clone checked out at a tag or sha is pinned on purpose: skipped, not a failure.
+    git -C "$c" symbolic-ref -q HEAD >/dev/null 2>&1 || { echo "claude-discord: $c: pinned at $(git -C "$c" rev-parse --short HEAD 2>/dev/null || echo '?'), skipped"; continue; }
     old=$(plugin_version "$c")
     git -C "$c" pull -q --ff-only || { echo "claude-discord: $c: pull failed (local changes, diverged, or no network)" >&2; rc=1; continue; }
     echo "claude-discord $c: $old -> $(plugin_version "$c")"
   done
-  patch_official || rc=1
+  # The patch step and the shim come from the freshly pulled code, run as a
+  # new process (this one still holds the old functions). runtime/ and the
+  # patched cache are machine-wide, so the machine's source clone owns them;
+  # without one, the first clone pulled (or this one).
+  new=$self_root
+  [ -x "$helpers/source/bin/claude-discord" ] && new=$helpers/source || { [ "${#clones[@]}" -eq 0 ] || new=${clones[0]}; }
+  "$new/bin/claude-discord" patch || rc=1
   mkdir -p "$HOME/.local/bin"
-  cmp -s "$self_root/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
-    install -m 755 "$self_root/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
-    { echo "claude-discord: could not install the shim from $self_root" >&2; rc=1; }
+  cmp -s "$new/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
+    install -m 755 "$new/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
+    { echo "claude-discord: could not install the shim from $new" >&2; rc=1; }
   echo "claude-discord: run /reload-plugins in running sessions (a bot: the self-reload skill)"
   exit "$rc"
 fi

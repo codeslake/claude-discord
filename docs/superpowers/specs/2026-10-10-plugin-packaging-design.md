@@ -99,7 +99,11 @@ wrapper for the current directory:
    project root is the nearest ancestor holding `.claude/discord-agents` or
    `.claude/skills/claude-discord`;
 2. else `~/.claude/skills/claude-discord/bin/claude-discord`;
-3. else it prints that claude-discord is not set up here and how to set it up.
+3. else the machine's source clone, `~/.claude-discord/source/bin/claude-discord`
+   (R3), so a project with no install of its own, new or not yet migrated,
+   still reaches `setup`, a launch, `refresh`, `update` and `--version`;
+4. else it prints that claude-discord is not set up on this machine and the
+   clone one-liner (shown only when the source clone is missing).
 
 Each project therefore runs the version installed for it. The shim itself
 changes rarely; `update` refreshes it when it differs.
@@ -115,13 +119,19 @@ afterwards: `setup` links to it (method link) or clones from the repo URL
 ## Update
 
 `claude-discord update` runs, for the clone the shim resolved (a link
-resolves to the source clone): `git -C <clone> pull --ff-only`, then the patch step, then the shim refresh,
-then prints the plugin version before and after and tells the operator to run
+resolves to the source clone): `git -C <clone> pull --ff-only`, then the
+patch step and the shim refresh, both run from the freshly pulled code as a
+new process (the running one still holds the old functions; `runtime/` and
+the patched cache are machine-wide, so the source clone owns them, else the
+first clone pulled), then prints the plugin version before and after and tells the operator to run
 `/reload-plugins` in running sessions (a bot does it through the self-reload
 skill). `update --all` does the same for every clone recorded in
 `~/.claude-discord/records/installs` (one path per line, written by `setup`,
 pruned when a path no longer exists), each real clone once however many
-links point at it.
+links point at it. A clone on a detached HEAD (pinned to a tag or sha) is
+reported `pinned at <sha>, skipped` and is not a failure. Hook scripts and
+tools run from the clone on disk, so a running bot uses the new ones at its
+next hook call; `/reload-plugins` is for the manifest and `hooks/hooks.json`.
 
 Versioning: `plugin.json` `version` is bumped in every commit that changes
 behaviour; `update` prints it, and `claude-discord --version` prints it with
@@ -248,8 +258,14 @@ Per machine, by its operator (dkim's boxes: dong-dev-bot):
    patched by the wrapper when the bot started.
 3. `claude-discord --version` and `health` confirm each bot.
 
-Rollback: `git -C <clone> checkout <previous tag>` and `setup` again, or the
-previous release's `install.sh`, which re-registers the settings hooks.
+Rollback (R13): the previous release's `install.sh` writes through the R8
+links into the source clone, so first remove the plugin installs (each path in
+`~/.claude-discord/records/installs`: `rm` a link, `rm -rf` a clone) and
+`rm -rf ~/.claude-discord/hooks ~/.claude-discord/discord-chunk.ts
+~/.claude-discord/discord-proxy.ts` (only links remain there); then
+`cd ~/.claude-discord/source && git checkout <previous tag> && ./install.sh`,
+which re-registers the settings hooks. Or stay on this release and
+`git -C <clone> checkout <previous tag>` of a clone-method install.
 
 ## Testing
 

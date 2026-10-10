@@ -91,9 +91,12 @@ does silently).
 `~/.local/bin/claude-discord`. It finds the wrapper for the current directory:
 `<project>/.claude/skills/claude-discord/bin/claude-discord` (the nearest
 ancestor holding `.claude/discord-agents` or that install), else
-`~/.claude/skills/claude-discord/bin/claude-discord`, else it says claude-discord
-is not set up here. Each project therefore runs the version installed for it.
-Put `~/.local/bin` on your `PATH`.
+`~/.claude/skills/claude-discord/bin/claude-discord`, else the machine's source
+clone, `~/.claude-discord/source/bin/claude-discord`, else it says claude-discord
+is not set up on this machine and how to clone it. Each project therefore runs
+the version installed for it, and a project with no install of its own (a new
+one, or one not yet migrated) still reaches `setup`, a launch, `update` and
+`--version` through the source clone. Put `~/.local/bin` on your `PATH`.
 
 ### Update, version, patch
 
@@ -107,8 +110,14 @@ claude-discord patch           # patch every cached copy of the official discord
 `update` prints `claude-discord <clone>: <old> -> <new>` and exits 1 when a
 clone cannot fast-forward (local changes, a diverged branch, no network), the
 patches no longer match or the shim cannot be written, after trying the rest.
-Running sessions keep the code they loaded: run `/reload-plugins` in each (a bot
-does it through the self-reload skill). `~/.claude-discord/runtime/` holds the
+A clone checked out at a tag or sha is pinned on purpose: it is reported as
+`pinned at <sha>, skipped` and is not a failure. The patch step and the shim come
+from the freshly pulled code (the source clone's when there is one).
+The hook scripts and tools run from the clone on disk, so a running bot uses the
+new ones at its next hook call. What waits for `/reload-plugins` is the plugin's
+manifest and `hooks/hooks.json` (which hooks are registered) and, in a bot, the
+session prompt (`claude-discord refresh <bot>`); a bot runs `/reload-plugins`
+through the self-reload skill. `~/.claude-discord/runtime/` holds the
 two runtime files the patched official plugin imports (`discord-chunk.ts`,
 `discord-proxy.ts`), copied there from the clone by `setup` and `update`, because
 the official plugin's cache is machine-wide while clones are per project.
@@ -117,9 +126,11 @@ the official plugin's cache is machine-wide while clones are per project.
 
 On each machine, once:
 
-1. `git clone` the source (above) and run `claude-discord setup <bot>` in each
-   project (the existing bot's answers are kept; only the install questions are
-   new). It installs the plugin, removes the settings hook entries and the
+1. `git clone` the source (above), then run `claude-discord setup <bot>` in each
+   project (the shim reaches the source clone from a project that has no install
+   yet, so a project not yet migrated can still be set up, launched and
+   refreshed; the existing bot's answers are kept, only the install questions
+   are new). It installs the plugin, removes the settings hook entries and the
    `.claude/rules/claude-discord-*.md` file the old release wrote into the
    project, and replaces the old `~/.claude-discord/hooks`, `rules` and
    `discord-*.ts` copies. Settings hooks apply live, so from here a running bot
@@ -133,8 +144,17 @@ For this release `~/.claude-discord/hooks/{turn,peers,lib,autoresearchclaw}`,
 runtime copy), so a project not yet migrated keeps working through them; they go
 in the next release. `~/.claude-discord/rules/` is removed.
 
-Rollback: check out the previous release tag and run its `./install.sh`, which
-puts the old copies and the settings hooks back.
+Rollback: the previous release's `./install.sh` writes through the links above
+into the source clone, so remove them and the plugin installs first. For each
+path in `~/.claude-discord/records/installs`: `rm` it when it is a link (a
+link install), `rm -rf` it when it is a clone. Then:
+
+```
+rm -rf ~/.claude-discord/hooks ~/.claude-discord/discord-chunk.ts ~/.claude-discord/discord-proxy.ts   # only links remain there
+cd ~/.claude-discord/source && git checkout <previous tag> && ./install.sh
+```
+
+(`rm -rf` on a link removes the link, not its target.)
 
 ## Usage
 
@@ -435,7 +455,7 @@ session (a `turns/<session_id>.primed` marker holding the bot's mode and
 the context text), not on every turn -- a compaction or `/clear`
 drops it from the transcript, which is what `on-session-start` is for, and a
 changed mode or a changed text injects it again. So after `claude-discord update`
-changes the context, a running bot re-primes by itself on its next Discord
+changes the context (hook scripts run from the clone on disk), a running bot re-primes by itself on its next Discord
 turn, once. The session prompt (`--append-system-prompt`) is fixed when the
 session starts and still needs a restart (`claude-discord refresh <bot>`, or
 stop and start). The "refresh" handoff still fires on every matching
@@ -723,7 +743,7 @@ rest of Claude Code.
 | `Discord does not render markdown tables: rewrite it as a list, ...` | `thread-guard` found a table it would not rewrite: the reply has an odd number of ``` marks (a lone ``` in prose, or a fence that never closes), or `python3` is missing or failed. Close every fence or drop the stray mark; put `python3` on the bot's PATH |
 | After Claude Code upgraded itself, a bot breaks its rules: long answers or raw tables in the channel, no thread, no reactions | the worker that came up after the daemon's self-restart for the upgrade runs no hooks at all, the user's own included, with no error (Claude Code, seen on 2.1.280 → 2.1.281, a respawned worker; an adopted one was fine). Check: the bot's `last-message-id` is older than its last Discord turn, and no `Discord turn.` context arrived. Fix: `claude-discord refresh <bot>` |
 | `Before changing claude-discord, announce on Discord ...` | a dev-manager edited claude-discord without mentioning a peer in the last 60 minutes; announce the change, then edit |
-| `claude-discord: not set up here` (from the shim) | no plugin install for this project or globally; run `claude-discord setup <bot>` (the bootstrap line in Install if the shim is missing) |
+| `claude-discord: not set up on this machine` (from the shim) | no plugin install for this project, none global, and no `~/.claude-discord/source`; run the clone line in Install. With the source clone present the shim runs it, so `claude-discord setup <bot>` works in any project |
 | `claude-discord: ... pull failed` | `update` could not fast-forward that clone: local changes, a diverged branch (a clone-method install that pinned a version) or no network; the other clones were still updated |
 | The hooks do not run in a project | the plugin is not loaded there: the project is not trusted in `~/.claude.json` (scope project), the install path is a dangling link (re-run `setup`), or the session started before `setup` and has not run `/reload-plugins` |
 | `refresh` says `handoff.md is missing or empty` | the session did not write it; ask it to, or pass `--force` |

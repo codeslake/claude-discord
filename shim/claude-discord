@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ~/.local/bin/claude-discord: runs the claude-discord installed for the
 # current project (<project>/.claude/skills/claude-discord), else the global
-# one (~/.claude/skills/claude-discord). Copied there by `claude-discord setup`;
+# one (~/.claude/skills/claude-discord), else ~/.claude-discord/source. Copied there by `claude-discord setup`;
 # kept tiny so it rarely needs replacing.
 d=$PWD
 while :; do
@@ -14,6 +14,9 @@ while :; do
 done
 g=$HOME/.claude/skills/claude-discord/bin/claude-discord
 [ -x "$g" ] && exec "$g" "$@"
-echo "claude-discord: not set up here. Install it with:" >&2
+# The machine's source clone: a project with no install of its own (new, or not yet migrated) still reaches setup, a launch, update and --version.
+src=$HOME/.claude-discord/source/bin/claude-discord
+[ -x "$src" ] && exec "$src" "$@"
+echo "claude-discord: not set up on this machine. Install it with:" >&2
 echo "  git clone https://github.com/codeslake/claude-discord ~/.claude-discord/source && ~/.claude-discord/source/bin/claude-discord setup <bot>" >&2
 exit 1

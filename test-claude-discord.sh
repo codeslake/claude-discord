@@ -151,10 +151,14 @@ mkdir -p "$HOME/.claude/skills/claude-discord/bin"; printf '#!/bin/bash\necho gl
 mkdir -p "$SP/sub/inner/.claude/discord-agents"
 [ "$(cd "$SP/sub/inner" && bash "$SH" health)" = "global-copy health" ] || { echo "FAIL: a project without its own clone runs the global one"; exit 1; }
 rm -rf "$HOME/.claude/skills/claude-discord"
+# No install of its own and no global one, but the machine's source clone: a new or unmigrated project still reaches it (setup, a launch, update).
+mkdir -p "$HOME/.claude-discord/source/bin"; printf '#!/bin/bash\necho source-copy "$@"\n' > "$HOME/.claude-discord/source/bin/claude-discord"; chmod +x "$HOME/.claude-discord/source/bin/claude-discord"
+[ "$(cd "$SP/sub/inner" && bash "$SH" setup bot)" = "source-copy setup bot" ] && [ "$(cd "$HOME" && bash "$SH" update --all)" = "source-copy update --all" ] || { echo "FAIL: with no install of its own the shim must run the source clone"; exit 1; }
+rm -rf "$HOME/.claude-discord"
 out=$(cd "$HOME" && bash "$SH" 2>&1) && { echo "FAIL: with no clone the shim must fail"; exit 1; }
-grep -q 'not set up' <<<"$out" || { echo "FAIL: the shim must say how to set up: $out"; exit 1; }
+grep -q 'not set up' <<<"$out" && grep -q 'git clone' <<<"$out" || { echo "FAIL: the shim must say how to set up: $out"; exit 1; }
 rm -rf "$HOME/shim test" "$HOME/.claude/skills"
-echo "ok: the shim runs the project's clone (path with a space, from a subdirectory), else the global one, else explains"
+echo "ok: the shim runs the project's clone (path with a space, from a subdirectory), else the global one, else the source clone, else explains"
 P="$HOME/project"; mkdir -p "$P"; cd "$P"; git init -q .
 # A local stand-in for GitHub, built from the WORKING TREE (a clone of $D would
 # carry only committed HEAD, so a red-green cycle could not see an edit). Every
@@ -2802,10 +2806,13 @@ C="$UP/.claude/skills/claude-discord"; CC="$UC/.claude/skills/claude-discord"
 v=$(cd "$UP" && bash "$C/bin/claude-discord" --version)
 grep -qE '^claude-discord [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]{7,}\)$' <<<"$v" && [[ $v == *"($(git -C "$PC" rev-parse --short HEAD))" ]] || { echo "FAIL: --version through a link must print the version and the source's sha: $v"; exit 1; }
 # The upstream moves: a new commit in the stand-in repo, with a new plugin version.
+# The pulled commit also changes what the patch verb prints, so the test can tell the pulled patch code from the code update was started with.
 jq '.version = "9.9.9"' "$SRC/.claude-plugin/plugin.json" > "$SRC/p.json" && mv "$SRC/p.json" "$SRC/.claude-plugin/plugin.json" &&
+  sed -i 's/^if \[ "\${1:-}" = patch \]; then patch_official;/if [ "${1:-}" = patch ]; then echo PATCH-CODE-V2 >\&2; patch_official;/' "$SRC/bin/claude-discord" && grep -q PATCH-CODE-V2 "$SRC/bin/claude-discord" &&
   git -C "$SRC" -c user.email=t@t -c user.name=t commit -qam bump || { echo "FAIL: could not bump the stand-in repo"; exit 1; }
 rm -rf "$HOME/.claude-discord/runtime"; echo stale > "$HOME/.local/bin/claude-discord"
 out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || { echo "FAIL: update failed: $out"; exit 1; }
+grep -q PATCH-CODE-V2 <<<"$out" || { echo "FAIL: update must run the patch step from the code it just pulled: $out"; exit 1; }
 grep -q -- '-> 9.9.9' <<<"$out" && grep -q '/reload-plugins' <<<"$out" && [ "$(grep -c -- "$PC" <<<"$out")" = 1 ] || { echo "FAIL: update must pull the source behind the link once and ask for /reload-plugins: $out"; exit 1; }
 [ "$(jq -r .version "$PC/.claude-plugin/plugin.json")" = 9.9.9 ] && [ "$(jq -r .version "$CC/.claude-plugin/plugin.json")" != 9.9.9 ] || { echo "FAIL: update must pull the source and only the source"; exit 1; }
 [ -s "$HOME/.claude-discord/runtime/discord-chunk.ts" ] && [ -s "$HOME/.claude-discord/runtime/discord-proxy.ts" ] && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" || { echo "FAIL: update must refill the runtime copy and refresh the shim"; exit 1; }
@@ -2820,7 +2827,9 @@ out=$(cd "$UP" && bash "$C/bin/claude-discord" update --all 2>&1) || { echo "FAI
 # A clone that cannot fast-forward is reported with exit 1 and does not stop the others.
 git -C "$CC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local
 git -C "$SRC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m remote
+div=$(git -C "$CC" rev-parse HEAD)
 rc=0; out=$(cd "$UP" && bash "$C/bin/claude-discord" update --all 2>&1) || rc=$?
+[ "$(git -C "$CC" rev-parse HEAD)" = "$div" ] && [ -z "$(git -C "$CC" status --porcelain)" ] || { echo "FAIL: a failed pull must leave the clone as it was"; exit 1; }
 [ "$rc" = 1 ] && grep -q "$CC: pull failed" <<<"$out" && [ "$(git -C "$PC" rev-parse HEAD)" = "$(git -C "$SRC" rev-parse HEAD)" ] || { echo "FAIL: a diverged clone must exit 1, named, after the others were pulled (rc=$rc): $out"; exit 1; }
 # A shim that cannot be refreshed is reported with exit 1 on its own.
 git -C "$CC" reset -q --hard '@{u}'
@@ -2828,9 +2837,14 @@ echo stale > "$HOME/.local/bin/claude-discord"; chmod 555 "$HOME/.local/bin"
 rc=0; out=$(cd "$UP" && bash "$C/bin/claude-discord" update --all 2>&1) || rc=$?
 chmod 755 "$HOME/.local/bin"
 [ "$rc" = 1 ] && grep -q 'could not install the shim' <<<"$out" && ! grep -q 'pull failed' <<<"$out" || { echo "FAIL: an unwritable shim must exit 1 with a message (rc=$rc): $out"; exit 1; }
+# A clone pinned to a tag or sha (detached HEAD) is skipped by name and is not a failure; the others are still pulled.
+git -C "$CC" checkout -q --detach; pin=$(git -C "$CC" rev-parse HEAD)
+git -C "$SRC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m after-pin
+rc=0; out=$(cd "$UP" && bash "$C/bin/claude-discord" update --all 2>&1) || rc=$?
+[ "$rc" = 0 ] && grep -q "$CC: pinned at ${pin:0:7}, skipped" <<<"$out" && [ "$(git -C "$CC" rev-parse HEAD)" = "$pin" ] && [ "$(git -C "$PC" rev-parse HEAD)" = "$(git -C "$SRC" rev-parse HEAD)" ] || { echo "FAIL: a detached clone must be skipped without failing the run (rc=$rc): $out"; exit 1; }
 bash "$C/bin/claude-discord" update --bogus >/dev/null 2>&1 && { echo "FAIL: update takes only --all"; exit 1; }
 rm -rf "$UP" "$UC"
-echo "ok: --version prints the version and the clone's sha (a link's is the source's); update pulls the source behind a link once, refills the runtime copy and the shim and asks for /reload-plugins; --all pulls each real clone once, prunes a removed project and exits 1 on a diverged clone or an unwritable shim"
+echo "ok: --version prints the version and the clone's sha (a link's is the source's); update pulls the source behind a link once, runs the pulled commit's patch step, refills the runtime copy and the shim and asks for /reload-plugins; --all pulls each real clone once, prunes a removed project, skips a detached (pinned) clone without failing, and exits 1 on a diverged clone (left as it was) or an unwritable shim"
 
 # Nothing this suite started is still running: no process runs from its
 # HOME (hooks, stubs, the fake worker).
