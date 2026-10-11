@@ -298,6 +298,16 @@ positive that dong-dev-bot measured on lmd79 (2026-10-09: a live session
 answering other threads reported `stale ... refresh` for one message 62 min
 behind). Tests cover both: delivered-and-unanswered is `ok`, undelivered in
 one thread while another thread is answered is `stale`.
+Scope: `stale` is a delivery check. `ok` means "the session received it", not
+"it was answered": a turn that ended without a reply (a Stop hook refusal, a
+reply sent elsewhere) reads `ok`. on-prompt, not the plugin server, writes
+`delivered`, because the question is whether the message reached the session;
+a message the server holds while the session sits idle and never takes it is
+exactly the fault `stale` reports. The gap between a turn's end and the queued
+message becoming the next prompt is seconds, far under the 15 min threshold.
+dong-dev-bot's 62-min case (message 1557522558478454878, received by session
+4cde6d3a 0.35 s after Discord's timestamp, answered 88 min later) is a test
+fixture: `ok`.
 `busy` is not a finding. While a host is `noreach`, `hostdown` or `blind`,
 its bots' states are frozen: such a pass says nothing about them, so it
 neither posts nor recovers them. A bot that leaves the list (its `.env`
