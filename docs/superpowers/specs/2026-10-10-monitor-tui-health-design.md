@@ -175,11 +175,18 @@ hand keeps both, at human cadence. The existing caches (`bot-id`,
 ```
 # ssh host names this manager checks; "local" is this machine (no ssh)
 local HTTPS_PROXY=http://127.0.0.1:8118
-wmac  HTTPS_PROXY=http://127.0.0.1:8118
-pmac
+wmac  laptop HTTPS_PROXY=http://127.0.0.1:8118
+pmac  laptop
 ```
 
-One host per line, then optional `KEY=VALUE` env for the remote command
+One host per line, then an optional `laptop` word, then optional `KEY=VALUE`
+env for the remote command. A `laptop` host is checked every pass like any
+other, so a bot set up there later is watched with no ledger change, but its
+own unreachability is never posted (shown in the TUI only): a closed lid is
+not an outage, and the bots on it sleep with it. Setup marks a host `laptop`
+when its probe answers `Darwin` to `uname -s` and the host has a battery
+(`pmset -g batt` lists one), and the owner can edit the word. Then the
+optional env
 (a non-interactive ssh shell may lack the proxy that the bots' launcher
 had; a missing one shows up as `noreach`). `local` is always present; setup
 adds it. The file is also the on/off switch the owner asked for in
@@ -285,7 +292,7 @@ logged. The key is `host|project|bot` for a bot, `host|-` for a host.
 | `throttled`, `apierror` | health | 429, 000 or 5xx for that bot | 30 min (6092937121) |
 | `noreach` | health | that host's unauthenticated `GET /gateway` fails | never posted; logged and shown (6092937121) |
 | `patchfail` | `--patch` | `patch` exit 1 (a pattern no longer matches) | none: deterministic |
-| `hostdown` | monitor | ssh exit non-zero, and again with `-o ControlPath=none` (a stale master refuses falsely) | 30 min: the Macs are laptops and sleep |
+| `hostdown` | monitor | ssh exit non-zero, and again with `-o ControlPath=none` (a stale master refuses falsely) | 30 min; never posted for a `laptop` host (owner 2026-10-11) |
 | `blind` | monitor | ssh ran but no valid document (claude-discord missing or too old for `--all`, health crashed) | 5 min |
 
 A message the session received is not `stale`: on-prompt appends each
@@ -486,12 +493,13 @@ patch.
 
 ## Open questions for the owner
 
-1. **Host down on laptops.** wmac and pmac sleep and move; `hostdown` after
-   30 min will fire on an ordinary night. Recommendation: keep the 30 min
-   hold but post `hostdown` only for hosts marked always-on in the ledger
-   (`lmd42`, `lmd79`); a laptop's unreachability is shown in the TUI only.
+None open.
 
-Answered 2026-10-10:
+Answered 2026-10-10/11:
+1. Host down on laptops: owner asked "나중에 생기면?" (a bot set up on a Mac
+   later). Laptops stay in the ledger marked `laptop`: their bots are checked
+   whenever the host answers, and `hostdown` is never posted for them (see
+   "Ledger").
 2. macOS `down`/`duplicate`: owner "wmac에서 해봐". Measured; the count is in
    this release (see "Coverage gap" above, `ps -ax` required).
 3. Inbound on `#bot-health-check`: owner "알림채널로만써". Write-only for the
