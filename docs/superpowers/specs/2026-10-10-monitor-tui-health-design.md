@@ -278,7 +278,7 @@ logged. The key is `host|project|bot` for a bot, `host|-` for a host.
 | finding | from | probe | hold |
 |---|---|---|---|
 | `down` | health | no plugin server for the bot, nothing unanswered | 5 min (two passes): a pass that lands inside a `refresh` sees `down` for seconds |
-| `stale` | health | oldest addressed message unanswered 15 min, no live turn, AND no reply by the bot anywhere in its channel or threads since that message arrived (health's own filters: allowFrom, requireMention, replies, turn-file and `claude agents` holds) | none: the 15 min is already in the probe |
+| `stale` | health | oldest addressed message unanswered 15 min, no live turn, AND its message id not in `<bot>/delivered` (health's own filters: allowFrom, requireMention, replies, turn-file and `claude agents` holds) | none: the 15 min is already in the probe |
 | `duplicate` | health | more than one plugin server on the bot's token | 5 min |
 | `unreachable` | health | Discord answered 401/403 for the bot's token or channel | 5 min |
 | `nostate` | health | unanswered and `claude agents` silent for 6 runs | none: already 30 min |
@@ -288,10 +288,16 @@ logged. The key is `host|project|bot` for a bot, `host|-` for a host.
 | `hostdown` | monitor | ssh exit non-zero, and again with `-o ControlPath=none` (a stale master refuses falsely) | 30 min: the Macs are laptops and sleep |
 | `blind` | monitor | ssh ran but no valid document (claude-discord missing or too old for `--all`, health crashed) | 5 min |
 
-A bot that replied anywhere after the unanswered message is lagging, not
-stuck, and stays `ok`: dong-dev-bot measured the old alert's false positive on
-lmd79 (2026-10-09), a live session answering other threads reported
-`stale ... refresh` for one message 62 min behind. A test covers that case.
+A message the session received is not `stale`: on-prompt appends each
+received message id to `<bot>/delivered` (kept to the last 200 lines), and an
+unanswered message found there was handled by the session, answered or
+deliberately not (a mention that asks nothing gets no reply by rule). Only a
+message that never reached the session is `stale`, so one stuck thread still
+alerts while the bot answers others. This removes the old alert's false
+positive that dong-dev-bot measured on lmd79 (2026-10-09: a live session
+answering other threads reported `stale ... refresh` for one message 62 min
+behind). Tests cover both: delivered-and-unanswered is `ok`, undelivered in
+one thread while another thread is answered is `stale`.
 `busy` is not a finding. While a host is `noreach`, `hostdown` or `blind`,
 its bots' states are frozen: such a pass says nothing about them, so it
 neither posts nor recovers them. A bot that leaves the list (its `.env`
