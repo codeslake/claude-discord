@@ -2971,6 +2971,56 @@ out=$(bash "$S" health --json 2>/dev/null) || :
 echo "ok: stale is cleared by the bot's own later message in the same chat, not by one in another thread; an unreadable delivered does not abort health"
 rm -f "$SD/delivered"; echo "$ID_SEEN" > "$SD/last-message-id"
 echo "ok: stale needs a message never delivered to the session: delivered-and-unanswered is ok (dong-dev-bot's 62-min case too), undelivered in one thread while another is answered is stale"
+# macOS has no /proc: the servers are counted from ps, argv first (ps -axww: bun, a .../discord/ argument, last word
+# start), then the environment of only those pids (ps -axEww -p). A shell of the session carries the same
+# DISCORD_STATE_DIR and must not count; neither may sbot2's server. CLAUDE_DISCORD_PROC points health at a missing
+# /proc; the ps stub sits on PATH for these runs only.
+mkdir -p "$HOME/psbin"
+cat > "$HOME/psbin/ps" <<'STUB'
+#!/bin/bash
+case "$*" in
+  "-axww -o pid=,command=") [ ! -f "$HOME/ps.fail" ] || exit 1; cat "$HOME/ps.argv";;
+  "-axEww -o pid=,command= -p "*) printf '%s\n' "$*" >> "$HOME/ps.calls"; awk -v want=",${*: -1}," 'index(want, "," $1 ",")' "$HOME/ps.env";;  # like ps -p: only the asked pids
+  *) exec /bin/ps "$@";;
+esac
+STUB
+chmod +x "$HOME/psbin/ps"
+BUNS='/opt/bun/bin/bun run --cwd /Users/u/.claude/plugins/cache/claude-plugins-official/discord/0.0.4 --shell=bun --silent start'
+printf '  101 %s\n  102 %s\n  103 /bin/zsh -c sleep 1\n  104 %s\n' "$BUNS" "$BUNS" "$BUNS" > "$HOME/ps.argv"
+printf '  101 %s TERM=x DISCORD_STATE_DIR=%s HOME=/Users/u\n  102 %s DISCORD_STATE_DIR=%s2\n  104 %s PATH=/bin DISCORD_STATE_DIR=%s\n' \
+  "$BUNS" "$SD" "$BUNS" "$SD" "$BUNS" "$SD" > "$HOME/ps.env"
+rm -f "$HOME/ps.calls"
+macrun() { queue "200 $NONE" '200 {"threads":[]}'; PATH="$HOME/psbin:$PATH" CLAUDE_DISCORD_PROC=/nonexistent bash "$S" health --json 2>/dev/null || :; }
+out=$(macrun)
+[ "$(verdict_of sbot "$out")" = duplicate ] && [ "$(field_of sbot servers "$out")" = 2 ] || { echo "FAIL: two bun servers carrying sbot's DISCORD_STATE_DIR must read as a duplicate: $out"; exit 1; }
+[ "$(<"$HOME/ps.calls")" = "-axEww -o pid=,command= -p 101,102,104" ] || { echo "FAIL: only the bun servers' environment may be read: $(<"$HOME/ps.calls")"; exit 1; }
+# lmd79, 2026-10-12: a bot session can run a SECOND bun server, the telegram plugin's, with the same inherited
+# DISCORD_STATE_DIR. Its argv has no .../discord/ word, so it is not a candidate and its environment is never read.
+TELE='/opt/bun/bin/bun run --cwd /Users/u/.claude/plugins/cache/claude-plugins-official/telegram/0.0.7 --shell=bun --silent start'
+printf '  101 %s\n  105 %s\n' "$BUNS" "$TELE" > "$HOME/ps.argv"
+printf '  101 %s DISCORD_STATE_DIR=%s\n  105 %s DISCORD_STATE_DIR=%s\n' "$BUNS" "$SD" "$TELE" "$SD" > "$HOME/ps.env"
+rm -f "$HOME/ps.calls"
+out=$(macrun)
+[ "$(field_of sbot servers "$out")" = 1 ] && [ "$(verdict_of sbot "$out")" != duplicate ] || { echo "FAIL: a telegram-shaped bun server with sbot's DISCORD_STATE_DIR must not make a duplicate (macOS): $out"; exit 1; }
+[ "$(<"$HOME/ps.calls")" = "-axEww -o pid=,command= -p 101" ] || { echo "FAIL: the telegram server's environment must not be read (macOS): $(<"$HOME/ps.calls")"; exit 1; }
+: > "$HOME/ps.fail"
+out=$(macrun)
+[ "$(field_of sbot servers "$out")" = unknown ] && [ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: a ps that fails is unknown, never down: $out"; exit 1; }
+rm -rf "$HOME/psbin" "$HOME/ps.argv" "$HOME/ps.env" "$HOME/ps.calls" "$HOME/ps.fail"
+# The same on Linux (the real /proc): a real bun in a telegram directory, started with sbot's state dir beside sbot's one
+# stand-in discord server, leaves the count at 1.
+FAKE_TG="$HOME/fake-servers/telegram/0.0.7"; mkdir -p "$FAKE_TG"
+printf '{"name":"fake-telegram","scripts":{"start":"sleep 300"}}\n' > "$FAKE_TG/package.json"
+DISCORD_STATE_DIR="$SD" perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- bun run --cwd "$FAKE_TG" --shell=bun --silent start >/dev/null 2>&1 &
+TG=$!; SERVERS="$SERVERS $TG"; KILL_AT_EXIT="$KILL_AT_EXIT $TG"
+for _ in $(seq 250); do
+  case $(tr '\0' ' ' < "/proc/$TG/cmdline" 2>/dev/null) in bun*telegram*) break;; esac   # perl execs bun in place
+  nap 0.02
+done
+queue "200 $NONE" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(field_of sbot servers "$out")" = 1 ] || { echo "FAIL: a telegram-shaped bun server with sbot's DISCORD_STATE_DIR must not be counted (Linux): $out"; exit 1; }
+echo "ok: without /proc the servers are counted from ps -axww argv first, then ps -axEww for those pids only; another bot's server and a shell with the same state dir do not count; a telegram plugin server with the bot's state dir does not count (macOS and Linux); a failing ps is unknown"
 stop_servers
 cd "$HP"
 

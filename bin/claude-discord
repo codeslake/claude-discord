@@ -857,9 +857,10 @@ if [ "${1:-}" = health ]; then
   # bot as a duplicate. A server is `bun run --cwd <plugin>/discord/<ver>
   # ... start`, so the argv test is: argv[0] is bun, some argument sits
   # under a .../discord/ directory, and the last argument is `start`. Only
-  # then is that pid's environ read, to see WHICH bot it serves. Prints
-  # "unknown" where there is no /proc to read (macOS), which the caller
-  # treats as "cannot tell", never as zero.
+  # then is that pid's environ read, to see WHICH bot it serves. Without a
+  # /proc (macOS) the same order runs on ps output, below. Prints "unknown"
+  # only when ps itself fails, which the caller treats as "cannot tell",
+  # never as zero.
   # The candidate pids, found ONCE per run rather than once per bot.
   # Walking every /proc entry cost ~85 ms per call here (805 processes) and
   # ~300 ms on a busier machine. `pgrep -x bun` narrows it to the handful of
@@ -873,18 +874,42 @@ if [ "${1:-}" = health ]; then
   # every bot is judged against the same instant -- where a per-bot list
   # could count a server for one bot that had already exited for the next.
   # A health run is a snapshot either way; this makes it one snapshot.
-  server_cands=""
-  if [ -d /proc ]; then
+  server_cands="" mac_env="" mac_pids="" mac_ok=no
+  proc=${CLAUDE_DISCORD_PROC:-/proc}   # the suite points this at a missing path to exercise the macOS count on Linux
+  if [ ! -d "$proc" ]; then
+    # macOS: argv first here too. -ax, because without it ps lists only
+    # processes with a terminal and a --bg server has none (measured on wmac,
+    # 2026-10-10: 0 of 1). The argv test on the one-line command: the first
+    # word is bun, the last is start, a word sits under .../discord/. Then one
+    # more ps with -E for those pids: each line is "<pid> <argv> <environment>".
+    mac_ok=no mac_pids=""
+    if mac_ps=$(ps -axww -o pid=,command= 2>/dev/null) && [ -n "$mac_ps" ]; then
+      mac_ok=yes
+      mac_pids=$(printf '%s\n' "$mac_ps" | awk '{ a0 = $2; sub(/.*\//, "", a0) } a0 == "bun" && $NF == "start" && /\/discord\// { printf "%s%s", (n++ ? "," : ""), $1 }') || mac_pids=""
+      [ -z "$mac_pids" ] || mac_env=$(ps -axEww -o pid=,command= -p "$mac_pids" 2>/dev/null) || mac_ok=no
+    fi
+  fi
+  if [ -d "$proc" ]; then
     if command -v pgrep >/dev/null 2>&1 && server_cands=$(pgrep -x bun 2>/dev/null); then
-      server_cands=$(printf '/proc/%s/cmdline ' $server_cands)
+      server_cands=$(printf "$proc/%s/cmdline " $server_cands)
     else
-      server_cands=$(printf '%s ' /proc/[0-9]*/cmdline)
+      server_cands=$(printf '%s ' "$proc"/[0-9]*/cmdline)
     fi
   fi
 
   count_servers() {  # $1 = bot state dir
-    local n=0 c pid args a hit
-    [ -d /proc ] || { printf 'unknown'; return 0; }
+    local n=0 c pid args a hit l
+    if [ ! -d "$proc" ]; then
+      [ "$mac_ok" = yes ] || { printf 'unknown'; return 0; }   # ps itself failed: cannot tell, never zero
+      # The token after the argv text: " DISCORD_STATE_DIR=<dir>" ending the
+      # line or followed by a space, so "hbot" never counts "hbot2"'s server.
+      # shortcut: a state dir with a space in its path is not counted here; quote-aware parsing if a Mac project ever has one.
+      local IFS=$'\n'; set -f   # one ps line at a time (a subshell: neither leaks), with no here-string (bash 3.2 writes those to TMPDIR)
+      for l in $mac_env; do
+        case "$l " in *" DISCORD_STATE_DIR=$1 "*) n=$((n + 1));; esac
+      done
+      printf '%s' "$n"; return 0
+    fi
     for c in $server_cands; do
       # Braces around the read, not `2>/dev/null` on mapfile alone: a
       # process that exits between the glob and the read makes the SHELL
@@ -899,13 +924,13 @@ if [ "${1:-}" = health ]; then
       hit=no
       for a in "${args[@]}"; do case $a in */discord/*) hit=yes; break;; esac; done
       [ "$hit" = yes ] || continue
-      pid=${c#/proc/}; pid=${pid%/cmdline}
+      pid=${c#"$proc"/}; pid=${pid%/cmdline}
       # -x: without it this is a SUBSTRING test, so a bot named "hbot"
       # counts "hbot2"'s server too (measured) -- the shorter-named bot then
       # reads as a duplicate and the longer-named one, when down, does not
       # read as down at all. -z makes each NUL-separated entry a line, and
       # -x anchors the whole entry.
-      grep -qzxF "DISCORD_STATE_DIR=$1" "/proc/$pid/environ" 2>/dev/null && n=$((n + 1))
+      grep -qzxF "DISCORD_STATE_DIR=$1" "$proc/$pid/environ" 2>/dev/null && n=$((n + 1))
     done
     printf '%s' "$n"
   }
