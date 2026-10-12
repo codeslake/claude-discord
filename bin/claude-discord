@@ -355,6 +355,12 @@ remove_old_install() {
   [ "$bad" = 0 ] || { echo "claude-discord: could not link the old install paths under $h to $c" >&2; return 1; }
 }
 
+# same_tree <a> <b>: same files and the same executables (diff -r ignores modes,
+# and an old settings entry skips a hook that is not -x).
+same_tree() {
+  diff -r "$1" "$2" >/dev/null 2>&1 &&
+    [ "$(cd "$1" && find . -type f -perm -100 | sort)" = "$(cd "$2" && find . -type f -perm -100 | sort)" ]
+}
 # sync_compat <plugin>: rebuilds ~/.claude-discord/compat from that plugin when
 # it differs (a write through a link included), in a new directory swapped in by
 # rename, so a hook already running from the old copy keeps its open file.
@@ -365,25 +371,43 @@ remove_old_install() {
 # starting at once, mv would move a copy INTO a compat/ another writer has just
 # put in place; rename(2) fails instead, and that writer's complete copy stays.
 # A failed swap puts our old copy back unless another LIVE writer's compat.old.*
-# says it is mid-swap (success: its copy lands next, ours must not beat it in).
+# says it is mid-swap (success: its copy lands next, ours must not beat it in),
+# or unless the copy we moved aside is already current (a writer that finished
+# its swap just before our mv): that one goes back.
+# CLAUDE_DISCORD_COMPAT_SWAP_S (default 60, read only here) bounds how recently
+# another writer's compat.old.<pid> was renamed for it to count as mid-swap.
 sync_compat() {
-  local c=$helpers/compat n=$helpers/compat.new.$$ t v="" have=""
+  local c=$helpers/compat n=$helpers/compat.new.$$ t v="" have="" mid=""
   rm -rf "$n" && mkdir -p "$n/hooks" || return 1
   for t in turn peers lib autoresearchclaw; do cp -R "$1/hooks/$t" "$n/hooks/" || { rm -rf "$n"; return 1; }; done
   cp -R "$1/tools" "$1/rules" "$n/" && head_sha "$1" > "$n/VERSION" || { rm -rf "$n"; return 1; }
-  # Same files and the same executables (diff -r ignores modes, and an old settings entry skips a hook that is not -x).
-  if [ -d "$c" ] && [ ! -L "$c" ] && diff -r "$c" "$n" >/dev/null 2>&1 &&
-     [ "$(cd "$c" && find . -type f -perm -100 | sort)" = "$(cd "$n" && find . -type f -perm -100 | sort)" ]; then rm -rf "$n"; return 0; fi
+  if [ -d "$c" ] && [ ! -L "$c" ] && same_tree "$c" "$n"; then rm -rf "$n"; return 0; fi
   rm -rf "$c.old.$$"
   { ! has_path "$c" || mv "$c" "$c.old.$$"; } && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$n" "$c" ||
-    { IFS= read -r v < "$n/VERSION" || :; rm -rf "$n"
+    { IFS= read -r v < "$n/VERSION" || :
       if [ ! -d "$c" ]; then
-        # Another writer is between its two renames: its compat.old.<pid> counts only while that pid lives (a killed writer leaves one for good).
-        for t in "$c".old.*; do [ "$t" != "$c.old.$$" ] && [ -d "$t" ] && kill -0 "${t##*.}" 2>/dev/null && { rm -rf "$c.old.$$"; return 0; }; done
-        [ -d "$c.old.$$" ] && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$c.old.$$" "$c" && return 1   # our swap failed: put the old copy back
+        # Another writer is between its two renames only while its pid lives AND it renamed compat/ to compat.old.<pid>
+        # within the last minute (a swap's renames are ms apart; rename sets ctime on Linux and macOS): an older one is a
+        # killed writer's leftover (under a live pid, a reused one), removed here rather than left forever. A recent one whose
+        # pid does not answer stays: it may be a writer in another pid namespace (a host and a container share this dir).
+        for t in "$c".old.*; do
+          [ "$t" != "$c.old.$$" ] && [ -d "$t" ] || continue
+          if perl -e 'exit !((lstat $ARGV[1])[10] > time - $ARGV[0])' "${CLAUDE_DISCORD_COMPAT_SWAP_S:-60}" "$t"; then
+            kill -0 "${t##*.}" 2>/dev/null && mid=1 || :
+          else rm -rf "$t"; fi
+        done
+        if [ -z "$mid" ]; then   # our swap failed: put the old copy back
+          [ -d "$c.old.$$" ] && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$c.old.$$" "$c" && { rm -rf "$n"; return 1; }
+        # What we moved aside is a current copy (that writer landed it and has not yet removed its compat.old.<pid>): it goes
+        # back, as the only copy; should the rename fail, the check below decides. A stale copy must not beat the writer's in.
+        elif [ -d "$c.old.$$" ] && same_tree "$c.old.$$" "$n"; then perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$c.old.$$" "$c" || :
+        else rm -rf "$n" "$c.old.$$"; return 0; fi
+        # Our restore failed too: keep our old copy (the next start rebuilds) unless another writer's compat.old.* says one
+        # is swapping its copy in. Checked only after a restore: a compat/ in place at the test above may be moved aside by
+        # then, and our old copy, kept for it, would stay behind for good.
+        [ -d "$c" ] || { rm -rf "$n"; for t in "$c".old.*; do [ "$t" = "$c.old.$$" ] || [ ! -d "$t" ] || { rm -rf "$c.old.$$"; break; }; done; return 1; }
       fi
-      [ -d "$c" ] || return 1   # our restore failed too: keep our old copy, the next start rebuilds
-      rm -rf "$c.old.$$"   # a compat/ put in place by another writer (before or during our restore) makes our old copy moot
+      rm -rf "$n" "$c.old.$$"   # a compat/ put in place by another writer (before or during our restore) makes our old copy moot
       # Another writer's copy of this commit in place is not a failure; ours left unreplaced (mv refused) is.
       IFS= read -r have < "$c/VERSION" 2>/dev/null || :; [ -n "$v" ] && [ "$have" = "$v" ]; return; }   # return: the trailing rm would turn this status into 0
   rm -rf "$c.old.$$"

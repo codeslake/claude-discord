@@ -3082,15 +3082,21 @@ touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" != 0 ] && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] ||
   { echo "FAIL: a failed rename must put the old compat/ back and fail (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-# A compat.old.<pid> whose writer is dead (killed between its renames, never reaped) is no mid-swap: our old copy goes back, the run fails.
+# A recent compat.old.<pid> whose pid does not answer is no mid-swap (our old copy goes back, the run fails), and it stays:
+# that writer may live in another pid namespace (a host and a container sharing this dir).
 true & DP=$!; wait "$DP"
 mkdir "$OH/compat.old.$DP"; touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" != 0 ] && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ "$(ls -d "$OH"/compat.* 2>/dev/null)" = "$OH/compat.old.$DP" ] ||
-  { echo "FAIL: a dead writer's compat.old.* must not count as mid-swap (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-rmdir "$OH/compat.old.$DP"
-# The mid-swap cases below name a LIVE pid: a compat.old.<pid> counts only while that pid lives.
+  { echo "FAIL: a recent compat.old.<dead pid> must neither count as mid-swap nor be reaped (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
+# The mid-swap cases below name a LIVE pid: a compat.old.<pid> counts only while that pid lives and was renamed recently.
 sleep 300 & LP=$!
+# Renamed long ago (swap window 0 s here), a compat.old.<pid> is a killed writer's leftover whether its pid answers (reused) or
+# not: no mid-swap, both reaped, the run fails.
+mkdir "$OH/compat.old.$LP"; touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
+rc=0; CLAUDE_DISCORD_COMPAT_SWAP_S=0 PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
+[ "$rc" != 0 ] && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] ||
+  { echo "FAIL: an old compat.old.<pid>, live or dead, must not count as mid-swap and must be reaped (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
 rm "$SB/perl"; printf '#!/bin/sh\ncase $1 in */compat) /bin/mv "$1" "$1.old.%s"; exit 1;; esac\nexec /bin/mv "$@"\n' "$LP" > "$SB/mv"; chmod +x "$SB/mv"
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] && [ -d "$OH/compat.old.$LP" ] && [ ! -e "$OH/compat" ] || { echo "FAIL: another writer's compat.old.* must make a failed mv a success (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
@@ -3105,7 +3111,15 @@ rm "$SB/mv"; printf '#!/bin/sh\ncase $3 in */compat.new.*) cp -R "$3" "$4.old.%s
 touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] && [ ! -e "$OH/compat" ] && [ "$(ls -d "$OH"/compat.* 2>/dev/null)" = "$OH/compat.old.$LP" ] || { echo "FAIL: another writer mid-swap must keep our old copy from going back (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-mv "$OH/compat.old.$LP" "$OH/compat"; kill "$LP"; wait "$LP" 2>/dev/null || :
+mv "$OH/compat.old.$LP" "$OH/compat"
+# A writer landed its copy and has not yet removed its compat.old.<pid> when our mv takes that copy aside and our swap
+# fails: the copy we moved aside is current, so it goes back (it is the only one) and the run succeeds.
+printf '#!/bin/sh\ncase $3 in */compat.new.*) rm -rf "$4.old.${3##*.}"; cp -R "$3" "$4.old.${3##*.}"; mkdir "$4.old.%s"; exit 1;; esac\nexec "%s" "$@"\n' "$LP" "$RP" > "$SB/perl"
+touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
+rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] && cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ "$(ls -d "$OH"/compat.* 2>/dev/null)" = "$OH/compat.old.$LP" ] ||
+  { echo "FAIL: a current copy we moved aside while a writer finishes must go back (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
+rmdir "$OH/compat.old.$LP"; kill "$LP"; wait "$LP" 2>/dev/null || :
 # Another writer's compat/ lands between our failed swap and our restore (six bots at once, lmd79): the restore's rename(2)
 # fails where mv nested our old copy at compat/compat.old.<pid>; that writer's copy carries our sha, so the run succeeds.
 rm -f "$SB/mv"
@@ -3114,10 +3128,19 @@ touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ -e "$SB/fired" ] && [ "$rc" = 0 ] && cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ -z "$(ls -d "$OH"/compat.* "$OH"/compat/compat.* 2>/dev/null)" ] ||
   { echo "FAIL: a compat/ landing before our restore must stay whole, our old copy neither inside nor beside it (rc=$rc): $(ls -d "$OH"/compat* "$OH"/compat/compat.* 2>&1)"; exit 1; }
+# A copy lands as our swap fails, and a third writer moves it aside before we look again: our old copy must not stay behind.
+rm -f "$SB/fired"
+printf '#!/bin/sh\ncase $3 in */compat.new.*) cp -R "$3" "$4"; : > "%s/fired"; exit 1;; esac\nexec "%s" "$@"\n' "$SB" "$RP" > "$SB/perl"
+printf '#!/bin/sh\ncase $2 in */compat.new.*) [ ! -e "%s/fired" ] || [ -e "%s/moved" ] || { : > "%s/moved"; /bin/mv "%s/compat" "%s/compat.old.99999"; };; esac\nexec /bin/rm "$@"\n' "$SB" "$SB" "$SB" "$OH" "$OH" > "$SB/rm"; chmod +x "$SB/rm"
+touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
+rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
+[ -e "$SB/moved" ] && [ "$(ls -d "$OH"/compat.* 2>/dev/null)" = "$OH/compat.old.99999" ] ||
+  { echo "FAIL: a compat/ moved aside after our failed swap must not leave our old copy behind (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
+/bin/mv "$OH/compat.old.99999" "$OH/compat"
 rm -rf "$SB"
 bash "$S" patch --compat >/dev/null 2>&1   # leave a fresh compat/
 rm -rf "$HOME/cbproj"
-echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, a failed swap restores the old copy (another writer mid-swap is no failure and is not beaten in by our old copy; a copy landing before the restore stays whole), a refused mv fails, and with no source clone no bot start rebuilds it"
+echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, a failed swap restores the old copy (another live, recently renamed writer mid-swap is no failure and is not beaten in by our old copy, a current copy we moved aside goes back, an old leftover is reaped, a recent one with no visible pid kept; a copy landing before the restore stays whole), a refused mv fails, and with no source clone no bot start rebuilds it"
 
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.
