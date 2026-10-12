@@ -169,7 +169,7 @@ export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'kill $KILL_AT_E
 # is a link to its one version dir, which the assertions read through.
 FAKEDIR="$HOME/.claude/plugins/cache/claude-plugins-official/discord/0.0.4"
 mkdir -p "$FAKEDIR" "$HOME/bin"; ln -s "$FAKEDIR" "$HOME/fakeplugin"
-printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(msg)\n})\nfunction isAddressed(msg) {\n  if (client.user && msg.mentions.has(client.user)) return true\n}\nasync function reply(text, limit, mode) {\n        const chunks = chunk(text, limit, mode)\n}\n      meta: {\n        user_id: msg.author.id,\n        ts: x,\n      },\n' "'messageCreate'" > "$HOME/fakeplugin/server.ts"
+printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(msg)\n})\nfunction isAddressed(msg) {\n  if (client.user && msg.mentions.has(client.user)) return true\n}\nasync function reply(text, limit, mode) {\n        const chunks = chunk(text, limit, mode)\n}\n      meta: {\n        user_id: msg.author.id,\n        ts: x,\n      },\nconst TOKEN = process.env.DISCORD_BOT_TOKEN\nif (!TOKEN) {\n  process.stderr.write("no token")\n  process.exit(1)\n}\nclient.login(TOKEN).catch(err => {\n  process.exit(1)\n})\n' "'messageCreate'" > "$HOME/fakeplugin/server.ts"
 cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.pristine"
 printf '#!/bin/bash\necho "LAUNCHER $*"\n' > "$HOME/bin/claude-launcher"; chmod +x "$HOME/bin/claude-launcher"
 printf '#!/bin/bash\ncase $1 in agents) exit 1;; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
@@ -260,7 +260,7 @@ done | tar --null -T - -cf -) | tar -xf - -C "$SRC" &&
   (cd "$SRC" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm stand-in) || { echo "FAIL: could not build the stand-in repo"; exit 1; }
 export CLAUDE_DISCORD_REPO=$SRC
 PHOME=$(cd "$HOME" && pwd -P)   # setup keys trust by the physical path
-jq -n --arg h "$PHOME" '[$h + "/project", $h + "/project-moved", $h + "/project4", $h + "/project-all", $h + "/project-upper", $h + "/project-runpath", $h + "/project2"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
+jq -n --arg h "$PHOME" '[$h + "/project", $h + "/project-moved", $h + "/project4", $h + "/project-all", $h + "/project-upper", $h + "/project-runpath", $h + "/project-later", $h + "/project2"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
 R="$P/.claude/discord-agents"
 
 printf '\n1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alpha --scope project >/dev/null
@@ -391,6 +391,18 @@ printf '\ny\n\npeerz:501:601:host\n' | bash "$S" setup movedmgr --scope project 
 [ "$(jq -c '.groups | keys' "$RM/movedmgr/access.json")" = '["777"]' ] || { echo "FAIL: dev-manager re-run must not recreate config.env's channel group: $(jq -c . "$RM/movedmgr/access.json")"; exit 1; }
 [ "$(jq -c '.groups["777"].allowFrom' "$RM/movedmgr/access.json")" = '["11","501"]' ] || { echo "FAIL: the peer must join the moved group's allowFrom, once: $(jq -c . "$RM/movedmgr/access.json")"; exit 1; }
 echo "ok: dev-manager re-run adds a peer to the moved group's allowFrom, not to a group keyed by config.env's channel"
+
+# Started before its Discord bot and channel existed: Enter at every ID and the token. A later re-run asks the IDs
+# again and fills the "" group key and "" ids in access.json, keeping a hand-edited field.
+PL="$HOME/project-later"; mkdir -p "$PL"; cd "$PL"; RL="$PL/.claude/discord-agents"
+printf '\n\n\n\n\nn\n' | bash "$S" setup later --scope project >/dev/null
+[ "$(jq -c '[(.groups | keys), .allowFrom]' "$RL/later/access.json")" = '[[""],[""]]' ] || { echo "FAIL: the empty-answer fixture is not what setup writes: $(jq -c . "$RL/later/access.json")"; exit 1; }
+jq '.ackReaction = ""' "$RL/later/access.json" > "$RL/later/a.tmp" && cat "$RL/later/a.tmp" > "$RL/later/access.json" && rm -f "$RL/later/a.tmp"
+printf '55\n11\n22\ntokL\n\n\n' | bash "$S" setup later --scope project >/dev/null
+grep -q "^DISCORD_CHANNEL_ID='55'$" "$RL/config.env" && grep -q '^DISCORD_BOT_TOKEN=tokL$' "$RL/later/.env" &&
+  [ "$(jq -c '[(.groups | keys), .groups["55"].allowFrom, .groups["55"].requireMention, .allowFrom, .ackReaction]' "$RL/later/access.json")" = '[["55"],["11","22"],true,["11"],""]' ] ||
+  { echo "FAIL: a re-run with the real IDs must fill the empty group key and ids and keep the rest: $(jq -c . "$RL/later/access.json") $(<"$RL/config.env")"; exit 1; }
+echo "ok: a bot set up with empty IDs gets the real channel and ids from a later setup run, other access.json fields kept"
 
 cd "$P"
 printf '999\n111\n\ntokA2\nn\n' | bash "$S" setup alpha --scope project --reset >/dev/null
@@ -823,6 +835,11 @@ bash "$S" --name alpha >/dev/null 2>&1
 # The fixture carries the plugin's meta block, so a patch that edited it would show here.
 ! grep -qF 'bot: "true"' "$HOME/fakeplugin/server.ts" || { echo "FAIL: no patch may add bot=\"true\" to the channel tag (nothing reads it since 1.9.3): $(<"$HOME/fakeplugin/server.ts")"; exit 1; }
 echo "ok: both patches are idempotent, and the channel tag's meta is left alone"
+# late-token: no token waits instead of exiting, and login polls .env; once, both anchors gone, the login's .catch kept.
+[ "$(grep -c 'no token yet; waiting for it' "$HOME/fakeplugin/server.ts")" = 1 ] && [ "$(grep -c 'setInterval' "$HOME/fakeplugin/server.ts")" = 1 ] &&
+  [ "$(grep -c 'process.exit(1)' "$HOME/fakeplugin/server.ts")" = 1 ] && ! grep -qF 'client.login(TOKEN).catch(' "$HOME/fakeplugin/server.ts" &&
+  grep -qF '.then(t => client.login(t)).catch(err => {' "$HOME/fakeplugin/server.ts" || { echo "FAIL: late-token must replace the exit and the login once: $(<"$HOME/fakeplugin/server.ts")"; exit 1; }
+echo "ok: late-token replaces the no-token exit and the login once"
 
 CALL='const chunks = chunk(text, limit, mode)'
 PATCHED="const chunks = (await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chunk(text, limit, mode)"
@@ -899,10 +916,12 @@ out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch aft
 echo "ok: patch rewrites a chunk import and a proxy preload left at the old paths to runtime/, and a second run is silent"
 # A moved pattern: exit 1 naming file and patch, the other patches still applied.
 mkdir -p "$PCACHE/0.0.7"
-printf 'client.on(x, msg => {\n  if (msg.author.isBot()) return\n})\n' > "$PCACHE/0.0.7/server.ts"
+printf 'client.on(x, msg => {\n  if (msg.author.isBot()) return\n})\nif (!TOKEN) {\n  process.exit(1)\n}\nclient.connect(TOKEN).catch(err => {})\n' > "$PCACHE/0.0.7/server.ts"
 printf '{"mcpServers":{"discord":{"command":"bun"}}}\n' > "$PCACHE/0.0.7/.mcp.json"
 out=$(bash "$S" patch 2>&1) && { echo "FAIL: a pattern that no longer matches must exit 1"; exit 1; }
 grep -q 'patch: .*0.0.7/server.ts: bot-authors no longer matches' <<<"$out" || { echo "FAIL: wrong no-match report: $out"; exit 1; }
+# One late-token anchor without the other (the login moved): reported, and the exit left in place.
+grep -q 'patch: .*0.0.7/server.ts: late-token no longer matches' <<<"$out" && grep -q '^  process.exit(1)$' "$PCACHE/0.0.7/server.ts" || { echo "FAIL: a moved login must leave the no-token exit alone and be reported: $out"; exit 1; }
 ! grep -q '0.0.[456]/server.ts: ' <<<"$out" || { echo "FAIL: only the moved dir may be reported: $out"; exit 1; }
 grep -qF "$HOME/.claude-discord/runtime/discord-proxy.ts" "$PCACHE/0.0.7/bunfig.toml" &&
   [ "$(jq -r '.mcpServers.discord.env.CLAUDE_DISCORD_BOT' "$PCACHE/0.0.7/.mcp.json")" = '${DISCORD_STATE_DIR:-}' ] || { echo "FAIL: the patches that still match must be applied beside the moved one"; exit 1; }

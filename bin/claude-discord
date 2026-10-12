@@ -550,7 +550,9 @@ if [ "${1:-}" = setup ]; then
     [ "${3:-}" = --reset ] && rm -rf "$root/$name" "$root/config.env"
     mkdir -p "$root/$name"
     printf '*\n' > "$root/.gitignore"
-    if [ ! -f "$root/config.env" ]; then
+    # A project set up before its Discord channel existed (Enter at these
+    # prompts) is asked again, so a later setup run fills the IDs in.
+    if [ ! -f "$root/config.env" ] || grep -qxE "DISCORD_(CHANNEL|USER)_ID=('')?" "$root/config.env"; then
       ask channel "Discord channel ID: "
       ask user "Your Discord user ID: "
       # Shown only at a terminal, like read -p's own prompt.
@@ -595,9 +597,23 @@ EOT
     # (moved to another channel, allowFrom trimmed, ackReaction silenced). A
     # re-run must not clobber that; only a bot with none yet (new, or just
     # after --reset, which deletes the bot dir first) gets one written fresh.
+    # The one exception: a bot set up with no channel or user ID yet has a
+    # group keyed "" and "" in allowFrom. Once the IDs are known, that group
+    # takes the channel as key and each "" becomes the user (plus the other
+    # IDs, or [] for "all", as write_access builds it); every other field stays.
     if [ -f "$root/$name/access.json" ]; then
-      jq_edit "$root/$name/access.json" --argjson mention "$mention" \
-        'if (.groups | type) == "object" then .groups |= map_values(.requireMention = $mention) else . end'
+      jq_edit "$root/$name/access.json" --argjson mention "$mention" --arg ch "${DISCORD_CHANNEL_ID:-}" --arg me "${DISCORD_USER_ID:-}" \
+          --arg others "${DISCORD_ALLOW_IDS:-}" --arg open "${allow_all:+yes}" '
+        def fill($ids): if (.allowFrom | type) == "array" then .allowFrom |= map(if . == "" then $ids[] else . end) else . end;
+        if (.groups | type) == "object" then .groups |= map_values(.requireMention = $mention) else . end
+        | if $me == "" then . else
+            fill([$me])
+            | if $ch != "" and (.groups | type) == "object" and (.groups | has("") and (has($ch) | not)) then
+                .groups[$ch] = (.groups[""] | if $open == "yes" then .allowFrom = []
+                  else fill([$me] + ($others | split(",") | map(gsub("\\s";"")) | map(select(. != "")))) end)
+                | del(.groups[""])
+              else . end
+          end'
     else
       # allow_all is set only by the answer above, so it reaches this bot and
       # no other: a bot set up later in the same project inherits config.env's
@@ -1397,11 +1413,15 @@ fi
 # Every version dir in the cache, not just the active one: an auto-update adds
 # an unpatched dir while bots run on the old one, and the next start, respawn
 # or config-changing /reload-plugins uses the new one (measured, 2.1.296).
-# Five patches, each idempotent because its pattern is gone once applied:
+# Six patches, each idempotent because its pattern is gone once applied:
 #   bot-authors     let other bots reach access.json's allowFrom gate
 #   ignore-everyone @everyone/@here wake no bot
 #   chunk           fence-safe chunking, imported from the stable runtime copy
 #                   (an import of any other path is rewritten to it)
+#   late-token      no token at start waits instead of exiting (Claude Code would
+#                   mark the server failed): .env is re-read every 10 s and the
+#                   client logs in once a token is there, so a bot started before
+#                   its Discord bot existed needs no restart
 #   proxy           bunfig preload pinning fetch and WebSocket to HTTPS_PROXY
 #   failure-cache   a per-bot env in .mcp.json, so Claude Code's 15-minute MCP
 #                   failure cache (keyed on the config hashed after ${VAR}
@@ -1435,6 +1455,17 @@ patch_official() {
       CHUNK_TS=$rt/discord-chunk.ts perl -pi -e 's/import\("[^"]*"\)\)\.chunk\(text, limit, mode\)/import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)/' "$f"; mark "$f"
     else
       echo "claude-discord: patch: $f: chunk no longer matches" >&2; rc=1
+    fi
+    # Both anchors in one perl run, so a server.ts gets both edits or neither;
+    # the replacement text comes in through env, so perl interpolates none of it.
+    if grep -qF 'no token yet; waiting for it' "$f"; then :
+    elif CD_WAIT='process.stderr.write("discord channel: no token yet; waiting for it (re-read every 10 s)\n")' \
+         CD_LOGIN='new Promise<string>(ok => { if (TOKEN) return ok(TOKEN); const t = setInterval(() => { let m; try { m = readFileSync(ENV_FILE, "utf8").match(/^DISCORD_BOT_TOKEN=(.+)$/m) } catch {} if (m?.[1].trim()) { clearInterval(t); ok(m[1].trim()) } }, 10000) }).then(t => client.login(t)).catch(' \
+         perl -0777 -pi -e 'if (/^if \(!TOKEN\) \{\n(?:[ \t].*\n)*?[ \t]+process\.exit\(1\)$/m && /^client\.login\(TOKEN\)\.catch\(/m) {
+             s/^(if \(!TOKEN\) \{\n(?:[ \t].*\n)*?[ \t]+)process\.exit\(1\)$/$1$ENV{CD_WAIT}/m; s/^client\.login\(TOKEN\)\.catch\(/$ENV{CD_LOGIN}/m; $ok = 1 }
+           END { exit !$ok }' "$f"; then mark "$f"
+    else
+      echo "claude-discord: patch: $f: late-token no longer matches" >&2; rc=1
     fi
     [ "$(cat "$d/bunfig.toml" 2>/dev/null)" = "preload = [\"$rt/discord-proxy.ts\"]" ] ||
       { printf 'preload = ["%s"]\n' "$rt/discord-proxy.ts" > "$d/bunfig.toml"; mark "$d/bunfig.toml"; }
