@@ -153,7 +153,7 @@ All under `~/.claude-discord/records/monitor/<bot>/`, mode 0700 directory,
 
 | path | written by | lifetime |
 |---|---|---|
-| `lock` | created once (empty) | fixed; the flock target |
+| `lock` | created once; the monitor writes its pid there | fixed; the flock target. The monitor checks every tick and before each post that it still holds its own pid, and leaves (`exit reason=lock-lost`) when the file was removed or replaced, which let a second monitor start (plan deviation 15) |
 | `state.json` | monitor only, via `state.json.tmp` (same dir, fixed name) and rename | kept after exit so the TUI shows the last state |
 | `monitor.log`, `monitor.log.1` | monitor | capped at 256 KiB; on overflow `.log` replaces `.log.1` |
 | `holders/<kind>-<pid>` | the TUI and the hook | removed by their owner on exit, by the monitor when dead, all of them by the monitor on a signal exit (a no-holders exit keeps any that appeared at the last moment, for the exit race; the next start prunes stale ones) |
@@ -161,7 +161,10 @@ All under `~/.claude-discord/records/monitor/<bot>/`, mode 0700 directory,
 Plus one machine-wide record, `~/.claude-discord/records/projects`: one
 project root per line, written by `setup` and by a `health` run in a project
 (so a project migrated by sub-project 1 gets in at its confirming `health`
-run), pruned by `health --all` when `<root>/.claude/discord-agents` is gone.
+run). It is never pruned: a project whose `<root>/.claude/discord-agents` is
+missing (a volume mounted late) is reported by `health --all` with `error:
+"project folder missing: ..."`, which the monitor reads as `blind`; the owner
+deletes the line once the project is gone for good (plan deviation 13).
 `records/installs` cannot serve: a global install names no project.
 
 Per bot, the monitor path writes nothing new. `health --all` does not append
@@ -276,6 +279,11 @@ headers, never a token.
   manager session gone for a few seconds; the monitor may exit in that gap
   and the new session's SessionStart starts it again. `state.json` keeps
   `posted`, so nothing is re-sent.
+- **Update and death.** A running monitor execs a changed `monitor.sh` at a
+  pass start (same pid, the lock kept) once the file has held still for a
+  whole pass and parses. One killed without its trap is started again at the
+  manager's next prompt (on-prompt checks `monitor.pid` with no fork) or by
+  the TUI (plan deviation 12).
 - **Pass cadence.** A pass starts at most every 300 s (the first right after
   start). `health`'s `unknown_cap=6` ("30 min at 5 min") assumes this
   cadence: changing the interval alone changes when `nostate` fires.
@@ -332,7 +340,10 @@ fixture: `ok`.
 `busy` is not a finding. While a host is `noreach`, `hostdown` or `blind`,
 its bots' states are frozen: such a pass says nothing about them, so it
 neither posts nor recovers them. A bot that leaves the list (its `.env`
-removed, its project gone) is dropped and logged, not announced. `health`'s
+removed, its project gone) is dropped and logged, not announced. A host taken
+out of the ledger is kept for a day with its bots and their `posted`, frozen,
+so one missing for a pass posts nothing again; then it is dropped with its
+bots, logged, not announced (plan deviation 14). `health`'s
 own `unreachable` means a refused token; an unreachable host is `hostdown`,
 so the two never share a name. ssh is called as `ssh -o BatchMode=yes -o
 ConnectTimeout=8 <host> ...` and judged by exit status, never by output.
