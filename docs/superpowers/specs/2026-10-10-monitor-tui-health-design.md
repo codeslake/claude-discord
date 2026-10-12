@@ -156,7 +156,7 @@ All under `~/.claude-discord/records/monitor/<bot>/`, mode 0700 directory,
 | `lock` | created once; the monitor writes its pid there | fixed; the flock target. The monitor checks every tick and before each post that it still holds its own pid, and leaves (`exit reason=lock-lost`) when the file was removed or replaced, which let a second monitor start (plan deviation 15) |
 | `state.json` | monitor only, via `state.json.tmp` (same dir, fixed name) and rename | kept after exit so the TUI shows the last state |
 | `monitor.log`, `monitor.log.1` | monitor | capped at 256 KiB; on overflow `.log` replaces `.log.1` |
-| `holders/<kind>-<pid>` | the TUI, the hook and the keeper (plan deviation 17) | removed by their owner on exit, by the monitor when dead, all of them by the monitor on a signal exit (a no-holders exit keeps any that appeared at the last moment, for the exit race; the next start prunes stale ones) |
+| `holders/<kind>-<pid>` | the TUI and the keeper (plan deviations 17, 19; a 1.10.2 hook's session record is read until its session ends) | removed by their owner on exit, by the monitor when dead, all but keeper records by the monitor on a signal exit (1.10.3) (a no-holders exit keeps any that appeared at the last moment, for the exit race; the next start prunes stale ones) |
 
 Plus one machine-wide record, `~/.claude-discord/records/projects`: one
 project root per line, written by `setup` and by a `health` run in a project
