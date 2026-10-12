@@ -156,7 +156,7 @@ All under `~/.claude-discord/records/monitor/<bot>/`, mode 0700 directory,
 | `lock` | created once (empty) | fixed; the flock target |
 | `state.json` | monitor only, via `state.json.tmp` (same dir, fixed name) and rename | kept after exit so the TUI shows the last state |
 | `monitor.log`, `monitor.log.1` | monitor | capped at 256 KiB; on overflow `.log` replaces `.log.1` |
-| `holders/<kind>-<pid>` | the TUI and the hook | removed by their owner on exit, by the monitor when dead, all of them by the monitor on exit |
+| `holders/<kind>-<pid>` | the TUI and the hook | removed by their owner on exit, by the monitor when dead, all of them by the monitor on a signal exit (a no-holders exit keeps any that appeared at the last moment, for the exit race; the next start prunes stale ones) |
 
 Plus one machine-wide record, `~/.claude-discord/records/projects`: one
 project root per line, written by `setup` and by a `health` run in a project
@@ -263,7 +263,7 @@ headers, never a token.
   (a holder may have just registered), and if still none it kills the
   running pass child, writes `state.json` with `monitor.pid` set to null and
   a `stopped_at` time (so the only pid record left reads as stopped),
-  removes `holders/*`, logs `exit` and exits. Worst case: 30 s after the
+  keeps any holder record that appeared since (exit race), logs `exit` and exits. Worst case: 30 s after the
   last holder dies.
 - **Exit race.** An `--ensure` that arrives while the old monitor is exiting
   waits up to 5 s for the lock and then becomes the new monitor, so a holder

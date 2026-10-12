@@ -20,6 +20,7 @@ Every piece of code below was run before this plan was written: the full suite p
 5. `pass.out` (one host's answer, removed at the end of each pass) joins the spec's fixed file list: a command substitution cannot be polled every tick, and an ssh ControlMaster could hold its pipe open.
 6. A fourth interval override, `CLAUDE_DISCORD_MONITOR_LOCK_WAIT` (default 5 s), lets the suite test the lock wait in 0.15 s; `CLAUDE_DISCORD_PROC` and `CLAUDE_DISCORD_UV` exist only so the suite can exercise the macOS count on Linux and a missing uv.
 7. The suite grows by about 4.5 s, not the spec's ~3 s (see Global Constraints).
+8. A `no-holders` exit keeps `holders/*`: every record left was found dead and removed by the check just before, so one that is there at exit belongs to a holder whose `--ensure` is waiting for the lock (the exit race), and it must stay for the monitor that wait starts. The next start's first holder check, before its first pass, prunes any stale record. A signal exit still removes them all.
 
 ## Global Constraints
 
@@ -2550,7 +2551,7 @@ Not subagent work: the lead runs it, and dong-dev-bot reviews before main (proje
 
 HARD HOME RULE (repeat verbatim in any dispatch prompt here): any probe outside the test suite sets a literal sandbox HOME in the SAME Bash call, chained with &&; never write the real ~/.claude.json, ~/.claude, ~/.claude-discord or ~/.local/bin; run hand-run hooks/tools with env -u DISCORD_STATE_DIR.
 
-- [ ] **Step 1:** Push `impl/monitor-tui`, post the diff summary in the item's Discord thread to dong-dev-bot with the seven deviations above, close every review finding (re-review each fix commit) before main.
+- [ ] **Step 1:** Push `impl/monitor-tui`, post the diff summary in the item's Discord thread to dong-dev-bot with the eight deviations above, close every review finding (re-review each fix commit) before main.
 - [ ] **Step 2:** On lmd42, `claude-discord update` from the branch, one `claude-discord health` in each bot project, then `claude-discord setup junyong-dev-bot --mode` answering `wmac, pmac`; `claude-discord tui`. Proof: the hosts table lists `local`, `wmac`, `pmac` with versions; `ls ~/.claude-discord/records/monitor/junyong-dev-bot` shows only `holders lock monitor.log state.json`.
 - [ ] **Step 3:** Stop one non-critical bot by hand (`claude stop <id>`). Proof: one `[down]` message in `#bot-health-check` within 10 minutes mentioning its owner; after `claude-discord --bg --name <bot>`, one `[recovered]` line; nothing else posted.
 - [ ] **Step 4:** Quit the TUI with no manager session holding: `ps` shows no `monitor/monitor.sh` process 30 s later; `state.json` reads `"pid": null` with `stopped_at`.

@@ -1710,6 +1710,13 @@ if [ "${1:-}" = update ]; then
   exit "$rc"
 fi
 
+# monitor: the backend health monitor of a manager bot (monitor/monitor.sh has
+# the whole story). Not in --help: the TUI and the SessionStart hook run it.
+if [ "${1:-}" = monitor ]; then
+  shift
+  exec bash "$self_root/monitor/monitor.sh" "$self_path" "$@"
+fi
+
 args=() name="" skip=0 want_name=0 named=0 positional=0 has_name=0 bare=0
 # With a --name anywhere, a bare word is an argument for claude, not the bot
 # (`-p hello --name beta` keeps `hello`).
