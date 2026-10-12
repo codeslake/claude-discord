@@ -72,6 +72,8 @@ def variant(name):
         s["monitor"].update(pid=None, stopped_at=NOW, holders=[])
     elif name == "keeper":
         s["monitor"]["holders"] = [{"kind": "keeper", "pid": 789}, {"kind": "tui", "pid": 456}]
+    elif name == "stopped_by_user":
+        s["monitor"].update(pid=None, stopped_at=NOW, holders=[], stopped_by_user=True)
     elif name == "post_failed":
         s["monitor"]["post_failed"] = True
     elif name == "pass_failed":
@@ -152,6 +154,10 @@ async def stopped(app, pilot):
     assert f"monitor stopped at {NOW}" in text(app, "#bar")
 
 
+async def stopped_by_user(app, pilot):
+    assert "stopped by you" in text(app, "#bar") and "claude-discord monitor --start mgr" in text(app, "#bar"), text(app, "#bar")
+
+
 async def keeper(app, pilot):
     head = text(app, "#head")
     assert "holders keeper 789, tui 456" in head and "claude-discord monitor --stop mgr" in head, head
@@ -220,6 +226,7 @@ async def main():
     await case("crashed_project", crashed_project)
     await case("stopped", stopped)
     await case("keeper", keeper)
+    await case("stopped_by_user", stopped_by_user)
     await case("post_failed", post_failed)
     await case("pass_failed", pass_failed)
     await case("markup", markup)

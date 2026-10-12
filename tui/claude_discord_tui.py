@@ -83,6 +83,8 @@ def header_lines(state: dict, note: str = "") -> tuple[str, str | None]:
     bar = None
     if not state:
         bar = "no state yet: the monitor has not written state.json"
+    elif m.get("stopped_by_user"):   # monitor --stop: nothing starts it until monitor --start
+        bar = f"stopped by you (monitor --stop); start it again: claude-discord monitor --start {state.get('manager', '?')}"
     elif not pid:
         bar = f"monitor stopped at {m.get('stopped_at') or '?'}"
     elif not alive(pid, state.get("manager") or ""):   # killed without its trap (kill -9, OOM): its pid stays in state.json

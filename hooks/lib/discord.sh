@@ -194,71 +194,31 @@ hook_session() {
   case $sid in .*) return 1;; esac
 }
 
-# session_pid: the pid of the Claude Code CLI process this hook runs under: a
-# process whose argv[0] (never a later argument: a `bash .../claude-proxied
-# .../claude/versions/x` wrapper is no session) is .../claude or lies under
-# .../claude/versions/, and whose argv[1] is not `daemon`. $CLAUDE_PID first,
-# when it names such a process: Claude Code sets it to its own pid for its
-# children, so it is exact. Else the nearest such ancestor, three levels at
-# most: Claude Code runs a hook directly, through sh -c, or with a
-# CLAUDE_CODE_SHELL_PREFIX through two sh -c (sh -c "<prefix> 'sh -c ...'"),
-# and dash does not exec the last command. Nearest, and capped: above a --bg
-# session sit its --bg-pty-host and `claude daemon`, which never exits, and a
-# terminal's own claude may sit above a script that runs a hook by hand.
-# Linux reads CLAUDE_PID's /proc cmdline with no fork. Prints nothing when
-# there is none.
-session_pid() {
-  local p=${CLAUDE_PID:-} n=0 a0="" a1=""
-  if [[ $p =~ ^[0-9]+$ ]]; then
-    if [ -d /proc/self ]; then
-      { IFS= read -rd '' a0; IFS= read -rd '' a1; } 2>/dev/null < "/proc/$p/cmdline"
-    else
-      set -f; set -- $(ps -o args= -p "$p" 2>/dev/null); set +f; a0=${1:-} a1=${2:-}
-    fi
-    case $a0 in claude|*/claude|*/claude/versions/*)
-      [ "$a1" = daemon ] || { printf '%s' "$p"; return 0; };;
-    esac
-  fi
-  p=$PPID
-  while [ "$n" -lt 3 ] && [ "${p:-0}" -gt 1 ]; do
-    set -f; set -- $(ps -o ppid= -o args= -p "$p" 2>/dev/null); set +f   # ppid, argv[0], argv[1], ...
-    [ $# -ge 2 ] || return 0
-    case $2 in claude|*/claude|*/claude/versions/*)
-      [ "${3:-}" = daemon ] || { printf '%s' "$p"; return 0; };;
-    esac
-    p=$1 n=$((n + 1))
-  done
-}
-
-# ensure_monitor: this session (session_pid) as a holder of its manager bot's
-# backend monitor, which is started if none runs. Detached, stdio closed, so the
-# hook returns at once and leaves nothing on Claude Code's pipe. No session
-# found is said in the bot's health.log, not skipped in silence.
-ensure_monitor() {
-  local spid
+# ensure_keeper: the manager bot's backend (a keeper and its monitor), started detached when none runs. The --keep
+# front checks (one keeper per bot; nothing while the owner's --stop marker stands) and returns at once; stdio closed
+# and backgrounded, so the hook leaves nothing on Claude Code's pipe. The session is no holder: the backend outlives it.
+ensure_keeper() {
   [ -x "$plugin_root/bin/claude-discord" ] || return 0
-  spid=$(session_pid)
-  [ -n "$spid" ] || printf '%s %s: no claude session process found (CLAUDE_PID or three levels up): monitor not ensured\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${0##*/}" >> "$DISCORD_STATE_DIR/health.log" 2>/dev/null || :
-  # An if, not `[ -z ] || (...) &`: the & would take the whole || list into a forked subshell that keeps the hook's own
-  # stdout open until --ensure ends, and Claude Code reads the hook's pipe to EOF.
-  if [ -n "$spid" ]; then
-    (cd "$bot_project" && "$plugin_root/bin/claude-discord" monitor --ensure "$bot_name" --holder session "$spid") </dev/null >/dev/null 2>&1 &
-  fi
+  (cd "$bot_project" && "$plugin_root/bin/claude-discord" monitor --keep "$bot_name" --detach) </dev/null >/dev/null 2>&1 &
 }
-# monitor_alive: the manager's monitor runs. The pid state.json names in "monitor" (written first there, within the
-# first 512 bytes) must be a `bash <root>/monitor/monitor.sh <wrapper> --locked <bot>` command line: a pid reused by
-# another program, a zombie or another bot's monitor is no monitor. Linux reads /proc/<pid>/cmdline with no fork
-# (on-prompt asks on every prompt); elsewhere one `ps` fork per prompt, the price of telling a reused pid on a Mac.
-monitor_alive() {
-  local s="" pid a0="" a1="" a2="" a3="" a4="" re='"monitor":\{([^{}]*,)?"pid":([0-9]+)'
-  { IFS= read -r -n 512 s < "$HOME/.claude-discord/records/monitor/$bot_name/state.json"; } 2>/dev/null
-  [[ $s =~ $re ]] || return 1
-  pid=${BASH_REMATCH[2]}
-  if [ -d /proc/self ]; then
-    { IFS= read -rd '' a0; IFS= read -rd '' a1; IFS= read -rd '' a2; IFS= read -rd '' a3; IFS= read -rd '' a4; } 2>/dev/null < "/proc/$pid/cmdline"
-    [[ $a1 == */monitor/monitor.sh && $a3 == --locked && $a4 == "$bot_name" ]]
-  else
-    s=$(ps -p "$pid" -o command= 2>/dev/null)
-    [[ $s == *monitor/monitor.sh*" --locked $bot_name" ]]
-  fi
+# keeper_alive: the backend is up or was stopped on purpose (the `stopped` marker), so a prompt starts nothing. A live
+# keeper is a holders/keeper-<pid> record whose pid runs `bash <root>/monitor/monitor.sh <wrapper> --keep <bot>`: a pid
+# reused by another program or another bot's keeper is none. Linux reads /proc/<pid>/cmdline with no fork (on-prompt
+# asks on every prompt); elsewhere one `ps` fork per record.
+keeper_alive() {
+  local d="$HOME/.claude-discord/records/monitor/$bot_name" f p s a0 a1 a2 a3 a4
+  [ ! -e "$d/stopped" ] || return 0
+  for f in "$d"/holders/keeper-*; do
+    p=${f##*/keeper-}
+    case $p in ''|*[!0-9]*) continue;; esac
+    if [ -d /proc/self ]; then
+      a0="" a1="" a2="" a3="" a4=""
+      { IFS= read -rd '' a0; IFS= read -rd '' a1; IFS= read -rd '' a2; IFS= read -rd '' a3; IFS= read -rd '' a4; } 2>/dev/null < "/proc/$p/cmdline"
+      [[ $a1 == */monitor/monitor.sh && $a3 == --keep && $a4 == "$bot_name" ]] && return 0
+    else
+      s=$(ps -p "$p" -o command= 2>/dev/null)
+      [[ $s == *monitor/monitor.sh*" --keep $bot_name" ]] && return 0
+    fi
+  done
+  return 1
 }

@@ -8,15 +8,9 @@ set -euo pipefail
 # otherwise point refresh at its own state dir, and a shell that wraps claude
 # would turn PLAIN into LAUNCHER. The suite sets the ones it needs below.
 for v in "${!CLAUDE_@}" "${!DISCORD_@}"; do unset "$v"; done
-# A hook run here takes $CLAUDE_PID (cleared above) or looks three levels up for its claude session (session_pid), and
-# a dev-manager's SessionStart starts a monitor that session holds: three levels above a hook the suite runs reach at
-# most the suite's grandparent. With claude as its parent or grandparent the suite runs itself one level down, again
-# until neither is (two hops straight under claude), so no hook here finds a real session.
-SUITE_GP=$(ps -o ppid= -p "$PPID" 2>/dev/null) || SUITE_GP=""
-for SUITE_UP in "$(ps -o args= -p "$PPID" 2>/dev/null)" "$(ps -o args= -p "${SUITE_GP// /}" 2>/dev/null)"; do
-  case $SUITE_UP in claude|claude\ *|*/claude|*/claude\ *|*/claude/versions/*) bash "$0" "$@"; exit;; esac
-done
-unset SUITE_GP SUITE_UP
+# No backend starts by itself here (setup, the TUI and a manager's hooks would each start a keeper): the blocks that test
+# those starts unset this for the one call.
+export CLAUDE_DISCORD_NO_AUTOSTART=1
 S=${1:?script path}; S=$(cd "$(dirname "$S")" && pwd)/$(basename "$S")   # absolute: the test cd-s into a throwaway project
 D=$(cd "$(dirname "$S")/.." && pwd -P)   # repo root = plugin root (bin/claude-discord); -P matches the hooks' plugin_root
 
@@ -3844,142 +3838,15 @@ n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; r
 mstop; touch "$PC/monitor/monitor.sh"; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep" "$HOME/monitor.good"
 echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd by the same process once it held still for a pass, lock kept, nothing posted again; a future mtime restarts it once, not every tick; one that does not parse is skipped, logged once; a lock file replaced under it ends it at the next tick, writing state.json only when the file is empty"
 
-# The session a SessionStart hook belongs to: $CLAUDE_PID when its argv[0] is .../claude or under .../claude/versions/
-# and its argv[1] is not daemon, else the nearest such ancestor, three levels at most (claude -> sh -c "<shell prefix>
-# ..." -> sh -c -> hook). Process chains are built with perl's $0 (what ps shows), outermost first; the innermost runs
-# session_pid in a bash child and prints the title of what it found.
-FK="$HOME/fk"
-chain() {
-  perl -e '
-    my ($lib, @titles) = @ARGV;
-    for my $t (@titles) { my $pid = fork(); if ($pid) { waitpid($pid, 0); exit 0; } $0 = $t; }
-    system("bash", "-c", ". \"\$1\"; p=\$(session_pid); t=none; [ -z \"\$p\" ] || IFS= read -r -d \"\" t < /proc/\$p/cmdline; echo \"\$t\"", "x", $lib);' "$D/hooks/lib/discord.sh" "$@"
-}
-[ "$(chain "bash $FK/claude-proxied $FK/claude/versions/9.9.9" "sh -c hook")" = none ] || { echo "FAIL: a bash wrapper whose later argument is a claude path is no session"; exit 1; }
-[ "$(chain "$FK/bin/claude daemon" "$FK/claude/versions/9.9.9")" = "$FK/claude/versions/9.9.9" ] || { echo "FAIL: the nearest claude process, not the daemon above it: $(chain "$FK/bin/claude daemon" "$FK/claude/versions/9.9.9")"; exit 1; }
-[ "$(chain "$FK/bin/claude daemon")" = none ] || { echo "FAIL: claude daemon is never the session"; exit 1; }
-[ "$(chain "claude --name x" "sh -c hook")" = "claude --name x" ] || { echo "FAIL: a foreground claude through sh -c is the session"; exit 1; }
-[ "$(chain "$FK/claude/versions/9.9.9" "sh -c prefix" "sh -c hook")" = "$FK/claude/versions/9.9.9" ] || { echo "FAIL: a claude three levels up (a shell prefix's two sh -c) is the session: $(chain "$FK/claude/versions/9.9.9" "sh -c prefix" "sh -c hook")"; exit 1; }
-[ "$(chain "$FK/claude/versions/9.9.9" "sh -c a" "sh -c b" "sh -c c")" = none ] || { echo "FAIL: a claude four levels up is not this hook's session"; exit 1; }
-# CLAUDE_PID: real argv here, not perl titles (a title is one /proc field, spaces and all). The stand-in claude is a sleep
-# exec'd as .../claude/versions/7.7.7; the wrapper a bash running .../claude-proxied .../claude/versions/7.7.7 (it traps
-# TERM and takes its sleep down, so the kill at exit leaves nothing). Each is waited for until /proc shows its argv.
-mkdir -p "$FK"; printf '%s\n' 'trap "kill \$! 2>/dev/null; exit" TERM; sleep 30 & wait' > "$FK/claude-proxied"
-bash -c 'exec -a "$0" /bin/sleep 30' "$FK/claude/versions/7.7.7" & CP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $CP"
-bash "$FK/claude-proxied" "$FK/claude/versions/7.7.7" & WP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $WP"
-argv01() { local a="" b=""; { IFS= read -rd '' a; IFS= read -rd '' b; } 2>/dev/null < "/proc/$1/cmdline"; printf '%s %s' "$a" "$b"; }
-n=0; while { [ "$(argv01 "$CP")" != "$FK/claude/versions/7.7.7 30" ] || [ "$(argv01 "$WP")" != "bash $FK/claude-proxied" ]; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
-export CLAUDE_PID=$CP
-[ "$(chain "sh -c hook")" = "$FK/claude/versions/7.7.7" ] || { echo "FAIL: CLAUDE_PID naming a claude process is the session, no claude within reach: $(chain "sh -c hook")"; exit 1; }
-CLAUDE_PID=$WP
-[ "$(chain "sh -c hook")" = none ] || { echo "FAIL: CLAUDE_PID naming a claude-proxied bash wrapper is ignored: $(chain "sh -c hook")"; exit 1; }
-CLAUDE_PID=$$
-[ "$(chain "$FK/claude/versions/8.8.8" "sh -c hook")" = "$FK/claude/versions/8.8.8" ] || { echo "FAIL: CLAUDE_PID naming no claude is ignored, the walk decides: $(chain "$FK/claude/versions/8.8.8" "sh -c hook")"; exit 1; }
-unset CLAUDE_PID; kill "$CP" "$WP" 2>/dev/null || :; wait "$CP" "$WP" 2>/dev/null || :
-# No session found: ensure_monitor says so in the bot's health.log (and starts nothing), not in silence.
-mkdir -p "$HOME/hl"
-bash -c '. "$1"; plugin_root=$2 DISCORD_STATE_DIR=$3 bot_project=$3 bot_name=mgr; ensure_monitor' x "$D/hooks/lib/discord.sh" "$D" "$HOME/hl"
-grep -q ' x: no claude session process found ' "$HOME/hl/health.log" 2>/dev/null || { echo "FAIL: ensure_monitor with no session must log it to health.log: $(cat "$HOME/hl/health.log" 2>&1)"; exit 1; }
-rm -rf "$HOME/hl"
-echo "ok: session_pid takes CLAUDE_PID when it is a claude process, else the nearest claude within three levels, never claude daemon or a wrapper with claude in a later argument; no session found is logged in health.log"
-
-# The manager session's SessionStart (any source; compact here, which runs no patch) registers the session, its
-# nearest claude ancestor, as a holder and ensures the monitor, detached; the monitor ends with that session. The
-# session is a perl process titled .../claude/versions/9.9.9 that runs the hook as its child. mgr is a dev-manager
-# with a ledger (h1 and local laptop, from the block above).
-printf '{"session_id":"sMon","source":"compact"}' > "$HOME/ss.json"
-mstate '.hosts = "x"'   # this monitor's reducer fails every pass (a state whose hosts is no object): below
-want=$(( $(starts) + 1 ))
-perl -e '$0 = shift @ARGV; open(STDIN, "<", shift @ARGV) or die; system(@ARGV); sleep 30' "$FK/claude/versions/9.9.9" "$HOME/ss.json" \
-  env CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$PC/hooks/turn/on-session-start" >/dev/null 2>&1 &
-HPID=$!; KILL_AT_EXIT="$KILL_AT_EXIT $HPID"
-wait_log "$want" 'Z start$'
-[ -f "$MB/holders/session-$HPID" ] || { echo "FAIL: the manager's SessionStart must register its session as a holder: $(ls "$MB/holders")"; exit 1; }
-# A reducer that fails is said in state.json, for the TUI's red bar, not only in monitor.log (a pass that goes through
-# clears it: the cadence block above).
-n=0; while ! jq -e '.monitor.error | startswith("the reducer rejected its input at ")' "$MB/state.json" >/dev/null 2>&1 && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
-[ "$n" -lt 100 ] || { echo "FAIL: a failed reducer must write state.json with monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
-# Killed without its trap (kill -9 here; an OOM or a self-update that broke end the same way), the monitor leaves its pid
-# in state.json. The manager's next prompt (on-prompt, under the same kind of session) sees that pid dead, with no fork,
-# and ensures the monitor again, detached, as SessionStart does.
-mon_alive() { bash -c '. "$1"; bot_name=mgr; monitor_alive' x "$D/hooks/lib/discord.sh"; }
-mon_alive || { echo "FAIL: monitor_alive must see the running monitor: $(head -c 200 "$MB/state.json")"; exit 1; }
-printf '{"session_id":"sMon","prompt":"hi"}' > "$HOME/up.json"
-mp=$(mpid); want=$(( $(starts) + 1 )); kill -9 "$mp"
-n=0; while running "$mp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
-! mon_alive || { echo "FAIL: monitor_alive must see a monitor killed without its trap as dead"; exit 1; }
-perl -e '$0 = shift @ARGV; open(STDIN, "<", shift @ARGV) or die; system(@ARGV); sleep 30' "$FK/claude/versions/9.9.9" "$HOME/up.json" \
-  env CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$PC/hooks/turn/on-prompt" >/dev/null 2>&1 &
-UP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $UP"
-wait_log "$want" 'Z start$'
-[ "$(mpid)" != "$mp" ] && [ -f "$MB/holders/session-$UP" ] ||
-  { echo "FAIL: the manager's next prompt must start a monitor killed without its trap again, its session the holder: $(ls "$MB/holders")"; exit 1; }
-kill "$UP" 2>/dev/null || :; wait "$UP" 2>/dev/null || :
-mstop; rm -f "$HOME/ss.json" "$HOME/up.json"
-# A live pid that is no monitor (reused by another program) is dead to it too.
-mstate --argjson p "$$" '.monitor.pid = $p'; ! mon_alive || { echo "FAIL: a live pid that runs no monitor.sh is no monitor"; exit 1; }
-# Nor is a live monitor.sh of another bot, or the same program run by another command line: the pid has to be
-# `bash .../monitor/monitor.sh <wrapper> --locked mgr`. Decoys under a monitor/monitor.sh of their own (a sleep); each is
-# waited for until ps shows its command line, so a decoy still in bash's fork before its exec cannot pass for the answer.
-# A decoy's sleep is a child of its bash: the TERM trap takes it down too, or it outlives the kill below (ppid 1) and
-# holds the suite's stdout for 30 s. The trap is set before the fork, so a TERM at any moment leaves no sleep behind.
-mkdir -p "$HOME/decoy/monitor"; printf '%s\n' 'trap "kill \$! 2>/dev/null; exit" TERM; sleep 30 & wait' > "$HOME/decoy/monitor/monitor.sh"
-decoy() {  # $@ = the arguments after monitor.sh; the pid in state.json
-  bash "$HOME/decoy/monitor/monitor.sh" "$@" & DP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $DP"
-  n=0; while [[ $(ps -p "$DP" -o command= 2>/dev/null) != *monitor.sh* ]] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
-  mstate --argjson p "$DP" '.monitor.pid = $p'
-}
-decoy "$S" --locked mgr; mon_alive || { echo "FAIL: monitor_alive must see a command line shaped as the monitor's (control for the cases below)"; exit 1; }
-kill "$DP" 2>/dev/null || :; wait "$DP" 2>/dev/null || :
-decoy "$S" --locked other; ! mon_alive || { echo "FAIL: the monitor of another bot is no monitor of this one"; exit 1; }
-kill "$DP" 2>/dev/null || :; wait "$DP" 2>/dev/null || :
-decoy "$S" --ensure mgr; ! mon_alive || { echo "FAIL: a monitor.sh that is not the locked monitor (the --ensure front, which ends at once) is no monitor"; exit 1; }
-kill "$DP" 2>/dev/null || :; wait "$DP" 2>/dev/null || :
-rm -rf "$HOME/decoy"
-echo "ok: a dev-manager's SessionStart registers its session (the nearest claude process) as a holder and starts the monitor, which exits with that session; its next prompt starts a monitor killed without its trap again; a failed reducer is written to state.json"
-
-# And it leaves nothing on the hook's pipe: against a plugin root copy whose claude-discord takes 3 s, the caller (Claude
-# Code reads the hook's stdout to EOF; here perl does) sees EOF at once, the output is the JSON line alone, and the stub
-# was given the perl process, the session, as holder. Copies, not links: plugin_root is cd -P of the hook's own place.
-FX="$HOME/fxroot"; mkdir -p "$FX/bin" "$FX/hooks/turn" "$FX/hooks/lib"; cp "$D/hooks/turn/on-session-start" "$FX/hooks/turn/"; cp "$D/hooks/lib/discord.sh" "$FX/hooks/lib/"
-printf '#!/bin/sh\nprintf "%%s %%s\\n" "$PWD" "$*" > "$HOME/fx.rec"\necho $$ > "$HOME/fx.pid"\nexec sleep 3\n' > "$FX/bin/claude-discord"; chmod +x "$FX/bin/claude-discord"
-FXR=$(cd -P "$FX" && pwd -P); rm -f "$HOME/fx.rec" "$HOME/fx.pid"
-printf '{"session_id":"sFx","source":"compact"}' > "$HOME/ss.json"
-fxout=$(perl -e 'use Time::HiRes qw(time); $0 = shift; open(STDIN, "<", shift) or die; my $t = time; my $pid = open(P, "-|"); die unless defined $pid;
-    if (!$pid) { open(STDERR, ">&", \*STDOUT); exec @ARGV; die } local $/; my $o = <P>; printf "%.3f %d\n%s", time - $t, $$, $o;' \
-  "$FK/claude/versions/9.9.9" "$HOME/ss.json" env CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-session-start")
-read -r fxel fxpp <<<"$(printf '%s\n' "$fxout" | head -n 1)"
-n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
-[ -s "$HOME/fx.pid" ] && kill "$(<"$HOME/fx.pid")" 2>/dev/null || :   # the stub's 1 s sleep (exec'd, same pid): not left behind
-jq -ne --arg e "$fxel" '($e | tonumber) < 1.5' >/dev/null || { echo "FAIL: the SessionStart hook must return at once while --ensure runs (the pipe closed after $fxel s)"; exit 1; }
-[ "$(printf '%s\n' "$fxout" | tail -n +2)" = "$(jq -nc --arg c "CLAUDE_DISCORD_TOOLS=$FXR/tools" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}')" ] ||
-  { echo "FAIL: the SessionStart hook must print its context line and nothing else: $fxout"; exit 1; }
-[ "$(<"$HOME/fx.rec")" = "$MP monitor --ensure mgr --holder session $fxpp" ] || { echo "FAIL: --ensure must be called from the project with the session as holder (perl $fxpp): $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
-# And the prompt hook: a state.json naming a live pid that is no monitor (a sleep here, a pid another program got after the
-# monitor was killed without its trap) is a dead monitor to it: --ensure runs again, with the session as holder.
-rm -f "$HOME/fx.rec" "$HOME/fx.pid"; cp "$D/hooks/turn/on-prompt" "$FX/hooks/turn/"
-/bin/sleep 30 & SP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $SP"; mstate --argjson p "$SP" '.monitor.pid = $p'
-printf '{"session_id":"sFx","prompt":"hi"}' > "$HOME/up.json"
-fxout=$(perl -e '$0 = shift; open(STDIN, "<", shift) or die; my $pid = open(P, "-|"); die unless defined $pid;
-    if (!$pid) { open(STDERR, ">&", \*STDOUT); exec @ARGV; die } local $/; my $o = <P>; printf "%d\n%s", $$, $o;' \
-  "$FK/claude/versions/9.9.9" "$HOME/up.json" env CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt")
-fxpp=${fxout%%$'\n'*}
-n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
-[ -s "$HOME/fx.pid" ] && kill "$(<"$HOME/fx.pid")" 2>/dev/null || :
-[ -s "$HOME/fx.pid" ] && [ "$(<"$HOME/fx.rec")" = "$MP monitor --ensure mgr --holder session $fxpp" ] ||
-  { echo "FAIL: a prompt with a live pid that is no monitor in state.json must ensure the monitor again (perl $fxpp): $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
-kill "$SP" 2>/dev/null || :; wait "$SP" 2>/dev/null || :
-rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json" "$HOME/up.json"
-echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while --ensure is still running"
-
 # The keeper (monitor --keep): a holder of kind keeper that runs --ensure every interval, so the monitor needs no TUI or
 # session. It refuses a bot with no ledger or that is not a dev-manager (exit 1), and a lock held by a monitor this side
 # cannot see (a home shared with a container: here a lock whose pid is no monitor); a second keeper exits 0; a monitor
-# killed without its trap is back within an interval; TERM removes its record; --stop takes keeper and monitor down,
-# and says so when nothing runs.
+# killed without its trap is back within an interval; TERM removes its record (the monitor stopped meanwhile, so it
+# cannot prune it first); --stop takes keeper and monitor down and leaves the `stopped` marker, which --keep, --ensure
+# and setup respect and only --start clears; the keeper runs a changed monitor.sh (same pid); a ledger removed ends it.
 export CLAUDE_DISCORD_MONITOR_PASS=60 CLAUDE_DISCORD_KEEP_INTERVAL=0.05
 printf 'local\n' > "$MR/mgr/hosts"; mdoc lambda 0 r1:ok > "$MON/local.out"; rm -f "$MON/local.sleep" "$MON/local.rc"
-mstate '.hosts = {} | .bots = {} | .alerts = []'; echo dev-manager > "$MR/mgr/mode"
+mstate '.hosts = {} | .bots = {} | .alerts = []'; echo dev-manager > "$MR/mgr/mode"; rm -f "$MB"/holders/*   # dead holders the last block left
 rc=0; out=$(cd "$P" && bash "$S" monitor --keep alpha 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'no hosts ledger' <<<"$out" || { echo "FAIL: --keep for a bot without a ledger exits 1 saying so (rc=$rc): $out"; exit 1; }
 echo none > "$MR/mgr/mode"; rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?; echo dev-manager > "$MR/mgr/mode"
@@ -4000,10 +3867,11 @@ mp=$(mpid); want=$(( $(starts) + 1 )); kill -9 "$mp"; wait_log "$want" 'Z start$
 rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?
 [ "$rc" = 0 ] && grep -q "a keeper already runs for mgr (pid $KP)" <<<"$out" && [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] ||
   { echo "FAIL: a second --keep exits 0 saying one runs, and registers nothing (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
-mp=$(mpid); kill -TERM "$KP"; rc=0; wait "$KP" || rc=$?
+n=0; mp=""; while { [ -z "$mp" ] || [ "$(<"$MB/lock")" != "$mp" ] || ! running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); mp=$(mpid); done
+kill -STOP "$mp"; kill -TERM "$KP"; rc=0; wait "$KP" || rc=$?; rec=$(ls "$MB/holders"); kill -CONT "$mp"
 n=0; while running "$mp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
-[ "$rc" = 0 ] && [ ! -e "$MB/holders/keeper-$KP" ] && ! running "$mp" ||
-  { echo "FAIL: a TERM ends the keeper (rc 0) and removes its record, and the monitor ends with its last holder (rc=$rc): $(ls "$MB/holders")"; exit 1; }
+[ "$rc" = 0 ] && [ -z "$rec" ] && ! running "$mp" ||
+  { echo "FAIL: a TERM ends the keeper (rc 0) and removes its record, and the monitor ends with its last holder (rc=$rc): '$rec'"; exit 1; }
 # --stop with a TUI holder too, so the monitor does not leave on its own once the keeper is gone: --stop ends it.
 want=$(( $(starts) + 1 ))
 (cd "$MP" && exec bash "$S" monitor --keep mgr) >> "$HOME/keep.out" 2>&1 & KP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $KP"
@@ -4013,11 +3881,122 @@ n=0; mp=""; while { [ -z "$mp" ] || [ "$(<"$MB/lock")" != "$mp" ] || ! running "
 out=$(cd "$MP" && bash "$S" monitor --stop mgr 2>&1); rc=0; wait "$KP" || rc=$?
 n=0; while running "$mp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
 kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
-[ "$rc" = 0 ] && ! running "$mp" && [ -z "$(ls "$MB/holders")" ] && grep -q "stopped keeper $KP$" <<<"$out" && grep -q "stopped monitor $mp " <<<"$out" ||
-  { echo "FAIL: --stop must end the keeper and the monitor and leave no holder record (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
+[ "$rc" = 0 ] && ! running "$mp" && [ -z "$(ls "$MB/holders")" ] && grep -q "stopped keeper $KP$" <<<"$out" && grep -q "stopped monitor $mp$" <<<"$out" &&
+  [ -e "$MB/stopped" ] && jq -e '.monitor.stopped_by_user == true' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: --stop must end the keeper and the monitor, leave no holder record, and mark the bot stopped by its owner (rc=$rc): $out $(ls "$MB/holders") $(jq -c .monitor "$MB/state.json")"; exit 1; }
 out=$(cd "$MP" && bash "$S" monitor --stop mgr 2>&1) && grep -q 'no keeper or monitor of mgr runs here' <<<"$out" || { echo "FAIL: --stop with nothing running exits 0 saying so: $out"; exit 1; }
+# Stopped by its owner: --keep starts nothing (exit 0, says how to start), --ensure is refused (the TUI's red bar), and
+# setup starts nothing; --start clears the marker and starts the keeper, detached, in one line.
+rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?
+rc2=0; out2=$(cd "$MP" && bash "$S" monitor --ensure mgr 2>&1) || rc2=$?
+out3=$(printf 'dev-manager\n\n\n' | env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" setup mgr --mode 2>&1)
+[ "$rc" = 0 ] && [ "$rc2" = 1 ] && grep -q 'was stopped by you (monitor --stop); start it again with: claude-discord monitor --start mgr' <<<"$out$out2" &&
+  grep -q 'was stopped by you' <<<"$out3" && [ -z "$(ls "$MB/holders")" ] ||
+  { echo "FAIL: after --stop, --keep (rc=$rc), --ensure (rc=$rc2) and setup must start nothing and say so: $out / $out2 / $out3 $(ls "$MB/holders")"; exit 1; }
+want=$(( $(starts) + 1 ))
+out=$(cd "$MP" && bash "$S" monitor --start mgr 2>&1)
+KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
+wait_log "$want" 'Z start$'
+[ "$out" = "claude-discord: started the backend of mgr (a keeper and the monitor, detached); stop it with: claude-discord monitor --stop mgr" ] &&
+  [ -n "$KP" ] && [ ! -e "$MB/stopped" ] && jq -e '.monitor | has("stopped_by_user") | not' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: --start clears the marker and starts the keeper, saying so in one line: '$out' '$KP' $(jq -c .monitor "$MB/state.json")"; exit 1; }
+# claude-discord update changed monitor.sh: the keeper goes on as the new file once it held still for an interval, the
+# same process (its record stays valid). Then the ledger removed: the keeper leaves, its record with it.
+cp "$PC/monitor/monitor.sh" "$HOME/monitor.keep"; echo '# probe' >> "$PC/monitor/monitor.sh"
+wait_log 1 "keeper $KP restart: monitor\.sh changed\$"; wait_log 2 " keeper $KP start "
+running "$KP" && [ -e "$MB/holders/keeper-$KP" ] || { echo "FAIL: the keeper must run a changed monitor.sh as the same process: $(command grep " keeper $KP " "$MB/monitor.log")"; exit 1; }
+cp "$HOME/monitor.keep" "$PC/monitor/monitor.sh"; rm -f "$HOME/monitor.keep"; wait_log 2 "keeper $KP restart: monitor\.sh changed\$"
+mv "$MR/mgr/hosts" "$MR/mgr/hosts.off"
+n=0; while running "$KP" && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
+mv "$MR/mgr/hosts.off" "$MR/mgr/hosts"
+! running "$KP" && [ ! -e "$MB/holders/keeper-$KP" ] || { echo "FAIL: a keeper whose ledger is gone must leave, its record with it"; exit 1; }
+# setup in dev-manager mode starts the backend when none runs, and says so in one line.
+out=$(printf 'dev-manager\n\n\n' | env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" setup mgr --mode 2>&1)
+KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
+[ -n "$KP" ] && [ "$(grep -c 'started the backend of mgr' <<<"$out")" = 1 ] && grep -q 'stop it with: claude-discord monitor --stop mgr' <<<"$out" ||
+  { echo "FAIL: setup of a dev-manager with a ledger must start the backend and say so once: '$KP' $out"; exit 1; }
+(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null); rm -f "$MB/stopped"
+n=0; while running "$KP" && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
 unset CLAUDE_DISCORD_KEEP_INTERVAL; rm -f "$HOME/keep.out"
-echo "ok: monitor --keep refuses no ledger, a non-manager and a lock held by a monitor this side cannot see; registers a keeper holder with its start time, brings a killed monitor back, is one per bot, ends on TERM with its record; --stop ends keeper and monitor"
+echo "ok: monitor --keep refuses no ledger, a non-manager and a lock held by a monitor this side cannot see; registers a keeper holder with its start time, brings a killed monitor back, is one per bot, ends on TERM with its record, runs a changed monitor.sh as the same process, leaves with its ledger; --stop ends keeper and monitor and marks the bot stopped (--keep, --ensure and setup start nothing) until --start; setup starts the backend"
+
+# A dev-manager's SessionStart (any source; compact here) starts its backend when none runs: the keeper, detached, in a
+# session of its own; the session itself is no holder. keeper_alive (the prompt's check, no fork on Linux) sees it; its
+# next prompt with the keeper killed starts one again, and after monitor --stop starts nothing. A record whose pid runs
+# another bot's keeper, the monitor or no monitor.sh at all is no keeper.
+export CLAUDE_DISCORD_KEEP_INTERVAL=0.05
+printf '{"session_id":"sMon","source":"compact"}' > "$HOME/ss.json"; printf '{"session_id":"sMon","prompt":"hi"}' > "$HOME/up.json"
+mstate '.hosts = "x"'   # this monitor's reducer fails every pass (a state whose hosts is no object): below
+hook() { env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$PC/hooks/turn/$1" < "$HOME/$2" >/dev/null 2>&1; }
+newkeeper() {  # $1 = a keeper pid that does not count; sets KP to the one whose record appears
+  KP=""; local n=0 f
+  while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || [ "${f##*-}" = "$1" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
+}
+want=$(( $(starts) + 1 )); hook on-session-start ss.json; newkeeper ""; wait_log "$want" 'Z start$'
+[ -n "$KP" ] && [ "$(ps -o sid= -p "$KP" | tr -d ' ')" = "$KP" ] && ! ls "$MB/holders" | grep -q '^session-' ||
+  { echo "FAIL: the manager's SessionStart must start a detached keeper and register no session: '$KP' $(ls "$MB/holders")"; exit 1; }
+# A reducer that fails is said in state.json, for the TUI's red bar, not only in monitor.log (a pass that goes through
+# clears it: the cadence block above).
+n=0; while ! jq -e '.monitor.error | startswith("the reducer rejected its input at ")' "$MB/state.json" >/dev/null 2>&1 && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+[ "$n" -lt 100 ] || { echo "FAIL: a failed reducer must write state.json with monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
+ka() { bash -c '. "$1"; bot_name=mgr; keeper_alive' x "$D/hooks/lib/discord.sh"; }
+ka || { echo "FAIL: keeper_alive must see the running keeper $KP"; exit 1; }
+old=$KP; kill -9 "$old"; n=0; while running "$old" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+! ka || { echo "FAIL: keeper_alive must see a keeper killed with -9 as dead"; exit 1; }
+hook on-prompt up.json; newkeeper "$old"
+[ -n "$KP" ] || { echo "FAIL: the manager's next prompt must start a keeper killed with -9 again: $(ls "$MB/holders")"; exit 1; }
+(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null)
+ka || { echo "FAIL: keeper_alive must count a backend stopped by its owner as nothing to start"; exit 1; }
+hook on-prompt up.json; nap 0.1; [ -z "$(ls "$MB/holders")" ] || { echo "FAIL: after monitor --stop a prompt starts nothing: $(ls "$MB/holders")"; exit 1; }
+rm -f "$MB/stopped" "$HOME/ss.json" "$HOME/up.json"; unset CLAUDE_DISCORD_KEEP_INTERVAL
+n=0; while running "$KP" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+# Decoys under a monitor/monitor.sh of their own (a sleep), each waited for until ps shows its command line. A decoy's
+# sleep is a child of its bash: the TERM trap takes it down too, set before the fork.
+mkdir -p "$HOME/decoy/monitor"; printf '%s\n' 'trap "kill \$! 2>/dev/null; exit" TERM; sleep 30 & wait' > "$HOME/decoy/monitor/monitor.sh"
+decoy() {  # $@ = the arguments after monitor.sh; a keeper record names the decoy
+  bash "$HOME/decoy/monitor/monitor.sh" "$@" & DP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $DP"
+  n=0; while [[ $(ps -p "$DP" -o command= 2>/dev/null) != *monitor.sh* ]] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+  : > "$MB/holders/keeper-$DP"
+}
+undecoy() { kill "$DP" 2>/dev/null || :; wait "$DP" 2>/dev/null || :; rm -f "$MB/holders/keeper-$DP"; }
+decoy "$S" --keep mgr; ka || { echo "FAIL: keeper_alive must see a command line shaped as the keeper's (control for the cases below)"; exit 1; }; undecoy
+decoy "$S" --keep other; ! ka || { echo "FAIL: the keeper of another bot is no keeper of this one"; exit 1; }; undecoy
+decoy "$S" --locked mgr; ! ka || { echo "FAIL: the monitor is no keeper"; exit 1; }; undecoy
+/bin/sleep 30 & DP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $DP"; : > "$MB/holders/keeper-$DP"
+! ka || { echo "FAIL: a live pid that runs no monitor.sh is no keeper"; exit 1; }; undecoy
+rm -rf "$HOME/decoy"
+echo "ok: a dev-manager's SessionStart starts its backend's keeper detached (no session holder); its next prompt starts a keeper killed with -9 again and nothing after monitor --stop; keeper_alive tells the keeper from another bot's, the monitor and a reused pid; a failed reducer is written to state.json"
+
+# And it leaves nothing on the hook's pipe: against a plugin root copy whose claude-discord takes 3 s, the caller (Claude
+# Code reads the hook's stdout to EOF; here perl does) sees EOF at once, the output is the JSON line alone, and the stub
+# was asked for the keeper from the project. Copies, not links: plugin_root is cd -P of the hook's own place.
+FX="$HOME/fxroot"; mkdir -p "$FX/bin" "$FX/hooks/turn" "$FX/hooks/lib"; cp "$D/hooks/turn/on-session-start" "$FX/hooks/turn/"; cp "$D/hooks/lib/discord.sh" "$FX/hooks/lib/"
+printf '#!/bin/sh\nprintf "%%s %%s\\n" "$PWD" "$*" > "$HOME/fx.rec"\necho $$ > "$HOME/fx.pid"\nexec sleep 3\n' > "$FX/bin/claude-discord"; chmod +x "$FX/bin/claude-discord"
+FXR=$(cd -P "$FX" && pwd -P); rm -f "$HOME/fx.rec" "$HOME/fx.pid"
+printf '{"session_id":"sFx","source":"compact"}' > "$HOME/ss.json"
+fxout=$(perl -e 'use Time::HiRes qw(time); open(STDIN, "<", shift) or die; my $t = time; my $pid = open(P, "-|"); die unless defined $pid;
+    if (!$pid) { open(STDERR, ">&", \*STDOUT); exec @ARGV; die } local $/; my $o = <P>; printf "%.3f\n%s", time - $t, $o;' \
+  "$HOME/ss.json" env CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-session-start")
+fxel=$(printf '%s\n' "$fxout" | head -n 1)
+n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+[ -s "$HOME/fx.pid" ] && kill "$(<"$HOME/fx.pid")" 2>/dev/null || :   # the stub's sleep (exec'd, same pid): not left behind
+jq -ne --arg e "$fxel" '($e | tonumber) < 1.5' >/dev/null || { echo "FAIL: the SessionStart hook must return at once while the keeper's start runs (the pipe closed after $fxel s)"; exit 1; }
+[ "$(printf '%s\n' "$fxout" | tail -n +2)" = "$(jq -nc --arg c "CLAUDE_DISCORD_TOOLS=$FXR/tools" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}')" ] ||
+  { echo "FAIL: the SessionStart hook must print its context line and nothing else: $fxout"; exit 1; }
+[ "$(<"$HOME/fx.rec")" = "$MP monitor --keep mgr --detach" ] || { echo "FAIL: the keeper must be started from the project, detached: $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
+# And the prompt hook: a keeper record naming a live pid that is no keeper (a sleep here, a pid another program got after
+# the keeper was killed) is no keeper to it: the keeper is started again.
+rm -f "$HOME/fx.rec" "$HOME/fx.pid"; cp "$D/hooks/turn/on-prompt" "$FX/hooks/turn/"
+/bin/sleep 30 & SP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $SP"; : > "$MB/holders/keeper-$SP"
+printf '{"session_id":"sFx","prompt":"hi"}' > "$HOME/up.json"
+env CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1
+n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+[ -s "$HOME/fx.pid" ] && kill "$(<"$HOME/fx.pid")" 2>/dev/null || :
+[ -s "$HOME/fx.pid" ] && [ "$(<"$HOME/fx.rec")" = "$MP monitor --keep mgr --detach" ] ||
+  { echo "FAIL: a prompt with a keeper record naming a live pid that is no keeper must start the keeper: $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
+kill "$SP" 2>/dev/null || :; wait "$SP" 2>/dev/null || :
+rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json" "$HOME/up.json" "$MB/holders/keeper-$SP"
+echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while the keeper's start is still running"
 
 # claude-discord tui: the project's one dev-manager bot with a ledger unless named; it hands the bot, the monitor's
 # state dir and the wrapper to the TUI script through `uv run --script`. uv is needed for this verb only and its
@@ -4025,12 +4004,12 @@ echo "ok: monitor --keep refuses no ledger, a non-manager and a lock held by a m
 echo dev-manager > "$MR/mgr/mode"
 printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "$HOME/uv.args"; pwd -P > "$HOME/uv.cwd"\n' > "$HOME/bin/uv"; chmod +x "$HOME/bin/uv"
 mkdir -p "$MP/sub/dir"   # from a subdirectory: the project is found above it
-(cd "$MP/sub/dir" && bash "$S" tui 2>/dev/null) || { echo "FAIL: tui from a subdirectory of the project must find the project above it"; exit 1; }
+(cd "$MP/sub/dir" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui 2>/dev/null) || { echo "FAIL: tui from a subdirectory of the project must find the project above it"; exit 1; }
 [ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord" ] || { echo "FAIL: tui must run the script through uv with the bot, the state dir and the wrapper: $(cat "$HOME/uv.args" 2>&1)"; exit 1; }
 # It started a keeper, detached (a session of its own), so the monitor outlives the TUI; the next tui starts none.
 n=0; KP=""; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
 [ -n "$KP" ] && [ "$(ps -o sid= -p "$KP" | tr -d ' ')" = "$KP" ] || { echo "FAIL: tui must start a keeper in a session of its own: '$KP' $(ls "$MB/holders")"; exit 1; }
-(cd "$MP" && bash "$S" tui 2>/dev/null) || { echo "FAIL: a second tui must run"; exit 1; }
+(cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui 2>/dev/null) || { echo "FAIL: a second tui must run"; exit 1; }
 [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] && grep -q "a keeper already runs for mgr (pid $KP)" "$MB/monitor.log" ||
   { echo "FAIL: tui must not start a second keeper while one lives: $(ls "$MB/holders")"; exit 1; }
 rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1) || rc=$?
@@ -4069,6 +4048,10 @@ printf '%s\n' "$PFB" > "$HOME/.claude-discord/records/projects"
 mp=$(mpid); (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null)
 n=0; while { running "$KP" || running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
 ! running "$KP" && ! running "$mp" || { echo "FAIL: --stop must end the keeper tui started and its monitor"; exit 1; }
+# Stopped by its owner: a tui with no terminal to ask at starts nothing (it shows the stop in its bar).
+(cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui </dev/null 2>/dev/null); nap 0.1
+[ -z "$(ls "$MB/holders")" ] || { echo "FAIL: tui must not start a backend its owner stopped without a yes: $(ls "$MB/holders")"; exit 1; }
+rm -f "$MB/stopped"
 rm -rf "$HOME/bin/uv" "$HOME/uv.args" "$HOME/uv.cwd" "$TP" "$MP/sub" "$NP" "$HOME/tuiproj2"
 echo "ok: tui runs the script through uv for the project's one manager bot (or the named one, from a subdirectory too), says when uv is missing, refuses a bot without a ledger, and asks for the name when it cannot tell, and outside a project picks among the recorded managers (cwd = its project); it starts a detached keeper when none lives, and none when one does"
 

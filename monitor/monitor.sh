@@ -6,24 +6,28 @@
 # one message per state change to #bot-health-check with the manager bot's
 # token. It never restarts or stops anything.
 #
-# Run through the wrapper:
-#   claude-discord monitor [--ensure] <bot> [--holder tui|session|keeper <pid>]
+# Run through the wrapper. The backend of a manager bot is a keeper and the monitor it keeps up; it runs until
+# `claude-discord monitor --stop <bot>`, whoever started it.
+#   claude-discord monitor [--ensure] <bot> [--holder tui|keeper <pid>]
 # registers the holder (when given), then starts the monitor detached unless
-# one already holds the lock. The monitor lives while a holder lives (the TUI,
-# the manager session, a keeper) and exits within one tick (30 s) of the last one.
+# one already holds the lock. The monitor lives while a holder lives (a keeper,
+# an open TUI) and exits within one tick (30 s) of the last one.
 #   claude-discord monitor --keep <bot> [--detach]
 # the keeper: a holder of its own that runs the same --ensure every 60 s, so a
-# dead monitor comes back with no TUI or session open. Foreground (tmux, a
-# container entrypoint, systemd); --detach (the TUI's start) checks, then runs
-# it in its own session and returns. One per bot. No OS scheduler, ever.
-#   claude-discord monitor --stop <bot>
-# TERMs the bot's keepers and its monitor; a TUI or session still open starts it again.
+# dead monitor comes back with nothing else open. Foreground (tmux, a container
+# entrypoint, systemd); --detach (setup, the TUI, a manager session that finds
+# none) checks, then runs it in its own session and returns. One per bot. It
+# runs the new monitor.sh once `claude-discord update` changed it. No OS scheduler, ever.
+#   claude-discord monitor --stop <bot>     TERMs the keepers and the monitor and leaves the `stopped` marker:
+#                                           nothing starts them again but
+#   claude-discord monitor --start <bot>    clears the marker and starts the keeper detached.
 #
 # Everything it keeps is under ~/.claude-discord/records/monitor/<bot>/:
 #   lock                       the flock target (fd 9 of the monitor), holding its pid
 #   state.json (+ .tmp)        what the TUI shows; `posted` makes a restart quiet
 #   monitor.log, monitor.log.1 256 KiB each at most
 #   holders/<kind>-<pid>       "<pid> <start time> <kind>"
+#   stopped                    `--stop` was run: no automatic start until `--start`
 #   pass.out                   one host's answer, only during a pass
 #   post.out                   one POST's answer and status, only during a pass
 # Nothing in /tmp: no mktemp and no here-document or here-string anywhere in
@@ -32,14 +36,15 @@
 set -u
 self=${1:?wrapper path}; shift
 alert_channel=1558283274487341137   # #bot-health-check: both owners' managers post here; write-only
-locked=no kind="" hpid="" bot="" keep="" stop="" detach=""
-usage="usage: claude-discord monitor [--ensure] <bot> [--holder tui|session|keeper <pid>] | --keep <bot> [--detach] | --stop <bot>"
+locked=no start="" kind="" hpid="" bot="" keep="" stop="" detach=""
+usage="usage: claude-discord monitor [--ensure] <bot> [--holder tui|keeper <pid>] | --keep <bot> [--detach] | --stop <bot> | --start <bot>"
 while [ $# -gt 0 ]; do
   case $1 in
     --ensure) ;;
     --locked) locked=yes;;   # internal: this process holds the lock on fd 9
     --keep) keep=yes;;
     --stop) stop=yes;;
+    --start) start=yes keep=yes detach=yes;;
     --detach) detach=yes;;
     --holder) kind=${2:-} hpid=${3:-}; shift 3 2>/dev/null || shift $#; continue;;
     -*) echo "$usage" >&2; exit 2;;
@@ -53,7 +58,7 @@ M=$HOME/.claude-discord/records/monitor/$bot
 # The ledger is the on/off switch: no hosts file, no monitor. --stop needs none: it stops what runs.
 [ -n "$stop" ] || { [ -f "$dir/hosts" ] && [ -f "$dir/.env" ]; } || { echo "claude-discord: monitor: $dir has no hosts ledger (claude-discord setup $bot --mode writes one)" >&2; exit 1; }
 umask 077
-[ -n "$stop" ] || mkdir -p "$M/holders" || exit 1
+mkdir -p "$M/holders" || exit 1
 
 # lstart <pid>: the process's start time. A pid alone can be reused; a pid
 # with its start time cannot. Linux: field 22 of /proc/<pid>/stat, read with
@@ -72,6 +77,8 @@ lstart() {
     set -- $(LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null); echo "$*"
   fi
 }
+# sig: this file's signature (mtime to the sub-second, size, inode), to see `claude-discord update` change it.
+sig() { perl -MTime::HiRes=stat -e '@s = stat $ARGV[0] and print "$s[9] $s[7] $s[1]"' "$0" 2>/dev/null; }
 # a_monitor <pid>: the pid runs this bot's monitor (bash .../monitor/monitor.sh <wrapper> --locked <bot>) as this side sees it.
 a_monitor() {
   local c=""
@@ -89,7 +96,9 @@ live_rec() {
 }
 
 if [ -n "$stop" ]; then
-  # The keepers first (a keeper would start the monitor again), then the monitor the lock file names, if it runs here.
+  # The marker first, so nothing automatic starts a keeper meanwhile; then the keepers (one would start the monitor
+  # again), then the monitor the lock file names, if it runs here.
+  : > "$M/stopped"
   said=""
   for f in "$M"/holders/keeper-*; do
     [ -f "$f" ] || continue
@@ -101,18 +110,33 @@ if [ -n "$stop" ]; then
     rm -f "$f"
   done
   l=""; { read -r l < "$M/lock"; } 2>/dev/null
-  ! a_monitor "$l" || { kill -TERM "$l" 2>/dev/null; echo "claude-discord: monitor: stopped monitor $l (an open TUI or manager session starts it again)"; said=1; }
+  if a_monitor "$l"; then
+    kill -TERM "$l" 2>/dev/null; echo "claude-discord: monitor: stopped monitor $l"; said=1
+    n=0; while a_monitor "$l" && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+  fi
+  # Said in state.json too, for the TUI (the monitor wrote its own stop above; this is the one writer now).
+  [ ! -s "$M/state.json" ] || { jq -c '.monitor.stopped_by_user = true' "$M/state.json" > "$M/state.json.tmp" && mv -f "$M/state.json.tmp" "$M/state.json"; } 2>/dev/null
   [ -n "$said" ] || echo "claude-discord: monitor: no keeper or monitor of $bot runs here"
+  echo "claude-discord: monitor: $bot stays stopped until: claude-discord monitor --start $bot"
   exit 0
 fi
+[ -z "$start" ] || rm -f "$M/stopped"
+# What an automatic start meets after --stop: nothing is started until --start.
+stopped_msg="claude-discord: monitor: $bot was stopped by you (monitor --stop); start it again with: claude-discord monitor --start $bot"
 
 if [ -n "$keep" ]; then
-  # Started by the TUI, which is about to take the terminal: what this says goes to monitor.log.
-  [ -z "$detach" ] || exec >>"$M/monitor.log" 2>&1
+  # Detached (setup, the TUI, a hook): what this says goes to monitor.log, and the outcome line to the caller too.
+  [ -z "$detach" ] || exec 3>&1 >>"$M/monitor.log" 2>&1
+  tell() { echo "$*"; [ -z "$detach" ] || echo "$*" >&3; }
+  tell_err() { echo "$*" >&2; [ -z "$detach" ] || echo "$*" >&3; }
+  # A machine that must never start a backend by itself (the other side of a shared home; the suite): only --start does.
+  [ -z "$detach" ] || [ -n "$start" ] || [ -z "${CLAUDE_DISCORD_NO_AUTOSTART:-}" ] || exit 0
+  [ ! -e "$M/stopped" ] || { tell "$stopped_msg"; exit 0; }
   m=""; { read -r m < "$dir/mode"; } 2>/dev/null
-  [ "$m" = dev-manager ] || { echo "claude-discord: monitor: --keep: $bot is not a dev-manager bot (mode '$m')" >&2; exit 1; }
+  [ "$m" = dev-manager ] || { tell_err "claude-discord: monitor: --keep: $bot is not a dev-manager bot (mode '$m')"; exit 1; }
   for f in "$M"/holders/keeper-*; do
-    [ -f "$f" ] && live_rec "$f" && { echo "claude-discord: monitor: a keeper already runs for $bot (pid $rp)"; exit 0; }
+    # Not this process: a keeper that re-execs itself after an update keeps its pid and its record.
+    [ -f "$f" ] && live_rec "$f" && [ "$rp" != $$ ] && { tell "claude-discord: monitor: a keeper already runs for $bot (pid $rp)"; exit 0; }
   done
   # A home shared by two sides (a container and its host): the lock held, and the pid in it no monitor of this bot that
   # this side can see, means the monitor runs on the other side, with the bots; a keeper here would read them all as
@@ -125,28 +149,42 @@ if [ -n "$keep" ]; then
   }
   if unseen; then
     sleep "${CLAUDE_DISCORD_MONITOR_LOCK_WAIT:-5}"
-    ! unseen || { echo "claude-discord: monitor: --keep: the monitor lock is held by a monitor this side cannot see; run --keep where the bots run" >&2; exit 1; }
+    ! unseen || { tell_err "claude-discord: monitor: --keep: the monitor lock is held by a monitor this side cannot see; run --keep where the bots run"; exit 1; }
   fi
   if [ -n "$detach" ]; then
     perl -MPOSIX -e 'defined(my $pid = fork()) or exit 1; exit 0 if $pid; POSIX::setsid(); exec @ARGV' \
-      bash "$0" "$self" --keep "$bot" </dev/null >>"$M/monitor.log" 2>&1
-    exit
+      bash "$0" "$self" --keep "$bot" </dev/null >>"$M/monitor.log" 2>&1 3>&- || exit 1   # 3>&-: never the caller's pipe
+    tell "claude-discord: started the backend of $bot (a keeper and the monitor, detached); stop it with: claude-discord monitor --stop $bot"
+    exit 0
   fi
   iv=${CLAUDE_DISCORD_KEEP_INTERVAL:-60}   # read here only; the suite shortens it
-  sp=""
+  sp="" ksig=$(sig) kseen=""
   trap '[ -z "$sp" ] || kill "$sp" 2>/dev/null; rm -f "$M/holders/keeper-$$"; exit 0' TERM INT HUP
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) keeper $$ start (every ${iv}s)"
   while :; do
     [ -f "$dir/hosts" ] || { rm -f "$M/holders/keeper-$$"; echo "claude-discord: monitor: keeper $$: $dir/hosts is gone; exiting" >&2; exit 1; }
-    # Registered again each time: a monitor taken down by a signal removes every holder record, this one too.
+    # Registered again each time: a monitor taken down by a signal removes every holder record but a keeper's.
     bash "$0" "$self" --ensure "$bot" --holder keeper "$$" </dev/null
+    # claude-discord update changed this file: go on as the new one (same pid, so the record stays), once its signature
+    # held for an interval and it parses, as the monitor does at a pass.
+    cur=$(sig)
+    if [ -n "$cur" ] && [ "$cur" != "$ksig" ]; then
+      if [ "$cur" != "$kseen" ]; then kseen=$cur
+      elif bash -n "$0" 2>/dev/null; then
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) keeper $$ restart: monitor.sh changed"; trap - TERM INT HUP
+        exec bash "$0" "$self" --keep "$bot"
+      fi
+    fi
     # Waited on, so a TERM runs the trap at once.
     sleep "$iv" & sp=$!; wait "$sp"; sp=""
   done
 fi
 
+# The TUI's --ensure after --stop: refused, and said in its red bar.
+[ "$locked" = yes ] || [ ! -e "$M/stopped" ] || { echo "$stopped_msg" >&2; exit 1; }
+
 if [ -n "$kind$hpid" ]; then
-  case $kind in tui|session|keeper) ;; *) echo "claude-discord: monitor: --holder takes tui, session or keeper, got '$kind'" >&2; exit 2;; esac
+  case $kind in tui|keeper) ;; *) echo "claude-discord: monitor: --holder takes tui or keeper, got '$kind'" >&2; exit 2;; esac
   case $hpid in ''|*[!0-9]*) echo "claude-discord: monitor: --holder needs a pid, got '$hpid'" >&2; exit 2;; esac
   st=$(lstart "$hpid")
   [ -n "$st" ] || { echo "claude-discord: monitor: no process $hpid to hold for" >&2; exit 1; }
@@ -183,7 +221,6 @@ fi
 # is started with 9>&-: a child that survived a crash would otherwise keep the
 # lock and no new monitor could start.
 # CLAUDE_DISCORD_MONITOR_LOCK_WAIT (above; 5) is the fourth interval the suite shortens.
-sig() { perl -MTime::HiRes=stat -e '@s = stat $ARGV[0] and print "$s[9] $s[7] $s[1]"' "$0" 2>/dev/null; }
 sig0=$(sig)   # this file as this process started
 bad=""        # the signature of a changed monitor.sh that did not parse, logged once
 seen=""       # the signature of a changed monitor.sh, exec'd once it is still the same a pass later
@@ -229,7 +266,7 @@ read_cfg() {
   done 2>/dev/null < "$dir/../config.env"   # 2> first: a missing file's error must not reach monitor.log
 }
 
-# is_holder <path>: a record's name is tui-, session- or keeper-<digits>, as --holder writes it. Anything else there (a
+# is_holder <path>: a record's name is tui-, keeper- or (written before 1.10.3) session-<digits>. Anything else there (a
 # stray file) is no holder: as a pid it would make holders_json invalid JSON and fail every pass.
 is_holder() { case ${1##*/} in tui-*|session-*|keeper-*) case ${1##*-} in ''|*[!0-9]*) return 1;; esac;; *) return 1;; esac; }
 # holders_alive: removes the records of dead holders (and stray files); 0 when one still lives.
@@ -666,7 +703,7 @@ state=$(jq -c --arg bot "$bot" 'if type == "object" and .version == 1 and .manag
 }
 holders_json
 state=$(printf '%s' "$state" | jq -c --argjson pid "$$" --arg now "$(now)" --argjson holders "$hj" \
-  '.monitor = ((.monitor // {}) + {pid: $pid, started: $now, holders: $holders}) | del(.monitor.stopped_at)')
+  '.monitor = ((.monitor // {}) + {pid: $pid, started: $now, holders: $holders}) | del(.monitor.stopped_at, .monitor.stopped_by_user)')
 write_state
 log start
 n=$pass_n   # the first pass right after start
