@@ -15,28 +15,39 @@ plugin_gate || exit 0
 
 [ "$bot_mode" = dev-manager ] && [ -f "$DISCORD_STATE_DIR/../peers.json" ] || exit 0
 input=$(cat 2>/dev/null) || exit 0
-# session_id and reply_to without jq would need a JSON parser; one jq reads them.
-out=$(printf '%s' "$input" | jq -r '"\(.session_id // "") \(.tool_input.reply_to // "")"' 2>/dev/null) || exit 0
-session_id=${out%% *} reply_to=${out#* }
+# One jq read gives all of it: the session id when the reply has no reply_to
+# (as "<session_id> <reply_to>" with trailing newlines stripped would split:
+# plain characters, then nothing), whether the text mentions anyone, the deny
+# line for a named but unmentioned peer, and one "<bot_id> <deny line>" per peer
+# for an answer that mentions nobody (only these need the turn's sender, read
+# below). A bot_id with a newline can equal no sender and is left out. A failed
+# read (input or peers.json not JSON) leaves all of it empty: nothing denied.
+peerlines=()
+{ IFS= read -r session_id; read -r mentions; IFS= read -r named; while IFS= read -r l; do peerlines+=("$l"); done; } < <(printf '%s' "$input" | jq -r --arg self "$bot_name" --slurpfile pf "$DISCORD_STATE_DIR/../peers.json" '
+  def deny: sub("\n+\\z"; "") | {hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: .}} | tojson;
+  (.tool_input.text // "" | tostring) as $text
+  | ("\(.session_id // "") \(.tool_input.reply_to // "")" | sub("\n+\\z"; "") | if test("\\A[A-Za-z0-9_-]+ \\z") then .[:-1] else "" end),
+    ($text | test("<@[!&]?[0-9]+>")),
+    ([$pf[0].peers[]? | {name: (.name // "" | tostring), bot_id: (.bot_id // "" | tostring)}
+      | select(.name != "" and (.bot_id | test("^[0-9]+$")) and (.name | ascii_downcase) != ($self | ascii_downcase))]
+     | def mentioned: . as $p | $text | contains("<@\($p.bot_id)>") or contains("<@!\($p.bot_id)>");
+       def named: . as $p | ($text | ascii_downcase | split($p.name | ascii_downcase)) as $s
+         | any(range(1; $s | length); ($s[. - 1] | test("[a-z0-9_-]$") | not) and ($s[.] | test("^[a-z0-9_-]") | not));
+       ([.[] | select(named and (mentioned | not))][0] // empty
+         | "Mention \(.name) as <@\(.bot_id)>; a bot only receives messages that mention it." | deny) // "",
+       (.[] | select(.bot_id | test("\\A[0-9]+\\z"))
+         | "\(.bot_id) \("You are answering \(.name); mention it as <@\(.bot_id)> or it never sees this." | deny)"))' 2>/dev/null)
 from=""
 case $session_id in
   ''|*[!A-Za-z0-9_-]*) ;;
   *) turns="$DISCORD_STATE_DIR/turns/$session_id"
-     if [ -f "$turns" ] && [ -z "$reply_to" ]; then
+     if [ -f "$turns" ]; then
        while read -r _ m u _ || [ -n "$m" ]; do from=$u; done < "$turns"
      fi ;;
 esac
-reason=$(printf '%s' "$input" | jq -r --arg self "$bot_name" --arg from "$from" --slurpfile pf "$DISCORD_STATE_DIR/../peers.json" '
-  (.tool_input.text // "" | tostring) as $text
-  | [$pf[0].peers[]? | {name: (.name // "" | tostring), bot_id: (.bot_id // "" | tostring)}
-     | select(.name != "" and (.bot_id | test("^[0-9]+$")) and (.name | ascii_downcase) != ($self | ascii_downcase))]
-  | def mentioned: . as $p | $text | contains("<@\($p.bot_id)>") or contains("<@!\($p.bot_id)>");
-  def named: . as $p | ($text | ascii_downcase | split($p.name | ascii_downcase)) as $s
-    | any(range(1; $s | length); ($s[. - 1] | test("[a-z0-9_-]$") | not) and ($s[.] | test("^[a-z0-9_-]") | not));
-  first(([.[] | select(.bot_id == $from and ($text | test("<@[!&]?[0-9]+>") | not))][0] // empty
-    | "You are answering \(.name); mention it as <@\(.bot_id)> or it never sees this."),
-  ([.[] | select(named and (mentioned | not))][0] // empty
-    | "Mention \(.name) as <@\(.bot_id)>; a bot only receives messages that mention it."))' 2>/dev/null)
-[ -n "$reason" ] || exit 0
-jq -nc --arg r "$reason" '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}' 2>/dev/null
+# Answering a peer without mentioning anyone comes first, then a named peer.
+if [ -n "$from" ] && [ "$mentions" = false ]; then
+  for l in ${peerlines[@]+"${peerlines[@]}"}; do [ "${l%% *}" != "$from" ] || { printf '%s\n' "${l#* }"; exit 0; }; done
+fi
+[ -z "$named" ] || printf '%s\n' "$named"
 exit 0
