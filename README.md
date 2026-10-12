@@ -17,7 +17,7 @@ Origin: written by d.kim4, extended here.
 | `bun` | the plugin's runtime (`curl -fsSL https://bun.sh/install \| bash`) |
 | `jq` | writes `access.json` and the settings files, reads the plugin's install path; every hook needs it too, and without it they silently do nothing |
 | the plugin | `claude plugin install discord@claude-plugins-official` then `claude plugin disable discord@claude-plugins-official` (see below) |
-| `curl` (optional) | the ✅ reaction on a finished reply, and the `tools/thread` helper; without it no reaction is sent and no thread can be opened, everything else still works |
+| `curl` (optional) | the ✅ and ☑️ reactions at the end of a turn, and the `tools/thread` helper; without it no reaction is sent and no thread can be opened, everything else still works |
 | `python3` (optional, stdlib only) | `thread-guard` rewrites a markdown table in a reply into an aligned code block; without it a reply with a table is denied instead |
 | `perl` | patches the plugin at every start, and detaches a `refresh` in its own session (macOS has no `setsid`) |
 | `git` | `setup` clones claude-discord, `update` pulls it |
@@ -240,13 +240,36 @@ their default):
 
 | Prompt | Stored in | Notes |
 |---|---|---|
-| Discord channel ID | `config.env` (shared) | also written as the channel group of each bot's `access.json` the first time it is set up. A running bot's channel is that group: to move one bot, edit its `access.json` (the plugin, the hooks' identity text and the start prompt all follow it; `config.env` is the fallback when the file has no single group). A setup re-run keeps `access.json` as it is, wherever its group has moved to, and only updates `requireMention` there; `setup ... --reset` (which deletes the bot's directory first) writes `config.env`'s channel into a fresh one |
+| Discord channel ID | `config.env` (shared) | also written as the channel group of each bot's `access.json` the first time it is set up. A running bot's channel is that group: to move one bot, edit its `access.json` (the plugin, the hooks' identity text and the start prompt all follow it; `config.env` is the fallback when the file has no single group). A setup re-run keeps `access.json` as it is, wherever its group has moved to, and only updates `requireMention` there (a channel left empty at setup is filled in, see "Start now, register the bot later"); `setup ... --reset` (which deletes the bot's directory first) writes `config.env`'s channel into a fresh one |
 | Your Discord user ID | `config.env` (shared) | the only user allowed to DM the bot |
 | Other user or bot IDs | `config.env` (shared) | comma-separated; may be empty. These can trigger the bot in the channel. Answer `all` instead to let **everyone who can post in that channel** trigger it — the group's `allowFrom` is written empty, which is how the plugin spells "no filter". Anyone who can post there can then drive a session that has shell access on that machine, and that includes every other bot in the channel (the wrapper patches the plugin to let bot authors reach this gate). The plugin counts a reply to one of the bot's own messages as a mention, so two open bots can answer each other without end even with the mention requirement on; with "Respond without an @mention" set to Y they will. `all` is **not** stored in the shared `config.env`, so it applies to the bot being set up and no other; a bot set up later inherits the stored IDs and stays closed, and `setup <name> --reset` is how you answer again (it clears the token and shared IDs too); to open a bot that already exists without re-answering, set its channel group `allowFrom` to `[]` in `access.json` by hand. `all` cannot be mixed with IDs, and DMs stay owner-only either way |
 | Bot token | `<name>/.env` | input is hidden, like a password. On a re-run, empty keeps the current token |
 | Respond without an @mention? | `<name>/access.json` | default N for a new bot; on a re-run Enter keeps the bot's current `requireMention`. With Y the bot answers every channel message |
 | Mode | `<name>/mode` | `none` (default), `dev-manager` or `autoresearchclaw`; see Modes below. On a re-run the picker starts at the current mode |
 | Peer dev bots (dev-manager only) | `peers.json` (shared), `<name>/access.json` | `name:bot_id:owner_id:machine`, comma-separated; empty keeps the current list |
+
+### Start now, register the bot later
+
+A session can start before its Discord bot and channel exist, and pick them
+up later without a restart:
+
+```
+claude-discord setup alpha        # Enter at the channel, user ID, other IDs and token prompts
+claude-discord --bg --name alpha  # runs now; its Discord server waits for a token instead of failing
+# ... later, once the bot and channel exist:
+claude-discord setup alpha        # asks the IDs again (they are empty) and the token: give the real ones
+claude-discord health             # the bot should answer
+```
+
+The running session's Discord server re-reads `<name>/.env` every 10 s and logs
+in once a token is there (`claude-discord patch` makes the official server wait
+for a missing token instead of exiting, which Claude Code would mark failed and
+not retry for 15 minutes). A token Discord refuses is waited out the same way: the server says so once on stderr and logs in again when `.env` holds a different token. The second setup
+replaces the empty IDs in `config.env` and turns `access.json`'s empty group key
+and allowFrom entries into the channel and IDs, keeping any other field. The
+session's start prompt still names no channel until its next start; replies go
+where each message came from, so nothing depends on it. A tool called before
+the login fails with discord.js's error instead of reaching Discord.
 
 Everything lives under `./.claude/discord-agents/` in the project, mode 0700.
 Setup writes a `*` `.gitignore` inside that directory, so the token can never
@@ -409,8 +432,8 @@ session.
   session silent when the human asked it to speak). A Discord message that
   arrives while you are talking to the session in the terminal is answered on
   Discord, and your question in the terminal, each where it came from; a
-  turn that ends with its Discord message unanswered is sent back once to
-  answer it. A request's thread is listed in `open-threads` from
+  turn that ends with its Discord message unanswered gets ☑️ on it, never
+  sent back. A request's thread is listed in `open-threads` from
   `thread start` until `thread close` (`open-threads` drops what is over a
   week old, since a thread left to archive itself is never closed), so the
   background subagent working that request, and the turn its result wakes,
@@ -453,7 +476,7 @@ session.
 A message that arrives over Discord should be answered through the discord
 reply tool only, not also typed into the CLI (that would waste a reply on a
 channel nobody types into). Four hooks handle that, plus identity, a
-"refresh" handoff trigger, and a ✅ reaction once a turn actually replies.
+"refresh" handoff trigger, and a ✅ (replied) or ☑️ (no reply) reaction at the end of a turn.
 The plugin's `hooks/hooks.json` registers all nine, each as
 `"${CLAUDE_PLUGIN_ROOT}/hooks/<topic>/<name>"` with no shell wrapper; no hook
 entry is written into a project's settings files. Scripts live
@@ -464,9 +487,9 @@ session (see Modes and Expected behaviour above).
 
 | Event | Matcher | Script | What |
 |---|---|---|---|
-| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn (a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag), records that tag's chat_id/message_id/user_id for `on-stop` and `mention-guard` and the sender's display name per id in `user-names` (it labels that id in the People line), and marks the message pending until a reply (`turns/<session_id>.pending`) (only the leading tag is trusted: the plugin does not escape `<` in message text, so anything after it could be forged; a message arriving mid-turn comes as a prompt of its own and is appended) and, once per session (see below), adds an additionalContext entry with the bot's identity, the mention rule, the thread rule, the orchestrator rule and a People line (every id the channel lets in, from `access.json`, config.env's owner and the 20 who wrote here most recently (`user-names`), as `<@id>`, named once that id has written), so a bot can call a person who is not in the turn; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
-| PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply, and clears the pending mark. |
-| Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it. If a Discord message is still pending (no reply, `thread start` or closing line came after it), sends the turn back once (`decision: block`) so the answer reaches Discord and not only the terminal; the second stop (`stop_hook_active`) closes it, which is also how a mention that asked nothing ends. Clears the per-turn files whenever it closes a turn. |
+| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn (a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag), records that tag's chat_id/message_id/user_id for `on-stop` and `mention-guard` and the sender's display name per id in `user-names` (it labels that id in the People line) (only the leading tag is trusted: the plugin does not escape `<` in message text, so anything after it could be forged; a message arriving mid-turn comes as a prompt of its own and is appended) and, once per session (see below), adds an additionalContext entry with the bot's identity, the mention rule, the thread rule, the orchestrator rule and a People line (every id the channel lets in, from `access.json`, config.env's owner and the 20 who wrote here most recently (`user-names`), as `<@id>`, named once that id has written), so a bot can call a person who is not in the turn; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
+| PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply. |
+| Stop | | `turn/on-stop` | Never blocks a turn: a session has read a Discord message the moment it receives it. Reacts on every message `on-prompt` recorded for the turn: ✅ if the turn sent a reply (`thread start` or a closing line counts) after the message was recorded, else ☑️ (read, no reply; `on-reply` writes the turn's message count into `.replied`, so a message that arrived after the last reply gets ☑️). ☑️ cannot tell "nothing was owed" from "the answer went only to the terminal", so a person who sees ☑️ and expected an answer should ask again. Then clears the per-turn files. |
 | SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Runs `claude-discord patch` (a respawn, or an auto-update of the official plugin since the last start, is covered), and gives the session `CLAUDE_DISCORD_TOOLS=<path>` as additionalContext, plus `rules/dev-manager.md` for a dev-manager bot. After a compact or `/clear`, clears the per-session "primed" flag, so the next Discord turn injects the identity context again. At a startup or resume, clears the per-turn files a turn whose Stop never ran (an interrupt, a kill) left behind, keeping the primed flag (a resumed conversation still holds that context), then pins a background session's job (see Background sessions below). |
 | PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/mention-guard` | dev-manager only. Denies a reply that names a peer (a whole word, case-insensitive) without its `<@bot_id>` or `<@!bot_id>`, or that answers a peer without mentioning it: the author of the message in `reply_to` when that is set, else of the turn's last message. A bot only receives messages that mention it. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `peers/checkin` | dev-manager only. A reply that mentions a peer (`<@bot_id>` or `<@!bot_id>`) touches `.claude/discord-agents/checkin/<session_id>`. |

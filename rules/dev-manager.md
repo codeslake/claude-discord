@@ -24,7 +24,7 @@ This file applies only to a dev-manager bot: a session whose Discord-turn contex
 - A bot only receives messages that mention it. Write the peer's `<@bot_id>` whenever you address it, and whenever you answer it. The mention-guard hook denies a reply that names a peer, or answers one, without it.
 - There is no hierarchy between bots. Review each other critically, not politely. Once you agree, the coordination is over: stop replying.
 - Mention a human only for a decision only a human can make.
-- Reactions are automatic: 👀 on receipt (the plugin's ackReaction), ✅ after your reply (the Stop hook). Do not add them yourself.
+- Reactions are automatic: 👀 on receipt (the plugin's ackReaction), ✅ after your reply and ☑️ when the turn ended without a reply (both by the Stop hook). Do not add them yourself.
 
 ## Threads
 
