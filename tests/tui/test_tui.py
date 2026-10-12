@@ -158,6 +158,11 @@ async def stopped_by_user(app, pilot):
     assert "stopped by you" in text(app, "#bar") and "claude-discord monitor --start mgr" in text(app, "#bar"), text(app, "#bar")
 
 
+async def refused_marker(app, pilot):
+    bar = text(app, "#bar")
+    assert "auto-start refused here" in bar and "claude-discord monitor --start mgr" in bar, bar
+
+
 async def keeper(app, pilot):
     head = text(app, "#head")
     assert "holders keeper 789, tui 456" in head and "claude-discord monitor --stop mgr" in head, head
@@ -226,6 +231,8 @@ async def main():
     await case("crashed_project", crashed_project)
     await case("stopped", stopped)
     await case("keeper", keeper)
+    # the refused marker (a detached start met a monitor lock this side cannot see) is shown in the bar
+    await case("refused_marker", refused_marker, state="all_ok", wrapper=lambda d: (Path(d) / "refused").write_text("") or None)
     await case("stopped_by_user", stopped_by_user)
     await case("post_failed", post_failed)
     await case("pass_failed", pass_failed)

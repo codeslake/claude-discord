@@ -70,10 +70,11 @@ def alive(pid: int, bot: str) -> bool:
     return "monitor/monitor.sh" in cmd and cmd.endswith(f" --locked {bot}")
 
 
-def header_lines(state: dict, note: str = "", stopped: str | None = None) -> tuple[str, str | None]:
+def header_lines(state: dict, note: str = "", stopped: str | None = None, refused: bool = False) -> tuple[str, str | None]:
     """The header text and the red bar's text (None when there is nothing to warn about). `note` is why
     `monitor --ensure` failed, when it did: the one place a refusal is visible. `stopped`: when the `stopped` marker
-    (monitor --stop) was left, if it stands."""
+    (monitor --stop) was left, if it stands. `refused`: the `refused` marker (a detached start met a monitor lock this
+    side cannot see) stands."""
     m = state.get("monitor") or {}
     holders = ", ".join(f"{h.get('kind')} {h.get('pid')}" for h in m.get("holders") or []) or "none"
     pid = m.get("pid")
@@ -87,6 +88,9 @@ def header_lines(state: dict, note: str = "", stopped: str | None = None) -> tup
     elif stopped is not None or m.get("stopped_by_user"):   # monitor --stop: nothing starts it until monitor --start
         bar = (f"stopped by you{' at ' + stopped if stopped else ''} (monitor --stop); "
                f"start it again: claude-discord monitor --start {state.get('manager', '?')}")
+    elif refused:   # held until monitor --start, like the stopped marker
+        bar = (f"auto-start refused here: another side holds the monitor lock (shared home?). "
+               f"Start here with: claude-discord monitor --start {state.get('manager', '?')}")
     elif not pid:
         bar = f"monitor stopped at {m.get('stopped_at') or '?'}"
     elif not alive(pid, state.get("manager") or ""):   # killed without its trap (kill -9, OOM): its pid stays in state.json
@@ -235,6 +239,9 @@ class MonitorTUI(App):
             return None
         return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    def refused(self) -> bool:
+        return (self.state_dir / "refused").exists()
+
     def backend(self, verb: str) -> None:
         """`monitor --start` or `--stop` of this bot; a failure is shown in the red bar."""
         try:
@@ -274,7 +281,7 @@ class MonitorTUI(App):
         stopped = self.stopped()
         if self.wrapper and not stopped and not alive(pid, self.bot) and time.monotonic() - self.ensured >= 30:
             self.ensure()
-        text, bar = header_lines(self.state, self.note, stopped)
+        text, bar = header_lines(self.state, self.note, stopped, self.refused())
         self.query_one("#head", Static).update(text)
         b = self.query_one("#bar", Static)
         b.update(bar or "")
