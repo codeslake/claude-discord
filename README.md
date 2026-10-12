@@ -229,7 +229,7 @@ claude-discord setup alpha --reset    # forget alpha's token and policy AND the 
 claude-discord setup alpha --mode     # change only alpha's mode (and, for dev-manager, its peers); needs alpha already set up
 claude-discord refresh alpha          # replace the running session with a fresh one, from its handoff
 claude-discord health                 # is every bot in this project still answering? see below
-claude-discord tui [<manager>]        # a read-only view of the manager bot's monitor; see The monitor and the TUI
+claude-discord tui [<manager>]        # a read-only view of the manager bot's monitor, from any directory; see The monitor and the TUI
 claude-discord update [--all]         # see Install
 ```
 
@@ -830,7 +830,7 @@ installed in the OS: no launchd, systemd or cron.
 
 ```
 claude-discord setup <manager> --mode    # dev-manager, then: ssh hosts to check
-claude-discord tui [<manager>]           # a read-only view; starts the monitor if none runs
+claude-discord tui [<manager>]           # a read-only view; starts the monitor if none runs; works outside a project
 ```
 
 **Ledger.** `setup` in dev-manager mode asks `ssh hosts to check` and writes
@@ -916,7 +916,7 @@ default; `ALERT_LANG='en'` in the manager project's `config.env` makes them
 English (any other value is Korean). The reason and the command are never
 translated.
 
-**TUI.** `claude-discord tui` shows the monitor's state: hosts, bots
+**TUI.** `claude-discord tui` shows the monitor's state (outside a project it picks among the manager bots of the projects `claude-discord` has recorded: the one, or a numbered list at a terminal, else exit 2 naming them; `tui <bot>` picks the project that has it): hosts, bots
 (findings first), `Enter` for a row's detail and recovery command, `a` for
 the last 50 posts, `q` to quit. A red bar says when the monitor is stopped,
 its pid is gone (killed without cleaning up; the TUI starts it again, once

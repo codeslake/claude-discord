@@ -3976,7 +3976,7 @@ echo "ok: a dev-manager's SessionStart returns at once with only its context on 
 # state dir and the wrapper to the TUI script through `uv run --script`. uv is needed for this verb only and its
 # absence is said. The script itself is exercised outside the budget (tests/tui/test_tui.py).
 echo dev-manager > "$MR/mgr/mode"
-printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "$HOME/uv.args"\n' > "$HOME/bin/uv"; chmod +x "$HOME/bin/uv"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "$HOME/uv.args"; pwd -P > "$HOME/uv.cwd"\n' > "$HOME/bin/uv"; chmod +x "$HOME/bin/uv"
 mkdir -p "$MP/sub/dir"   # from a subdirectory: the project is found above it
 (cd "$MP/sub/dir" && bash "$S" tui 2>/dev/null) || { echo "FAIL: tui from a subdirectory of the project must find the project above it"; exit 1; }
 [ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord" ] || { echo "FAIL: tui must run the script through uv with the bot, the state dir and the wrapper: $(cat "$HOME/uv.args" 2>&1)"; exit 1; }
@@ -3984,6 +3984,7 @@ rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1
 [ "$rc" = 1 ] && grep -q 'tui needs uv' <<<"$out" || { echo "FAIL: without uv, tui must say so (rc=$rc): $out"; exit 1; }
 rc=0; out=$(cd "$P" && bash "$S" tui alpha 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'no hosts ledger' <<<"$out" || { echo "FAIL: tui for a bot without a ledger must refuse (rc=$rc): $out"; exit 1; }
+PFB=$(cat "$HOME/.claude-discord/records/projects" 2>/dev/null || :); : > "$HOME/.claude-discord/records/projects"   # nothing recorded: the none case
 rc=0; out=$(cd / && bash "$S" tui mgr 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'no project above /' <<<"$out" && ! grep -q '/\.claude/discord-agents/' <<<"$out" || { echo "FAIL: tui outside any project must say there is no project above, not name /.claude/discord-agents/<bot> (rc=$rc): $out"; exit 1; }
 # Two dev-manager bots with a ledger of their own (not borrowed from other blocks' fixtures): which one is not guessed.
@@ -3991,8 +3992,26 @@ TP="$HOME/tuiproj"; mkdir -p "$TP/.claude/discord-agents/m1" "$TP/.claude/discor
 for b in m1 m2; do echo dev-manager > "$TP/.claude/discord-agents/$b/mode"; echo local > "$TP/.claude/discord-agents/$b/hosts"; done
 rc=0; out=$(cd "$TP" && bash "$S" tui </dev/null 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -q 'name the manager bot' <<<"$out" || { echo "FAIL: with two manager bots and no terminal, tui must ask for the name (rc=$rc): $out"; exit 1; }
-rm -rf "$HOME/bin/uv" "$HOME/uv.args" "$TP" "$MP/sub"
-echo "ok: tui runs the script through uv for the project's one manager bot (or the named one, from a subdirectory too), says when uv is missing, refuses a bot without a ledger, and asks for the name when it cannot tell"
+# Outside any project: the recorded projects' manager bots (records/projects); the TUI runs from the chosen project's root.
+NP="$HOME/notaproject"; mkdir -p "$NP" "$HOME/tuiproj2/.claude/discord-agents/mgr"
+echo dev-manager > "$HOME/tuiproj2/.claude/discord-agents/mgr/mode"; echo local > "$HOME/tuiproj2/.claude/discord-agents/mgr/hosts"
+printf '%s\n' "$HOME/gone" "$MP" > "$HOME/.claude-discord/records/projects"
+rm -f "$HOME/uv.args" "$HOME/uv.cwd"
+(cd "$NP" && bash "$S" tui 2>/dev/null </dev/null) || { echo "FAIL: tui outside a project must use the one recorded manager bot (a missing folder skipped)"; exit 1; }
+[ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord" ] && [ "$(<"$HOME/uv.cwd")" = "$(cd -P "$MP" && pwd -P)" ] || { echo "FAIL: tui outside a project must run the recorded bot from its project root: $(cat "$HOME/uv.args" "$HOME/uv.cwd" 2>&1)"; exit 1; }
+printf '%s\n' "$MP" "$TP" > "$HOME/.claude-discord/records/projects"
+(cd "$NP" && bash "$S" tui m2 2>/dev/null </dev/null) && [ "$(<"$HOME/uv.cwd")" = "$(cd -P "$TP" && pwd -P)" ] && grep -q -- '--bot m2 ' "$HOME/uv.args" || { echo "FAIL: tui <bot> outside a project must pick the project that has it: $(cat "$HOME/uv.args" "$HOME/uv.cwd" 2>&1)"; exit 1; }
+rc=0; out=$(cd "$NP" && bash "$S" tui </dev/null 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -q mgr <<<"$out" && grep -q m1 <<<"$out" && grep -q m2 <<<"$out" || { echo "FAIL: tui outside a project with several recorded managers and no terminal must exit 2 naming them (rc=$rc): $out"; exit 1; }
+printf '%s\n' "$MP" "$HOME/tuiproj2" > "$HOME/.claude-discord/records/projects"
+rc=0; out=$(cd "$NP" && bash "$S" tui mgr </dev/null 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -qF "$MP" <<<"$out" && grep -qF "$HOME/tuiproj2" <<<"$out" || { echo "FAIL: a manager name in two recorded projects, no terminal, must exit 2 naming both (rc=$rc): $out"; exit 1; }
+printf '%s\n' "$P" > "$HOME/.claude-discord/records/projects"   # recorded, but no dev-manager with a ledger
+rc=0; out=$(cd "$NP" && bash "$S" tui </dev/null 2>&1) || rc=$?
+[ "$rc" = 1 ] && grep -q 'writes one' <<<"$out" || { echo "FAIL: tui outside a project with no recorded manager bot must exit 1 (rc=$rc): $out"; exit 1; }
+printf '%s\n' "$PFB" > "$HOME/.claude-discord/records/projects"
+rm -rf "$HOME/bin/uv" "$HOME/uv.args" "$HOME/uv.cwd" "$TP" "$MP/sub" "$NP" "$HOME/tuiproj2"
+echo "ok: tui runs the script through uv for the project's one manager bot (or the named one, from a subdirectory too), says when uv is missing, refuses a bot without a ledger, and asks for the name when it cannot tell, and outside a project picks among the recorded managers (cwd = its project)"
 
 # The monitor blocks end here: the real shim back, the stubs and fixtures gone.
 mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"

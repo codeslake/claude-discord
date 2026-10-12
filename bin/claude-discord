@@ -44,7 +44,8 @@
 #                                        scheduler is installed any more
 #   claude-discord tui [<name>]          a read-only view of a manager bot's
 #                                        backend monitor (needs uv); starts the
-#                                        monitor if none runs
+#                                        monitor if none runs; outside a project
+#                                        it picks among the recorded projects
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
@@ -1813,13 +1814,42 @@ fi
 
 # tui: a read-only view of the monitor's state.json (tui/claude_discord_tui.py,
 # Python + Textual through `uv run --script`; uv is needed for this verb only).
-# The bot is the project's one dev-manager bot with a hosts ledger unless named.
+# The bot is the project's one dev-manager bot with a hosts ledger unless named. Outside any project: the recorded
+# projects' manager bots (records/projects), and the cwd becomes the chosen project's root.
 if [ "${1:-}" = tui ]; then
   bot=${2:-}
   # From anywhere inside the project, like the shim: up to the directory that holds .claude/discord-agents.
   here=$PWD
   while [ ! -d "$PWD/.claude/discord-agents" ] && [ "$PWD" != / ]; do cd ..; done
-  [ -d "$PWD/.claude/discord-agents" ] || { echo "claude-discord: tui: no project above $here (no .claude/discord-agents; run it inside a project with a manager bot)" >&2; exit 1; }
+  if [ ! -d "$PWD/.claude/discord-agents" ]; then
+    # No project above: the recorded ones (records/projects, as health --all reads it), the manager bots with a ledger.
+    cands="" n=0 pf=$helpers/records/projects
+    if [ -f "$pf" ]; then
+      while IFS= read -r p || [ -n "$p" ]; do
+        p=${p%$'\r'}; [ -n "$p" ] || continue
+        for d in "$p"/.claude/discord-agents/*/; do
+          d=${d%/}; b=${d##*/}
+          [ -f "$d/hosts" ] && [ "$(cat "$d/mode" 2>/dev/null)" = dev-manager ] || continue
+          [ -z "$bot" ] || [ "$bot" = "$b" ] || continue
+          c=$b$'\t'$p$'\n'
+          case $'\n'$cands in *$'\n'"$c"*) continue;; esac
+          cands=$cands$c; n=$((n + 1))
+        done
+      done < "$pf"
+    fi
+    [ "$n" -gt 0 ] || { echo "claude-discord: tui: no project above $here, and no recorded project has a dev-manager bot${bot:+ '$bot'} with a hosts ledger (claude-discord setup <bot> --mode writes one)" >&2; exit 1; }
+    if [ "$n" = 1 ]; then
+      pick=${cands%$'\n'}
+    else
+      [ -t 0 ] || { echo "claude-discord: tui: more than one recorded manager bot; run it in a project, or at a terminal to choose:" >&2; while IFS=$'\t' read -r b p; do [ -z "$b" ] || echo "  $b  $p" >&2; done <<<"$cands"; exit 2; }
+      i=0; while IFS=$'\t' read -r b p; do [ -z "$b" ] || { i=$((i + 1)); echo "$i) $b  ${p/#"$HOME"/"~"}"; }; done <<<"$cands"
+      read -rp "Number: " i || i=""
+      case $i in ''|*[!0-9]*|0*) echo "claude-discord: tui: not a number: '$i'" >&2; exit 2;; esac
+      pick=$(sed -n "${i}p" <<<"$cands")
+      [ -n "$pick" ] || { echo "claude-discord: tui: no entry $i" >&2; exit 2; }
+    fi
+    bot=${pick%%$'\t'*}; cd "${pick#*$'\t'}"
+  fi
   root=$PWD/.claude/discord-agents
   if [ -z "$bot" ]; then
     n=0
