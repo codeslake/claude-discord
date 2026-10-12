@@ -240,7 +240,11 @@ class MonitorTUI(App):
         return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def refused(self) -> bool:
-        return (self.state_dir / "refused").exists()
+        try:   # this side's marker: monitor.sh names it by the pid namespace (digits only), plain where /proc has none
+            ns = "".join(c for c in os.readlink("/proc/self/ns/pid") if c in "0123456789")
+        except OSError:
+            ns = ""
+        return (self.state_dir / (f"refused.{ns}" if ns else "refused")).exists()
 
     def backend(self, verb: str) -> None:
         """`monitor --start` or `--stop` of this bot; a failure is shown in the red bar."""

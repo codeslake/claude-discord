@@ -228,14 +228,21 @@ ensure_keeper() {
   (cd "$bot_project" && env -u DISCORD_STATE_DIR -u CLAUDE_PROJECT_DIR -u CLAUDE_PLUGIN_ROOT -u CLAUDECODE \
     "$plugin_root/bin/claude-discord" monitor --keep "$bot_name" --detach) </dev/null >/dev/null 2>&1 &
 }
-# keeper_alive: the backend is up, was stopped on purpose (the `stopped` marker) or was refused for good (`refused`: a
-# monitor this side cannot see), so a prompt starts nothing. A live
+# keeper_alive: the backend is up, was stopped on purpose (the `stopped` marker) or was refused for good (`refused.<pid namespace id>`,
+# this side's own: a monitor this side cannot see), so a prompt starts nothing. A live
 # keeper is a holders/keeper-<pid> record whose pid runs `bash <root>/monitor/monitor.sh <wrapper> --keep <bot>`: a pid
 # reused by another program or another bot's keeper is none. Linux reads /proc/<pid>/cmdline with no fork (on-prompt
 # asks on every prompt); elsewhere one `ps` fork per record.
 keeper_alive() {
-  local d="$HOME/.claude-discord/records/monitor/$bot_name" f p s a0 a1 a2 a3 a4
-  [ ! -e "$d/stopped" ] && [ ! -e "$d/refused" ] || return 0
+  local d="$HOME/.claude-discord/records/monitor/$bot_name" f p s a0 a1 a2 a3 a4 ns
+  [ ! -e "$d/stopped" ] || return 0
+  # The marker is per pid namespace (monitor.sh names it); the readlink fork happens only when some marker exists.
+  for f in "$d"/refused*; do
+    [ -e "$f" ] || break
+    ns=""; [ ! -L /proc/self/ns/pid ] || { ns=$(readlink /proc/self/ns/pid); ns=${ns//[!0-9]/}; ns=${ns:+.$ns}; }
+    [ ! -e "$d/refused$ns" ] || return 0
+    break
+  done
   for f in "$d"/holders/keeper-*; do
     p=${f##*/keeper-}
     case $p in ''|*[!0-9]*) continue;; esac

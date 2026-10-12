@@ -163,6 +163,16 @@ async def refused_marker(app, pilot):
     assert "auto-start refused here" in bar and "claude-discord monitor --start mgr" in bar, bar
 
 
+async def refused_other_side(app, pilot):
+    assert app.query_one("#bar").has_class("hidden"), text(app, "#bar")   # another pid namespace's marker is not ours
+
+
+def own_marker(d):
+    """This side's refused marker, named as monitor.sh names it: the digits of the pid namespace link, plain where /proc has none."""
+    ns = "".join(c for c in os.readlink("/proc/self/ns/pid") if c.isdigit()) if os.path.islink("/proc/self/ns/pid") else ""
+    return Path(d) / (f"refused.{ns}" if ns else "refused")
+
+
 async def keeper(app, pilot):
     head = text(app, "#head")
     assert "holders keeper 789, tui 456" in head and "claude-discord monitor --stop mgr" in head, head
@@ -232,7 +242,8 @@ async def main():
     await case("stopped", stopped)
     await case("keeper", keeper)
     # the refused marker (a detached start met a monitor lock this side cannot see) is shown in the bar
-    await case("refused_marker", refused_marker, state="all_ok", wrapper=lambda d: (Path(d) / "refused").write_text("") or None)
+    await case("refused_marker", refused_marker, state="all_ok", wrapper=lambda d: own_marker(d).write_text("") or None)
+    await case("refused_other_side", refused_other_side, state="all_ok", wrapper=lambda d: (Path(d) / "refused.1").write_text("") or None)
     await case("stopped_by_user", stopped_by_user)
     await case("post_failed", post_failed)
     await case("pass_failed", pass_failed)

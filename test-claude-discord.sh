@@ -3855,13 +3855,18 @@ perl -MFcntl=:flock -e 'open(my $l, ">>", $ARGV[0]) or die; flock($l, LOCK_EX) o
 KILL_AT_EXIT="$KILL_AT_EXIT $LP"; n=0; l=""
 until [ "$l" = "$LP" ] || [ "$n" -ge 200 ]; do nap 0.01; n=$((n + 1)); { read -r l < "$MB/lock"; } 2>/dev/null || :; done
 rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?
-# An automatic (detached) start that is refused leaves `refused`, and keeper_alive then reads the backend as handled, so
-# a hook does not fork the same refusal on every prompt; the foreground refusal above leaves none.
-[ ! -e "$MB/refused" ] || { echo "FAIL: a foreground refusal must leave no refused marker"; exit 1; }
+# An automatic (detached) start that is refused leaves this side's marker (refused.<pid namespace id>, plain `refused` where
+# /proc has none), and keeper_alive then reads the backend as handled, so a hook does not fork the same refusal on every
+# prompt; the foreground refusal above leaves none. A marker another namespace wrote is that side's: it stops nothing here.
+rf=refused; [ ! -L /proc/self/ns/pid ] || { rf=$(readlink /proc/self/ns/pid); rf=refused.${rf//[!0-9]/}; }
+[ -z "$(ls "$MB" | command grep '^refused')" ] || { echo "FAIL: a foreground refusal must leave no refused marker: $(ls "$MB")"; exit 1; }
 rc2=0; (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" monitor --keep mgr --detach >/dev/null 2>&1) || rc2=$?
-[ "$rc2" = 1 ] && [ -e "$MB/refused" ] && bash -c '. "$1"; bot_name=mgr; keeper_alive' x "$D/hooks/lib/discord.sh" ||
-  { echo "FAIL: a detached start refused for an unseen lock must leave refused, which keeper_alive honours (rc=$rc2)"; exit 1; }
-rm -f "$MB/refused"
+[ "$rc2" = 1 ] && [ "$(ls "$MB" | command grep '^refused')" = "$rf" ] && bash -c '. "$1"; bot_name=mgr; keeper_alive' x "$D/hooks/lib/discord.sh" ||
+  { echo "FAIL: a detached start refused for an unseen lock must leave $rf, which keeper_alive honours (rc=$rc2): $(ls "$MB")"; exit 1; }
+rm -f "$MB/$rf"; : > "$MB/refused.1"
+! bash -c '. "$1"; bot_name=mgr; keeper_alive' x "$D/hooks/lib/discord.sh" ||
+  { echo "FAIL: a refused marker of another pid namespace (refused.1) must not stop this side's start (own: $rf)"; exit 1; }
+: > "$MB/$rf"   # stale: the next start that gets through (the keeper below, once the lock is free) clears it, not the other side's
 kill "$LP" 2>/dev/null || :; wait "$LP" 2>/dev/null || :
 [ "$rc" = 1 ] && grep -q 'held by a monitor this side cannot see; run --keep where the bots run' <<<"$out" && [ -z "$(ls "$MB/holders")" ] ||
   { echo "FAIL: --keep must refuse a lock held by a monitor it cannot see (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
@@ -3869,6 +3874,8 @@ want=$(( $(starts) + 1 ))
 # Its stderr a socket (systemd's journal): the --ensure must still run, so the monitor starts.
 (cd "$MP" && exec perl -MSocket -e 'socketpair(A, B, AF_UNIX, SOCK_STREAM, 0) and open(STDERR, ">&", \*B) or die; exec @ARGV' bash "$S" monitor --keep mgr) > "$HOME/keep.out" & KP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $KP"
 wait_for_file "$MB/holders/keeper-$KP"; wait_log "$want" 'Z start$'; rec=$(<"$MB/holders/keeper-$KP")
+[ ! -e "$MB/$rf" ] && [ -e "$MB/refused.1" ] || { echo "FAIL: a start that gets through clears this side's refused marker and no other: $(ls "$MB")"; exit 1; }
+rm -f "$MB/refused.1"
 [[ $rec == "$KP "?*" keeper" ]] || { echo "FAIL: --keep registers a keeper holder with its start time: '$rec' $(ls "$MB/holders")"; exit 1; }
 mp=$(mpid); want=$(( $(starts) + 1 )); kill -9 "$mp"; wait_log "$want" 'Z start$'
 [ "$(mpid)" != "$mp" ] && running "$(mpid)" || { echo "FAIL: the keeper must start a monitor killed without its trap again: $(tail -3 "$MB/monitor.log")"; exit 1; }

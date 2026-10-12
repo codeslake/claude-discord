@@ -29,7 +29,10 @@
 #   monitor.log, monitor.log.1 256 KiB each at most
 #   holders/<kind>-<pid>       "<pid> <start time> <kind>"
 #   stopped                    `--stop` was run: no automatic start until `--start`
-#   refused                    a detached start met a monitor this side cannot see: the hooks start nothing until `--start`
+#   refused.<id>               a detached start met a monitor this side cannot see: this side's hooks start nothing until
+#                              `--start` or a start that gets through. <id> is the pid namespace (the digits of
+#                              `readlink /proc/self/ns/pid`), so the other side of a shared home is not stopped by it;
+#                              plain `refused` where /proc has none (a Mac)
 #   pass.out                   one host's answer, only during a pass
 #   post.out                   one POST's answer and status, only during a pass
 # Nothing in /tmp: no mktemp and no here-document or here-string anywhere in
@@ -123,7 +126,11 @@ if [ -n "$stop" ]; then
   echo "claude-discord: monitor: $bot stays stopped until: claude-discord monitor --start $bot"
   exit 0
 fi
-[ -z "$start" ] || rm -f "$M/stopped" "$M/refused"
+# This side's refused marker (see the header): named by the pid namespace, so the other side of a shared home neither
+# writes nor reads it.
+rf=refused
+if [ -n "$start$keep" ] && [ -L /proc/self/ns/pid ]; then ns=$(readlink /proc/self/ns/pid); ns=${ns//[!0-9]/}; [ -z "$ns" ] || rf=refused.$ns; fi
+[ -z "$start" ] || rm -f "$M/stopped" "$M/$rf"
 # What an automatic start meets after --stop: nothing is started until --start.
 stopped_msg="claude-discord: monitor: $bot was stopped by you (monitor --stop); start it again with: claude-discord monitor --start $bot"
 
@@ -155,9 +162,11 @@ if [ -n "$keep" ]; then
     }
     if unseen; then
       sleep "${CLAUDE_DISCORD_MONITOR_LOCK_WAIT:-5}"
-      # An automatic start (detached) leaves `refused`, so a hook does not fork this again on every prompt; --start clears it.
-      ! unseen || { [ -z "$detach" ] || : > "$M/refused"; tell_err "claude-discord: monitor: --keep: the monitor lock is held by a monitor this side cannot see; run --keep where the bots run"; exit 1; }
+      # An automatic start (detached) leaves this side's marker, so a hook does not fork this again on every prompt; --start clears it.
+      ! unseen || { [ -z "$detach" ] || : > "$M/$rf"; tell_err "claude-discord: monitor: --keep: the monitor lock is held by a monitor this side cannot see; run --keep where the bots run"; exit 1; }
     fi
+    # A start that got through proves the marker stale (the monitor it met is gone).
+    rm -f "$M/$rf"
     # One keeper per bot: the keeper takes $M/keeper.lock (flock, as the monitor takes its lock) BEFORE it detaches and
     # holds it on fd 8 for its whole life, through its self re-exec; the kernel drops it on any death. A starter that
     # loses it finds a keeper and exits 0. No record or pid is read, so two starters at once leave one keeper, and a
