@@ -104,7 +104,7 @@ cap=${CLAUDE_DISCORD_MONITOR_HOST_CAP:-90}     # per host, enforced here (no tim
 # host is polled every step (1 s, or a fifth of a tick shorter than 5 s).
 read -r step pass_n cap_n tick_n < <(awk -v t="$tick" -v p="$pass" -v c="$cap" 'BEGIN {
   s = (t < 5 ? t / 5 : 1); printf "%s %d %d %d\n", s, (p / t < 1 ? 1 : int(p / t + 0.5)), int(c / s + 0.5), int(t / s + 0.5) }')
-child="" tp="" state="" h_rc=0 local_env=() p_code=000 p_retry=""
+child="" tp="" state="" h_rc=0 local_env=() p_code=000 p_retry="" used=0 part=""
 # A pass child runs as its own process group (perl, as for the lock: setsid(1) is util-linux), so the cap and finish
 # kill its whole subtree: a health's $(...) or an ssh's children would otherwise outlive both. The pid survives the exec.
 pg='setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127'
@@ -167,6 +167,8 @@ finish() {  # $1 = reason: kill the pass child, leave a state that reads as stop
   [ -z "$child" ] || kill -- -"$child" 2>/dev/null || kill "$child" 2>/dev/null
   [ -z "$tp" ] || kill "$tp" 2>/dev/null
   rm -f "$M/pass.out"
+  # Mid-pass (run_pass's locals are visible here): the posts already sent are recorded, or a restart would send them again.
+  [ -z "${posts:-}" ] || state=$(printf '%s' "$state" | jq -c --arg results "$posts" --arg now "${ts:-$(now)}" "$apply" 2>/dev/null || printf '%s' "$state")
   state=$(printf '%s' "$state" | jq -c --arg now "$(now)" '.monitor.pid = null | .monitor.holders = [] | .monitor.stopped_at = $now' 2>/dev/null) && write_state
   # On no-holders every record left was dead and is already gone; a record
   # that appears now belongs to a holder whose --ensure is waiting for this
@@ -416,11 +418,13 @@ apply='
 | .monitor.post_failed = any($rs[]; .status == "failed")
 '
 run_pass() {
-  local t0=$SECONDS now_s line w host laptop remote doc results="" out l rest hosts=0 nb=0 mowner ts="" hj k=0 \
-    lang scope key lk knd verdict payload st posts="" findings=0 posted=0 leaving=""
+  local t0=$SECONDS now_s start line w host laptop remote doc results="" out l rest hosts=0 nb=0 mowner ts="" hj k=0 \
+    lang scope key lk knd verdict payload st posts="" findings=0 posted=0
   local envs=()
   local_env=()   # a ledger that lost its local line: POSTs with the monitor's own env
   rotate
+  # The pass's time is its start: holds then count between pass starts, which are PASS apart, whatever the hosts take.
+  read -r now_s start < <(date -u '+%s %Y-%m-%dT%H:%M:%SZ')
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line%$'\r'}   # a ledger saved with CRLF line endings
     set -f; set -- $line; set +f
@@ -441,9 +445,10 @@ run_pass() {
     hosts=$((hosts + 1))
   done < "$dir/hosts"
   rm -f "$M/pass.out"
+  used=$k   # the steps the hosts took, for the main loop's count (the posts', rare and 10 s a call at most, are not counted)
   read_cfg; holders_json
-  read -r now_s ts < <(date -u '+%s %Y-%m-%dT%H:%M:%SZ')
-  out=$(printf '%s\n%s' "$state" "$results" | jq -nrR --arg now "$ts" --argjson now_s "$now_s" --arg lang "$lang" --arg mowner "$mowner" \
+  ts=$(now)
+  out=$(printf '%s\n%s' "$state" "$results" | jq -nrR --arg now "$start" --argjson now_s "$now_s" --arg lang "$lang" --arg mowner "$mowner" \
     --argjson every "$pass" --argjson pass_s "$(( SECONDS - t0 ))" --argjson holders "$hj" "$reduce" 2>/dev/null) ||
     { log "pass failed: the reducer rejected its input"; return 0; }
   while IFS= read -r l; do
@@ -454,11 +459,10 @@ run_pass() {
       E*) log "$rest";;
       O*) set -f; IFS=$'\x1f'; set -- $rest; IFS=$' \t\n'; set +f   # split with no fork: tojson escapes any US in the payload
           scope=$1 key=$2 knd=$3 verdict=$4 payload=$5
-          [ "$knd" != finding ] || findings=$((findings + 1))
           # The holder check between posts (a POST may take 10 s and more): once none is left the rest stay
-          # pending, and what was sent is still recorded below before the monitor leaves.
-          [ -n "$leaving" ] || ! no_holders || leaving=1
-          [ -z "$leaving" ] || continue
+          # pending, and finish records what was sent before the monitor leaves.
+          ! no_holders || finish no-holders
+          [ "$knd" != finding ] || findings=$((findings + 1))
           lk=$key; [ "$scope" != hosts ] || lk="$key|-"   # the log's key, as the TUI and the spec name a host
           if post "$payload"; then
             posted=$((posted + 1)); log "post $lk $verdict $p_code"; st=sent
@@ -470,12 +474,11 @@ run_pass() {
   done < <(printf '%s\n' "$out")
   # A failed apply keeps the state as it was (nothing marked posted: the next pass posts again), never an empty one.
   if [ -n "$posts" ]; then
-    out=$(printf '%s' "$state" | jq -c --arg results "$posts" --arg now "$ts" "$apply" 2>/dev/null) && state=$out ||
+    out=$(printf '%s' "$state" | jq -c --arg results "$posts" --arg now "$ts" "$apply" 2>/dev/null) && state=$out posts="" ||
       log "pass failed: could not apply the post results"
   fi
   write_state
   log "pass hosts=$hosts bots=$nb findings=$findings posted=$posted $(( SECONDS - t0 ))s"
-  [ -z "$leaving" ] || finish no-holders
 }
 
 rotate
@@ -496,8 +499,20 @@ while :; do
   [ -f "$dir/hosts" ] || finish no-ledger
   ! no_holders || finish no-holders
   # Straight back to the holder check after a pass: the last in-pass check may be most of a tick old.
-  if [ "$n" -ge "$pass_n" ]; then run_pass; n=0; continue; fi
+  # Passes start PASS apart, not PASS after the last one ended: the ticks its hosts took count, and the first sleep
+  # after it is the rest of the tick they ended in.
+  if [ "$n" -ge "$pass_n" ]; then
+    run_pass; n=$((used / tick_n)) part=""
+    [ $((used % tick_n)) = 0 ] || part=$(awk -v s="$step" -v m=$((tick_n - used % tick_n)) 'BEGIN { print s * m }')
+    continue
+  fi
   # Waited on, not run in the foreground: a trapped TERM then runs at once, not after up to a tick (finish kills the sleep).
-  sleep "$tick" 9>&- & tp=$!; wait "$tp"; tp=""
+  sleep "${part:-$tick}" 9>&- & tp=$!; wait "$tp"; tp="" part=""
   n=$((n + 1))
+  # claude-discord update changed this file since the last state write: go on as the new one. Same pid, and fd 9 (no
+  # close-on-exec) keeps the lock across exec; it re-reads state.json, whose `posted` keeps it from posting again.
+  # "Not older" rather than "newer": bash 3.2's -nt counts whole seconds, and a change in the second of a state
+  # write would be missed for good (the cost: one restart more). No state.json (unwritable) is no reason: that
+  # restart would come every tick and post everything again.
+  [ ! -f "$M/state.json" ] || [ "$M/state.json" -nt "$0" ] || { log "restart: monitor.sh changed"; exec bash "$0" "$self" --locked "$bot"; }
 done

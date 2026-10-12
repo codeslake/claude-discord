@@ -3292,7 +3292,7 @@ export CLAUDE_DISCORD_MONITOR_TICK=0.01 CLAUDE_DISCORD_MONITOR_PASS=60 CLAUDE_DI
 MB="$HOME/.claude-discord/records/monitor/mgr"
 mv "$HOME/.local/bin/claude-discord" "$HOME/shim.real"
 # $HOME/mon/local.sleep delays it and local.rc is its exit status, as for the ssh stub.
-printf '#!/bin/bash\nprintf "%%s|%%s\\n" "$*" "${HTTPS_PROXY:-}" >> "$HOME/local.calls"\n[ ! -f "$HOME/mon/local.sleep" ] || /bin/sleep "$(<"$HOME/mon/local.sleep")"\ncat "$HOME/mon/local.out" 2>/dev/null\n[ ! -f "$HOME/mon/local.rc" ] || exit "$(<"$HOME/mon/local.rc")"\n' > "$HOME/.local/bin/claude-discord"
+printf '#!/bin/bash\nprintf "%%s|%%s\\n" "$*" "${HTTPS_PROXY:-}" >> "$HOME/local.calls"\n[ ! -f "$HOME/mon/local.sleep" ] || /bin/sleep "$(<"$HOME/mon/local.sleep")"\n[ ! -f "$HOME/clock" ] || echo $(( $(<"$HOME/clock") + 1000 )) > "$HOME/clock"\ncat "$HOME/mon/local.out" 2>/dev/null\n[ ! -f "$HOME/mon/local.rc" ] || exit "$(<"$HOME/mon/local.rc")"\n' > "$HOME/.local/bin/claude-discord"
 chmod +x "$HOME/.local/bin/claude-discord"
 # mdoc <host> <patch rc> <bot:verdict>...: a health --all document with those bots in project /home/u/ws/p, owner 222.
 mdoc() {
@@ -3557,6 +3557,38 @@ wait_log $(( ex + 1 )) 'exit reason=no-holders$'
 jq -e '.hosts.local | .verdict == "blind" and (.detail | test("did not finish"))' "$MB/state.json" >/dev/null || { echo "FAIL: a local laptop past the cap is blind (it alerts), not hostdown: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
 mstop
 echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; hosts and bots that left are dropped and logged; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting"
+
+# Cadence and self-update, counted, never timed. date and sleep are stubs for this monitor: date reads $HOME/clock,
+# which each local health run moves 1000 s on, and logs D for a pass's start stamp (the %s call); sleep logs its
+# argument. Every sleep between two D lines is the monitor's own, in order, so their sum is the pass interval in the
+# monitor's units: PASS (0.05) exactly, with the hosts' steps inside it, not PASS plus them (two intervals: steps
+# that end mid-tick in at least one of them). A finding first seen in a
+# pass carries that pass's start (the clock before health moved it). Then monitor.sh changes under the running
+# monitor: within a tick it execs the new file, same pid, the lock still on fd 9, and posts nothing again.
+CK="$HOME/clockbin"; mkdir -p "$CK"; echo 2000000000 > "$HOME/clock"; : > "$HOME/clk.log"
+printf '#!/bin/bash\ncase $* in *%%s*) echo D >> "$HOME/clk.log";; esac\nexec %s -d "@$(<"$HOME/clock")" "$@"\n' "$(command -v date)" > "$CK/date"
+printf '#!/bin/sh\necho "$1" >> "$HOME/clk.log"\nexec %s "$1"\n' "$(command -v sleep)" > "$CK/sleep"; chmod +x "$CK/date" "$CK/sleep"
+printf 'local\n' > "$MR/mgr/hosts"; mdoc lambda 0 r1:stale > "$MON/local.out"; echo 0.02 > "$MON/local.sleep"
+rm -f "$MB/state.json"; printf '200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"
+want=$(( $(starts) + 2 )); np=$(passes); holder
+(cd "$MP" && PATH="$CK:$PATH" CLAUDE_DISCORD_MONITOR_PASS=0.05 CLAUDE_DISCORD_MONITOR_HOST_CAP=5 bash "$S" monitor --ensure mgr --holder tui "$HPID")
+wait_log $(( np + 3 )) ' pass hosts='
+[ "$(jq -r '.bots["local|/home/u/ws/p|r1"].since_s' "$MB/state.json")" = 2000000000 ] ||
+  { echo "FAIL: a pass is stamped at its start, not after its hosts: $(jq -c '.bots["local|/home/u/ws/p|r1"]' "$MB/state.json")"; exit 1; }
+# Per interval: PASS, or (hosts slower than PASS on a loaded box) their steps alone, with no sleep after them.
+iv=$(awk '/^D$/ { if (d == 1 || d == 2) printf "%s ", ((s > 0.0499 && s < 0.0501) || (s > 0.05 && only) ? "ok" : "bad:" s); d++; s = 0; only = 1; next }
+  { s += $1; if ($1 != "0.002") only = 0 }' "$HOME/clk.log")
+[ "$iv" = "ok ok " ] || { echo "FAIL: pass starts must be PASS (0.05) apart in the monitor's own sleeps, the hosts' steps inside it, not after them: $iv"; exit 1; }
+# Touched again until it lands between passes: one that lands mid-pass is older than that pass's state write.
+rp=$(mpid); n=0
+until command grep -q 'restart: monitor' "$MB/monitor.log" || [ "$n" -ge 30 ]; do touch "$PC/monitor/monitor.sh"; nap 0.03; n=$((n + 1)); done
+wait_log 1 'restart: monitor\.sh changed$'; wait_log "$want" 'Z start$'; next_pass
+[ "$(mpid)" = "$rp" ] && [ "$(readlink "/proc/$rp/fd/9")" = "$MB/lock" ] ||
+  { echo "FAIL: a changed monitor.sh is run by the same process, still holding the lock (pid $rp, now $(mpid), fd 9 $(readlink "/proc/$rp/fd/9"))"; exit 1; }
+[ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 1 ] && [ "$(posts | grep -c .)" = 1 ] ||
+  { echo "FAIL: one restart, and the stale already posted is not posted again: $(posts)"; exit 1; }
+mstop; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep"
+echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd within a tick by the same process, lock kept, nothing posted again"
 
 # The session a SessionStart hook belongs to: the nearest ancestor, two levels at most, whose argv[0] is .../claude or
 # under .../claude/versions/ and whose argv[1] is not daemon. Process chains are built with perl's $0 (what ps shows),
