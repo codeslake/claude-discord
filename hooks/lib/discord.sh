@@ -200,16 +200,20 @@ hook_session() {
 # first bot that wakes. No records, no manager, every keeper alive: builtins only (no fork on Linux), and silent.
 # CLAUDE_DISCORD_NO_AUTOSTART turns it off on a machine (the other side of a shared home; the suite).
 revive_backends() {
-  local pf="$HOME/.claude-discord/records/projects" p d m bot_name bot_project
+  local pf="$HOME/.claude-discord/records/projects" p d m bot_name bot_project seen=" "
   [ -z "${CLAUDE_DISCORD_NO_AUTOSTART:-}" ] && [ -f "$pf" ] || return 0
   while IFS= read -r p || [ -n "$p" ]; do
     p=${p%$'\r'}; [ -n "$p" ] || continue
     for d in "$p"/.claude/discord-agents/*/; do
       d=${d%/}
-      [ -f "$d/hosts" ] || continue
+      [ -f "$d/hosts" ] && [ -f "$d/.env" ] || continue   # the front refuses a bot with no .env, on every prompt
       m=""; { read -r m < "$d/mode"; } 2>/dev/null
       [ "$m" = dev-manager ] || continue
+      # One state dir per bot name: a second project's manager of the same name is not a second backend (and its start
+      # would race the first's, as keeper_alive cannot see a keeper just backgrounded).
       bot_name=${d##*/} bot_project=$p
+      case $seen in *" $bot_name "*) continue;; esac
+      seen="$seen$bot_name "
       keeper_alive || ensure_keeper
     done
   done < "$pf"
@@ -219,7 +223,10 @@ revive_backends() {
 # and backgrounded, so the hook leaves nothing on Claude Code's pipe. The session is no holder: the backend outlives it.
 ensure_keeper() {
   [ -x "$plugin_root/bin/claude-discord" ] || return 0
-  (cd "$bot_project" && "$plugin_root/bin/claude-discord" monitor --keep "$bot_name" --detach) </dev/null >/dev/null 2>&1 &
+  # Without the calling session's own: the keeper and its monitor outlive it, and any bot's hook starts them, so they keep
+  # neither its state dir nor its plugin and project paths. Proxies for the monitor belong in the ledger's per-host words.
+  (cd "$bot_project" && env -u DISCORD_STATE_DIR -u CLAUDE_PROJECT_DIR -u CLAUDE_PLUGIN_ROOT -u CLAUDECODE \
+    "$plugin_root/bin/claude-discord" monitor --keep "$bot_name" --detach) </dev/null >/dev/null 2>&1 &
 }
 # keeper_alive: the backend is up or was stopped on purpose (the `stopped` marker), so a prompt starts nothing. A live
 # keeper is a holders/keeper-<pid> record whose pid runs `bash <root>/monitor/monitor.sh <wrapper> --keep <bot>`: a pid

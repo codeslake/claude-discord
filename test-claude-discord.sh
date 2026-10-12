@@ -4044,6 +4044,28 @@ n=0; KP=""; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/ke
   { echo "FAIL: tui must not start a second keeper while one lives: $(ls "$MB/holders")"; exit 1; }
 rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'tui needs uv' <<<"$out" || { echo "FAIL: without uv, tui must say so (rc=$rc): $out"; exit 1; }
+# Every bot's hook starts the keeper from the project, without the calling session's own DISCORD_STATE_DIR, CLAUDE_PROJECT_DIR,
+# CLAUDE_PLUGIN_ROOT and CLAUDECODE (the keeper and its monitor outlive that session); a manager name that two recorded projects
+# share starts ONE keeper (one state dir per name); a manager with no .env is not started (the front refuses it every time).
+rm -f "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/fx2.rec"; rm -f "$MB"/holders/keeper-*
+printf '#!/bin/sh\nprintf "%%s %%s|%%s|%%s|%%s|%%s\\n" "$PWD" "$*" "${DISCORD_STATE_DIR-unset}" "${CLAUDE_PROJECT_DIR-unset}" "${CLAUDE_PLUGIN_ROOT-unset}" "${CLAUDECODE-unset}" >> "$HOME/fx2.rec"\n' > "$FX/bin/claude-discord"
+DUP="$HOME/dupproj"; mkdir -p "$DUP/.claude/discord-agents/mgr" "$DUP/.claude/discord-agents/noenv"
+for b in mgr noenv; do echo dev-manager > "$DUP/.claude/discord-agents/$b/mode"; echo local > "$DUP/.claude/discord-agents/$b/hosts"; done
+echo DISCORD_BOT_TOKEN=x > "$DUP/.claude/discord-agents/mgr/.env"
+printf '%s\n' "$MP" "$DUP" > "$HOME/.claude-discord/records/projects"
+env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDECODE=1 CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1
+n=0; while [ ! -s "$HOME/fx2.rec" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; nap 0.05
+[ "$(<"$HOME/fx2.rec")" = "$MP monitor --keep mgr --detach|unset|unset|unset|unset" ] ||
+  { echo "FAIL: a prompt must start one keeper per manager name, from its project, with none of the session's own env, and none for a manager with no .env: $(cat "$HOME/fx2.rec" 2>&1)"; exit 1; }
+# And setup refuses a dev-manager name another recorded project already runs, naming that project (the same project may re-run).
+D3="$HOME/dupproj3"; mkdir -p "$D3/.claude/discord-agents/mgr"; echo DISCORD_BOT_TOKEN=x > "$D3/.claude/discord-agents/mgr/.env"; echo '{}' > "$D3/.claude/discord-agents/mgr/access.json"
+rc=0; out=$(cd "$D3" && printf 'dev-manager\n\n\n' | bash "$S" setup mgr --mode 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -qE "already a dev-manager with a hosts ledger in ($MP|$DUP);" <<<"$out" && [ ! -e "$D3/.claude/discord-agents/mgr/mode" ] ||
+  { echo "FAIL: setup --mode dev-manager must refuse a name another recorded project runs as a manager, writing no mode (rc=$rc): $out"; exit 1; }
+rc=0; out=$(cd "$D3" && printf 'none\n' | bash "$S" setup mgr --mode 2>&1) || rc=$?
+[ "$rc" = 0 ] && [ "$(<"$D3/.claude/discord-agents/mgr/mode")" = none ] || { echo "FAIL: only the dev-manager mode is refused (rc=$rc): $out"; exit 1; }
+rm -rf "$D3"
+rm -rf "$DUP" "$HOME/fx2.rec"
 rc=0; out=$(cd "$P" && bash "$S" tui alpha 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'no hosts ledger' <<<"$out" || { echo "FAIL: tui for a bot without a ledger must refuse (rc=$rc): $out"; exit 1; }
 PFB=$(cat "$HOME/.claude-discord/records/projects" 2>/dev/null || :); : > "$HOME/.claude-discord/records/projects"   # nothing recorded: the none case

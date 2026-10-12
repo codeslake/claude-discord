@@ -834,6 +834,17 @@ EOT
     "none  a plain bot" \
     "dev-manager  coordinates claude-discord changes with peer bots" \
     "autoresearchclaw  reports each AutoResearchClaw iteration to the channel")
+  if [ "$mode" = dev-manager ] && [ -f "$helpers/records/projects" ]; then
+    # One backend (state dir, keeper, monitor) per manager bot NAME on a machine: a second project's manager of the same
+    # name would share it, and two ledgers would be followed by whichever monitor started first.
+    here=$(pwd -P)
+    while IFS= read -r p || [ -n "$p" ]; do
+      p=${p%$'\r'}
+      [ -n "$p" ] && [ "$p" != "$here" ] && [ -f "$p/.claude/discord-agents/$name/hosts" ] && [ "$(cat "$p/.claude/discord-agents/$name/mode" 2>/dev/null)" = dev-manager ] || continue
+      echo "claude-discord: '$name' is already a dev-manager with a hosts ledger in $p; one backend serves one manager name per machine, so pick another bot name here" >&2
+      exit 2
+    done < "$helpers/records/projects"
+  fi
   printf '%s\n' "$mode" > "$root/$name/mode"
   if [ "$mode" = dev-manager ]; then
     read -rp "Peer dev bots as name:bot_id:owner_id:machine, comma-separated (empty keeps the current list): " peers || :
