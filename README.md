@@ -229,6 +229,7 @@ claude-discord setup alpha --reset    # forget alpha's token and policy AND the 
 claude-discord setup alpha --mode     # change only alpha's mode (and, for dev-manager, its peers); needs alpha already set up
 claude-discord refresh alpha          # replace the running session with a fresh one, from its handoff
 claude-discord health                 # is every bot in this project still answering? see below
+claude-discord tui [<manager>]        # a read-only view of the manager bot's monitor; see The monitor and the TUI
 claude-discord update [--all]         # see Install
 ```
 
@@ -813,7 +814,7 @@ Every run by hand also appends to `<bot>/health.log` and to the journal;
 `health --all` (the monitor's run, every five minutes) writes neither. Old
 `health.log` files can be deleted.
 
-**No timer, no alerts.** Older versions offered `health --install-timer`, a
+**No timer.** Older versions offered `health --install-timer`, a
 systemd `--user` timer running `health --notify` every five minutes, which
 posted alerts in a `[health] <bot>` thread. Both are gone: an OS
 scheduler outlives every session and brings a stopped setup back on the next
@@ -911,7 +912,9 @@ the manager session gone, no monitor process is left 30 s later.
 
 **Rollback.** Delete `<manager>/hosts`; `rm -r
 ~/.claude-discord/records/monitor ~/.claude-discord/records/projects` removes
-everything this feature wrote.
+everything the monitor wrote. The other file this release adds is
+`<bot>/delivered`, appended by `on-prompt` in every bot's project; delete it
+and `health` goes back to judging by `last-message-id`.
 
 ## Behind a corporate proxy
 
@@ -977,7 +980,7 @@ rest of Claude Code.
 | `[hostdown] <host>` in `#bot-health-check` | ssh to that host failed twice. Run the command in the message; `up` means a stale ControlMaster or a tunnel that was reconnecting |
 | `[blind] <host>` | ssh works but `health --all` gave no document: `~/.local/bin/claude-discord` is missing there or older than 1.10.0. Run `setup` or `update` on that host |
 | `[patchfail] <host>` | the official plugin changed and a patch no longer matches; `claude-discord update` there, and if it still fails the patch needs a claude-discord fix |
-| The TUI says `monitor stopped` | no holder is alive; opening the TUI starts it. If it stops again at once, `<manager>/hosts` is missing or `monitor.log` says why |
+| The TUI says `monitor stopped` or `no state yet` | no holder is alive; opening the TUI starts it. A reason after it in the red bar is `monitor --ensure` refusing, which `monitor.log` never sees: `no hosts ledger` means `<manager>/hosts` **or** `<manager>/.env` is missing (the message names the ledger for both). With no reason and a monitor that stops again at once, `monitor.log` says why |
 | No alert for a bot on a ledger host | its project is not in that host's `~/.claude-discord/records/projects` (run `claude-discord health` there once), or the host is `noreach`/`hostdown`/`blind` (the TUI shows it) |
 | `claude-discord: tui needs uv` | install uv (https://docs.astral.sh/uv/); only the TUI needs it |
 | `claude-discord health: <bot> nostate` | `claude agents` has not answered for six runs, so whether a turn is running cannot be told, and the unanswered message is no longer being held. The daemon is probably unwell: run `claude agents` by hand |

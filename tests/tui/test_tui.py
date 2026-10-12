@@ -9,6 +9,7 @@ Exit 0 and one "ok:" line per case, or the first failure."""
 import asyncio
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -45,6 +46,15 @@ def variant(name):
         s["bots"][CRASHED] = {"host": "wmac", "name": "wmac", "project": "/Users/u/q", "home": "/Users/u",
                               "owner_id": "111", "verdict": "blind", "since": NOW, "detail": "health exited 1 with no document",
                               "fix": "ssh wmac 'cd ~/q && ~/.local/bin/claude-discord health'"}
+    elif name == "markup":
+        # state-derived text with Rich/Textual markup lookalikes: shown as typed, never parsed ([/] would raise)
+        s["manager"] = "mgr [bold]"
+        s["monitor"].update(pid=None, stopped_at="[down]x", holders=[])
+        s["bots"]["wmac|/Users/u/p|MAC"].update(verdict="down", detail="error [/] near", servers="[0]",
+                                                fix="echo patch output [down] here")
+        s["alerts"] = [{"ts": NOW, "key": "wmac|/Users/u/p|MAC", "kind": "find[/]ing", "verdict": "down", "status": "[red]sent"}]
+    elif name == "cursor":
+        s["bots"]["wmac|/Users/u/p|MAC"]["detail"] = "before"
     elif name == "stopped":
         s["monitor"].update(pid=None, stopped_at=NOW, holders=[])
     elif name == "post_failed":
@@ -52,11 +62,19 @@ def variant(name):
     return s
 
 
-async def case(name, check):
+def stub(d, body):
+    """An executable stand-in for the wrapper: `body` is its shell text."""
+    p = Path(d) / "wrapper-stub"
+    p.write_text("#!/bin/sh\n" + body + "\n")
+    p.chmod(0o755)
+    return str(p)
+
+
+async def case(name, check, wrapper=None, state=None):
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "holders").mkdir()
-        (Path(d) / "state.json").write_text(json.dumps(variant(name)))
-        app = tui.MonitorTUI(Path(d), "mgr", None)
+        (Path(d) / "state.json").write_text(json.dumps(variant(state or name)))
+        app = tui.MonitorTUI(Path(d), "mgr", wrapper(d) if wrapper else None)
         async with app.run_test() as pilot:
             await pilot.pause()
             await check(app, pilot)
@@ -119,12 +137,64 @@ async def post_failed(app, pilot):
     assert "POST" in text(app, "#bar")
 
 
+async def markup(app, pilot):
+    assert "mgr [bold]" in text(app, "#head"), text(app, "#head")
+    assert "[down]x" in text(app, "#bar"), text(app, "#bar")
+    bots = app.query_one("#bots")
+    row = [str(c) for c in bots.get_row_at(0)]
+    assert row[5:] == ["[0]", "error [/] near"], row
+    bots.focus()
+    bots.move_cursor(row=0)
+    await pilot.press("enter")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.Detail)
+    assert str(app.screen.query_one("#fix").render()) == "echo patch output [down] here", str(app.screen.query_one("#fix").render())
+    await pilot.press("escape")
+    await pilot.press("a")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.Alerts)
+    assert [str(c) for c in app.screen.query_one("#alerts").get_row_at(0)][2:] == ["find[/]ing", "down", "[red]sent"]
+
+
+async def missing_wrapper(app, pilot):
+    assert not app.query_one("#bar").has_class("hidden")
+    assert "/nonexistent/claude-discord" in text(app, "#bar"), text(app, "#bar")
+    assert "monitor pid 123" in text(app, "#head")   # the rest of the screen still came up
+
+
+async def refused(app, pilot):
+    assert "no hosts ledger [x]" in text(app, "#bar"), text(app, "#bar")
+    args = (Path(app.state_dir) / "args").read_text().strip()
+    assert args == f"monitor --ensure mgr --holder tui {os.getpid()}", args
+
+
+async def cursor(app, pilot):
+    bots = app.query_one("#bots")
+    key = "wmac|/Users/u/p|MAC"
+    bots.focus()
+    bots.move_cursor(row=1)
+    assert bots.ordered_rows[bots.cursor_row].key.value == key
+    state = json.loads((app.state_dir / "state.json").read_text())
+    state["bots"][key]["detail"] = "after"
+    state["bots"]["local|/home/u/p|RVP"]["detail"] = "also"
+    (app.state_dir / "state.json").write_text(json.dumps(state))
+    os.utime(app.state_dir / "state.json", (1, 1))   # a different mtime, whatever the clock's resolution
+    app.refresh_state()
+    assert [str(c) for c in bots.get_row(key)][6] == "after", "the pass was not re-read"
+    assert bots.ordered_rows[bots.cursor_row].key.value == key, "the selected row must stay selected across a refresh"
+
+
 async def main():
     await case("all_ok", all_ok)
     await case("findings", findings)
     await case("crashed_project", crashed_project)
     await case("stopped", stopped)
     await case("post_failed", post_failed)
+    await case("markup", markup)
+    await case("cursor", cursor)
+    await case("missing_wrapper", missing_wrapper, wrapper=lambda d: "/nonexistent/claude-discord", state="all_ok")
+    await case("refused", refused, state="all_ok",
+               wrapper=lambda d: stub(d, 'echo "$*" > "$(dirname "$0")/args"; echo "claude-discord: monitor: no hosts ledger [x]" >&2; exit 1'))
     # q removes the holder record
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "holders").mkdir()

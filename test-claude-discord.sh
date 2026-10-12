@@ -3620,6 +3620,8 @@ rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1
 [ "$rc" = 1 ] && grep -q 'tui needs uv' <<<"$out" || { echo "FAIL: without uv, tui must say so (rc=$rc): $out"; exit 1; }
 rc=0; out=$(cd "$P" && bash "$S" tui alpha 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'no hosts ledger' <<<"$out" || { echo "FAIL: tui for a bot without a ledger must refuse (rc=$rc): $out"; exit 1; }
+rc=0; out=$(cd / && bash "$S" tui mgr 2>&1) || rc=$?
+[ "$rc" = 1 ] && grep -q 'no project above /' <<<"$out" && ! grep -q '/\.claude/discord-agents/' <<<"$out" || { echo "FAIL: tui outside any project must say there is no project above, not name /.claude/discord-agents/<bot> (rc=$rc): $out"; exit 1; }
 # Two dev-manager bots with a ledger of their own (not borrowed from other blocks' fixtures): which one is not guessed.
 TP="$HOME/tuiproj"; mkdir -p "$TP/.claude/discord-agents/m1" "$TP/.claude/discord-agents/m2"
 for b in m1 m2; do echo dev-manager > "$TP/.claude/discord-agents/$b/mode"; echo local > "$TP/.claude/discord-agents/$b/hosts"; done

@@ -20,6 +20,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
@@ -53,8 +54,9 @@ def short(project: str, home: str) -> str:
     return "~" + project[len(home):] if home and project.startswith(home + "/") else project
 
 
-def header_lines(state: dict) -> tuple[str, str | None]:
-    """The header text and the red bar's text (None when there is nothing to warn about)."""
+def header_lines(state: dict, note: str = "") -> tuple[str, str | None]:
+    """The header text and the red bar's text (None when there is nothing to warn about). `note` is why
+    `monitor --ensure` failed, when it did: the one place a refusal is visible."""
     m = state.get("monitor") or {}
     holders = ", ".join(f"{h.get('kind')} {h.get('pid')}" for h in m.get("holders") or []) or "none"
     pid = m.get("pid")
@@ -67,6 +69,8 @@ def header_lines(state: dict) -> tuple[str, str | None]:
         bar = f"monitor stopped at {m.get('stopped_at') or '?'}"
     elif m.get("post_failed"):
         bar = "the last POST to #bot-health-check failed; it is retried next pass"
+    if note:
+        bar = f"{bar}; {note}" if bar else note
     return text, bar
 
 
@@ -108,11 +112,11 @@ class Detail(Screen):
         lines = [f"{self.key}", "", f"verdict  {e.get('verdict', '')} (since {e.get('since', '?')})",
                  f"detail   {e.get('detail', '')}", f"posted   {e.get('posted') or '-'}", "", "recovery command:"]
         with VerticalScroll():
-            yield Static("\n".join(lines))
-            yield Static(e.get("fix") or "(none)", id="fix")   # its own widget so the text can be selected and copied
+            yield Static("\n".join(lines), markup=False)   # state-derived text: [..] in it is text, not markup
+            yield Static(e.get("fix") or "(none)", id="fix", markup=False)   # its own widget so the text can be selected and copied
             mine = [a for a in self.alerts if a.get("key") == self.alert_key]
             yield Static("\nposts for this key:\n" + ("\n".join(
-                f"{a.get('ts')}  {a.get('kind')}  {a.get('verdict')}  {a.get('status')}" for a in mine) or "(none)"))
+                f"{a.get('ts')}  {a.get('kind')}  {a.get('verdict')}  {a.get('status')}" for a in mine) or "(none)"), markup=False)
         yield Footer()
 
 
@@ -127,7 +131,7 @@ class Alerts(Screen):
         t = DataTable(id="alerts")
         t.add_columns("time", "key", "kind", "verdict", "status")
         for a in reversed(self.alerts):
-            t.add_row(a.get("ts", ""), a.get("key", ""), a.get("kind", ""), a.get("verdict", ""), a.get("status", ""))
+            t.add_row(*(Text(str(a.get(k, ""))) for k in ("ts", "key", "kind", "verdict", "status")))
         yield t
         yield Footer()
 
@@ -141,12 +145,13 @@ class MonitorTUI(App):
         super().__init__()
         self.state_dir, self.bot, self.wrapper = state_dir, bot, wrapper
         self.state: dict = {}
+        self.note = ""   # why `monitor --ensure` failed, shown in the red bar
         self.mtime: float | None = None
         self.holder = state_dir / "holders" / f"tui-{os.getpid()}"
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="head")
-        yield Static("", id="bar", classes="hidden")
+        yield Static("", id="head", markup=False)
+        yield Static("", id="bar", classes="hidden", markup=False)
         hosts = DataTable(id="hosts", cursor_type="row")
         hosts.add_columns("host", "reach", "patch", "claude-discord", "bots ok", "checked")
         bots = DataTable(id="bots", cursor_type="row")
@@ -157,8 +162,15 @@ class MonitorTUI(App):
 
     def on_mount(self) -> None:
         if self.wrapper:   # the holder record and the monitor: one wrapper call, which returns at once
-            subprocess.run([self.wrapper, "monitor", "--ensure", self.bot, "--holder", "tui", str(os.getpid())],
-                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            # Its refusals (no ledger, no .env) go to stderr, not monitor.log; the monitor child writes to the log.
+            try:
+                r = subprocess.run([self.wrapper, "monitor", "--ensure", self.bot, "--holder", "tui", str(os.getpid())],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                   text=True, errors="replace", check=False)
+                if r.returncode:
+                    self.note = " ".join(r.stderr.split()) or f"monitor --ensure exited {r.returncode}"
+            except OSError as e:   # a missing or non-executable wrapper: say so instead of crashing the mount
+                self.note = f"cannot run {self.wrapper}: {e.strerror or e}"
         self.refresh_state()
         self.set_interval(2, self.refresh_state)
 
@@ -172,16 +184,20 @@ class MonitorTUI(App):
             return
         self.mtime = mtime
         self.state = load(path)
-        text, bar = header_lines(self.state)
+        text, bar = header_lines(self.state, self.note)
         self.query_one("#head", Static).update(text)
         b = self.query_one("#bar", Static)
         b.update(bar or "")
         b.set_class(bar is None, "hidden")
         for table_id, rows in (("#hosts", host_rows(self.state)), ("#bots", bot_rows(self.state))):
             t = self.query_one(table_id, DataTable)
+            # clear() resets the cursor to row 0: put it back on the same row key (once per pass otherwise).
+            keep = t.ordered_rows[t.cursor_row].key if t.row_count else None
             t.clear()
             for key, row in rows:
-                t.add_row(*row, key=key)
+                t.add_row(*(Text(str(c)) for c in row), key=key)   # Text: [..] in a cell is not markup
+            if keep is not None and any(k == keep.value for k, _ in rows):
+                t.move_cursor(row=t.get_row_index(keep))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         key = event.row_key.value
