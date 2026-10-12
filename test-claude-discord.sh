@@ -259,7 +259,9 @@ SRC="$HOME/src-repo"; mkdir -p "$SRC"
 done | tar --null -T - -cf -) | tar -xf - -C "$SRC" &&
   (cd "$SRC" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm stand-in) || { echo "FAIL: could not build the stand-in repo"; exit 1; }
 export CLAUDE_DISCORD_REPO=$SRC
-# compat writers poll a held lock in short steps and give up within seconds here (a leaked lock fails the suite fast).
+# compat writers poll a held lock in short steps and give up within seconds here. The give-up bound (5 s) is NOT past
+# the default stale bound (5 s) on purpose: a leaked lock fails the suite instead of being broken; stale-lock cases age
+# the lock with touch -d.
 export CLAUDE_DISCORD_COMPAT_STEP_S=0.01 CLAUDE_DISCORD_COMPAT_WAIT_S=5
 PHOME=$(cd "$HOME" && pwd -P)   # setup keys trust by the physical path
 jq -n --arg h "$PHOME" '[$h + "/project", $h + "/project-moved", $h + "/project4", $h + "/project-all", $h + "/project-upper", $h + "/project-runpath", $h + "/project-later", $h + "/project2"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
