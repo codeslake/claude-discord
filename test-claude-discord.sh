@@ -3139,20 +3139,24 @@ rm -f "$HOME/logger.calls" "$SDS/health.log"
 grep -qxF "$(cd "$SPS" && pwd -P)" "$PF" || { echo "FAIL: a health run in a project must record it: $(<"$PF")"; exit 1; }
 [ -s "$SDS/health.log" ] && [ -s "$HOME/logger.calls" ] || { echo "FAIL: control: a health run by hand keeps health.log and the journal line"; exit 1; }
 rm -f "$HOME/logger.calls" "$SDS/health.log"
+# A project whose health crashes (config.env exits 3), listed with a CRLF; the walked project listed twice.
+CP="$HOME/crash proj"; mkdir -p "$CP/.claude/discord-agents/cbot"; echo 'exit 3' > "$CP/.claude/discord-agents/config.env"
+printf '%s\n%s\r\n' "$(cd "$SPS" && pwd -P)" "$(cd "$CP" && pwd -P)" >> "$PF"
 PCACHE=$HOME/.claude/plugins/cache/claude-plugins-official/discord
 mkdir -p "$PCACHE/0.0.98"; printf 'nothing to patch here\n' > "$PCACHE/0.0.98/server.ts"
 queue "200 $MENTION" '200 {"threads":[]}'
 rc=0; doc=$(cd "$HOME" && bash "$S" health --all --json --patch 2>/dev/null) || rc=$?
 [ "$rc" = 0 ] || { echo "FAIL: health --all --json must exit 0 when it printed the document, a finding or not (rc=$rc): $doc"; exit 1; }
-jq -e --arg home "$HOME" --arg p "$(cd "$SPS" && pwd -P)" '
+jq -e --arg home "$HOME" --arg p "$(cd "$SPS" && pwd -P)" --arg cp "$(cd "$CP" && pwd -P)" '
   (.host | length > 0) and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+ \\(")) and .home == $home
   and .patch.rc == 1 and (.patch.output | test("0.0.98/server.ts: bot-authors no longer matches"))
-  and (.projects | length) == 1 and .projects[0].project == $p
+  and (.projects | length) == 2 and .projects[0].project == $p and (.projects[0] | has("error") | not)
+  and .projects[1].project == $cp and .projects[1].bots == [] and .projects[1].error == "health exited 3 with no document"
   and .projects[0].bots[0].bot == "sbot" and .projects[0].bots[0].verdict == "stale" and .projects[0].bots[0].owner_id == "111"' <<<"$doc" >/dev/null ||
   { echo "FAIL: health --all --json --patch: wrong document: $doc"; exit 1; }
 [ ! -e "$SDS/health.log" ] && [ ! -e "$HOME/logger.calls" ] || { echo "FAIL: health --all must write no health.log line and call no logger"; exit 1; }
 grep -qF 'gone project' "$PF" && { echo "FAIL: --all must prune a project whose discord-agents is gone: $(<"$PF")"; exit 1; }
-rm -rf "$PCACHE/0.0.98" "$HOME/bin/logger" "$HOME/logger.calls" "$SPS"; mv "$PF.suite" "$PF"
+rm -rf "$PCACHE/0.0.98" "$HOME/bin/logger" "$HOME/logger.calls" "$SPS" "$CP"; mv "$PF.suite" "$PF"
 echo "ok: health --all --json --patch prints one document (host, version, home, the patch step's rc and stderr, each project's bots with owner_id; a project path with a space, a quote and a \$), exits 0 with a finding, prunes a gone project, and writes no health.log or journal line; setup and a health run record their project"
 
 stop_servers

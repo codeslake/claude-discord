@@ -837,13 +837,16 @@ if [ "${1:-}" = health ]; then
     fi
     if [ -f "$pf" ]; then
       while IFS= read -r p || [ -n "$p" ]; do
+        p=${p%$'\r'}   # a hand-edited CRLF line
         [ -n "$p" ] && [ -d "$p/.claude/discord-agents" ] || continue
+        case $'\n'$keep in *$'\n'"$p"$'\n'*) continue;; esac   # each project once: the same bots twice would read as two
         keep="$keep$p"$'\n'
         if [ "$as_json" = yes ]; then
           # </dev/null: the loop's stdin is the list itself, and a reader in the run would eat its lines.
-          one=$(cd "$p" 2>/dev/null && "$self_path" health --json --nolog 2>/dev/null </dev/null) || :
+          orc=0; one=$(cd "$p" 2>/dev/null && "$self_path" health --json --nolog 2>/dev/null </dev/null) || orc=$?
+          # A child that printed no array is a crash, not a project without bots: the monitor reads `error` as blind.
           # Two plain assignments: bash 3.2 misreads a quoted jq program inside "$( )" inside double quotes.
-          one=$(printf '%s' "${one:-[]}" | jq -c --arg p "$p" '{project: $p, bots: (if type == "array" then . else [] end)}' 2>/dev/null) || one=$(jq -nc --arg p "$p" '{project: $p, bots: []}')
+          one=$(printf '%s' "${one:-null}" | jq -c --arg p "$p" --arg e "health exited $orc with no document" 'if type == "array" then {project: $p, bots: .} else {project: $p, bots: [], error: $e} end' 2>/dev/null) || one=$(jq -nc --arg p "$p" --arg e "health exited $orc with no document" '{project: $p, bots: [], error: $e}')
           docs=$docs$one$'\n'
         else
           echo "== $p"

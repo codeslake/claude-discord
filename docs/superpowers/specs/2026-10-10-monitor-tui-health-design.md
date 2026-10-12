@@ -208,6 +208,11 @@ calls "config.env's owner"). That answers 6091915116's open question on where
 the owner id comes from. `patch.output` is the patch step's stderr, file and
 patch name, nothing else.
 
+A project whose `health` printed no array (it crashed: unreadable `config.env`,
+a directory it cannot enter) carries `"error": "health exited N with no
+document"` and `"bots": []`. The monitor reads a project with `error` as
+`blind` (its bots frozen, alert after 5 min), never as "no bots".
+
 ### `state.json`
 
 ```json
