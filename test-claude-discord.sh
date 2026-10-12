@@ -8,10 +8,15 @@ set -euo pipefail
 # otherwise point refresh at its own state dir, and a shell that wraps claude
 # would turn PLAIN into LAUNCHER. The suite sets the ones it needs below.
 for v in "${!CLAUDE_@}" "${!DISCORD_@}"; do unset "$v"; done
-# A hook run here looks two levels up for its claude session (session_pid) and a dev-manager's SessionStart starts a
-# monitor that session holds: two levels above a hook the suite runs is at most the suite's own parent. Started straight
-# under claude (no shell between), the suite runs itself one level down, so no hook here finds a real session.
-case $(ps -o args= -p "$PPID" 2>/dev/null) in claude|claude\ *|*/claude|*/claude\ *|*/claude/versions/*) bash "$0" "$@"; exit;; esac
+# A hook run here takes $CLAUDE_PID (cleared above) or looks three levels up for its claude session (session_pid), and
+# a dev-manager's SessionStart starts a monitor that session holds: three levels above a hook the suite runs reach at
+# most the suite's grandparent. With claude as its parent or grandparent the suite runs itself one level down, again
+# until neither is (two hops straight under claude), so no hook here finds a real session.
+SUITE_GP=$(ps -o ppid= -p "$PPID" 2>/dev/null) || SUITE_GP=""
+for SUITE_UP in "$(ps -o args= -p "$PPID" 2>/dev/null)" "$(ps -o args= -p "${SUITE_GP// /}" 2>/dev/null)"; do
+  case $SUITE_UP in claude|claude\ *|*/claude|*/claude\ *|*/claude/versions/*) bash "$0" "$@"; exit;; esac
+done
+unset SUITE_GP SUITE_UP
 S=${1:?script path}; S=$(cd "$(dirname "$S")" && pwd)/$(basename "$S")   # absolute: the test cd-s into a throwaway project
 D=$(cd "$(dirname "$S")/.." && pwd -P)   # repo root = plugin root (bin/claude-discord); -P matches the hooks' plugin_root
 
@@ -3839,9 +3844,10 @@ n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; r
 mstop; touch "$PC/monitor/monitor.sh"; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep" "$HOME/monitor.good"
 echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd by the same process once it held still for a pass, lock kept, nothing posted again; a future mtime restarts it once, not every tick; one that does not parse is skipped, logged once; a lock file replaced under it ends it at the next tick, writing state.json only when the file is empty"
 
-# The session a SessionStart hook belongs to: the nearest ancestor, two levels at most, whose argv[0] is .../claude or
-# under .../claude/versions/ and whose argv[1] is not daemon. Process chains are built with perl's $0 (what ps shows),
-# outermost first; the innermost runs session_pid in a bash child and prints the title of what it found.
+# The session a SessionStart hook belongs to: $CLAUDE_PID when its argv[0] is .../claude or under .../claude/versions/
+# and its argv[1] is not daemon, else the nearest such ancestor, three levels at most (claude -> sh -c "<shell prefix>
+# ..." -> sh -c -> hook). Process chains are built with perl's $0 (what ps shows), outermost first; the innermost runs
+# session_pid in a bash child and prints the title of what it found.
 FK="$HOME/fk"
 chain() {
   perl -e '
@@ -3849,11 +3855,33 @@ chain() {
     for my $t (@titles) { my $pid = fork(); if ($pid) { waitpid($pid, 0); exit 0; } $0 = $t; }
     system("bash", "-c", ". \"\$1\"; p=\$(session_pid); t=none; [ -z \"\$p\" ] || IFS= read -r -d \"\" t < /proc/\$p/cmdline; echo \"\$t\"", "x", $lib);' "$D/hooks/lib/discord.sh" "$@"
 }
+[ "$(chain "bash $FK/claude-proxied $FK/claude/versions/9.9.9" "sh -c hook")" = none ] || { echo "FAIL: a bash wrapper whose later argument is a claude path is no session"; exit 1; }
 [ "$(chain "$FK/bin/claude daemon" "$FK/claude/versions/9.9.9")" = "$FK/claude/versions/9.9.9" ] || { echo "FAIL: the nearest claude process, not the daemon above it: $(chain "$FK/bin/claude daemon" "$FK/claude/versions/9.9.9")"; exit 1; }
 [ "$(chain "$FK/bin/claude daemon")" = none ] || { echo "FAIL: claude daemon is never the session"; exit 1; }
 [ "$(chain "claude --name x" "sh -c hook")" = "claude --name x" ] || { echo "FAIL: a foreground claude through sh -c is the session"; exit 1; }
-[ "$(chain "$FK/claude/versions/9.9.9" "sh -c a" "sh -c b")" = none ] || { echo "FAIL: a claude three levels up is not this hook's session"; exit 1; }
-echo "ok: session_pid finds the nearest claude process within two levels, never claude daemon"
+[ "$(chain "$FK/claude/versions/9.9.9" "sh -c prefix" "sh -c hook")" = "$FK/claude/versions/9.9.9" ] || { echo "FAIL: a claude three levels up (a shell prefix's two sh -c) is the session: $(chain "$FK/claude/versions/9.9.9" "sh -c prefix" "sh -c hook")"; exit 1; }
+[ "$(chain "$FK/claude/versions/9.9.9" "sh -c a" "sh -c b" "sh -c c")" = none ] || { echo "FAIL: a claude four levels up is not this hook's session"; exit 1; }
+# CLAUDE_PID: real argv here, not perl titles (a title is one /proc field, spaces and all). The stand-in claude is a sleep
+# exec'd as .../claude/versions/7.7.7; the wrapper a bash running .../claude-proxied .../claude/versions/7.7.7 (it traps
+# TERM and takes its sleep down, so the kill at exit leaves nothing). Each is waited for until /proc shows its argv.
+mkdir -p "$FK"; printf '%s\n' 'trap "kill \$! 2>/dev/null; exit" TERM; sleep 30 & wait' > "$FK/claude-proxied"
+bash -c 'exec -a "$0" /bin/sleep 30' "$FK/claude/versions/7.7.7" & CP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $CP"
+bash "$FK/claude-proxied" "$FK/claude/versions/7.7.7" & WP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $WP"
+argv01() { local a="" b=""; { IFS= read -rd '' a; IFS= read -rd '' b; } 2>/dev/null < "/proc/$1/cmdline"; printf '%s %s' "$a" "$b"; }
+n=0; while { [ "$(argv01 "$CP")" != "$FK/claude/versions/7.7.7 30" ] || [ "$(argv01 "$WP")" != "bash $FK/claude-proxied" ]; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
+export CLAUDE_PID=$CP
+[ "$(chain "sh -c hook")" = "$FK/claude/versions/7.7.7" ] || { echo "FAIL: CLAUDE_PID naming a claude process is the session, no claude within reach: $(chain "sh -c hook")"; exit 1; }
+CLAUDE_PID=$WP
+[ "$(chain "sh -c hook")" = none ] || { echo "FAIL: CLAUDE_PID naming a claude-proxied bash wrapper is ignored: $(chain "sh -c hook")"; exit 1; }
+CLAUDE_PID=$$
+[ "$(chain "$FK/claude/versions/8.8.8" "sh -c hook")" = "$FK/claude/versions/8.8.8" ] || { echo "FAIL: CLAUDE_PID naming no claude is ignored, the walk decides: $(chain "$FK/claude/versions/8.8.8" "sh -c hook")"; exit 1; }
+unset CLAUDE_PID; kill "$CP" "$WP" 2>/dev/null || :; wait "$CP" "$WP" 2>/dev/null || :
+# No session found: ensure_monitor says so in the bot's health.log (and starts nothing), not in silence.
+mkdir -p "$HOME/hl"
+bash -c '. "$1"; plugin_root=$2 DISCORD_STATE_DIR=$3 bot_project=$3 bot_name=mgr; ensure_monitor' x "$D/hooks/lib/discord.sh" "$D" "$HOME/hl"
+grep -q ' x: no claude session process found ' "$HOME/hl/health.log" 2>/dev/null || { echo "FAIL: ensure_monitor with no session must log it to health.log: $(cat "$HOME/hl/health.log" 2>&1)"; exit 1; }
+rm -rf "$HOME/hl"
+echo "ok: session_pid takes CLAUDE_PID when it is a claude process, else the nearest claude within three levels, never claude daemon or a wrapper with claude in a later argument; no session found is logged in health.log"
 
 # The manager session's SessionStart (any source; compact here, which runs no patch) registers the session, its
 # nearest claude ancestor, as a holder and ensures the monitor, detached; the monitor ends with that session. The
