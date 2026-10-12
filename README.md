@@ -837,7 +837,9 @@ claude-discord tui [<manager>]           # a read-only view; starts the monitor 
 `<manager>/hosts`: one host per line, an optional `laptop` word, then optional
 `KEY=VALUE` words (no spaces in a value) that become the remote command's
 environment. `local` is this machine and is always there; its `KEY=VALUE`
-words are also the environment of the monitor's own Discord calls.
+words are also the environment of the monitor's own Discord calls. A proxy
+word (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`, in either case)
+is set in both cases, since curl prefers the lowercase one.
 
 ```
 # ssh host names this manager checks; "local" is this machine (no ssh)

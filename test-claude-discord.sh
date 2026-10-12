@@ -222,7 +222,7 @@ cat > "$HOME/bin/curl" <<'EOF'
 # first. With nothing queued nothing is printed, as before.
 # Builtins only (read, printf): a spawned head, cat or tail costs more than the stub's whole job, and it runs ~100 times.
 printf '%s\n' "$*" >> "$CURL_LOG"
-[ -z "${HTTPS_PROXY:-}" ] || printf '%s\n' "$HTTPS_PROXY" >> "$HOME/curl.proxy"   # the env a call ran with (the monitor's POST)
+[ -z "${HTTPS_PROXY:-}${https_proxy:-}" ] || printf '%s|%s\n' "${HTTPS_PROXY:-}" "${https_proxy:-}" >> "$HOME/curl.proxy"   # the env a call ran with (the monitor's POST)
 while IFS= read -r l || [ -n "$l" ]; do printf '%s\n' "$l"; done >> "$CURL_STDIN_LOG" 2>/dev/null
 [ ! -f "$HOME/curl.sleep" ] || { echo 1 > "$HOME/curl.slept"; /bin/sleep "$(<"$HOME/curl.sleep")"; }   # a slow answer, after the request
 line=""; rest=()
@@ -3461,8 +3461,8 @@ echo "ok: monitor: the holder check counts across the whole pass (a holder gone 
 # own failure; new, so held), h5 (connected, then silent past the cap: blind,
 # not hostdown, and new, so held), lap2 (a laptop silent past the cap, seeded blind 301 s: a sleeping laptop is
 # hostdown, never posted), h1's project ws/c crashed on first sight (an entry of its own, blind, held).
-# The monitor starts with no proxy in its env, and the local line names one no host uses: a POST can only have it
-# from the ledger.
+# The monitor starts with no HTTPS_PROXY in its env but a lowercase https_proxy (which curl prefers), and the local line
+# names a proxy no host uses: a POST can only have it from the ledger, in both spellings.
 printf 'local HTTPS_PROXY=http://127.0.0.1:18118\nh1\nh2\n-oProxyCommand=x\nh3\nh4\nh5\nh6\nlap laptop\nlap2 laptop\n' > "$MR/mgr/hosts"
 echo 124 > "$MON/h5.rc"; echo 124 > "$MON/lap2.rc"   # what the cap leaves (the cap itself: the last block's local laptop)
 mdoc h6 0 "l1:noreach" > "$MON/h6.out"; echo 255 > "$MON/local.rc"
@@ -3489,7 +3489,7 @@ mstate --argjson n "$(date +%s)" '
 : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; rm -f "$HOME/ssh.log" "$HOME/curl.proxy"
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do printf '200 {}\n'; done > "$CURL_REPLIES"
 want=$(( $(passes) + 1 )); holder
-(cd "$MP" && env -u HTTPS_PROXY -u https_proxy -u ALL_PROXY bash "$S" monitor --ensure mgr --holder tui "$HPID")
+(cd "$MP" && env -u HTTPS_PROXY -u ALL_PROXY https_proxy=http://127.0.0.1:1 bash "$S" monitor --ensure mgr --holder tui "$HPID")
 wait_log "$want" ' pass hosts='
 P1=$(posts)
 [ "$(printf '%s\n' "$P1" | grep -c .)" = 16 ] || { echo "FAIL: one pass must post exactly the 16 due findings and recoveries: $P1"; exit 1; }
@@ -3526,7 +3526,7 @@ grep -qxF "복구: ssh h2 'cd \"/home/u/it'\\''s \\\$x here\" && ~/.local/bin/cl
 [ "$s_wsc" = true ] ||
   { echo "FAIL: a project that crashes on first sight gets an entry of its own (blind, the manager's owner), never vanishes: $(jq -c '.bots | with_entries(select(.key | contains("ws/c")))' "$MB/state.json")"; exit 1; }
 grep -q 'Authorization: Bot tokMgrUnique' "$CURL_STDIN_LOG" && ! grep -q tokMgrUnique "$CURL_LOG" || { echo "FAIL: the manager's token goes on curl's stdin, never argv"; exit 1; }
-[ "$(sort -u "$HOME/curl.proxy" 2>/dev/null)" = http://127.0.0.1:18118 ] || { echo "FAIL: a POST runs with the ledger's local env (the proxy): $(cat "$HOME/curl.proxy" 2>&1)"; exit 1; }
+[ "$(sort -u "$HOME/curl.proxy" 2>/dev/null)" = 'http://127.0.0.1:18118|http://127.0.0.1:18118' ] || { echo "FAIL: a POST runs with the ledger's local proxy in both spellings, over a lowercase one in the session env: $(cat "$HOME/curl.proxy" 2>&1)"; exit 1; }
 rm -f "$HOME/curl.proxy"
 leak=$(command grep -rlF tokMgrUnique "$HOME/.claude-discord/records" "$MP" | command grep -v '/mgr/\.env$' || :)
 [ -z "$leak" ] || { echo "FAIL: the token may appear in no file but the bot's .env: $leak"; exit 1; }

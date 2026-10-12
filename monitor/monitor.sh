@@ -464,7 +464,15 @@ run_pass() {
     laptop=false; [ "${1:-}" != laptop ] || { laptop=true; shift; }
     envs=()
     for w in "$@"; do
-      if [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then envs+=("$w"); else log "ledger: $host: a word that is not KEY=VALUE was skipped"; fi
+      [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { log "ledger: $host: a word that is not KEY=VALUE was skipped"; continue; }
+      # A proxy word sets both spellings: curl prefers the lowercase one, which the session's own env may already set.
+      case ${w%%=*} in
+        HTTPS_PROXY|https_proxy) envs+=("HTTPS_PROXY=${w#*=}" "https_proxy=${w#*=}");;
+        HTTP_PROXY|http_proxy) envs+=("HTTP_PROXY=${w#*=}" "http_proxy=${w#*=}");;
+        ALL_PROXY|all_proxy) envs+=("ALL_PROXY=${w#*=}" "all_proxy=${w#*=}");;
+        NO_PROXY|no_proxy) envs+=("NO_PROXY=${w#*=}" "no_proxy=${w#*=}");;
+        *) envs+=("$w");;
+      esac
     done
     [ "$host" != local ] || local_env=(${envs[@]+"${envs[@]}"})
     remote="env $([ ${#envs[@]} = 0 ] || printf '%q ' "${envs[@]}")~/.local/bin/claude-discord health --all --json --patch"
