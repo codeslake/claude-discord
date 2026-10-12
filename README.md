@@ -1015,7 +1015,9 @@ rest of Claude Code.
 throwaway HOME with a stub plugin and stub `claude`; it touches nothing real
 and prints `ALL PASS`. It runs on Linux only: it finds its stand-in plugin
 servers through `/proc`, and assumes GNU `wc`, `sed` and a `/tmp` that is not a
-symlink, none of which hold on macOS.
+symlink, none of which hold on macOS. A C compiler (`cc`) is optional: with
+one the suite builds a faster jq stub, without it a bash stub runs (about 1.5 s
+slower, same checks).
 
 `uv run --script tests/tui/test_tui.py` drives the TUI over fixture state
 files (Textual's pilot). It needs uv and the Textual wheel, so it sits

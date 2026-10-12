@@ -3785,8 +3785,20 @@ n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; r
 ! running "$rp" && [ "$(mpid)" = "$rp" ] && [ "$(posts | grep -c '\] l[ab] on')" = 1 ] &&
   jq -e '.bots["local|/home/u/ws/p|la"].posted == "stale" and .bots["local|/home/u/ws/p|lb"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a monitor whose lock file was replaced posts nothing more, records what it sent and leaves its pid: $(posts | grep '\] l[ab] on') $(jq -c '[.monitor.pid, (.bots | map_values(.posted))]' "$MB/state.json") $(tail -2 "$MB/monitor.log")"; exit 1; }
+# The same, but the file now names another pid (a successor that already started from state.json): this monitor still
+# ends before the next post, and writes nothing, so the post it did send is not in state.json (the successor owns it).
+mstop; mdoc lambda 0 r1:stale la:stale lb:stale > "$MON/local.out"; printf '200 {}\n' > "$CURL_REPLIES"; np=$(passes); holder
+(cd "$MP" && PATH="$CK:$PATH" CLAUDE_DISCORD_MONITOR_PASS=0.05 CLAUDE_DISCORD_MONITOR_HOST_CAP=5 bash "$S" monitor --ensure mgr --holder tui "$HPID")
+wait_log $(( np + 1 )) ' pass hosts='; rp=$(mpid)
+mdoc lambda 0 r1:stale la:stale lb:stale lc:stale ld:stale > "$MON/local.out"; printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; echo 0.15 > "$HOME/curl.sleep"
+wait_for_file "$HOME/curl.slept"
+ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :; printf '1\n' > "$MB/lock"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
+n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
+! running "$rp" && [ "$(<"$MB/lock")" = 1 ] && [ "$(posts | grep -c '\] l[cd] on')" = 1 ] &&
+  jq -e '.bots["local|/home/u/ws/p|lc"].posted == null and .bots["local|/home/u/ws/p|ld"].posted == null' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: a monitor whose lock file names another pid ends without writing state.json: $(posts | grep '\] l[cd] on') $(jq -c '[.monitor.pid, (.bots | map_values(.posted))]' "$MB/state.json") $(tail -2 "$MB/monitor.log")"; exit 1; }
 mstop; touch "$PC/monitor/monitor.sh"; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep" "$HOME/monitor.good"
-echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd by the same process once it held still for a pass, lock kept, nothing posted again; a future mtime restarts it once, not every tick; one that does not parse is skipped, logged once; a lock file replaced under it ends it at the next tick"
+echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd by the same process once it held still for a pass, lock kept, nothing posted again; a future mtime restarts it once, not every tick; one that does not parse is skipped, logged once; a lock file replaced under it ends it at the next tick, writing state.json only when the file is empty"
 
 # The session a SessionStart hook belongs to: the nearest ancestor, two levels at most, whose argv[0] is .../claude or
 # under .../claude/versions/ and whose argv[1] is not daemon. Process chains are built with perl's $0 (what ps shows),
