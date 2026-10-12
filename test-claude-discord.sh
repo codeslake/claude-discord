@@ -51,7 +51,7 @@ wait_for_file() {  # $1 = path; up to 2s in 0.01s steps, for an async write to l
 # literal pattern (-F or not, -x, a leading ^ or trailing $ on a literal) on stdin or in one readable file, and hands every
 # other call (any other flag, a regex, several files, a missing file) to the real grep untouched.
 grep() {
-  local flags="" pat file="" data need hay nl=$'\n' bol=0 eol=0
+  local flags="" pat file="" data="" l need hay nl=$'\n' bol=0 eol=0
   local -a args=("$@")
   while [ $# -gt 0 ]; do
     case $1 in
@@ -82,7 +82,7 @@ grep() {
   if [ -n "$file" ]; then
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then printf 'grep: %s: No such file or directory\n' "$file" >&2; return 2; fi
     { [ -f "$file" ] && [ -r "$file" ]; } || { command grep "${args[@]}"; return; }
-    IFS= read -rd '' data < "$file" || :
+    while IFS= read -r l; do data+=$l$nl; done < "$file"; data+=$l   # by line: bash reads a file in blocks that way, a byte per syscall with -d ''
   else
     IFS= read -rd '' data || :
   fi
@@ -219,6 +219,58 @@ case $* in
 esac
 EOF
 chmod +x "$HOME/bin/sleep"
+# `jq`, memoized. jq 1.6 compiles its builtins at every start (10.7 ms here, 2026-10-11), and the wrapper, the hooks and
+# this suite start it ~1600 times, ~1000 of them with a call already made in this run: half the suite's wall time. jq is a
+# pure function of its arguments, the files it names and its stdin, so the first answer to each distinct call is kept and
+# replayed (~2 ms). Whatever the stub does not fully understand runs the real jq untouched: an option outside the plain
+# set, a filter that names the clock, the environment, `input` or a module, a file argument that is not a readable
+# regular file. An answer that came with stderr, or a failure other than -e's 1 or 4, is never kept.
+# An entry is "<rc>\n<key><stdout>\004" in a file named by the lengths of the key's parts, created with noclobber (hooks
+# run in parallel); a reader takes it only when it holds its own key and ends in \004, so a half-written one is a miss.
+# Inputs and entries are read line by line (c ends up byte for byte the content): bash reads a file in blocks that way,
+# and a byte per syscall with any other delimiter.
+mkdir -p "$HOME/jq.cache"
+{ printf '#!/bin/bash\nJQ_REAL=%q; JQ_CACHE=%q\n' "$(command -v jq)" "$HOME/jq.cache"; cat <<'EOF'
+args=("$@"); filter=""; have=0; null=0; inputs=0; files=()
+real() { exec "$JQ_REAL" "${args[@]}"; }
+slurp() { local l; c=""; while IFS= read -r l; do c+=$l$'\n'; done; c+=$l; }   # shortcut: drops a NUL; no caller sends one (JSON has none)
+while [ $# -gt 0 ]; do
+  a=$1; shift
+  case $a in
+    --arg|--argjson) [ $# -ge 2 ] || real; shift 2;;
+    --slurpfile|--rawfile) [ $# -ge 2 ] || real; files+=("$2"); shift 2;;
+    -[a-zA-Z]*) case ${a#-} in *[!nrcesSjaRMC]*) real;; *n*) null=1;; esac;;
+    -*) real;;
+    *) if [ $have = 0 ]; then filter=$a; have=1; else files+=("$a"); inputs=1; fi;;
+  esac
+done
+[ $have = 1 ] || real
+re='(^|[^.A-Za-z0-9_])(now|env|ENV|input[a-z_]*|[a-z]*local[a-z]*|debug|stderr|halt[a-z_]*|import|include|modulemeta|get_[a-z_]*)([^A-Za-z0-9_]|$)'
+[[ ! $filter =~ $re ]] || real
+key=""; for a in "${args[@]}"; do key+=$a$'\001'; done
+name=${#key}
+for f in "${files[@]}"; do
+  { [ -f "$f" ] && [ -r "$f" ]; } || real
+  slurp < "$f"; key+=$c$'\002'; name+=-${#c}
+done
+t=$JQ_CACHE/t$$; piped=0
+if [ $null = 0 ] && [ $inputs = 0 ]; then slurp; in=$c; key+=$c; name+=-${#c}; piped=1; fi
+i=0
+while [ -e "$JQ_CACHE/$name.$i" ]; do
+  slurp < "$JQ_CACHE/$name.$i"; rc=${c%%$'\n'*}; c=${c#*$'\n'}
+  if [ "${c:0:${#key}}" = "$key" ] && [ "${c: -1}" = $'\004' ]; then c=${c:${#key}}; printf '%s' "${c%?}"; exit "$rc"; fi
+  i=$((i+1))
+done
+rc=0
+if [ $piped = 1 ]; then printf '%s' "$in" > "$t.i"; "$JQ_REAL" "${args[@]}" < "$t.i" > "$t.o" 2> "$t.e" || rc=$?
+else "$JQ_REAL" "${args[@]}" > "$t.o" 2> "$t.e" || rc=$?; fi
+slurp < "$t.o"; out=$c
+printf '%s' "$out"
+if [ -s "$t.e" ]; then slurp < "$t.e"; printf '%s' "$c" >&2; exit "$rc"; fi
+case $rc in 0|1|4) case $key$out in *$'\004'*) ;; *) set -C; { printf '%s\n%s%s\004' "$rc" "$key" "$out" > "$JQ_CACHE/$name.$i"; } 2>/dev/null;; esac;; esac
+exit "$rc"
+EOF
+} > "$HOME/bin/jq"; chmod +x "$HOME/bin/jq"
 # Stands in for a session's claude process: runs each argument through
 # sh -c, as Claude Code runs a hook command, and reads its output to EOF (a
 # hook that left a child holding that pipe would hang here), appending it to
@@ -2588,13 +2640,14 @@ detail_of()  { field_of "$1" detail "$2"; }
 FAKE_PLUGIN="$HOME/fake-servers/discord/0.0.4"; mkdir -p "$FAKE_PLUGIN"
 printf '{"name":"fake-discord","scripts":{"start":"sleep 300"}}\n' > "$FAKE_PLUGIN/package.json"
 SERVERS=""
-count_fake_servers() {  # $1 = state dir; the same argv-then-environ order health uses
+count_fake_servers() {  # $1 = state dir, $2 = the candidates (default: every bun); the same argv-then-environ order health uses
   local n=0 c a p hit x cands
   # The same narrowing the product uses: `pgrep -x bun` cuts the candidates
   # from every process on the machine to the handful that could be a server
   # (4 of 792 measured). This is polled in a loop, so the full walk was paid
   # dozens of times a run.
-  if cands=$(pgrep -x bun 2>/dev/null); then
+  if [ -n "${2:-}" ]; then cands=$2
+  elif cands=$(pgrep -x bun 2>/dev/null); then
     cands=$(printf '/proc/%s/cmdline ' $cands)
   else
     cands=$(printf '%s ' /proc/[0-9]*/cmdline)
@@ -2612,7 +2665,7 @@ count_fake_servers() {  # $1 = state dir; the same argv-then-environ order healt
   printf '%s' "$n"
 }
 start_server() {  # $1 = the bot state dir this server serves
-  local want=$(( $(count_fake_servers "$1") + 1 ))
+  local pid
   # setsid, and kill -PGID below: `bun run start` runs the script as a CHILD
   # process, so signalling bun's own pid leaves that child orphaned --
   # measured, the `sleep` outlived its bun, and a run on another machine left
@@ -2620,10 +2673,11 @@ start_server() {  # $1 = the bot state dir this server serves
   # this works where only perl is present.
   DISCORD_STATE_DIR="$1" perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- \
     bun run --cwd "$FAKE_PLUGIN" --shell=bun --silent start >/dev/null 2>&1 &
-  SERVERS="$SERVERS $!"; KILL_AT_EXIT="$KILL_AT_EXIT $!"
-  # Polled through /proc, never through health: health drains CURL_REPLIES.
+  pid=$!; SERVERS="$SERVERS $pid"; KILL_AT_EXIT="$KILL_AT_EXIT $pid"
+  # Polled through /proc, never through health: health drains CURL_REPLIES. Only the pid just started is a candidate
+  # (perl execs bun in place): a pgrep per poll cost 20 ms on a host with ~600 processes.
   for _ in $(seq 250); do
-    [ "$(count_fake_servers "$1")" -ge "$want" ] && return 0
+    [ "$(count_fake_servers "$1" "/proc/$pid/cmdline")" = 1 ] && return 0
     nap 0.02
   done
   echo "FAIL: the stand-in plugin server for $1 never appeared"; exit 1
