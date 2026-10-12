@@ -3510,9 +3510,12 @@ jq -e '(.hosts.h3 | .verdict == "blind" and (.detail | test("wrong shape.*Cannot
 jq -e '(.hosts.h2| .verdict == "blind" and (.detail | test("exited 3"))) and (.bots | has("h2|/home/u/ws/p|r3") | not)' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a host whose remote exits non-zero is blind (its bots unread), document or not: $(jq -c .hosts.h2 "$MB/state.json")"; exit 1; }
 # The launcher opened monitor.log as the monitor's stdout and stderr; the rotation at start renamed that file, so the
-# monitor must have reopened it, or its output would grow monitor.log.1 past the cap.
-[ "$(readlink "/proc/$(mpid)/fd/1")" = "$MB/monitor.log" ] && [ "$(readlink "/proc/$(mpid)/fd/2")" = "$MB/monitor.log" ] ||
-  { echo "FAIL: after a rotation the monitor's stdout and stderr must append to the new monitor.log: $(readlink "/proc/$(mpid)/fd/1")"; exit 1; }
+# monitor must have reopened it, or its output would grow monitor.log.1 past the cap. Polled: the monitor runs builtins
+# with 2>/dev/null nearly all the time at this tick, so one read of fd 2 can land on /dev/null.
+mp=$(mpid) n=0
+until [ "$(readlink "/proc/$mp/fd/1")" = "$MB/monitor.log" ] && [ "$(readlink "/proc/$mp/fd/2")" = "$MB/monitor.log" ] || [ "$n" -ge 100 ]; do nap 0.01; n=$((n + 1)); done
+[ "$n" -lt 100 ] ||
+  { echo "FAIL: after a rotation the monitor's stdout and stderr must append to the new monitor.log: fd1 $(readlink "/proc/$mp/fd/1") fd2 $(readlink "/proc/$mp/fd/2")"; exit 1; }
 # A holder record whose pid lives but started at another time is a reused pid: dead. Were it counted, the monitor
 # would outlive the real holder below.
 printf '%s %s tui\n' "$$" "Thu Jan  1 00:00:00 1970" > "$MB/holders/tui-$$"
