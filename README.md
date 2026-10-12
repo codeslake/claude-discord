@@ -21,6 +21,8 @@ Origin: written by d.kim4, extended here.
 | `python3` (optional, stdlib only) | `thread-guard` rewrites a markdown table in a reply into an aligned code block; without it a reply with a table is denied instead |
 | `perl` | patches the plugin at every start, and detaches a `refresh` in its own session (macOS has no `setsid`) |
 | `git` | `setup` clones claude-discord, `update` pulls it |
+| `ssh` (manager bots only) | the backend monitor runs `health --all` on each ledger host over it, with `BatchMode=yes` |
+| `uv` (the TUI only) | `claude-discord tui` runs a Python + Textual script through `uv run --script`; nothing else needs it |
 
 Disable the plugin globally after installing it: enabled globally, every
 session without a bot token tries to start a Discord server. The wrapper
@@ -41,6 +43,14 @@ enables it per session with `--settings`.
   hook states `CLAUDE_DISCORD_TOOLS=<path>` in a bot session's context, and the
   commands in this README are run with that path. From a terminal use
   `<clone>/tools`, e.g. `~/.claude-discord/source/tools`.
+- **ledger**: `<project>/.claude/discord-agents/<manager bot>/hosts`, the ssh
+  hosts a manager bot's monitor checks. Its existence is the monitor's on/off
+  switch.
+- **holder**: a process the monitor lives for: an open TUI or the manager
+  session. The monitor exits within 30 s of the last one.
+- **finding**: a verdict that needs a human (`down`, `stale`, `duplicate`,
+  `unreachable`, `nostate`, `throttled`, `apierror`, `patchfail`, `hostdown`,
+  `blind`). `ok` and `busy` are not findings; `noreach` is logged, never posted.
 - **project**: the directory you run `claude-discord` from. All state lives in
   `./.claude/discord-agents/` there, so a bot belongs to a project. With exactly
   one bot set up, naming it is optional; with several, the name is required.
@@ -707,6 +717,7 @@ thing that died.
 ```
 claude-discord health                  # one line per bot; exit 1 if anything needs a human
 claude-discord health --json           # the same as data, for a script
+claude-discord health --all [--json] [--patch]   # every project on this machine (what a monitor pass runs)
 claude-discord health --uninstall-timer  # remove the timer an older version installed
 ```
 
@@ -716,8 +727,20 @@ its gateway are both up — `state` tracks whether a turn is running. Not the
 process count either, on its own, for the upgrade reason above. The primary
 signal is behavioural:
 
-> the **oldest** message that addressed this bot, newer than the last one its
-> hooks recorded in `last-message-id`, and more than 15 minutes old
+> the **oldest** message that addressed this bot, never handed to its session
+> (its id is not in `<bot>/delivered`), and more than 15 minutes old, with no
+> later message from the bot in the same chat (channel or thread)
+
+`on-prompt` appends every message id the session receives to `<bot>/delivered`
+(the last 200 are kept). So `stale` is a delivery check: `ok` means the
+session received the message, not that it answered. A mention that asks
+nothing gets no reply by rule, and a turn may take an hour; neither is a
+fault. Any later message the bot posted in the same chat also clears it, so a
+message lost in a refresh and then answered by the catch-up stops counting.
+A message stuck in one thread still reads `stale` while the bot answers
+in another, which `last-message-id` alone could not see. A bot whose hooks
+have not run since 1.10.0 has no `delivered` yet and is judged by
+`last-message-id`, as before.
 
 Oldest, not newest: the age being measured is how long the bot has been
 failing to answer, and with the newest every fresh message resets the clock —
@@ -786,14 +809,109 @@ run.
 **It never restarts and never stops anything.** A misjudged restart is what
 puts two sessions on one token, and a health check is the thing most likely to
 misjudge. It posts nothing to Discord either: it prints, and a human decides.
-Every run also appends to `<bot>/health.log` and to the journal.
+Every run by hand also appends to `<bot>/health.log` and to the journal;
+`health --all` (the monitor's run, every five minutes) writes neither. Old
+`health.log` files can be deleted.
 
 **No timer, no alerts.** Older versions offered `health --install-timer`, a
 systemd `--user` timer running `health --notify` every five minutes, which
 posted alerts in a `[health] <bot>` thread. Both are gone: an OS
 scheduler outlives every session and brings a stopped setup back on the next
 boot without anyone seeing it. `health --uninstall-timer` removes one an older
-version installed.
+version installed. Alerts now come from a manager bot's monitor (next
+section), which runs only while a TUI or the manager session holds it.
+
+## The monitor and the TUI (manager bots)
+
+A dev-manager bot can watch every bot on its own machines and tell each
+bot's owner in `#bot-health-check` when one stops answering. Nothing is
+installed in the OS: no launchd, systemd or cron.
+
+```
+claude-discord setup <manager> --mode    # dev-manager, then: ssh hosts to check
+claude-discord tui [<manager>]           # a read-only view; starts the monitor if none runs
+```
+
+**Ledger.** `setup` in dev-manager mode asks `ssh hosts to check` and writes
+`<manager>/hosts`: one host per line, an optional `laptop` word, then optional
+`KEY=VALUE` words (no spaces in a value) that become the remote command's
+environment. `local` is this machine and is always there; its `KEY=VALUE`
+words are also the environment of the monitor's own Discord calls.
+
+```
+# ssh host names this manager checks; "local" is this machine (no ssh)
+local HTTPS_PROXY=http://127.0.0.1:8118
+wmac  laptop HTTPS_PROXY=http://127.0.0.1:8118
+pmac  laptop
+```
+
+A `laptop` host is checked like any other, but its own unreachability is
+never posted (a closed lid is not an outage). Setup marks a host `laptop`
+when it answers `Darwin` and has a battery; edit the word by hand to change
+it. Deleting the file turns the monitor off. Two managers must not list the
+same host, or its bots are reported twice; nothing enforces that across
+owners.
+
+**Monitor.** One process per manager bot, started by the TUI or by the
+manager session's SessionStart hook, and alive only while one of them is: it
+exits within 30 s of the last. Every 5 minutes it runs, per host,
+`ssh -o BatchMode=yes -o ConnectTimeout=8 <host> 'env <KEY=VALUE...>
+~/.local/bin/claude-discord health --all --json --patch'` (`local`: the same
+command without ssh), so every ledger host needs the shim and claude-discord
+1.10.0 or later, and one `claude-discord health` run in each bot project to
+enter it in `~/.claude-discord/records/projects`. The same call keeps the
+official plugin patched on that host. It restarts and stops nothing.
+
+Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
+
+| file | what |
+|---|---|
+| `lock` | the single-instance lock (`flock` through perl) |
+| `state.json` | what the TUI shows; kept after exit, and what keeps a restart from repeating a finding |
+| `monitor.log`, `monitor.log.1` | one line per event, 256 KiB each at most |
+| `holders/<kind>-<pid>` | one record per open TUI or manager session |
+| `pass.out` | one host's answer, only during a pass |
+
+**Alerts.** One message per change, posted with the manager bot's token to
+channel `1558283274487341137`, and one `[recovered]` line when the bot is
+back. The channel is write-only: it is not in any bot's `access.json`, so a
+message there wakes no session.
+
+```
+<@owner id> [stale] RVP on lmd42 (~/workspace/tor-aic-research)
+사유: unanswered for 22m -- the plugin server is up, so its hooks or its turn are stuck
+복구: ssh lmd42 'cd ~/workspace/tor-aic-research && ~/.local/bin/claude-discord refresh RVP --force'
+```
+
+| finding | posted after | means |
+|---|---|---|
+| `stale`, `nostate`, `patchfail` | at once | see the troubleshooting rows; `patchfail` is a patch whose pattern moved |
+| `down`, `duplicate`, `unreachable`, `blind` | 5 min | `blind`: the host answered ssh but gave no health document (no claude-discord there, or one before 1.10.0) |
+| `throttled`, `apierror`, `hostdown` | 30 min | `hostdown`: ssh itself failed, also with `-o ControlPath=none`; never posted for a `laptop` |
+| `noreach` | never | that host cannot reach Discord; logged and shown |
+
+While a host is `noreach`, `hostdown` or `blind`, nothing is said about its
+bots. A bot's owner is `DISCORD_USER_ID` of its project's `config.env`; a
+host-level finding mentions the manager project's. Labels are Korean by
+default; `ALERT_LANG='en'` in the manager project's `config.env` makes them
+English (any other value is Korean). The reason and the command are never
+translated.
+
+**TUI.** `claude-discord tui` shows the monitor's state: hosts, bots
+(findings first), `Enter` for a row's detail and recovery command, `a` for
+the last 50 posts, `q` to quit. A red bar says when the monitor is stopped or
+the last post failed. A project whose `health` crashed before any of its bots
+was known is one row with bot `-` (it alerts as `blind`); it is not counted
+in its host's `bots ok`. The TUI changes nothing and never reads a token.
+
+**Expected.** With the TUI open, stopping a bot by hand gives one `[down]`
+message within 10 minutes and one `[recovered]` line after it is started
+again. A pass that sees nothing new posts nothing. With the TUI closed and
+the manager session gone, no monitor process is left 30 s later.
+
+**Rollback.** Delete `<manager>/hosts`; `rm -r
+~/.claude-discord/records/monitor ~/.claude-discord/records/projects` removes
+everything this feature wrote.
 
 ## Behind a corporate proxy
 
@@ -837,7 +955,7 @@ rest of Claude Code.
 | Every bot in the channel answers one message | someone wrote `@everyone`/`@here` with a wrapper older than 2026-09-18, or the mention policy is off on all of them |
 | `no bot '<name>' under ./.claude/discord-agents` | no setup in THIS directory; `cd` to the project you set it up in, or run setup here |
 | `bot name must be a plain directory name` | the name contained `/`, or was `.`/`..` |
-| `bot name 'hooks'` (or `'checkin'`) `is reserved` | those names are claude-discord's own directories under `.claude/discord-agents/`; pick another. A subcommand's name (`setup`, `install`, `update`, `patch`, `compat`, `refresh`, `health`) is reserved too |
+| `bot name 'hooks'` (or `'checkin'`) `is reserved` | those names are claude-discord's own directories under `.claude/discord-agents/`; pick another. A subcommand's name (`setup`, `install`, `update`, `patch`, `compat`, `refresh`, `health`, `monitor`, `tui`) is reserved too |
 | Two bots answer each other forever | the mention policy is off on both; turn it back on for at least one |
 | `Over 500 characters in the channel: start a thread ...` | the bot tried to put a long answer in the channel; `thread start "[<area>] <short title>"`, then post it inside the thread |
 | `A mirror line says which way it went ...` | a line opens with `->` or `<-`; write `[sent to name] ...` or `[received from name] ...` |
@@ -855,7 +973,13 @@ rest of Claude Code.
 | `claude-discord health: <bot> unreachable` | Discord answered 401 or 403: the token was refused, or the bot cannot read the channel. Check `DISCORD_BOT_TOKEN` in `<bot>/.env` and the bot's channel permissions |
 | `claude-discord health: <bot> throttled` / `apierror` | Discord rate-limited (429) or did not answer (000, 5xx). The token was *not* rejected, so nothing is said about the bot this run — these are deliberately not reported as a credential problem |
 | `health` says `noreach` for every bot | this machine cannot reach Discord at all (the unauthenticated `/gateway` probe failed), so nothing is said about any bot and no token is blamed. Behind a proxy, `HTTPS_PROXY` is missing from the shell |
-| `health` says `cannot count plugin servers on this machine` | no `/proc` (macOS); the behavioural signal still works, only the cause cannot be named |
+| `health` says `cannot count plugin servers on this machine` | neither `/proc` nor a working `ps -axww` (macOS counts through `ps`); the behavioural signal still works, only the cause cannot be named |
+| `[hostdown] <host>` in `#bot-health-check` | ssh to that host failed twice. Run the command in the message; `up` means a stale ControlMaster or a tunnel that was reconnecting |
+| `[blind] <host>` | ssh works but `health --all` gave no document: `~/.local/bin/claude-discord` is missing there or older than 1.10.0. Run `setup` or `update` on that host |
+| `[patchfail] <host>` | the official plugin changed and a patch no longer matches; `claude-discord update` there, and if it still fails the patch needs a claude-discord fix |
+| The TUI says `monitor stopped` | no holder is alive; opening the TUI starts it. If it stops again at once, `<manager>/hosts` is missing or `monitor.log` says why |
+| No alert for a bot on a ledger host | its project is not in that host's `~/.claude-discord/records/projects` (run `claude-discord health` there once), or the host is `noreach`/`hostdown`/`blind` (the TUI shows it) |
+| `claude-discord: tui needs uv` | install uv (https://docs.astral.sh/uv/); only the TUI needs it |
 | `claude-discord health: <bot> nostate` | `claude agents` has not answered for six runs, so whether a turn is running cannot be told, and the unanswered message is no longer being held. The daemon is probably unwell: run `claude agents` by hand |
 | `refresh` says `no running session of <name> ... started in <dir>` | the session was started elsewhere, or is a foreground one renamed with `/rename` (only background sessions have a job record); `claude agents` shows it, stop it by hand, then `refresh --force` |
 | The agent view still lists dead sessions of my bot | a start removes only its own (the session and, if it had one, its worktree): another name's, another project's and the one a `--resume` names are left alone on purpose, and only 20 go per start (oldest first), so start again for the next 20. Otherwise the wrapper predates 2026-09-19 (`claude-discord update`), or `claude agents --json --all` is not answering: run it by hand |
@@ -868,3 +992,7 @@ throwaway HOME with a stub plugin and stub `claude`; it touches nothing real
 and prints `ALL PASS`. It runs on Linux only: it finds its stand-in plugin
 servers through `/proc`, and assumes GNU `wc`, `sed` and a `/tmp` that is not a
 symlink, none of which hold on macOS.
+
+`uv run --script tests/tui/test_tui.py` drives the TUI over fixture state
+files (Textual's pilot). It needs uv and the Textual wheel, so it sits
+outside the stub suite and its 40 s budget.

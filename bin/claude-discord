@@ -42,6 +42,9 @@
 #                                        remove the systemd --user timer an
 #                                        older version installed; no OS
 #                                        scheduler is installed any more
+#   claude-discord tui [<name>]          a read-only view of a manager bot's
+#                                        backend monitor (needs uv); starts the
+#                                        monitor if none runs
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
@@ -1757,6 +1760,36 @@ fi
 if [ "${1:-}" = monitor ]; then
   shift
   exec bash "$self_root/monitor/monitor.sh" "$self_path" "$@"
+fi
+
+# tui: a read-only view of the monitor's state.json (tui/claude_discord_tui.py,
+# Python + Textual through `uv run --script`; uv is needed for this verb only).
+# The bot is the project's one dev-manager bot with a hosts ledger unless named.
+if [ "${1:-}" = tui ]; then
+  bot=${2:-}
+  # From anywhere inside the project, like the shim: up to the directory that holds .claude/discord-agents.
+  while [ ! -d "$PWD/.claude/discord-agents" ] && [ "$PWD" != / ]; do cd ..; done
+  root=$PWD/.claude/discord-agents
+  if [ -z "$bot" ]; then
+    n=0
+    for d in "$root"/*/; do
+      d=${d%/}
+      [ -f "$d/hosts" ] && [ "$(cat "$d/mode" 2>/dev/null)" = dev-manager ] || continue
+      bot=${d##*/}; n=$((n + 1))
+    done
+    if [ "$n" != 1 ]; then
+      # Not exactly one: ask at a terminal, else say what to type.
+      [ -t 0 ] || { echo "claude-discord: tui: name the manager bot (claude-discord tui <bot>); this project has $n dev-manager bots with a hosts ledger" >&2; exit 2; }
+      read -rp "Manager bot: " bot || bot=""
+    fi
+  fi
+  case $bot in ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$bot'" >&2; exit 2;; esac
+  [ -f "$root/$bot/hosts" ] || { echo "claude-discord: tui: $root/$bot has no hosts ledger (claude-discord setup $bot --mode writes one)" >&2; exit 1; }
+  uv=${CLAUDE_DISCORD_UV:-uv}
+  command -v "$uv" >/dev/null 2>&1 || { echo "claude-discord: tui needs uv (https://docs.astral.sh/uv/); nothing else in claude-discord does" >&2; exit 1; }
+  # The cwd stays the project root: the TUI's `monitor --ensure` call reads the ledger from there.
+  exec "$uv" run --script "$self_root/tui/claude_discord_tui.py" --bot "$bot" \
+    --state-dir "$HOME/.claude-discord/records/monitor/$bot" --claude-discord "$self_path"
 fi
 
 args=() name="" skip=0 want_name=0 named=0 positional=0 has_name=0 bare=0

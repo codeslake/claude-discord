@@ -3608,6 +3608,26 @@ jq -ne --arg e "$fxel" '($e | tonumber) < 1.5' >/dev/null || { echo "FAIL: the S
 rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json"
 echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while --ensure is still running"
 
+# claude-discord tui: the project's one dev-manager bot with a ledger unless named; it hands the bot, the monitor's
+# state dir and the wrapper to the TUI script through `uv run --script`. uv is needed for this verb only and its
+# absence is said. The script itself is exercised outside the budget (tests/tui/test_tui.py).
+echo dev-manager > "$MR/mgr/mode"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "$HOME/uv.args"\n' > "$HOME/bin/uv"; chmod +x "$HOME/bin/uv"
+mkdir -p "$MP/sub/dir"   # from a subdirectory: the project is found above it
+(cd "$MP/sub/dir" && bash "$S" tui 2>/dev/null) || { echo "FAIL: tui from a subdirectory of the project must find the project above it"; exit 1; }
+[ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord" ] || { echo "FAIL: tui must run the script through uv with the bot, the state dir and the wrapper: $(cat "$HOME/uv.args" 2>&1)"; exit 1; }
+rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1) || rc=$?
+[ "$rc" = 1 ] && grep -q 'tui needs uv' <<<"$out" || { echo "FAIL: without uv, tui must say so (rc=$rc): $out"; exit 1; }
+rc=0; out=$(cd "$P" && bash "$S" tui alpha 2>&1) || rc=$?
+[ "$rc" = 1 ] && grep -q 'no hosts ledger' <<<"$out" || { echo "FAIL: tui for a bot without a ledger must refuse (rc=$rc): $out"; exit 1; }
+# Two dev-manager bots with a ledger of their own (not borrowed from other blocks' fixtures): which one is not guessed.
+TP="$HOME/tuiproj"; mkdir -p "$TP/.claude/discord-agents/m1" "$TP/.claude/discord-agents/m2"
+for b in m1 m2; do echo dev-manager > "$TP/.claude/discord-agents/$b/mode"; echo local > "$TP/.claude/discord-agents/$b/hosts"; done
+rc=0; out=$(cd "$TP" && bash "$S" tui </dev/null 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -q 'name the manager bot' <<<"$out" || { echo "FAIL: with two manager bots and no terminal, tui must ask for the name (rc=$rc): $out"; exit 1; }
+rm -rf "$HOME/bin/uv" "$HOME/uv.args" "$TP" "$MP/sub"
+echo "ok: tui runs the script through uv for the project's one manager bot (or the named one, from a subdirectory too), says when uv is missing, refuses a bot without a ledger, and asks for the name when it cannot tell"
+
 # The monitor blocks end here: the real shim back, the stubs and fixtures gone.
 mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"
 rm -rf "$MON" "$HOME/ssh.log" "$HOME/local.calls" "$HOME/ro" "$HOME/bin/ssh"; : > "$CURL_REPLIES"
