@@ -217,6 +217,7 @@ cat > "$HOME/bin/curl" <<'EOF'
 # first. With nothing queued nothing is printed, as before.
 # Builtins only (read, printf): a spawned head, cat or tail costs more than the stub's whole job, and it runs ~100 times.
 printf '%s\n' "$*" >> "$CURL_LOG"
+[ -z "${HTTPS_PROXY:-}" ] || printf '%s\n' "$HTTPS_PROXY" >> "$HOME/curl.proxy"   # the env a call ran with (the monitor's POST)
 while IFS= read -r l || [ -n "$l" ]; do printf '%s\n' "$l"; done >> "$CURL_STDIN_LOG" 2>/dev/null
 line=""; rest=()
 { IFS= read -r line && while IFS= read -r l; do rest+=("$l"); done; } < "$CURL_REPLIES" 2>/dev/null || :   # no mapfile: bash 3.2 runs this on a Mac
@@ -3227,7 +3228,8 @@ echo "ok: setup writes the hosts ledger in dev-manager mode only (local always, 
 export CLAUDE_DISCORD_MONITOR_TICK=0.01 CLAUDE_DISCORD_MONITOR_PASS=60 CLAUDE_DISCORD_MONITOR_HOST_CAP=0.03 CLAUDE_DISCORD_MONITOR_LOCK_WAIT=0.1
 MB="$HOME/.claude-discord/records/monitor/mgr"
 mv "$HOME/.local/bin/claude-discord" "$HOME/shim.real"
-printf '#!/bin/bash\nprintf "%%s|%%s\\n" "$*" "${HTTPS_PROXY:-}" >> "$HOME/local.calls"\ncat "$HOME/mon/local.out" 2>/dev/null\n' > "$HOME/.local/bin/claude-discord"
+# $HOME/mon/local.sleep delays it and local.rc is its exit status, as for the ssh stub.
+printf '#!/bin/bash\nprintf "%%s|%%s\\n" "$*" "${HTTPS_PROXY:-}" >> "$HOME/local.calls"\n[ ! -f "$HOME/mon/local.sleep" ] || /bin/sleep "$(<"$HOME/mon/local.sleep")"\ncat "$HOME/mon/local.out" 2>/dev/null\n[ ! -f "$HOME/mon/local.rc" ] || exit "$(<"$HOME/mon/local.rc")"\n' > "$HOME/.local/bin/claude-discord"
 chmod +x "$HOME/.local/bin/claude-discord"
 # mdoc <host> <patch rc> <bot:verdict>...: a health --all document with those bots in project /home/u/ws/p, owner 222.
 mdoc() {
@@ -3358,6 +3360,139 @@ wait_log $(( ex + 1 )) 'exit reason=no-holders$'
   { echo "FAIL: a holder gone mid-pass must end the monitor at the pass's next tick, whatever host runs: $(tail -4 "$MB/monitor.log")"; exit 1; }
 ! pgrep -f '^/bin/sleep 4\.37$' >/dev/null || { echo "FAIL: a pass child's subtree must die with it, at the cap and at exit: $(pgrep -af '^/bin/sleep 4\.37$')"; exit 1; }
 echo "ok: monitor: the holder check counts across the whole pass (a holder gone mid-pass ends it within a tick), and a killed host takes its whole process group"
+
+# Every row of the failure table in one pass. Seeded: since times old enough (or not) for each hold, and what the
+# channel was last told. Expected posts, 16:
+#   h1|- patchfail (no hold); h1's bots d1 down (seeded 301 s), st stale (new, no hold), du duplicate (301 s),
+#   un unreachable (301 s), ns nostate (new; a 3000-character detail, cut to 1900), t2 throttled (1801 s),
+#   ap apierror (1801 s), bu busy after a posted stale (recovery), ok ok after a down posted 35 min ago (recovery);
+#   h3|- hostdown (1801 s; ssh 255 twice); h4|- blind (301 s; no document); ch stale after a posted down (a new
+#   finding is a new message); nm stale with no owner_id (an older host's document): no mention, nobody pinged;
+#   h1's project ws/h, posted blind (it had crashed with no bot known) and now answering: its recovery.
+#   h2's bot sp stale, in a project whose path holds a space, a quote and a $: the recovery command must survive both
+#   shells (h2 itself answered 255, then ok with ControlPath=none).
+# Not posted: d2 down (new), rc down after an ok seeded 1000 s ago (since restarts on the change, so the hold starts
+# over), t1 throttled (301 s), qu stale already posted, a ledger line that is not a plain host name (skipped, never
+# passed to ssh), lap hostdown (a laptop), h6 noreach and its bot l1 frozen (no recovery for its posted down), h3's
+# bots frozen (y's down, 900 s old, is not posted), local (its health exits 255: blind, never hostdown, which is ssh's
+# own failure; new, so held), h5 (connected, then silent past the cap: blind,
+# not hostdown, and new, so held), lap2 (a laptop silent past the cap, seeded blind 301 s: a sleeping laptop is
+# hostdown, never posted), h1's project ws/c crashed on first sight (an entry of its own, blind, held).
+# The monitor starts with no proxy in its env, and the local line names one no host uses: a POST can only have it
+# from the ledger.
+printf 'local HTTPS_PROXY=http://127.0.0.1:18118\nh1\nh2\n-oProxyCommand=x\nh3\nh4\nh5\nh6\nlap laptop\nlap2 laptop\n' > "$MR/mgr/hosts"
+echo 124 > "$MON/h5.rc"; echo 124 > "$MON/lap2.rc"   # what the cap leaves (the cap itself: the last block's local laptop)
+mdoc h6 0 "l1:noreach" > "$MON/h6.out"; echo 255 > "$MON/local.rc"
+mdoc h1 1 d1:down d2:down st:stale du:duplicate un:unreachable ns:nostate t1:throttled t2:throttled ap:apierror bu:busy ok:ok qu:stale ch:stale nm:stale rc:down |
+  jq -c '.projects[0].bots |= map(if .bot == "nm" then del(.owner_id) else . end) | .projects += [{project: "/home/u/ws/c", bots: [], error: "health exited 3 with no document"}]' > "$MON/h1.out"
+mdoc h2 0 sp:stale | jq -c '.projects[0].project = "/home/u/it\u0027s $x here"' > "$MON/h2.out"; echo 255 > "$MON/h2.rc"; echo 0 > "$MON/h2.rc2"
+echo 255 > "$MON/h3.rc"; echo 255 > "$MON/lap.rc"; echo 'not json' > "$MON/h4.out"
+mstate --argjson n "$(date +%s)" '
+  def at($s): {since: ($s | todate), since_s: $s};
+  def b($k; $v; $s): .bots["h1|/home/u/ws/p|" + $k] = ({host: "h1", verdict: $v} + at($n - $s));
+  b("d1"; "down"; 301) | b("du"; "duplicate"; 301) | b("un"; "unreachable"; 301) | b("t1"; "throttled"; 301)
+  | b("t2"; "throttled"; 1801) | b("ap"; "apierror"; 1801)
+  | b("bu"; "stale"; 600) | .bots["h1|/home/u/ws/p|bu"] += {posted: "stale", posted_since_s: ($n - 600)}
+  | b("ok"; "down"; 2100) | .bots["h1|/home/u/ws/p|ok"] += {posted: "down", posted_since_s: ($n - 2100)}
+  | b("qu"; "stale"; 900) | .bots["h1|/home/u/ws/p|qu"] += {posted: "stale", posted_since_s: ($n - 900)}
+  | b("ch"; "down"; 900) | .bots["h1|/home/u/ws/p|ch"] += {posted: "down", posted_since_s: ($n - 900)} | b("rc"; "ok"; 1000)
+  | .bots["h1|/home/u/ws/h|-"] = ({host: "h1", name: "h1", project: "/home/u/ws/h", home: "/home/u", verdict: "blind", posted: "blind", posted_since_s: ($n - 600)} + at($n - 600))
+  | .bots["h6|/home/u/ws/p|l1"] = ({host: "h6", verdict: "down", posted: "down", posted_since_s: ($n - 900)} + at($n - 900))
+  | .bots["h3|/home/u/ws/p|z"] = ({host: "h3", verdict: "stale", posted: "stale", posted_since_s: ($n - 900)} + at($n - 900))
+  | .bots["h3|/home/u/ws/p|y"] = ({host: "h3", bot: "y", verdict: "down"} + at($n - 900))
+  | .hosts.h3 = ({host: "h3", verdict: "hostdown"} + at($n - 1801)) | .hosts.lap = ({host: "lap", laptop: true, verdict: "hostdown"} + at($n - 1801))
+  | .hosts.h4 = ({host: "h4", verdict: "blind"} + at($n - 301)) | .hosts.lap2 = ({host: "lap2", laptop: true, verdict: "blind"} + at($n - 301))'
+: > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; rm -f "$HOME/ssh.log" "$HOME/curl.proxy"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do printf '200 {}\n'; done > "$CURL_REPLIES"
+want=$(( $(passes) + 1 )); holder
+(cd "$MP" && env -u HTTPS_PROXY -u https_proxy -u ALL_PROXY bash "$S" monitor --ensure mgr --holder tui "$HPID")
+wait_log "$want" ' pass hosts='
+P1=$(posts)
+[ "$(printf '%s\n' "$P1" | grep -c .)" = 16 ] || { echo "FAIL: one pass must post exactly the 16 due findings and recoveries: $P1"; exit 1; }
+C1=$(printf '%s\n' "$P1" | jq -r .content)
+for want in '<@111> [patchfail] h1' '<@222> [down] d1 on h1 (~/ws/p)' '<@222> [stale] st on h1' '<@222> [duplicate] du on h1' \
+            '<@222> [unreachable] un on h1' '<@222> [nostate] ns on h1' '<@222> [throttled] t2 on h1' '<@222> [apierror] ap on h1' \
+            '[recovered] bu on h1 (~/ws/p): answering again after 10m (was stale)' '[recovered] ok on h1 (~/ws/p): answering again after 35m (was down)' \
+            '[recovered] h1 (~/ws/h): answering again after 10m (was blind)' \
+            '<@111> [hostdown] h3' '<@111> [blind] h4' '<@222> [stale] ch on h1'; do
+  grep -qF -- "$want" <<<"$C1" || { echo "FAIL: missing post '$want': $C1"; exit 1; }
+done
+st=$(printf '%s\n' "$P1" | jq -c 'select(.content | startswith("<@222> [stale] st "))')
+[ "$(jq -r .content <<<"$st")" = "$(printf "<@222> [stale] st on h1 (~/ws/p)\n사유: why stale\n복구: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord refresh st --force'")" ] &&
+  [ "$(jq -c .allowed_mentions <<<"$st")" = '{"users":["222"]}' ] || { echo "FAIL: a finding names owner, session, reason and recovery command, and pings only the owner: $st"; exit 1; }
+[ "$(printf '%s\n' "$P1" | jq -c 'select(.content | startswith("[recovered]")) | .allowed_mentions' | sort -u)" = '{"parse":[]}' ] || { echo "FAIL: a recovery line pings nobody"; exit 1; }
+[ "$(printf '%s\n' "$P1" | jq -c 'select(.content | contains("] nm on ")) | [(.content | startswith("[stale] nm on h1")), .allowed_mentions]')" = '[true,{"parse":[]}]' ] || { echo "FAIL: a bot with no owner_id is posted with no mention and pings nobody: $(grep '] nm on' <<<"$C1")"; exit 1; }
+# The state checks below, read in one go (each keeps its own message).
+IFS=$'\t' read -r s_h2 s_h5 s_lap2 s_frozen s_local s_wsc s_alerts < <(jq -r --arg fix "ssh h1 'cd ~/ws/c && ~/.local/bin/claude-discord health'" '[
+  .hosts.h2.verdict, (.hosts.h5 | .verdict == "blind" and (.detail | test("did not finish"))), .hosts.lap2.verdict,
+  (.bots["h3|/home/u/ws/p|z"].posted == "stale" and .bots["h6|/home/u/ws/p|l1"].posted == "down" and .hosts.h6.verdict == "noreach"),
+  (.hosts.local | .verdict == "blind" and (.detail | test("exited 255"))),
+  (.bots["h1|/home/u/ws/c|-"] | .verdict == "blind" and .detail == "health exited 3 with no document" and .owner_id == "111" and .fix == $fix and .bot == null),
+  ([.alerts[].status] | "\(length) \(unique | join(","))")] | @tsv' "$MB/state.json")
+grep -q 'ledger: host skipped' "$MB/monitor.log" && ! grep -q ProxyCommand "$HOME/ssh.log" || { echo "FAIL: a ledger line that is not a plain host name must be skipped, never passed to ssh"; exit 1; }
+[ "$(printf '%s\n' "$P1" | jq -r 'select(.content | contains("[nostate]")) | .content | length')" = 1900 ] || { echo "FAIL: a message is cut to 1900 characters"; exit 1; }
+grep -q 'ControlPath=none h2 ' "$HOME/ssh.log" && grep -q 'host h2 ssh-failed rc=255 (retried with ControlPath=none)' "$MB/monitor.log" &&
+  [ "$s_h2" = ok ] || { echo "FAIL: ssh exit 255 is retried with ControlPath=none before the host counts as down"; exit 1; }
+grep -qxF "복구: ssh h2 'cd \"/home/u/it'\\''s \\\$x here\" && ~/.local/bin/claude-discord refresh sp --force'" <<<"$C1" || { echo "FAIL: a project path with a space, a quote and a \$ must be quoted for both shells: $(grep 'refresh sp' <<<"$C1")"; exit 1; }
+[ "$s_h5" = true ] || { echo "FAIL: a host that connected and went silent past the cap is blind, not hostdown: $(jq -c .hosts.h5 "$MB/state.json")"; exit 1; }
+[ "$s_lap2" = hostdown ] || { echo "FAIL: a laptop silent past the cap is hostdown (asleep), never a posted blind: $(jq -c .hosts.lap2 "$MB/state.json")"; exit 1; }
+[ "$s_frozen" = true ] ||
+  { echo "FAIL: a hostdown or noreach host's bots are frozen: $(jq -c '.bots["h3|/home/u/ws/p|z"], .bots["h6|/home/u/ws/p|l1"]' "$MB/state.json")"; exit 1; }
+[ "$s_local" = true ] || { echo "FAIL: a local health exiting 255 is blind, not hostdown: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
+[ "$s_wsc" = true ] ||
+  { echo "FAIL: a project that crashes on first sight gets an entry of its own (blind, the manager's owner), never vanishes: $(jq -c '.bots | with_entries(select(.key | contains("ws/c")))' "$MB/state.json")"; exit 1; }
+grep -q 'Authorization: Bot tokMgrUnique' "$CURL_STDIN_LOG" && ! grep -q tokMgrUnique "$CURL_LOG" || { echo "FAIL: the manager's token goes on curl's stdin, never argv"; exit 1; }
+[ "$(sort -u "$HOME/curl.proxy" 2>/dev/null)" = http://127.0.0.1:18118 ] || { echo "FAIL: a POST runs with the ledger's local env (the proxy): $(cat "$HOME/curl.proxy" 2>&1)"; exit 1; }
+rm -f "$HOME/curl.proxy"
+leak=$(command grep -rlF tokMgrUnique "$HOME/.claude-discord/records" "$MP" | command grep -v '/mgr/\.env$' || :)
+[ -z "$leak" ] || { echo "FAIL: the token may appear in no file but the bot's .env: $leak"; exit 1; }
+[ "$s_alerts" = "16 sent" ] || { echo "FAIL: alerts keeps each post: $(jq -c .alerts "$MB/state.json")"; exit 1; }
+echo "ok: monitor: every row of the failure table posts after its hold and not before (a new finding after a posted one too; a finding that cleared starts its hold over) (noreach and a laptop's hostdown never), frozen bots under hostdown and noreach, a local health exiting 255 is blind, ssh 255 retried with ControlPath=none, a host silent past the cap is blind (a laptop's is hostdown, unposted), a project crashed on first sight has its own entry (and its recovery once it answers), POSTs with the local line's env, recovery lines ping nobody, a path with a space and a quote survives both shells, 1900-character cut, token on stdin only"
+
+# A failed POST stays pending: logged, shown (post_failed, an alert with status failed), retried next pass; a 429 under
+# 10 s is waited out in the pass, a longer one (the retry's answer here) is left for the next pass.
+# Restarted on a ledger of h1 alone: h1 keeps its patchfail (already posted: a restart repeats nothing, since
+# state.json's `posted` is what the channel was last told), the hosts left out go with their bots and its other bots
+# leave the answer (dropped and logged, not announced) and nf is new. With nothing queued the curl stub answers
+# nothing, a failure too. The first pass meets the manager's .env without its token (read at POST time): the post
+# fails before any curl, and the log says why. This block needs several passes: one every 0.02 s, so its checks wait
+# for log lines, never count passes between two of them.
+mstop
+export CLAUDE_DISCORD_MONITOR_PASS=0.02
+printf '%s\n' '429 {"retry_after": 0.01}' '429 {"retry_after": 60}' > "$CURL_REPLIES"; : > "$CURL_LOG"
+mdoc h1 1 nf:stale > "$MON/h1.out"; printf 'h1\n' > "$MR/mgr/hosts"
+printf "ALERT_LANG='EN'\n" >> "$MR/config.env"   # labels in English from here on; any case of en, anything else is ko
+cp "$MR/mgr/.env" "$MR/mgr/.env.keep"; : > "$MR/mgr/.env"
+mstart
+grep -q 'post h1|/home/u/ws/p|nf stale failed 000 (no DISCORD_BOT_TOKEN in .*/mgr/\.env)$' "$MB/monitor.log" && [ -z "$(posts)" ] || { echo "FAIL: a POST with no token in the manager's .env must fail before curl, logged with the reason: $(grep ' post ' "$MB/monitor.log")"; exit 1; }
+mv "$MR/mgr/.env.keep" "$MR/mgr/.env"; wait_log 1 'post h1\|/home/u/ws/p\|nf stale failed 429 retry_after=60$'
+[ "$(posts | grep -c '\[stale\] nf')" -ge 2 ] && ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the restart must post only what is new (nf, twice: the 429 then its retry), never the patchfail already posted: $(posts)"; exit 1; }
+next_pass
+! grep -q 'retry_after=0.01' "$MB/monitor.log" || { echo "FAIL: a 429 with retry_after under 10 s must be waited out and retried in the same pass: $(grep ' post ' "$MB/monitor.log")"; exit 1; }
+[ "$(jq -r '.bots["h1|/home/u/ws/p|nf"].posted // "none"' "$MB/state.json")" = none ] && jq -e '.monitor.post_failed and (.alerts[-1].status == "failed")' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: a failed POST leaves the finding unposted and shows the failure: $(jq -c .monitor "$MB/state.json")"; exit 1; }
+printf '200 {}\n' > "$CURL_REPLIES"
+wait_log 1 'post h1\|/home/u/ws/p\|nf stale 200$'; next_pass
+[ "$(jq -r '.bots["h1|/home/u/ws/p|nf"].posted' "$MB/state.json")" = stale ] && [ "$(jq -r .monitor.post_failed "$MB/state.json")" = false ] &&
+  ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the pending post must be sent on a later pass, and nothing else posted: $(posts)"; exit 1; }
+[ "$(posts | tail -n 1 | jq -r .content)" = "$(printf "<@222> [stale] nf on h1 (~/ws/p)\nreason: why stale\nfix: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord refresh nf --force'")" ] || { echo "FAIL: ALERT_LANG=EN must give English labels: $(posts | tail -n 1)"; exit 1; }
+[ "$(jq -c '[(.hosts | keys), (.bots | keys)]' "$MB/state.json")" = '[["h1"],["h1|/home/u/ws/p|nf"]]' ] && grep -q ' drop h5|-$' "$MB/monitor.log" && grep -q ' drop h6|/home/u/ws/p|l1$' "$MB/monitor.log" ||
+  { echo "FAIL: hosts left out of the ledger (with their bots), and bots gone from an answer, are dropped from the state and logged: $(jq -c '[(.hosts | keys), (.bots | keys)]' "$MB/state.json")"; exit 1; }
+# hostdown is a failure of ssh itself, so a local laptop past the cap (a hung health on a Mac manager) is blind, which
+# alerts. And the holder check between posts: the holder dies while the first of two posts waits out a 429, so the
+# second stays pending and the monitor leaves with the first recorded as sent. nf, sent above, is not sent again.
+rm -f "$MON/local.rc"; echo 1 > "$MON/local.sleep"
+mdoc h1 1 nf:stale x1:stale x2:stale > "$MON/h1.out"; printf '%s\n' '429 {"retry_after": 0.15}' '200 {}' '200 {}' > "$CURL_REPLIES"; : > "$CURL_LOG"
+ex=$(command grep -c 'exit reason=no-holders$' "$MB/monitor.log") || :; printf 'h1\nlocal laptop\n' > "$MR/mgr/hosts"
+n=0; while ! command grep -q '] x1 on' "$CURL_LOG" && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); done
+kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
+wait_log $(( ex + 1 )) 'exit reason=no-holders$'
+[ "$(posts | grep -c .)" = 2 ] && [ "$(posts | grep -c '\] x1 on')" = 2 ] &&
+  jq -e '.bots["h1|/home/u/ws/p|x1"].posted == "stale" and .bots["h1|/home/u/ws/p|x2"].posted == null' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: a holder gone between posts ends the posting (the rest stay pending), what was sent recorded, nf not sent again: $(posts) $(jq -c '.bots | map_values(.posted)' "$MB/state.json")"; exit 1; }
+jq -e '.hosts.local | .verdict == "blind" and (.detail | test("did not finish"))' "$MB/state.json" >/dev/null || { echo "FAIL: a local laptop past the cap is blind (it alerts), not hostdown: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
+mstop
+echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; hosts and bots that left are dropped and logged; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting"
 
 # The monitor blocks end here: the real shim back, the stubs and fixtures gone.
 mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"

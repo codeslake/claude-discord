@@ -23,6 +23,7 @@
 # Runs under macOS /bin/bash 3.2: no associative arrays, no fractional read -t.
 set -u
 self=${1:?wrapper path}; shift
+alert_channel=1558283274487341137   # #bot-health-check: both owners' managers post here; write-only
 locked=no kind="" hpid="" bot=""
 while [ $# -gt 0 ]; do
   case $1 in
@@ -92,7 +93,7 @@ if [ "$locked" = no ]; then
 fi
 
 # ---- the monitor itself (fd 9 holds the lock) ------------------------------
-# Every child that can outlive a moment (sleep, ssh, the local health)
+# Every child that can outlive a moment (sleep, ssh, the local health, curl)
 # is started with 9>&-: a child that survived a crash would otherwise keep the
 # lock and no new monitor could start.
 # CLAUDE_DISCORD_MONITOR_LOCK_WAIT (above; 5) is the fourth interval the suite shortens.
@@ -103,7 +104,7 @@ cap=${CLAUDE_DISCORD_MONITOR_HOST_CAP:-90}     # per host, enforced here (no tim
 # host is polled every step (1 s, or a fifth of a tick shorter than 5 s).
 read -r step pass_n cap_n tick_n < <(awk -v t="$tick" -v p="$pass" -v c="$cap" 'BEGIN {
   s = (t < 5 ? t / 5 : 1); printf "%s %d %d %d\n", s, (p / t < 1 ? 1 : int(p / t + 0.5)), int(c / s + 0.5), int(t / s + 0.5) }')
-child="" tp="" state="" h_rc=0
+child="" tp="" state="" h_rc=0 local_env=() p_code=000 p_retry=""
 # A pass child runs as its own process group (perl, as for the lock: setsid(1) is util-linux), so the cap and finish
 # kill its whole subtree: a health's $(...) or an ssh's children would otherwise outlive both. The pid survives the exec.
 pg='setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127'
@@ -123,14 +124,18 @@ rotate() {
 }
 # Never an empty state: a TERM before the first state is built, or a failed jq, would otherwise write a lone newline.
 write_state() { [ -n "$state" ] || return 0; printf '%s\n' "$state" > "$M/state.json.tmp" 2>/dev/null && mv -f "$M/state.json.tmp" "$M/state.json" 2>/dev/null || :; }
-# read_cfg: mowner from the manager project's config.env (KEY='value' or
-# KEY=value), with no fork: DISCORD_USER_ID, the manager's own owner.
+# read_cfg: lang and mowner from the manager project's config.env (KEY='value'
+# or KEY=value), with no fork: ALERT_LANG (en in any case, anything else ko)
+# and DISCORD_USER_ID, the manager's own owner, whom a host-level finding mentions.
 read_cfg() {
   local l v
-  mowner=""
+  lang=ko mowner=""
   while IFS= read -r l || [ -n "$l" ]; do
     v=${l#*=}; v=${v#\'}; v=${v%\'}
-    case $l in DISCORD_USER_ID=*) mowner=$v;; esac
+    case $l in
+      ALERT_LANG=*) case $v in [eE][nN]) lang=en;; *) lang=ko;; esac;;
+      DISCORD_USER_ID=*) mowner=$v;;
+    esac
   done 2>/dev/null < "$dir/../config.env"   # 2> first: a missing file's error must not reach monitor.log
 }
 
@@ -174,6 +179,36 @@ finish() {  # $1 = reason: kill the pass child, leave a state that reads as stop
 }
 trap 'finish signal' TERM INT HUP
 
+# post <payload JSON>: one message to the alert channel with the manager
+# bot's token, read at POST time and sent on stdin, never argv, with the
+# ledger's local env (the proxy). Sets p_code (and p_retry for a 429). A 429
+# with retry_after under 10 s is waited out once; anything else failed is
+# left for the next pass (the caller keeps `posted` as it was).
+post() {
+  local tok="" line out try ra
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in DISCORD_BOT_TOKEN=*) tok=${line#DISCORD_BOT_TOKEN=}; tok=${tok%$'\r'}; break;; esac
+  done 2>/dev/null < "$dir/.env"
+  # The path, never the token: a missing token is the one failure curl cannot report.
+  [ -n "$tok" ] || { p_code="000 (no DISCORD_BOT_TOKEN in $dir/.env)" p_retry=""; return 1; }
+  for try in 1 2; do
+    p_retry=""
+    out=$(printf 'Authorization: Bot %s\n' "$tok" | env ${local_env[@]+"${local_env[@]}"} curl -s --max-time 10 -w '\n%{http_code}' \
+      -X POST -H @- -H 'Content-Type: application/json' --data-binary "$1" \
+      "https://discord.com/api/v10/channels/$alert_channel/messages" 2>/dev/null 9>&-) || out=""
+    p_code=${out##*$'\n'}
+    case $p_code in ''|*[!0-9]*) p_code=000;; esac
+    case $p_code in 2*) return 0;; esac
+    [ "$p_code" = 429 ] || return 1
+    ra=$(printf '%s' "${out%$'\n'*}" | jq -r '.retry_after // 99' 2>/dev/null) || ra=99
+    p_retry=$ra
+    [ "$try" = 1 ] && awk -v r="$ra" 'BEGIN { exit !(r + 0 < 10) }' || return 1
+    # Waited on, as the tick sleep is: a TERM meanwhile runs at once (finish kills it).
+    sleep "$ra" 9>&- & tp=$!; wait "$tp"; tp=""
+  done
+  return 1
+}
+
 # run_host: one host's health document into $M/pass.out, its exit status in
 # h_rc (124 = the per-host cap). The child is polled, never waited on: the
 # holder check keeps running every tick while a host is slow. ssh's own
@@ -213,28 +248,77 @@ run_host() {  # uses $host $remote, the envs array, and run_pass's step counter 
   done
 }
 
-# The reducer: (state, this pass's host results) -> the new state and the log
-# events. One jq program, so every rule of "what a pass saw" is in one place:
+# The reducer: (state, this pass's host results) -> the new state, the log
+# events and the messages to post. One jq program, so every rule of "what
+# counts as a real failure" is in one place:
 #   - a verdict that changes restarts its `since`;
+#   - a finding is posted once it has held for its hold time and differs
+#     from what the channel was last told (`posted`);
+#   - the first ok or busy after a posted finding posts the recovery line;
+#   - noreach is never posted; a laptop's hostdown is never posted;
 #   - while a host is noreach, hostdown or blind its bots are frozen;
 #   - a project whose health crashed (an `error` entry) is blind for the bots
-#     it had, which are kept, never dropped;
-#   - a bot that left its host's answer is dropped, not announced.
+#     it had, which are kept, never dropped; one with no bot known yet gets an
+#     entry of its own (key host|project|-, no `bot`), so it alerts too;
+#   - a bot that left its host's answer, or a host that left the ledger (with
+#     its bots), is dropped and logged, not announced.
 # Input, raw lines: the state JSON, then two lines per host, "<host> US <laptop> US <exit status>" and the host's
 # answer with its newlines made spaces (still valid JSON when it was).
-# Output lines: "S<state JSON>", "N<bot count>", "E<event>".
+# Output lines: "S<state JSON>", "N<bot count>", "E<event>", "O<scope US key US kind US verdict US payload JSON>".
 reduce='
+def hold: {"down": 300, "duplicate": 300, "unreachable": 300, "throttled": 1800, "apierror": 1800,
+           "stale": 0, "nostate": 0, "patchfail": 0, "hostdown": 1800, "blind": 300};
 def good: . == "ok" or . == "busy";
+def short($home): if $home != "" and startswith($home + "/") then "~" + .[($home | length):] else . end;
+# A path with anything but plain characters goes in double quotes, with what the shell would still expand escaped.
+def cdp: (.home // "") as $h | (.project | short($h)) as $s
+  | if ($s | test("^[A-Za-z0-9._/~+-]+$")) then $s else "\"" + (.project | gsub("(?<c>[\\\\\"$`])"; "\\\(.c)")) + "\"" end;
+def cd: if .host == "local" then "claude-discord" else "~/.local/bin/claude-discord" end;
+# A remote command goes in single quotes for the local shell that pastes it; the remote shell then reads what cdp quoted.
+def wrap($e): if $e.host == "local" then . else "ssh \($e.host) \u0027\(gsub("\u0027"; "\u0027\\\u0027\u0027"))\u0027" end;
+def fix: . as $e
+  | if   .verdict == "down"        then ("cd \(cdp) && \(cd) --bg --name \(.bot)" | wrap($e))
+    elif .verdict == "stale"       then ("cd \(cdp) && \(cd) refresh \(.bot) --force" | wrap($e))
+    elif .verdict == "duplicate"   then (if .host == "local" then "" else "on \(.host): " end) + "claude agents, then claude stop <id> for the copy that is not the bot\u0027s"
+    elif .verdict == "unreachable" then "check DISCORD_BOT_TOKEN in \(.project)/.claude/discord-agents/\(.bot)/.env and the bot\u0027s channel permissions"
+    elif .verdict == "nostate"     then (if .host == "local" then "" else "on \(.host): " end) + "claude agents by hand; the daemon is unwell"
+    elif .verdict == "throttled" or .verdict == "apierror" then ("cd \(cdp) && \(cd) health" | wrap($e))
+    elif .verdict == "patchfail"   then ("\(cd) update" | wrap($e)) + "; still failing means the patch needs a claude-discord fix"
+    elif .verdict == "hostdown"    then "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ControlPath=none \(.host) \u0027echo up\u0027"
+    # A crashed project: its own health run shows why. A host without a document: is claude-discord there at all.
+    elif .verdict == "blind" and .project != null then ("cd \(cdp) && \(cd) health" | wrap($e))
+    elif .verdict == "blind"       then ("~/.local/bin/claude-discord --version" | wrap($e)) + ", then setup or update there"
+    else "" end;
+def labels: if $lang == "en" then {reason: "reason", fix: "fix"} else {reason: "사유", fix: "복구"} end;
+def subject: (.home // "") as $h
+  | if .bot then "\(.bot) on \(.name) (\(.project | short($h)))" elif .project then "\(.name) (\(.project | short($h)))" else .name end;
+def finding_text: labels as $l
+  | ((if (.owner_id // "") != "" then "<@\(.owner_id)> " else "" end)
+     + "[\(.verdict)] \(subject)\n\($l.reason): \(.detail)\n\($l.fix): \(.fix)") | .[0:1900];
+# The recovery line has no label, so it reads the same in both languages.
+def recovery_text: ((($now_s - (.posted_since_s // $now_s)) / 60) | floor) as $m
+  | "[recovered] \(subject): answering again after \($m)m (was \(.posted))" | .[0:1900];
+def payload($kind): if $kind == "finding"
+  then {content: finding_text, allowed_mentions: (if (.owner_id // "") != "" then {users: [.owner_id]} else {parse: []} end)}
+  else {content: recovery_text, allowed_mentions: {parse: []}} end;
 # observe: fold one observation into an entry; `since` moves only when the verdict changes.
 def observe($v; $d; $meta): (. // {}) as $o
   | $o + $meta + {verdict: $v, detail: $d}
-  | if ($o.verdict // null) != $v then . + {since: $now, since_s: $now_s} else . end;
+  | if ($o.verdict // null) != $v then . + {since: $now, since_s: $now_s} else . end
+  | . + {fix: fix};
+def due:
+  if (.verdict | good) and (.posted // null) != null then "recovery"
+  elif hold[.verdict] != null and ((.verdict == "hostdown" and .laptop == true) | not)
+       and (.posted // null) != .verdict and ($now_s - .since_s) >= hold[.verdict] then "finding"
+  else null end;
 
 # host_step($r): one host result folded into {state, events}. $r.bad, when set, is why its document could not be read.
 def host_step($r):
     ($r.doc | if type == "object" and (.projects | type) == "array" then . else null end) as $doc
     | ([$doc.projects[]? | .project as $p | .bots[]? | . + {project: $p}]) as $bots
-    | (if $r.rc == 255 or ($r.rc == 124 and $r.laptop) then "hostdown"
+    # hostdown is a failure of ssh itself, so never local: a local health that exits 255, or a local laptop past the cap
+    # (a hung health on a Mac manager), is blind and alerts.
+    | (if $r.host != "local" and ($r.rc == 255 or ($r.rc == 124 and $r.laptop)) then "hostdown"
        elif $doc == null or $r.rc != 0 then "blind"
        elif ($bots | length) > 0 and all($bots[]; .verdict == "noreach") then "noreach"
        else "ok" end) as $reach
@@ -267,13 +351,26 @@ def host_step($r):
                 {host: $r.host, name: (if $r.host == "local" then ($doc.host // "local") else $r.host end),
                  project: $b.project, bot: $b.bot, home: ($doc.home // ""), owner_id: ($b.owner_id // ""), servers: ($b.servers // "")})
             | if $bw != $b.verdict and ($bw != null or ($b.verdict | good | not)) then .events += ["transition \($k) \($bw // "new")->\($b.verdict)"] else . end)
+        # A crashed project with no entry at all here (crashed on first sight): an entry of its own, or it would vanish.
+        | reduce ($errs | keys[]) as $p (.;
+            if any(.state.bots[]; .host == $r.host and .project == $p) then .
+            else "\($r.host)|\($p)|-" as $k
+              | .state.bots[$k] = ({} | observe("blind"; $errs[$p];
+                  {host: $r.host, name: (if $r.host == "local" then ($doc.host // "local") else $r.host end),
+                   project: $p, home: ($doc.home // ""), owner_id: $mowner}))
+              | .events += ["transition \($k) new->blind"] end)
         # The bots a crashed project had: blind with its error, every other field as last seen.
         | reduce ([.state.bots | to_entries[] | select(.value.host == $r.host and $errs[.value.project // ""] != null) | .key][]) as $k (.;
             (.state.bots[$k].verdict // null) as $bw
             | .state.bots[$k] |= observe("blind"; $errs[.project]; {})
             | if $bw != "blind" then .events += ["transition \($k) \($bw // "new")->blind"] else . end)
         | ([.state.bots | to_entries[] | select(.value.host == $r.host and $errs[.value.project // ""] == null
-              and ((.key as $k | $present | index($k)) == null)) | .key]) as $gone
+              and ((.key as $k | $present | index($k)) == null)) | .key]) as $left
+        # A project entry the channel was told about reads ok once its project answers, so its recovery is
+        # posted; it is dropped on a later pass, once that went out.
+        | .state.bots as $sb | ([$left[] | select(. as $k | $sb[$k] | .bot == null and .posted != null)]) as $healed
+        | reduce $healed[] as $k (.; .events += ["transition \($k) \(.state.bots[$k].verdict)->ok"] | .state.bots[$k] |= observe("ok"; ""; {}))
+        | ($left - $healed) as $gone
         | .events += ($gone | map("drop \(.)"))
         | .state.bots |= with_entries(select(.key as $k | ($gone | index($k)) == null))
       end;
@@ -286,14 +383,42 @@ def host_step($r):
 # host_step raise: that host alone is blind, with the error (capped, it may quote the document); the rest still count.
 | reduce $res[] as $r ({state: $old, events: []};
     . as $acc | try host_step($r) catch ((tostring | .[:200]) as $e | $acc | host_step($r + {doc: null, bad: $e})))
-| .state.monitor += {last_pass: $now, next_pass: (($now_s + $every) | floor | todate), pass_s: $pass_s, holders: $holders}
+# A host that left the ledger takes its entry and its bots with it.
+| ($res | map(.host)) as $ledger
+| ([.state.hosts | keys[] | select(. as $h | $ledger | index($h) == null)]) as $hgone
+| ([.state.bots | to_entries[] | select(.value.host as $h | $ledger | index($h) == null) | .key]) as $bgone
+| .events += ($hgone | map("drop \(.)|-")) + ($bgone | map("drop \(.)"))
+| .state.hosts |= with_entries(select(.key as $h | $hgone | index($h) == null))
+| .state.bots |= with_entries(select(.key as $k | $bgone | index($k) == null))
+| .state.monitor += {last_pass: $now, next_pass: (($now_s + $every) | floor | todate), pass_s: $pass_s, holders: $holders, post_failed: false}
 | .state as $s | .events as $ev
-| "S" + ($s | tojson), "N\($s.bots | length)",
-  ($ev[] | "E" + .)
+# Bots of a host that is not reachable as a whole are frozen: this pass says nothing about them.
+| [$s.hosts[] | select(.reach != "ok") | .host] as $frozen
+| ([$s.hosts | to_entries[] | {scope: "hosts", key: .key, e: .value}]
+   + [$s.bots | to_entries[] | select(.value.host as $h | $frozen | index($h) == null) | {scope: "bots", key: .key, e: .value}]) as $all
+| "S" + ($s | tojson), "N\([$s.bots[] | select(.bot)] | length)",
+  ($ev[] | "E" + .),
+  ($all[] | (.e | due) as $kind | select($kind != null)
+   | "O" + ([.scope, .key, $kind, (if $kind == "finding" then .e.verdict else .e.posted end), (.e | payload($kind) | tojson)] | join("\u001f")))
+'
+# apply: the POST results back into the state. A sent finding sets `posted`
+# (what makes a restart, and the next pass, quiet); a sent recovery clears it;
+# a failed one changes nothing, so the next pass tries again.
+apply='
+($results | split("\n") | map(select(. != "") | split("\u001f") | {scope: .[0], key: .[1], kind: .[2], verdict: .[3], status: .[4]})) as $rs
+| reduce $rs[] as $r (.;
+    (if $r.status != "sent" then .
+     elif $r.kind == "finding" then .[$r.scope][$r.key] |= (. + {posted: .verdict, posted_at: $now, posted_since_s: .since_s})
+     else .[$r.scope][$r.key] |= del(.posted, .posted_at, .posted_since_s) end)
+    | .alerts += [{ts: $now, key: (if $r.scope == "hosts" then $r.key + "|-" else $r.key end), kind: $r.kind, verdict: $r.verdict, status: $r.status}])
+| .alerts |= .[-50:]
+| .monitor.post_failed = any($rs[]; .status == "failed")
 '
 run_pass() {
-  local t0=$SECONDS now_s line w host laptop remote doc results="" out l rest hosts=0 nb=0 mowner ts="" hj k=0
+  local t0=$SECONDS now_s line w host laptop remote doc results="" out l rest hosts=0 nb=0 mowner ts="" hj k=0 \
+    lang scope key lk knd verdict payload st posts="" findings=0 posted=0 leaving=""
   local envs=()
+  local_env=()   # a ledger that lost its local line: POSTs with the monitor's own env
   rotate
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line%$'\r'}   # a ledger saved with CRLF line endings
@@ -307,6 +432,7 @@ run_pass() {
     for w in "$@"; do
       if [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then envs+=("$w"); else log "ledger: $host: a word that is not KEY=VALUE was skipped"; fi
     done
+    [ "$host" != local ] || local_env=(${envs[@]+"${envs[@]}"})
     remote="env $([ ${#envs[@]} = 0 ] || printf '%q ' "${envs[@]}")~/.local/bin/claude-discord health --all --json --patch"
     run_host
     doc=$(< "$M/pass.out") 2>/dev/null || doc=""
@@ -316,7 +442,7 @@ run_pass() {
   rm -f "$M/pass.out"
   read_cfg; holders_json
   read -r now_s ts < <(date -u '+%s %Y-%m-%dT%H:%M:%SZ')
-  out=$(printf '%s\n%s' "$state" "$results" | jq -nrR --arg now "$ts" --argjson now_s "$now_s" --arg mowner "$mowner" \
+  out=$(printf '%s\n%s' "$state" "$results" | jq -nrR --arg now "$ts" --argjson now_s "$now_s" --arg lang "$lang" --arg mowner "$mowner" \
     --argjson every "$pass" --argjson pass_s "$(( SECONDS - t0 ))" --argjson holders "$hj" "$reduce" 2>/dev/null) ||
     { log "pass failed: the reducer rejected its input"; return 0; }
   while IFS= read -r l; do
@@ -325,10 +451,30 @@ run_pass() {
       S*) state=$rest;;
       N*) nb=$rest;;
       E*) log "$rest";;
+      O*) set -f; IFS=$'\x1f'; set -- $rest; IFS=$' \t\n'; set +f   # split with no fork: tojson escapes any US in the payload
+          scope=$1 key=$2 knd=$3 verdict=$4 payload=$5
+          [ "$knd" != finding ] || findings=$((findings + 1))
+          # The holder check between posts (a POST may take 10 s and more): once none is left the rest stay
+          # pending, and what was sent is still recorded below before the monitor leaves.
+          [ -n "$leaving" ] || ! no_holders || leaving=1
+          [ -z "$leaving" ] || continue
+          lk=$key; [ "$scope" != hosts ] || lk="$key|-"   # the log's key, as the TUI and the spec name a host
+          if post "$payload"; then
+            posted=$((posted + 1)); log "post $lk $verdict $p_code"; st=sent
+          else
+            log "post $lk $verdict failed $p_code${p_retry:+ retry_after=$p_retry}"; st=failed
+          fi
+          posts="$posts$scope"$'\x1f'"$key"$'\x1f'"$knd"$'\x1f'"$verdict"$'\x1f'"$st"$'\n';;
     esac
   done < <(printf '%s\n' "$out")
+  # A failed apply keeps the state as it was (nothing marked posted: the next pass posts again), never an empty one.
+  if [ -n "$posts" ]; then
+    out=$(printf '%s' "$state" | jq -c --arg results "$posts" --arg now "$ts" "$apply" 2>/dev/null) && state=$out ||
+      log "pass failed: could not apply the post results"
+  fi
   write_state
-  log "pass hosts=$hosts bots=$nb $(( SECONDS - t0 ))s"
+  log "pass hosts=$hosts bots=$nb findings=$findings posted=$posted $(( SECONDS - t0 ))s"
+  [ -z "$leaving" ] || finish no-holders
 }
 
 rotate
