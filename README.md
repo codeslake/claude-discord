@@ -46,11 +46,12 @@ enables it per session with `--settings`.
 - **ledger**: `<project>/.claude/discord-agents/<manager bot>/hosts`, the ssh
   hosts a manager bot's monitor checks. Its existence is the monitor's on/off
   switch.
-- **holder**: a process the monitor lives for: an open TUI, the manager
-  session or a keeper. The monitor exits within 30 s of the last one.
-- **keeper**: `claude-discord monitor --keep <manager>`, a holder that is
-  neither a person nor a session: it keeps the monitor up with nothing else
-  open. `tui` starts one.
+- **backend**: a manager bot's keeper and the monitor it keeps up. It runs
+  on its own, with no session and no TUI, until `claude-discord monitor --stop`.
+- **holder**: a process the monitor lives for: its keeper, or an open TUI.
+  The monitor exits within 30 s of the last one.
+- **keeper**: `claude-discord monitor --keep <manager>`: it keeps the monitor
+  up with nothing else open. setup, the TUI and a manager session start one.
 - **finding**: a verdict that needs a human (`down`, `stale`, `duplicate`,
   `unreachable`, `nostate`, `throttled`, `apierror`, `patchfail`, `hostdown`,
   `blind`). `ok` and `busy` are not findings; `noreach` is logged, never posted.
@@ -233,7 +234,7 @@ claude-discord setup alpha --mode     # change only alpha's mode (and, for dev-m
 claude-discord refresh alpha          # replace the running session with a fresh one, from its handoff
 claude-discord health                 # is every bot in this project still answering? see below
 claude-discord tui [<manager>]        # a read-only view of the manager bot's monitor, from any directory; see The monitor and the TUI
-claude-discord monitor --keep <manager>   # keep that monitor up with no TUI or session (foreground); --stop <manager> ends both
+claude-discord monitor --stop <manager>   # stop the manager's backend (keeper and monitor) until --start <manager>
 claude-discord update [--all]         # see Install
 ```
 
@@ -824,7 +825,7 @@ posted alerts in a `[health] <bot>` thread. Both are gone: an OS
 scheduler outlives every session and brings a stopped setup back on the next
 boot without anyone seeing it. `health --uninstall-timer` removes one an older
 version installed. Alerts now come from a manager bot's monitor (next
-section), which runs only while a TUI, the manager session or a keeper holds it.
+section), which runs on its own until `claude-discord monitor --stop`.
 
 ## The monitor and the TUI (manager bots)
 
@@ -834,9 +835,27 @@ installed in the OS: no launchd, systemd or cron.
 
 ```
 claude-discord setup <manager> --mode    # dev-manager, then: ssh hosts to check
-claude-discord tui [<manager>]           # a read-only view; starts the monitor and a keeper if none runs; works outside a project
-claude-discord monitor --keep <manager>  # the keeper, in the foreground (tmux, a container entrypoint, systemd)
-claude-discord monitor --stop <manager>  # end the keeper and the monitor
+claude-discord tui [<manager>]           # a read-only view; starts the backend if none runs; works outside a project
+claude-discord monitor --stop <manager>  # stop the backend; nothing starts it again but:
+claude-discord monitor --start <manager> # start it again (detached)
+claude-discord monitor --keep <manager>  # the keeper in the foreground (tmux, a container entrypoint, systemd)
+```
+
+**The backend.** A manager bot's backend is a keeper and the monitor it
+keeps up. It runs on its own: no manager session and no TUI is needed, and
+it runs until `claude-discord monitor --stop <manager>`. It is started by
+`claude-discord setup <manager> --mode` (dev-manager with a ledger; setup
+says so in one line, with the stop command), by `claude-discord tui`, and by
+the manager session's start or prompt when it finds no keeper. A container
+or machine restart kills it, and the next of those starts it again.
+`--stop` leaves a `stopped` marker: then none of them starts it (the TUI
+asks first at a terminal, and shows `stopped by you`) until
+`claude-discord monitor --start <manager>`. `CLAUDE_DISCORD_NO_AUTOSTART=1`
+in the environment keeps setup, the TUI and the hooks from starting one at
+all on that machine (the other side of a shared home, below); `--start` and
+`--keep` still work there.
+
+```
 ```
 
 **Ledger.** `setup` in dev-manager mode asks `ssh hosts to check` and writes
@@ -861,9 +880,8 @@ it. Deleting the file turns the monitor off. Two managers must not list the
 same host, or its bots are reported twice; nothing enforces that across
 owners.
 
-**Monitor.** One process per manager bot, started by the TUI, a keeper or the
-manager session's SessionStart hook, and alive only while one of them is: it
-exits within 30 s of the last. Every 5 minutes it runs, per host,
+**Monitor.** One process per manager bot, started by its keeper (or an open
+TUI), and alive only while one of them is: it exits within 30 s of the last. Every 5 minutes it runs, per host,
 `ssh -o BatchMode=yes -o ConnectTimeout=8 <host> 'env <KEY=VALUE...>
 ~/.local/bin/claude-discord health --all --json --patch'` (`local`: the same
 command without ssh), so every ledger host needs the shim and claude-discord
@@ -876,24 +894,25 @@ official plugin patched on that host. It restarts and stops nothing.
 Passes start 5 minutes apart however long the hosts take (a longer pass is
 followed at once by the next). After `claude-discord update` a running
 monitor goes on as the new version once the new file has held still for a
-pass, as the same process, and posts nothing it already posted. A monitor
-killed without cleaning up (`kill -9`, out of memory) is started again by the
-manager session's next prompt, by an open TUI, or by a keeper within a minute.
+pass, as the same process, and posts nothing it already posted; the keeper
+does the same within two minutes. A monitor killed without cleaning up
+(`kill -9`, out of memory) is started again by its keeper within a minute; a
+killed keeper by the manager session's next prompt or the next TUI.
 
 **Keeper.** `claude-discord monitor --keep <manager>` runs in the
-foreground, registers itself as a holder of kind `keeper` and runs the same
-`--ensure` the hooks run every 60 s, so a dead monitor comes back with no TUI
-and no session open. It exits 1 with the reason for a bot with no ledger or
-not in dev-manager mode, exits 0 when a keeper already runs for that bot (one
-per bot), and removes its record on TERM or INT. `claude-discord tui` starts
-one in a session of its own (it says why it did not in `monitor.log`), so
-**quitting the TUI leaves the monitor running**; the TUI's header shows
+foreground, registers itself as a holder of kind `keeper` and runs
+`monitor --ensure` every 60 s, so a dead monitor comes back. It exits 1 with
+the reason for a bot with no ledger or not in dev-manager mode, exits 0 when
+a keeper already runs for that bot (one per bot) or the bot was stopped with
+`--stop`, leaves when the ledger is deleted, and removes its record on TERM or
+INT. setup, the TUI and the hooks start it detached, in a session of its own
+(why one did not start is in `monitor.log`), so **quitting the TUI or ending
+the manager session leaves the backend running**; the TUI's header shows
 `keeper <pid>` among the holders and the stop command.
-`claude-discord monitor --stop <manager>` TERMs the keeper, then the monitor
-(an open TUI or manager session starts the monitor again; close those first).
-claude-discord installs no OS scheduler (no launchd, cron or systemd unit):
-run the keeper where something already keeps processes, e.g. a tmux window,
-or a container's entrypoint:
+`claude-discord monitor --stop <manager>` TERMs the keeper, then the monitor.
+claude-discord installs no OS scheduler (no launchd, cron or systemd unit).
+To run the keeper in the foreground under something that already keeps
+processes, e.g. a tmux window or a container's entrypoint:
 
 ```
 # entry.sh (lmd79 style): from the manager's project, before the main process
@@ -905,7 +924,8 @@ A systemd unit you write yourself works the same (`ExecStart=` the command,
 
 A host and a container that share `$HOME` share `~/.claude-discord` but not
 their process ids: run the TUI, the keeper and the manager session on the
-side where the bots run, and list that machine once in the ledger. Otherwise
+side where the bots run (set `CLAUDE_DISCORD_NO_AUTOSTART=1` on the other),
+and list that machine once in the ledger. Otherwise
 each side reads the other's holder as dead (the monitor may exit under an open
 TUI), and a second ledger entry for the other side reports every bot twice,
 one side as `down`. A keeper on the wrong side would keep a monitor there that
@@ -922,7 +942,8 @@ Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 | `lock` | the single-instance lock (`flock` through perl); holds the running monitor's pid, and a monitor whose lock file was removed or replaced exits at its next tick |
 | `state.json` | what the TUI shows; kept after exit, and what keeps a restart from repeating a finding |
 | `monitor.log`, `monitor.log.1` | one line per event, 256 KiB each at most |
-| `holders/<kind>-<pid>` | one record per open TUI (`tui`), manager session (`session`) or keeper (`keeper`): `<pid> <start time> <kind>` |
+| `holders/<kind>-<pid>` | one record per keeper (`keeper`) or open TUI (`tui`): `<pid> <start time> <kind>` (a `session` record from 1.10.2 is read until its session ends) |
+| `stopped` | `monitor --stop` was run: nothing starts the backend until `monitor --start` |
 | `pass.out` | one host's answer, only during a pass |
 | `post.out` | one post's answer and status, only during a pass |
 
@@ -964,11 +985,12 @@ the ledger is shown as `(left the ledger)` for a day, then dropped. A project wh
 before any of its bots was known is one row with bot `-` (it alerts as
 `blind`); it is not counted in its host's `bots ok`. The TUI changes nothing and never reads a token.
 
-**Expected.** With the TUI open, stopping a bot by hand gives one `[down]`
-message within 10 minutes and one `[recovered]` line after it is started
-again. A pass that sees nothing new posts nothing. After
-`claude-discord monitor --stop <manager>`, with the TUI closed and the
-manager session gone, no monitor or keeper process is left 30 s later.
+**Expected.** With the backend running (no TUI or session needed), stopping a
+bot by hand gives one `[down]` message within 10 minutes and one
+`[recovered]` line after it is started again. A pass that sees nothing new
+posts nothing. After `claude-discord monitor --stop <manager>`, with the TUI
+closed, no monitor or keeper process is left 30 s later, and none comes back
+until `claude-discord monitor --start <manager>`.
 
 **Rollback.** Delete `<manager>/hosts`; `rm -r
 ~/.claude-discord/records/monitor ~/.claude-discord/records/projects` removes
@@ -1040,6 +1062,7 @@ rest of Claude Code.
 | `[hostdown] <host>` in `#bot-health-check` | ssh to that host failed twice. Run the command in the message; `up` means a stale ControlMaster or a tunnel that was reconnecting |
 | `[blind] <host>` | ssh works but `health --all` gave no document: `~/.local/bin/claude-discord` is missing there or older than 1.10.0. Run `setup` or `update` on that host |
 | `[patchfail] <host>` | the official plugin changed and a patch no longer matches; `claude-discord update` there, and if it still fails the patch needs a claude-discord fix |
+| The TUI says `stopped by you` | `claude-discord monitor --stop` was run; `claude-discord monitor --start <manager>` starts the backend again |
 | The TUI says `monitor stopped` or `no state yet` | no holder is alive; opening the TUI starts it. A reason after it in the red bar is `monitor --ensure` refusing, which `monitor.log` never sees: `no hosts ledger` means `<manager>/hosts` **or** `<manager>/.env` is missing (the message names the ledger for both). With no reason and a monitor that stops again at once, `monitor.log` says why |
 | No alert for a bot on a ledger host | its project is not in that host's `~/.claude-discord/records/projects` (run `claude-discord health` there once), or the host is `noreach`/`hostdown`/`blind` (the TUI shows it) |
 | `claude-discord: tui needs uv` | install uv (https://docs.astral.sh/uv/); only the TUI needs it |

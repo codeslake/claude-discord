@@ -252,10 +252,12 @@ headers, never a token.
 - **Start.** The TUI writes `holders/tui-<pid>`, then runs `monitor --ensure`.
   The hook writes `holders/session-<pid>`, then runs `monitor --ensure` in
   the background and returns. Either way at most one monitor holds the lock.
-  A keeper (`monitor --keep <bot>`, started by hand or by `tui`) writes
-  `holders/keeper-<pid>` and runs `--ensure` every 60 s, so the monitor
-  outlives every TUI and session; `monitor --stop <bot>` ends both (plan
-  deviation 17).
+  Since 1.10.3 the backend (a keeper and its monitor) runs on its own: the
+  keeper (`monitor --keep <bot>`, started detached by setup, the TUI or a
+  manager session that finds none) writes `holders/keeper-<pid>` and runs
+  `--ensure` every 60 s; the session is no holder. `monitor --stop <bot>`
+  ends both and nothing starts them until `monitor --start <bot>` (plan
+  deviations 17 and 19).
 - **Holder record.** `<pid> <start time> <kind>`, the start time from `ps -o
   lstart= -p <pid>` so a reused pid does not count as alive. The TUI's pid is
   its own. The session's pid is the hook's **nearest** ancestor that is a
