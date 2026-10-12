@@ -757,6 +757,12 @@ wait_for_file "$CURL_LOG"
 grep -q 'channels/111/messages/222/reactions/%E2%98%91%EF%B8%8F/@me' "$CURL_LOG" && ! grep -q '%E2%9C%85' "$CURL_LOG" || { echo "FAIL: a turn with no reply must react ☑️, not ✅: $(<"$CURL_LOG")"; exit 1; }
 [ ! -e "$DSD/turns/s6" ] && [ ! -e "$DSD/turns/s6.replied" ] || { echo "FAIL: on-stop must remove the turn's files even without a reply"; exit 1; }
 rm -f "$DSD/turns/s6.pending"
+if [ "$(id -u)" != 0 ]; then   # root reads a mode-000 file anyway
+  printf '111 222\n' > "$DSD/turns/s7"; chmod 000 "$DSD/turns/s7"
+  out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s7"}' 2>"$HOME/stop.err"); rc=$?
+  [ "$rc" = 0 ] && [ -z "$out" ] && [ ! -s "$HOME/stop.err" ] || { echo "FAIL: an unreadable turns file must not make on-stop print: rc=$rc err=$(<"$HOME/stop.err")"; exit 1; }
+  chmod 600 "$DSD/turns/s7" 2>/dev/null || :; rm -f "$DSD/turns/s7"
+fi
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"nod1"}')
 [ -z "$out" ] || { echo "FAIL: a turn with no Discord message must print nothing: $out"; exit 1; }
 echo "ok: on-stop never blocks and prints nothing; a turn with no reply gets ☑️ on its message and its files cleared; a turn with no Discord message prints nothing"

@@ -24,7 +24,7 @@ if [ -n "$session_id" ] && [ -n "$bot_name" ]; then
       [ -n "$chat_id" ] && [ -n "$message_id" ] || continue
       react "$chat_id" "$message_id" "$mark"
     done < "$turns"
-  fi
+  fi 2>/dev/null   # an unreadable turns file must not reach stderr either: this hook prints nothing
   rm -f "$turns" "$replied" 2>/dev/null
 fi
 exit 0
