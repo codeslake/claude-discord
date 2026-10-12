@@ -930,11 +930,17 @@ if [ "${1:-}" = health ]; then
     [ "${#1}" -lt "${#2}" ] && return 1
     [[ $1 > $2 ]]
   }
-  addressed_ids() {  # $1 = messages JSON; ids newer than $floor and not in $delivered, oldest first
+  # A candidate is also cleared when the bot itself posted a later message in
+  # this same page (one chat: the channel or one thread): it spoke after the
+  # message, so the message was handled even if no delivered line says so (a
+  # catch-up after a refresh gap or a down bot). The bot's reply in ANOTHER
+  # thread is a different page and clears nothing: one stuck thread still alerts.
+  addressed_ids() {  # $1 = messages JSON; ids newer than $floor, not in $delivered, no later bot message here; oldest first
     printf '%s' "$1" | jq -r --arg me "$me" --argjson allow "$allow" \
       --argjson mention "$mention" --arg seen "$floor" --arg delivered "$delivered" '
       ($delivered | split("\n")) as $dl |
       if type != "array" then empty else
+        [ .[] | select(.author.id? == $me) | .id? | select(type == "string") ] as $mine |
         [ .[]
           | (.author.id? // "") as $aid
           | select($aid != $me)
@@ -946,7 +952,9 @@ if [ "${1:-}" = health ]; then
           | select(type == "string" and test("^[0-9]{17,20}$"))
           | select((. | length) > ($seen | length)
                    or ((. | length) == ($seen | length) and . > $seen))
-          | select(. as $i | ($dl | index($i)) == null) ]
+          | select(. as $i | ($dl | index($i)) == null)
+          | select(. as $i | any($mine[]; (length > ($i | length))
+                                          or (length == ($i | length) and . > $i)) | not) ]
         | sort | .[]
       end' 2>/dev/null || :
   }
@@ -1020,11 +1028,12 @@ if [ "${1:-}" = health ]; then
     floor=$last_seen delivered=""
     if [ -s "$d/delivered" ]; then
       floor=""
+      # `|| :`: an unreadable file must not abort the run under set -e.
       while IFS= read -r id || [ -n "$id" ]; do
         is_id "$id" || continue
         delivered="$delivered$id"$'\n'
         if [ -z "$floor" ] || id_newer "$floor" "$id"; then floor=$id; fi
-      done < "$d/delivered"
+      done < "$d/delivered" || :
       [ -n "$floor" ] || floor=$last_seen
     fi
     refresh_tail=$(tail -1 "$d/refresh.log" 2>/dev/null) || refresh_tail=""

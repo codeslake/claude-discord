@@ -2952,6 +2952,23 @@ printf '%s\n%s\n' "$ID_SEEN" "$ID_B" > "$SD/delivered"; echo "$ID_B" > "$SD/last
 queue "200 $NONE" "200 {\"threads\":[{\"id\":\"34\",\"parent_id\":\"900\",\"last_message_id\":\"$ID_STALE\"}]}" "200 $MENTION"
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of sbot "$out")" = stale ] || { echo "FAIL: a message never delivered, in a thread older than the last one answered elsewhere, must be stale: $out"; exit 1; }
+# The bot's own later message in the SAME chat clears the candidate (it spoke after it: a catch-up handled it, though
+# delivered never saw it); its message in ANOTHER thread, read BEFORE the stuck one, clears nothing. The first run also makes delivered unreadable
+# (mode 000, no bound left but last-message-id 0): that must not abort the run under set -e (a no-op as root, which
+# reads it anyway; the bot-message check still runs).
+ID_C=$(snowflake_for 25)   # the bot's own message, after the stuck one
+BOTMSG="{\"id\":\"$ID_C\",\"author\":{\"id\":\"777\"}}"
+echo 0 > "$SD/last-message-id"; chmod 000 "$SD/delivered"
+queue "200 $NONE" "200 {\"threads\":[{\"id\":\"34\",\"parent_id\":\"900\",\"last_message_id\":\"$ID_C\"}]}" \
+      "200 [$BOTMSG,${MENTION#?}"
+out=$(bash "$S" health --json 2>/dev/null) || :
+chmod 600 "$SD/delivered"
+[ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: an undelivered message followed by the bot's own message in the same thread must read ok, and an unreadable delivered must not abort health: $out"; exit 1; }
+queue "200 $NONE" "200 {\"threads\":[{\"id\":\"35\",\"parent_id\":\"900\",\"last_message_id\":\"$ID_C\"},{\"id\":\"34\",\"parent_id\":\"900\",\"last_message_id\":\"$ID_STALE\"}]}" \
+      "200 [$BOTMSG]" "200 $MENTION"
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = stale ] || { echo "FAIL: the bot's later message in a DIFFERENT thread must not clear a stuck one: $out"; exit 1; }
+echo "ok: stale is cleared by the bot's own later message in the same chat, not by one in another thread; an unreadable delivered does not abort health"
 rm -f "$SD/delivered"; echo "$ID_SEEN" > "$SD/last-message-id"
 echo "ok: stale needs a message never delivered to the session: delivered-and-unanswered is ok (dong-dev-bot's 62-min case too), undelivered in one thread while another is answered is stale"
 stop_servers
