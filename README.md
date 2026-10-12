@@ -860,7 +860,10 @@ exits within 30 s of the last. Every 5 minutes it runs, per host,
 ~/.local/bin/claude-discord health --all --json --patch'` (`local`: the same
 command without ssh), so every ledger host needs the shim and claude-discord
 1.10.0 or later, and one `claude-discord health` run in each bot project to
-enter it in `~/.claude-discord/records/projects`. The same call keeps the
+enter it in `~/.claude-discord/records/projects`. A project listed there
+whose folder is missing (a volume not mounted yet) alerts as `blind` and is
+never dropped from the list; delete its line by hand once it is gone for
+good. The same call keeps the
 official plugin patched on that host. It restarts and stops nothing.
 Passes start 5 minutes apart however long the hosts take (a longer pass is
 followed at once by the next). After `claude-discord update` a running

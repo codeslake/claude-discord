@@ -3207,7 +3207,8 @@ echo "ok: health installs no timer (--install-timer and --proxy are refused), an
 
 # health --all: every project in records/projects, one document (host, version, home, patch, projects[].bots[] with
 # owner_id), exit 0 whenever it printed it (over ssh a non-zero exit means "no answer"). --patch runs the patch step
-# first and carries its rc and stderr. A project whose .claude/discord-agents is gone is pruned. Neither health.log nor
+# first and carries its rc and stderr. A project whose .claude/discord-agents is missing is an entry with `error`, never
+# pruned (a volume mounted late). Neither health.log nor
 # logger is written at a monitor's cadence; a health run by hand keeps both.
 PF="$HOME/.claude-discord/records/projects"
 # project-upper was set up above and never ran health: only setup can have recorded it.
@@ -3233,15 +3234,17 @@ rc=0; doc=$(cd "$HOME" && bash "$S" health --all --json --patch 2>/dev/null) || 
 jq -e --arg home "$HOME" --arg p "$(cd "$SPS" && pwd -P)" --arg cp "$(cd "$CP" && pwd -P)" '
   (.host | length > 0) and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+ \\(")) and .home == $home
   and .patch.rc == 1 and (.patch.output | test("0.0.98/server.ts: bot-authors no longer matches"))
-  and (.projects | length) == 2 and .projects[0].project == $p and (.projects[0] | has("error") | not)
-  and .projects[1].project == $cp and .projects[1].bots == [] and .projects[1].error == "health exited 3 with no document"
-  and .projects[0].bots[0].bot == "sbot" and .projects[0].bots[0].verdict == "stale" and .projects[0].bots[0].owner_id == "111"' <<<"$doc" >/dev/null ||
+  and (.projects | length) == 4 and .projects[3].project == $home + "/appended project" and (.projects[3].error | startswith("project folder missing"))
+  and .projects[1].project == $p and (.projects[1] | has("error") | not)
+  and .projects[0].project == $home + "/gone project" and .projects[0].bots == [] and (.projects[0].error | startswith("project folder missing: " + $home + "/gone project/.claude/discord-agents"))
+  and .projects[2].project == $cp and .projects[2].bots == [] and .projects[2].error == "health exited 3 with no document"
+  and .projects[1].bots[0].bot == "sbot" and .projects[1].bots[0].verdict == "stale" and .projects[1].bots[0].owner_id == "111"' <<<"$doc" >/dev/null ||
   { echo "FAIL: health --all --json --patch: wrong document: $doc"; exit 1; }
 [ ! -e "$SDS/health.log" ] && [ ! -e "$HOME/logger.calls" ] || { echo "FAIL: health --all must write no health.log line and call no logger"; exit 1; }
-grep -qF 'gone project' "$PF" && { echo "FAIL: --all must prune a project whose discord-agents is gone: $(<"$PF")"; exit 1; }
+grep -qxF "$HOME/gone project" "$PF" || { echo "FAIL: --all must never prune a project whose folder is missing (an unmounted volume): $(<"$PF")"; exit 1; }
 grep -qxF "$HOME/appended project" "$PF" || { echo "FAIL: a line appended to records/projects during the walk must survive the prune rewrite: $(<"$PF")"; exit 1; }
 rm -rf "$PCACHE/0.0.98" "$HOME/bin/logger" "$HOME/logger.calls" "$SPS" "$CP"; mv "$PF.suite" "$PF"
-echo "ok: health --all --json --patch prints one document (host, version, home, the patch step's rc and stderr, each project's bots with owner_id; a project path with a space, a quote and a \$), exits 0 with a finding, prunes a gone project, and writes no health.log or journal line; setup and a health run record their project"
+echo "ok: health --all --json --patch prints one document (host, version, home, the patch step's rc and stderr, each project's bots with owner_id; a project path with a space, a quote and a \$), exits 0 with a finding, reports a missing project folder as an error and keeps its line, and writes no health.log or journal line; setup and a health run record their project"
 
 stop_servers
 cd "$P"
