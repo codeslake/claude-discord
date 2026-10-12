@@ -3591,8 +3591,16 @@ wait_log 1 'restart: monitor\.sh changed$'; wait_log "$want" 'Z start$'; next_pa
 touch -d '+1 hour' "$PC/monitor/monitor.sh"; wait_log 2 'restart: monitor\.sh changed$'; np=$(passes); wait_log $(( np + 4 )) ' pass hosts='
 [ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 2 ] && [ "$(mpid)" = "$rp" ] ||
   { echo "FAIL: a monitor.sh with a future mtime must not restart the monitor again and again: $(command grep -c 'restart: monitor' "$MB/monitor.log") restarts"; exit 1; }
-mstop; touch "$PC/monitor/monitor.sh"; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep"
-echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd within a pass by the same process, lock kept, nothing posted again; a future mtime restarts it once, not every tick"
+# A monitor.sh that does not parse (a git pull caught mid-write) is not exec'd: one log line, the monitor keeps passing;
+# the valid file after it is one more restart.
+cp "$PC/monitor/monitor.sh" "$HOME/monitor.good"; { cat "$HOME/monitor.good"; echo ')'; } > "$PC/monitor/monitor.sh"
+wait_log 1 'update skipped: monitor\.sh does not parse'; np=$(passes); wait_log $(( np + 2 )) ' pass hosts='
+[ "$(command grep -c 'update skipped' "$MB/monitor.log")" = 1 ] && [ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 2 ] && [ "$(mpid)" = "$rp" ] ||
+  { echo "FAIL: a monitor.sh that does not parse is not exec'd, logged once, the monitor keeps passing: $(tail -4 "$MB/monitor.log")"; exit 1; }
+cp "$HOME/monitor.good" "$PC/monitor/monitor.sh"; wait_log 3 'restart: monitor\.sh changed$'; next_pass
+[ "$(mpid)" = "$rp" ] || { echo "FAIL: the valid monitor.sh after a broken one restarts the monitor, same process"; exit 1; }
+mstop; touch "$PC/monitor/monitor.sh"; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep" "$HOME/monitor.good"
+echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd within a pass by the same process, lock kept, nothing posted again; a future mtime restarts it once, not every tick; one that does not parse is skipped, logged once"
 
 # The session a SessionStart hook belongs to: the nearest ancestor, two levels at most, whose argv[0] is .../claude or
 # under .../claude/versions/ and whose argv[1] is not daemon. Process chains are built with perl's $0 (what ps shows),

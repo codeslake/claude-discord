@@ -99,6 +99,7 @@ fi
 # CLAUDE_DISCORD_MONITOR_LOCK_WAIT (above; 5) is the fourth interval the suite shortens.
 sig() { perl -MTime::HiRes=stat -e '@s = stat $ARGV[0] and print "$s[9] $s[7] $s[1]"' "$0" 2>/dev/null; }
 sig0=$(sig)   # this file as this process started
+bad=""        # the signature of a changed monitor.sh that did not parse, logged once
 tick=${CLAUDE_DISCORD_MONITOR_TICK:-30}        # holder check, seconds
 pass=${CLAUDE_DISCORD_MONITOR_PASS:-300}       # a pass at most this often; health's unknown_cap=6 assumes 300
 cap=${CLAUDE_DISCORD_MONITOR_HOST_CAP:-90}     # per host, enforced here (no timeout(1) on macOS)
@@ -510,7 +511,12 @@ while :; do
     # future mtime (a clock stepped back, a copied file) would restart every tick, and bash 3.2's -nt counts whole seconds.
     # An empty signature (replaced right now) is no change: never exec a missing file.
     cur=$(sig)
-    [ -z "$cur" ] || [ "$cur" = "$sig0" ] || { log "restart: monitor.sh changed"; exec bash "$0" "$self" --locked "$bot"; }
+    # A file caught mid-write (git pull unlinks and rewrites it) may be cut off: exec it only if it parses, else keep the
+    # running code and look again next pass, logging each broken signature once.
+    if [ -n "$cur" ] && [ "$cur" != "$sig0" ]; then
+      if bash -n "$0" 2>/dev/null; then log "restart: monitor.sh changed"; exec bash "$0" "$self" --locked "$bot"
+      elif [ "$cur" != "$bad" ]; then bad=$cur; log "update skipped: monitor.sh does not parse, keeping the running code"; fi
+    fi
     run_pass; n=$((used / tick_n)) part=""
     [ $((used % tick_n)) = 0 ] || part=$(awk -v s="$step" -v m=$((tick_n - used % tick_n)) 'BEGIN { print s * m }')
     continue

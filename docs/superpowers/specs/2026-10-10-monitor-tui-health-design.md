@@ -312,7 +312,9 @@ received message id to `<bot>/delivered` (kept to the last 200 lines), and an
 unanswered message found there was handled by the session, answered or
 deliberately not (a mention that asks nothing gets no reply by rule). Only a
 message that never reached the session is `stale`, so one stuck thread still
-alerts while the bot answers others. This removes the old alert's false
+alerts while the bot answers others. A later message by the bot in the same
+chat (channel or thread) in the fetched page also clears a stale candidate
+(T2-1): the bot spoke after it, so the session is answering that chat. This removes the old alert's false
 positive that dong-dev-bot measured on lmd79 (2026-10-09: a live session
 answering other threads reported `stale ... refresh` for one message 62 min
 behind). Tests cover both: delivered-and-unanswered is `ok`, undelivered in
