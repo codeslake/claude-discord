@@ -12,6 +12,9 @@ set -u
 plugin_gate || exit 0
 
 [ -n "$bot_name" ] || exit 0
+# A manager whose backend monitor died without its trap (kill -9, OOM, a self-update that broke) gets it back at its
+# next prompt, not only at its next SessionStart. No fork while the monitor runs: this is every prompt's path.
+[ "$bot_mode" != dev-manager ] || [ ! -f "$DISCORD_STATE_DIR/hosts" ] || monitor_alive || ensure_monitor
 input=$(cat 2>/dev/null) || exit 0
 # No tag anywhere in the raw JSON: a terminal prompt. Nothing to do unless a
 # turns file (a bare session id, no dot) is present.

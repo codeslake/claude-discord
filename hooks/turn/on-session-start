@@ -76,16 +76,8 @@ jq -nc --arg c "$ctx" '{hookSpecificOutput: {hookEventName: "SessionStart", addi
 
 # A manager bot with a hosts ledger holds its backend monitor open (every
 # source: the session is alive at a compaction too): this session's pid goes
-# in as a holder and the monitor is started if none runs. Detached, stdio
-# closed, so the hook returns at once and leaves nothing on Claude Code's pipe.
-if [ "$bot_mode" = dev-manager ] && [ -f "$DISCORD_STATE_DIR/hosts" ] && [ -x "$plugin_root/bin/claude-discord" ]; then
-  spid=$(session_pid)
-  # An if, not `[ -z ] || (...) &`: the & would take the whole || list into a forked subshell that keeps the hook's own
-  # stdout open until --ensure ends, and Claude Code reads the hook's pipe to EOF.
-  if [ -n "$spid" ]; then
-    (cd "$bot_project" && "$plugin_root/bin/claude-discord" monitor --ensure "$bot_name" --holder session "$spid") </dev/null >/dev/null 2>&1 &
-  fi
-fi
+# in as a holder and the monitor is started if none runs (detached).
+if [ "$bot_mode" = dev-manager ] && [ -f "$DISCORD_STATE_DIR/hosts" ]; then ensure_monitor; fi
 
 t=$DISCORD_STATE_DIR/turns/$session_id
 case $source in

@@ -212,3 +212,32 @@ session_pid() {
     p=$1 n=$((n + 1))
   done
 }
+
+# ensure_monitor: this session (session_pid) as a holder of its manager bot's
+# backend monitor, which is started if none runs. Detached, stdio closed, so the
+# hook returns at once and leaves nothing on Claude Code's pipe.
+ensure_monitor() {
+  local spid
+  [ -x "$plugin_root/bin/claude-discord" ] || return 0
+  spid=$(session_pid)
+  # An if, not `[ -z ] || (...) &`: the & would take the whole || list into a forked subshell that keeps the hook's own
+  # stdout open until --ensure ends, and Claude Code reads the hook's pipe to EOF.
+  if [ -n "$spid" ]; then
+    (cd "$bot_project" && "$plugin_root/bin/claude-discord" monitor --ensure "$bot_name" --holder session "$spid") </dev/null >/dev/null 2>&1 &
+  fi
+}
+# monitor_alive: the manager's monitor runs, told with no fork (on-prompt asks
+# on every prompt): the pid state.json names in "monitor" (written first there,
+# within the first 512 bytes), then on Linux that pid's argv[1] (a pid reused by
+# another program, or a zombie, is no monitor), kill -0 elsewhere.
+monitor_alive() {
+  local s="" a0="" a1="" re='"monitor":\{([^{}]*,)?"pid":([0-9]+)'
+  { IFS= read -r -n 512 s < "$HOME/.claude-discord/records/monitor/$bot_name/state.json"; } 2>/dev/null
+  [[ $s =~ $re ]] || return 1
+  if [ -d /proc/self ]; then
+    { IFS= read -rd '' a0; IFS= read -rd '' a1; } 2>/dev/null < "/proc/${BASH_REMATCH[2]}/cmdline"
+    [ "${a1##*/}" = monitor.sh ]
+  else
+    kill -0 "${BASH_REMATCH[2]}" 2>/dev/null
+  fi
+}

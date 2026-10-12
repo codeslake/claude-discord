@@ -3632,6 +3632,8 @@ iv=$(awk '/^D$/ { if (d == 1 || d == 2) printf "%s ", ((s > 0.0499 && s < 0.0501
 [ "$iv" = "ok ok " ] || { echo "FAIL: pass starts must be PASS (0.05) apart in the monitor's own sleeps, the hosts' steps inside it, not after them: $iv"; exit 1; }
 rp=$(mpid); touch "$PC/monitor/monitor.sh"
 wait_log 1 'restart: monitor\.sh changed$'; wait_log "$want" 'Z start$'; next_pass
+[ "$(awk '/monitor\.sh changed: restart at the next pass/ { s = 1; next } s && / pass hosts=/ { p = 1 } s && /restart: monitor\.sh changed$/ { print p + 0; exit }' "$MB/monitor.log")" = 1 ] ||
+  { echo "FAIL: a changed monitor.sh is exec'd only after its signature held for a whole pass: $(command grep -E 'monitor\.sh|pass hosts' "$MB/monitor.log" | tail -5)"; exit 1; }
 [ "$(mpid)" = "$rp" ] && [ "$(readlink "/proc/$rp/fd/9")" = "$MB/lock" ] ||
   { echo "FAIL: a changed monitor.sh is run by the same process, still holding the lock (pid $rp, now $(mpid), fd 9 $(readlink "/proc/$rp/fd/9"))"; exit 1; }
 [ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 1 ] && [ "$(posts | grep -c .)" = 1 ] ||
@@ -3655,7 +3657,7 @@ rm -f "$MB/lock"; : > "$MB/lock"; wait_log 1 'exit reason=lock-lost'
 n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
 ! running "$rp" && [ "$(mpid)" = "$rp" ] || { echo "FAIL: a monitor whose lock file was replaced must exit without writing state.json: $(tail -2 "$MB/monitor.log")"; exit 1; }
 mstop; touch "$PC/monitor/monitor.sh"; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep" "$HOME/monitor.good"
-echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd within a pass by the same process, lock kept, nothing posted again; a future mtime restarts it once, not every tick; one that does not parse is skipped, logged once; a lock file replaced under it ends it at the next tick"
+echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd by the same process once it held still for a pass, lock kept, nothing posted again; a future mtime restarts it once, not every tick; one that does not parse is skipped, logged once; a lock file replaced under it ends it at the next tick"
 
 # The session a SessionStart hook belongs to: the nearest ancestor, two levels at most, whose argv[0] is .../claude or
 # under .../claude/versions/ and whose argv[1] is not daemon. Process chains are built with perl's $0 (what ps shows),
@@ -3684,8 +3686,26 @@ perl -e '$0 = shift @ARGV; open(STDIN, "<", shift @ARGV) or die; system(@ARGV); 
 HPID=$!; KILL_AT_EXIT="$KILL_AT_EXIT $HPID"
 wait_log "$want" 'Z start$'
 [ -f "$MB/holders/session-$HPID" ] || { echo "FAIL: the manager's SessionStart must register its session as a holder: $(ls "$MB/holders")"; exit 1; }
-mstop; rm -f "$HOME/ss.json"
-echo "ok: a dev-manager's SessionStart registers its session (the nearest claude process) as a holder and starts the monitor, which exits with that session"
+# Killed without its trap (kill -9 here; an OOM or a self-update that broke end the same way), the monitor leaves its pid
+# in state.json. The manager's next prompt (on-prompt, under the same kind of session) sees that pid dead, with no fork,
+# and ensures the monitor again, detached, as SessionStart does.
+mon_alive() { bash -c '. "$1"; bot_name=mgr; monitor_alive' x "$D/hooks/lib/discord.sh"; }
+mon_alive || { echo "FAIL: monitor_alive must see the running monitor: $(head -c 200 "$MB/state.json")"; exit 1; }
+printf '{"session_id":"sMon","prompt":"hi"}' > "$HOME/up.json"
+mp=$(mpid); want=$(( $(starts) + 1 )); kill -9 "$mp"
+n=0; while running "$mp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+! mon_alive || { echo "FAIL: monitor_alive must see a monitor killed without its trap as dead"; exit 1; }
+perl -e '$0 = shift @ARGV; open(STDIN, "<", shift @ARGV) or die; system(@ARGV); sleep 30' "$FK/claude/versions/9.9.9" "$HOME/up.json" \
+  env CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$PC/hooks/turn/on-prompt" >/dev/null 2>&1 &
+UP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $UP"
+wait_log "$want" 'Z start$'
+[ "$(mpid)" != "$mp" ] && [ -f "$MB/holders/session-$UP" ] ||
+  { echo "FAIL: the manager's next prompt must start a monitor killed without its trap again, its session the holder: $(ls "$MB/holders")"; exit 1; }
+kill "$UP" 2>/dev/null || :; wait "$UP" 2>/dev/null || :
+mstop; rm -f "$HOME/ss.json" "$HOME/up.json"
+# A live pid that is no monitor (reused by another program) is dead to it too.
+mstate --argjson p "$$" '.monitor.pid = $p'; ! mon_alive || { echo "FAIL: a live pid that runs no monitor.sh is no monitor"; exit 1; }
+echo "ok: a dev-manager's SessionStart registers its session (the nearest claude process) as a holder and starts the monitor, which exits with that session; its next prompt starts a monitor killed without its trap again"
 
 # And it leaves nothing on the hook's pipe: against a plugin root copy whose claude-discord takes 3 s, the caller (Claude
 # Code reads the hook's stdout to EOF; here perl does) sees EOF at once, the output is the JSON line alone, and the stub

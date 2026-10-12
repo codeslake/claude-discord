@@ -101,6 +101,7 @@ fi
 sig() { perl -MTime::HiRes=stat -e '@s = stat $ARGV[0] and print "$s[9] $s[7] $s[1]"' "$0" 2>/dev/null; }
 sig0=$(sig)   # this file as this process started
 bad=""        # the signature of a changed monitor.sh that did not parse, logged once
+seen=""       # the signature of a changed monitor.sh, exec'd once it is still the same a pass later
 tick=${CLAUDE_DISCORD_MONITOR_TICK:-30}        # holder check, seconds
 pass=${CLAUDE_DISCORD_MONITOR_PASS:-300}       # a pass at most this often; health's unknown_cap=6 assumes 300
 cap=${CLAUDE_DISCORD_MONITOR_HOST_CAP:-90}     # per host, enforced here (no timeout(1) on macOS)
@@ -563,11 +564,13 @@ while :; do
     # future mtime (a clock stepped back, a copied file) would restart every tick, and bash 3.2's -nt counts whole seconds.
     # An empty signature (replaced right now) is no change: never exec a missing file.
     cur=$(sig)
-    # A file caught mid-write (git pull unlinks and rewrites it) may be cut off: exec it only if it parses and its
-    # signature held through the parse (a write still landing changes size or mtime), else keep the running code and
-    # look again next pass, logging each broken signature once.
+    # A file caught mid-write (git pull unlinks and rewrites it) may be cut off at a line end and still parse, and the
+    # exec'd process would die at once: exec it only once its signature has held for a whole pass, if it parses and
+    # still holds through the parse; else keep the running code and look again next pass, logging each broken signature
+    # once. One that dies anyway is started again by its manager's next prompt (on-prompt) or the TUI.
     if [ -n "$cur" ] && [ "$cur" != "$sig0" ]; then
-      if bash -n "$0" 2>/dev/null && [ "$(sig)" = "$cur" ]; then log "restart: monitor.sh changed"; exec bash "$0" "$self" --locked "$bot"
+      if [ "$cur" != "$seen" ]; then seen=$cur; log "monitor.sh changed: restart at the next pass if it holds still"
+      elif bash -n "$0" 2>/dev/null && [ "$(sig)" = "$cur" ]; then log "restart: monitor.sh changed"; exec bash "$0" "$self" --locked "$bot"
       elif [ "$cur" != "$bad" ]; then bad=$cur; log "update skipped: monitor.sh does not parse, keeping the running code"; fi
     fi
     run_pass; n=$((used / tick_n)) part=""
