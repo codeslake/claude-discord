@@ -3075,72 +3075,71 @@ touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.
 for _ in 1 2 3 4 5 6; do bash "$S" patch --compat >/dev/null 2>&1 & done; wait
 cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* "$OH"/compat/compat.* 2>/dev/null)" ] ||
   { echo "FAIL: six parallel refreshes must leave one complete compat/ and no temp dir: $(ls -d "$OH"/compat* "$OH"/compat/compat.* 2>&1)"; exit 1; }
-# Writers swap one at a time under compat.lock. A lock older than any swap is a dead writer's, broken by exactly one of two
-# refreshes that both judged it stale: the stubs make both judge it before either breaks, and the second break only once
-# the first holds the lock it re-took (its swap waits for that break to return); the second must leave that lock as it was,
-# wait for it, and then find compat/ current (one swap in all). Both succeed, one complete copy is left.
+# Writers swap one at a time under compat.lock. A stale lock is broken by exactly one of two refreshes that both judged it
+# stale: the stubs order both judgements before either break, and the second break after the first re-took the lock (its swap
+# waits for that break); the second must leave that lock, wait, then find compat/ current (one swap). Both succeed.
 SB="$HOME/swapfail-stubs"; mkdir -p "$SB"; RP=$(command -v perl); cp -R "$OH/compat" "$HOME/cur"
-cat > "$SB/perl" <<'EOF'
+cat > "$SB/hook" <<'EOF'
 #!/bin/sh
-case $4 in */compat.lock.broken.*) ;; *) exec "$TRP" "$@";; esac
-i=0
-if mkdir "$TSB/b1" 2>/dev/null; then
-  until [ -d "$TSB/b2" ] || [ $i = 300 ]; do sleep 0.01; i=$((i+1)); done; exec "$TRP" "$@"
-fi
-mkdir "$TSB/b2"
-until { [ -s "$TOH/compat.lock/owner" ] && [ "$(cat "$TOH/compat.lock/owner")" != dead ]; } || [ $i = 300 ]; do sleep 0.01; i=$((i+1)); done
-o=$(cat "$TOH/compat.lock/owner" 2>/dev/null); "$TRP" "$@"; r=$?
-[ "$(cat "$TOH/compat.lock/owner" 2>/dev/null)" = "$o" ] || : > "$TSB/overlap"; : > "$TSB/b2done"; exit $r
+case ${0##*/} in mv) s=$1 d=$2 r=/bin/mv;; mkdir) case $TC:$1 in dual:*/compat.lock) "$TMK" -p "$1"; exit;; esac; exec "$TMK" "$@";; *) s=$3 d=$4 r=$TRP;; esac
+w() { i=0; until [ -e "$TSB/$1" ] || [ $i = 300 ]; do sleep 0.01; i=$((i+1)); done; }
+case $TC:$s:$d in
+  two:"$TOH/compat":*old) echo >> "$TSB/swaps"; w b2done;;   # compat/ going aside: a swap
+  two:*:*/compat.lock.broken.*) mkdir "$TSB/b1" 2>/dev/null && { w b2; exec "$r" "$@"; }; : > "$TSB/b2"; i=0
+    until { [ -s "$TOH/compat.lock/owner" ] && [ "$(cat "$TOH/compat.lock/owner")" != dead ]; } || [ $i = 300 ]; do sleep 0.01; i=$((i+1)); done
+    o=$(cat "$TOH/compat.lock/owner" 2>/dev/null); "$r" "$@"; x=$?; [ "$(cat "$TOH/compat.lock/owner" 2>/dev/null)" = "$o" ] || : > "$TSB/overlap"; : > "$TSB/b2done"; exit $x;;
+  dual:"$TOH/compat":*old) case $d in */compat.new.*/old) ;; *) : > "$TSB/shared";; esac; mkdir "$TSB/a1" 2>/dev/null && { w at2; exec "$r" "$@"; }   # aside
+    : > "$TSB/at2"; w landed; "$r" "$@"; x=$?; : > "$TSB/aside2"; exit $x;;
+  dual:*/compat.new.*/compat:"$TOH/compat") mkdir "$TSB/l1" 2>/dev/null && { "$r" "$@"; x=$?; : > "$TSB/landed"; w aside2; exit $x; }; w done;;   # land
+esac; exec "$r" "$@"
 EOF
-cat > "$SB/mv" <<'EOF'
-#!/bin/sh
-case $2 in */compat.old) echo >> "$TSB/swaps"; i=0; until [ -e "$TSB/b2done" ] || [ $i = 300 ]; do sleep 0.01; i=$((i+1)); done;; esac
-exec /bin/mv "$@"
-EOF
-chmod +x "$SB/perl" "$SB/mv"
+chmod +x "$SB/hook"; for t in perl mv mkdir; do ln -s hook "$SB/$t"; done; export TSB="$SB" TOH="$OH" TRP="$RP" TMK="$(command -v mkdir)"
 mkdir "$OH/compat.lock"; echo dead > "$OH/compat.lock/owner"; touch -d '1 minute ago' "$OH/compat.lock" "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
-for _ in 1 2; do { PATH="$SB:$PATH" TSB="$SB" TOH="$OH" TRP="$RP" bash "$S" patch --compat >/dev/null 2>&1 || : > "$SB/failed"; } & done; wait
+for _ in 1 2; do { PATH="$SB:$PATH" TC=two bash "$S" patch --compat >/dev/null 2>&1 || : > "$SB/failed"; } & done; wait
 [ -e "$SB/b2done" ] && [ ! -e "$SB/overlap" ] && [ ! -e "$SB/failed" ] && [ "$(wc -l < "$SB/swaps")" -eq 1 ] && cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/hooks/turn/on-prompt" ] && [ -z "$(ls -d "$OH"/compat.* "$OH"/compat/compat* 2>/dev/null)" ] ||
   { echo "FAIL: of two breakers of one stale lock only one may break it, the other waits; one swap, both succeed, one complete compat/: $(wc -l < "$SB/swaps"; ls -d "$SB"/* "$OH"/compat* "$OH"/compat/compat* 2>&1)"; exit 1; }
-rm -r "$SB/perl" "$SB/mv" "$SB/b1" "$SB/b2" "$SB/b2done" "$SB/swaps"
-# Under the lock a dead writer's leftovers go: compat.old, an old compat.new.*, compat.old.<pid> (1.9.4) or
-# compat.lock.broken.* (a breaker killed mid-break), and a copy 1.9.4 nested inside compat/; a compat.new.* younger than
-# 10 minutes may be another writer still building, and stays.
-mkdir "$OH/compat.old" "$OH/compat.old.99999" "$OH/compat.new.99999" "$OH/compat.lock.broken.x" "$OH/compat.new.fresh" "$OH/compat/compat.old.99998"
+# Two holders at once (a lock broken under a stalled holder; the stub lets both past it), worst order: A takes compat/ aside,
+# lands, B takes that aside, A exits, B lands. Nothing nested, absent or old again; no old copy goes to a name writers share.
+touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
+for _ in 1 2; do { PATH="$SB:$PATH" TC=dual bash "$S" patch --compat >/dev/null 2>&1 || :; : > "$SB/done"; } & done; wait
+[ -e "$SB/aside2" ] && [ ! -e "$SB/shared" ] && diff -r "$OH/compat" "$HOME/cur" >/dev/null && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] ||
+  { echo "FAIL: two holders at once must leave compat/ whole and current, nothing nested or left: $(ls -d "$SB"/* "$OH"/compat* "$OH"/compat/compat* "$OH"/compat/old 2>&1)"; exit 1; }
+rm -r "$SB"/*
+# Under the lock a dead writer's leftovers go: an old compat.new.* (its old copy too), compat.old.<pid> (1.9.4), compat.lock.broken.*
+# (a breaker killed mid-break), a copy 1.9.4 nested in compat/; a compat.new.* under 10 minutes old may be a writer still building.
+mkdir "$OH/compat.old.99999" "$OH/compat.new.99999" "$OH/compat.new.99999/old" "$OH/compat.lock.broken.x" "$OH/compat.new.fresh" "$OH/compat/compat.old.99998"
 touch -d '1 hour ago' "$OH/compat.old.99999" "$OH/compat.new.99999" "$OH/compat.lock.broken.x"; touch -d '5 minutes ago' "$OH/compat.new.fresh"; touch -d '1 minute ago' "$OH/compat/VERSION"
 rc=0; bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] && [ "$(ls -d "$OH"/compat.* "$OH"/compat/compat* 2>/dev/null)" = "$OH/compat.new.fresh" ] ||
   { echo "FAIL: leftovers must be removed under the lock, a fresh compat.new.* kept (rc=$rc): $(ls -d "$OH"/compat* "$OH"/compat/compat* 2>&1)"; exit 1; }
 rmdir "$OH/compat.new.fresh"
-# A failed swap: perl's rename of our copy fails after our mv took compat/ away (a non-race failure) -> the old copy goes
+# A failed swap: perl's rename of our copy fails after compat/ went aside (a non-race failure) -> the old copy goes
 # back, the run fails, the lock is released. Only that rename fails; the restore reaches the real perl.
 printf '#!/bin/sh\ncase $3 in */compat.new.*/compat) exit 1;; esac\nexec "%s" "$@"\n' "$RP" > "$SB/perl"; chmod +x "$SB/perl"
 touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" != 0 ] && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] ||
   { echo "FAIL: a failed rename must put the old compat/ back, fail and release the lock (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-# The restore fails too: compat/ is gone, the run fails, compat.old (the only copy) is kept, and the lock is still released.
-printf '#!/bin/sh\ncase $3 in */compat.new.*/compat|*/compat.old) exit 1;; esac\nexec "%s" "$@"\n' "$RP" > "$SB/perl"
+# The restore fails too: compat/ is gone, the run fails, our compat.new.* holding the only copy in old/ stays, the lock goes.
+printf '#!/bin/sh\ncase $3 in */compat.new.*/compat|*/compat.new.*/old) exit 1;; esac\nexec "%s" "$@"\n' "$RP" > "$SB/perl"
 touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
-[ "$rc" != 0 ] && [ ! -e "$OH/compat" ] && [ "$(ls -d "$OH"/compat.* 2>/dev/null)" = "$OH/compat.old" ] ||
-  { echo "FAIL: a failed restore must keep compat.old and still release the lock (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-rm "$SB/perl"
-# A writer killed between its two renames leaves the same. A bot start puts compat.old back under the lock instead of
-# deleting the only copy (a current one then stays: same inode).
-rm -r "$OH/compat.old"; cp -R "$HOME/cur" "$OH/compat.old"; i=$(ls -di "$OH/compat.old")
-bash "$S" patch --compat >/dev/null 2>&1 || :   # what a bot start runs
-j=$(ls -di "$OH/compat" 2>/dev/null || :); [ "${j%% *}" = "${i%% *}" ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] ||
-  { echo "FAIL: a bot start must put back the compat.old a killed writer left: $(ls -di "$OH"/compat* 2>&1)"; exit 1; }
-# Our mv refused for a non-race reason (permissions): compat/ stays unreplaced, so the run fails.
-printf '#!/bin/sh\ncase $1 in */compat) exit 1;; esac\nexec /bin/mv "$@"\n' > "$SB/mv"; chmod +x "$SB/mv"; echo other-sha > "$OH/compat/VERSION"
+j=$(ls -d "$OH"/compat.* 2>/dev/null || :); [ "$rc" != 0 ] && [ ! -e "$OH/compat" ] && [ -d "$j/old" ] ||
+  { echo "FAIL: a failed restore must keep its compat.new.*/old and still release the lock (rc=$rc): $(ls -d "$OH"/compat* "$OH"/compat.*/* 2>&1)"; exit 1; }
+rm -r "$j/old"; bash "$S" patch --compat >/dev/null 2>&1 || :; [ ! -e "$OH/compat" ] || { echo "FAIL: with compat/ absent and no old copy, a bot start must leave it to setup"; exit 1; }
+# A writer killed between its two renames leaves the same. A bot start puts the newest old copy back under the lock before
+# the sweep, which then removes the older one (a current copy stays: same inode); the emptied one is fresh again, and stays.
+rm -r "$j" "$SB/perl"; mkdir "$OH/compat.new.a" "$OH/compat.new.b"; cp -R "$HOME/cur" "$OH/compat.new.a/old"; cp -R "$HOME/cur" "$OH/compat.new.b/old"
+touch -d '2 hours ago' "$OH/compat.new.a"; touch -d '1 hour ago' "$OH/compat.new.b"; i=$(ls -di "$OH/compat.new.b/old"); bash "$S" patch --compat >/dev/null 2>&1 || :
+j=$(ls -di "$OH/compat" 2>/dev/null || :); [ "${j%% *}" = "${i%% *}" ] && [ "$(ls -d "$OH"/compat.* 2>/dev/null)" = "$OH/compat.new.b" ] ||
+  { echo "FAIL: a bot start must put back the newest old copy a killed writer left ($i): $(ls -di "$OH"/compat* "$OH"/compat.*/* 2>&1)"; exit 1; }
+# Our compat/ refused to go aside for a non-race reason (permissions): it stays unreplaced, so the run fails.
+rmdir "$OH/compat.new.b"; printf '#!/bin/sh\ncase $4 in */compat.new.*/old) exit 1;; esac\nexec "%s" "$@"\n' "$RP" > "$SB/perl"; chmod +x "$SB/perl"; echo other-sha > "$OH/compat/VERSION"
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" != 0 ] && [ "$(cat "$OH/compat/VERSION")" = other-sha ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] || { echo "FAIL: a refused mv that leaves compat/ unreplaced must fail (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-# A writer that holds no lock (a 1.9.4 one, or a holder stalled past the bound whose lock we broke) lands its copy right
-# after our mv: our rename(2) fails instead of nesting our copy inside it, and that copy is current, so the run succeeds.
-# We stalled there past the stale bound too: the stub also plays the writer that broke our lock and holds it now, and our
-# release must leave that lock (its owner token is not ours).
-printf '#!/bin/sh\ncase $1 in */compat) /bin/mv "$1" "$2" && cp -R "%s/cur" "$1" && rm -r "$1.lock" && mkdir "$1.lock" && echo next > "$1.lock/owner" && : > "%s/fired"; exit;; esac\nexec /bin/mv "$@"\n' "$HOME" "$SB" > "$SB/mv"
+# A lockless writer (1.9.4, or a holder stalled past the bound whose lock we broke) lands its copy right after ours went aside: our rename(2)
+# fails instead of nesting ours in it, and the run succeeds; the stub also re-takes the lock (owner next), which our release must leave.
+printf '#!/bin/sh\ncase $4 in */compat.new.*/old) "%s" "$@" && cp -R "%s/cur" "$3" && rm -r "$3.lock" && mkdir "$3.lock" && echo next > "$3.lock/owner" && : > "%s/fired"; exit;; esac\nexec "%s" "$@"\n' "$RP" "$HOME" "$SB" "$RP" > "$SB/perl"
 mkdir "$OH/compat.lock"; touch -d '1 minute ago' "$OH/compat.lock" "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$(cat "$OH/compat.lock/owner" 2>/dev/null)" = next ] || { echo "FAIL: a writer whose lock was broken while it stalled must not release the next holder's lock: $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
@@ -3151,7 +3150,7 @@ rm -rf "$HOME/cur"
 rm -rf "$SB"
 bash "$S" patch --compat >/dev/null 2>&1   # leave a fresh compat/
 rm -rf "$HOME/cbproj"
-echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, writers swap one at a time under a lock (a held one is waited for, a stale one broken by exactly one breaker, a dead writer's leftovers removed), a failed swap restores the old copy, a killed writer's compat.old goes back at a bot start, a refused mv fails, a lockless writer's copy landing at our swap stays whole, a writer whose lock was broken leaves the next holder's, and with no source clone no bot start rebuilds it"
+echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, writers swap one at a time under a lock (a held one is waited for, a stale one broken by exactly one breaker, a dead writer's leftovers removed), two holders at once leave one whole current copy, a failed swap restores the old copy, a killed writer's old copy goes back at a bot start, a refused move aside fails, a lockless writer's copy landing at our swap stays whole, a writer whose lock was broken leaves the next holder's, and with no source clone no bot start rebuilds it"
 
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.
