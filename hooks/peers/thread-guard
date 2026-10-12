@@ -190,21 +190,22 @@ fi
 # block, passes.
 # Asking Discord instead put a network round trip on every reply, ~1 s each
 # through the proxy here, for a choice the writer can make (owner, 2026-10-07).
-# Read with the first jq (BARE is there); again here only on a rewritten table.
+# Read with the first jq (BARE is there); again here only on a rewritten table,
+# whose input is read once for all that follows: its bare ids, whether it is over
+# 500 characters in the channel (the length check below) and the line that sends
+# it. A failed read leaves all three empty: no deny, nothing sent.
+upd=""
 if [ -n "$converted" ]; then
-  bare=$(printf '%s' "$input" | jq -r --arg re "$BARE" "$BARE_Q" 2>/dev/null) || bare=""
+  bare="" over=""
+  { read -r bare; read -r over; IFS= read -r upd; } < <(printf '%s' "$input" | jq -r --arg re "$BARE" --arg ch "$bot_channel" "($BARE_Q),"'
+    (if (.tool_input.chat_id // "" | tostring) == $ch and ((.tool_input.text // "" | tostring) | length) > 500 then "over" else "" end),
+    ({hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: .tool_input}} | tojson)' 2>/dev/null) || :
 fi
 [ -z "$bare" ] || deny "Bare 17-20 digit number(s) $bare: write a channel or thread as <#id>, a user or bot you only name as plain @name, one who must answer or decide as <@id>, which is how you reach them; any other number (a message id, a measurement) goes in \`backticks\`."
 
-if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ] && [ -n "$converted" ]; then
-  over=$(printf '%s' "$input" | jq -r --arg ch "$bot_channel" '
-    select((.tool_input.chat_id // "" | tostring) == $ch
-      and ((.tool_input.text // "" | tostring) | length) > 500) | "over"' 2>/dev/null) || exit 0
-fi
 if [ "$bot_mode" != autoresearchclaw ] && [ -n "$bot_channel" ]; then
   [ "${over:-}" != over ] || deny "Over 500 characters in the channel: start a thread ($thread_tool start \"[<area>] <short title>\") and post this inside it, leaving one line here."
 fi
 
-[ -n "$converted" ] || exit 0
-printf '%s' "$input" | jq -c '{hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: .tool_input}}' 2>/dev/null
+[ -z "$upd" ] || printf '%s\n' "$upd"
 exit 0
