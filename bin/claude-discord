@@ -364,7 +364,7 @@ remove_old_install() {
 # Every rename onto compat/ is perl's rename(2), not mv: with several bots
 # starting at once, mv would move a copy INTO a compat/ another writer has just
 # put in place; rename(2) fails instead, and that writer's complete copy stays.
-# A failed swap puts our old copy back unless another writer's compat.old.*
+# A failed swap puts our old copy back unless another LIVE writer's compat.old.*
 # says it is mid-swap (success: its copy lands next, ours must not beat it in).
 sync_compat() {
   local c=$helpers/compat n=$helpers/compat.new.$$ t v="" have=""
@@ -378,11 +378,12 @@ sync_compat() {
   { ! has_path "$c" || mv "$c" "$c.old.$$"; } && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$n" "$c" ||
     { IFS= read -r v < "$n/VERSION" || :; rm -rf "$n"
       if [ ! -d "$c" ]; then
-        for t in "$c".old.*; do [ "$t" != "$c.old.$$" ] && [ -d "$t" ] && { rm -rf "$c.old.$$"; return 0; }; done   # another writer is between its two renames
+        # Another writer is between its two renames: its compat.old.<pid> counts only while that pid lives (a killed writer leaves one for good).
+        for t in "$c".old.*; do [ "$t" != "$c.old.$$" ] && [ -d "$t" ] && kill -0 "${t##*.}" 2>/dev/null && { rm -rf "$c.old.$$"; return 0; }; done
         [ -d "$c.old.$$" ] && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$c.old.$$" "$c" && return 1   # our swap failed: put the old copy back
       fi
+      [ -d "$c" ] || return 1   # our restore failed too: keep our old copy, the next start rebuilds
       rm -rf "$c.old.$$"   # a compat/ put in place by another writer (before or during our restore) makes our old copy moot
-      [ -d "$c" ] || return 1
       # Another writer's copy of this commit in place is not a failure; ours left unreplaced (mv refused) is.
       IFS= read -r have < "$c/VERSION" 2>/dev/null || :; [ -n "$v" ] && [ "$have" = "$v" ]; return; }   # return: the trailing rm would turn this status into 0
   rm -rf "$c.old.$$"
