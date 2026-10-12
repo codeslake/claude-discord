@@ -174,7 +174,34 @@ echo "ok: plugin.json and hooks.json are valid and every hook command exists"
 # KILL_AT_EXIT: pids this test started (fake workers), so a failed assertion
 # cannot leave one running.
 KILL_AT_EXIT=""
-export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'kill $KILL_AT_EXIT 2>/dev/null || :; rm -rf /tmp/claude-discord-test-$$' EXIT
+export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"
+# sandbox_pids: everything running from the sandbox, detached or not: its path in argv, or (Linux) the sandbox as the HOME it
+# inherited (an orphaned `/bin/sleep 30` names no path of the suite's). Never `pgrep -f`, whose own argv matches. The ps and
+# the grep run apart from each other and from the final filter, which drops this shell and the subshells running this.
+sandbox_pids() {
+  local me=$BASHPID a c="" t
+  a=$(ps -eo pid=,args= | SB=$HOME awk 'index($0, ENVIRON["SB"] "/") { print $1 }') || :
+  if [ -d /proc/self ]; then
+    c=$(echo "$BASHPID"; exec grep -lszE "^HOME=$HOME(/|\$)" /proc/[0-9]*/environ) || :
+    c=$(printf '%s\n' "$c" | awk 'NR == 1 { g = $1; next } { split($0, f, "/"); if (f[3] != g) print f[3] }')   # the first line is the grep's own pid
+  fi
+  t=$(ps -eo pid=,ppid=) || :
+  # Drop this process and its ancestors (the suite and the subshells running this): they carry the HOME too.
+  { printf '%s\n' "$t"; printf '%s\n%s\n' "$a" "$c"; } | awk -v me="$me" 'NF == 2 { pp[$1] = $2; next } NF == 1 { c[$1] = 1 }
+    END { for (q = me; q > 1; q = pp[q]) s[q] = 1; for (q in c) if (!(q in s) && q != 1) print q }'
+}
+# reap_sandbox: TERM everything sandbox_pids names, wait for it to go, KILL what is left after 2 s. Runs on every exit path
+# (the EXIT trap: a failing case, the watchdog's TERM, the end), so a keeper or monitor a case detached and did not stop
+# cannot outlive the HOME it reads (one did, 20:04Z-21:41Z).
+reap_sandbox() {
+  local pids n sig=TERM
+  for n in $(seq 25); do
+    pids=$(sandbox_pids); [ -n "$pids" ] || return 0
+    [ "$n" -le 20 ] || sig=KILL
+    kill -$sig $pids 2>/dev/null || :; nap 0.1
+  done
+}
+trap 'kill $KILL_AT_EXIT 2>/dev/null || :; reap_sandbox; rm -rf /tmp/claude-discord-test-$$' EXIT
 # Watchdog: a hang fails the suite, saying where, instead of blocking its caller. After $1 s it lists every process under
 # the shell that armed it (a hung command, a nap too: it is /bin/sleep) and kills that shell and all of them at once: a
 # grandchild in a $(...) holds the capture pipe open, so killing the children alone left the shell blocked. The shell's
@@ -4093,6 +4120,10 @@ n=0; KP=""; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/ke
 (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui 2>/dev/null) || { echo "FAIL: a second tui must run"; exit 1; }
 [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] && grep -q "a keeper already runs for mgr" "$MB/monitor.log" ||
   { echo "FAIL: tui must not start a second keeper while one lives: $(ls "$MB/holders")"; exit 1; }
+# Stopped here, before the cases below that can fail: a keeper left running by a failing case outlived the suite.
+mp=$(mpid); (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null)
+n=0; while { running "$KP" || running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
+! running "$KP" && ! running "$mp" || { echo "FAIL: --stop must end the keeper tui started and its monitor"; exit 1; }
 rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'tui needs uv' <<<"$out" || { echo "FAIL: without uv, tui must say so (rc=$rc): $out"; exit 1; }
 rc=0; out=$(cd "$P" && bash "$S" tui alpha 2>&1) || rc=$?
@@ -4126,9 +4157,6 @@ printf '%s\n' "$P" > "$HOME/.claude-discord/records/projects"   # recorded, but 
 rc=0; out=$(cd "$NP" && bash "$S" tui </dev/null 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'writes one' <<<"$out" || { echo "FAIL: tui outside a project with no recorded manager bot must exit 1 (rc=$rc): $out"; exit 1; }
 printf '%s\n' "$PFB" > "$HOME/.claude-discord/records/projects"
-mp=$(mpid); (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null)
-n=0; while { running "$KP" || running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
-! running "$KP" && ! running "$mp" || { echo "FAIL: --stop must end the keeper tui started and its monitor"; exit 1; }
 # Stopped by its owner: tui starts nothing itself (the TUI asks, and shows the stop in its bar).
 (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui </dev/null 2>/dev/null); nap 0.1
 [ -z "$(ls "$MB/holders")" ] || { echo "FAIL: tui must not start a backend its owner stopped without a yes: $(ls "$MB/holders")"; exit 1; }
@@ -4549,24 +4577,21 @@ rc=0; out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || rc=$?
 rm -rf "$UP" "$UC"
 echo "ok: --version prints the version and the clone's sha (a link's is the source's); update pulls the source behind a link once, runs the pulled commit's patch step, refills the runtime copy and the shim and asks for /reload-plugins; --all pulls each real clone once, prunes a removed project, skips a detached (pinned) clone without failing, and exits 1 on a diverged clone (left as it was) or an unwritable shim"
 
-# Nothing this suite started is still running once its exit trap has run (done here, so this check sees what the trap
-# leaves). On Linux a process is found by the HOME it inherited, whatever its argv: an orphaned `/bin/sleep 30` names
-# no path of the suite's, and held the suite's stdout (a `| tail -1` waited 30 s for it). Elsewhere, by argv.
+# Nothing this suite started is still running at the end: a case that detached a keeper or a monitor and did not stop it fails
+# here, by name of the process (sandbox_pids: the sandbox in its argv or as its HOME; an orphaned
+# `/bin/sleep 30` names no path of the suite's). Then the reaping itself, which every exit path runs (the EXIT trap): a decoy
+# detached the way a keeper is (a subshell that exits, so init adopts it; the sandbox in its argv) must be seen first, or the
+# last check could not fail, and reap_sandbox must take it down. Without the reaping that check fails.
+strays() { local p; for p in $(sandbox_pids); do ps -o pid=,ppid=,args= -p "$p" || :; done; }
 kill $KILL_AT_EXIT 2>/dev/null || :; KILL_AT_EXIT=""
-strays() {
-  local me=$BASHPID f p
-  if [ -r "/proc/$$/environ" ]; then
-    # The grep is exec'd in its own $(...), so its pid is the one echoed first; this function's subshell and the suite
-    # carry the HOME too and are skipped. A zombie's environ is empty: a zombie is gone.
-    set -- $(echo "$BASHPID"; exec grep -lszE "^HOME=$HOME(/|\$)" /proc/[0-9]*/environ)
-    p=$1; shift
-    for f; do f=${f#/proc/}; f=${f%/environ}; [ "$f" = "$$" ] || [ "$f" = "$me" ] || [ "$f" = "$p" ] || ps -o pid=,ppid=,args= -p "$f" || :; done
-  else
-    ps -eo pid=,args= | grep "[/]${HOME#/}/" || :   # the [/] keeps grep out of its own match
-  fi
-}
 for _ in $(seq 20); do left=$(strays); [ -z "$left" ] && break; nap 0.1; done
 [ -z "$left" ] || { echo "FAIL: processes left behind: $(strays)"; exit 1; }
+printf '/bin/sleep 3.%s; :\n' $$ > "$HOME/reapme.sh"
+( bash "$HOME/reapme.sh" </dev/null >/dev/null 2>&1 & )
+for _ in $(seq 20); do [ -z "$(sandbox_pids)" ] || break; nap 0.05; done
+[ -n "$(strays)" ] || { echo "FAIL: a detached decoy with the sandbox in its argv is not seen, so the check below proves nothing"; exit 1; }
+reap_sandbox
+[ -z "$(strays)" ] || { echo "FAIL: reap_sandbox left behind: $(strays)"; exit 1; }
 echo "ok: no process is left behind"
 
 echo "ALL PASS"
