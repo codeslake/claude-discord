@@ -3075,8 +3075,9 @@ cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/hooks/
   { echo "FAIL: six parallel refreshes must leave one complete compat/ and no temp dir: $(ls -d "$OH"/compat* "$OH"/compat/compat.* 2>&1)"; exit 1; }
 # A failed swap: perl's rename fails after our mv took compat/ away (a non-race failure) -> the old copy goes back and the run fails;
 # our mv fails because another writer has moved compat/ to compat.old.<its pid> and not yet renamed its copy in -> not a failure.
-SB="$HOME/swapfail-stubs"; mkdir -p "$SB"
-printf '#!/bin/sh\nexit 1\n' > "$SB/perl"; chmod +x "$SB/perl"
+SB="$HOME/swapfail-stubs"; mkdir -p "$SB"; RP=$(command -v perl)
+# Only the swap's rename fails; the restore (also perl's rename) reaches the real perl.
+printf '#!/bin/sh\ncase $3 in */compat.new.*) exit 1;; esac\nexec "%s" "$@"\n' "$RP" > "$SB/perl"; chmod +x "$SB/perl"
 touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" != 0 ] && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] ||
@@ -3089,10 +3090,25 @@ mv "$OH/compat.old.99999" "$OH/compat"
 printf '#!/bin/sh\ncase $1 in */compat) exit 1;; esac\nexec /bin/mv "$@"\n' > "$SB/mv"; echo other-sha > "$OH/compat/VERSION"
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" != 0 ] && [ "$(cat "$OH/compat/VERSION")" = other-sha ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] || { echo "FAIL: a refused mv that leaves compat/ unreplaced must fail (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
+# Our swap fails and another writer has moved compat/ to compat.old.<its pid> (mid-swap): our old copy must not be put
+# back ahead of its copy (it would then fail and leave ours, stale), so ours goes and the run succeeds.
+rm "$SB/mv"; printf '#!/bin/sh\ncase $3 in */compat.new.*) cp -R "$3" "$4.old.99999"; exit 1;; esac\nexec "%s" "$@"\n' "$RP" > "$SB/perl"; chmod +x "$SB/perl"
+touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
+rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] && [ ! -e "$OH/compat" ] && [ "$(ls -d "$OH"/compat.* 2>/dev/null)" = "$OH/compat.old.99999" ] || { echo "FAIL: another writer mid-swap must keep our old copy from going back (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
+mv "$OH/compat.old.99999" "$OH/compat"
+# Another writer's compat/ lands between our failed swap and our restore (six bots at once, lmd79): the restore's rename(2)
+# fails where mv nested our old copy at compat/compat.old.<pid>; that writer's copy carries our sha, so the run succeeds.
+printf '#!/bin/sh\ncase $1 in */compat.old.*) [ ! -d "%s/won" ] || /bin/mv "%s/won" "$2";; esac\nexec /bin/mv "$@"\n' "$SB" "$SB" > "$SB/mv"; chmod +x "$SB/mv"
+printf '#!/bin/sh\ncase $3 in */compat.new.*) cp -R "$3" "%s/won"; exit 1;; */compat.old.*) [ ! -d "%s/won" ] || /bin/mv "%s/won" "$4";; esac\nexec "%s" "$@"\n' "$SB" "$SB" "$SB" "$RP" > "$SB/perl"
+touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
+rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] && cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ -z "$(ls -d "$OH"/compat.* "$OH"/compat/compat.* 2>/dev/null)" ] ||
+  { echo "FAIL: a compat/ landing before our restore must stay whole, our old copy neither inside nor beside it (rc=$rc): $(ls -d "$OH"/compat* "$OH"/compat/compat.* 2>&1)"; exit 1; }
 rm -rf "$SB"
 bash "$S" patch --compat >/dev/null 2>&1   # leave a fresh compat/
 rm -rf "$HOME/cbproj"
-echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, a failed swap restores the old copy (another writer mid-swap is no failure), a refused mv fails, and with no source clone no bot start rebuilds it"
+echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, a failed swap restores the old copy (another writer mid-swap is no failure and is not beaten in by our old copy; a copy landing before the restore stays whole), a refused mv fails, and with no source clone no bot start rebuilds it"
 
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.
