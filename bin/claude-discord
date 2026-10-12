@@ -515,8 +515,11 @@ write_hosts() {
       new="$new$line"$'\n'
     done
   fi
-  # A temp file moved in: a running monitor reads the ledger every pass and must never see it half written.
-  printf '%s\n' "${new%$'\n'}" > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f" || rm -f "$f.tmp.$$"
+  # A temp file moved in: a running monitor reads the ledger every pass and must never see it half written. It takes
+  # the ledger's own mode (an owner's chmod survives), 600 when new, never the caller's umask (perl: stat's flags differ by OS).
+  local m=600
+  [ ! -f "$f" ] || m=$(perl -e 'printf "%o", (stat shift)[2] & 07777' "$f") || m=600
+  (umask 077; printf '%s\n' "${new%$'\n'}" > "$f.tmp.$$") && chmod "$m" "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f" || rm -f "$f.tmp.$$"
 }
 
 # --scope and --method, anywhere and in the = form too, for setup and install;

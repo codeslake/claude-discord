@@ -3410,9 +3410,11 @@ out=$(printf '\n900\n111\n\ntokMgrUnique\nn\ndev-manager\n\nh1, lap,down,-oProxy
 grep -q 'h1: claude-discord 1.10.0' <<<"$out" && grep -q "skipping host '-oProxyCommand=x'" <<<"$out" || { echo "FAIL: setup must print each probe's answer and skip a host that is not a plain name: $out"; exit 1; }
 grep -q 'down: could not tell' <<<"$out" && ! grep -q 'h1: could not tell' <<<"$out" || { echo "FAIL: setup must say it could not tell for a host that did not answer, and only for it: $out"; exit 1; }
 ! grep -q '^ATE' "$HOME/ssh.log" && [ "$(grep -c BatchMode=yes "$HOME/ssh.log")" = 3 ] || { echo "FAIL: one probe per host, with stdin closed: $(<"$HOME/ssh.log")"; exit 1; }
-printf '# mine\nlocal HTTPS_PROXY=http://127.0.0.1:8118\nh1 X=1\nlap laptop\n' > "$MR/mgr/hosts"
+[ "$(stat -c %a "$MR/mgr/hosts")" = 600 ] || { echo "FAIL: a new ledger is 600: $(stat -c %a "$MR/mgr/hosts")"; exit 1; }
+printf '# mine\nlocal HTTPS_PROXY=http://127.0.0.1:8118\nh1 X=1\nlap laptop\n' > "$MR/mgr/hosts"; chmod 640 "$MR/mgr/hosts"
 li=$(stat -c %i "$MR/mgr/hosts")
 printf 'dev-manager\n\n\n' | bash "$S" setup mgr --mode >/dev/null 2>&1
+[ "$(stat -c %a "$MR/mgr/hosts")" = 640 ] || { echo "FAIL: a rewritten ledger keeps the owner's mode (640), not the umask's: $(stat -c %a "$MR/mgr/hosts")"; exit 1; }
 [ "$(sed 1d "$MR/mgr/hosts")" = "$(printf 'local HTTPS_PROXY=http://127.0.0.1:8118\nh1 X=1\nlap laptop')" ] || { echo "FAIL: an empty answer keeps the ledger and its hand edits: $(<"$MR/mgr/hosts")"; exit 1; }
 [ "$(stat -c %i "$MR/mgr/hosts")" != "$li" ] || { echo "FAIL: the ledger is written to a temp file and moved in, never truncated in place under a running monitor"; exit 1; }
 printf 'none\n' | bash "$S" setup mgr --mode >/dev/null 2>&1
@@ -3531,6 +3533,15 @@ grep -q 'exit reason=no-holders$' "$MB/monitor.log" || { echo "FAIL: the exit mu
 grep -q 'state unreadable, starting empty$' "$MB/monitor.log" || { echo "FAIL: a state.json that is not valid must be said and replaced: $(<"$MB/monitor.log")"; exit 1; }
 [ -z "$(ls -A "$HOME/ro")" ] || { echo "FAIL: nothing may be written to TMPDIR"; exit 1; }
 chmod 755 "$HOME/ro"
+# Off Linux a start time comes from `ps -o lstart=`, printed in the caller's zone and locale; the record is written by a
+# hook and compared by the monitor, which may differ in both. Reached here through a pid with no /proc entry, with a ps
+# (its own dir, this call only) that prints one fixed time as macOS ps does: the same string under two zones and locales.
+mkdir -p "$HOME/psbin"; printf '#!/bin/sh\nexec date -d @1700000000 +%%c\n' > "$HOME/psbin/ps"; chmod +x "$HOME/psbin/ps"
+sed -n '/^lstart() {/,/^}/p' "$D/monitor/monitor.sh" > "$HOME/lstart.sh"
+l1=$(PATH="$HOME/psbin:$PATH" TZ=XYZ-9 LC_ALL=en_US.utf8 bash -c '. "$1"; lstart 999999999' x "$HOME/lstart.sh")
+l2=$(PATH="$HOME/psbin:$PATH" TZ=ABC+5 LC_ALL=C bash -c '. "$1"; lstart 999999999' x "$HOME/lstart.sh")
+[ -n "$l1" ] && [ "$l1" = "$l2" ] || { echo "FAIL: a ps start time must read the same in any zone and locale: '$l1' / '$l2'"; exit 1; }
+rm -rf "$HOME/psbin" "$HOME/lstart.sh"
 echo "ok: monitor: one instance for two --ensure calls, holder records with start times, local through the shim with the ledger's env, ssh for the rest (a CRLF ledger read as plain lines; a non-zero remote exit is blind even with a document, a wrong-shaped one blinds its host alone), nothing posted when all is well; it exits within a tick of its last holder (a reused pid counts as dead), leaving only lock, state.json (stopped), monitor.log (rotated at 256 KiB, one generation, the monitor's own output reopened onto the new file) and an empty holders/, nothing in TMPDIR; a broken state.json starts empty"
 
 # A crash leaves no lock behind: the pass's ssh is started without the lock's fd, so a new --ensure takes over while an
@@ -3600,8 +3611,8 @@ printf 'local HTTPS_PROXY=http://127.0.0.1:18118\nh1\nh2\n-oProxyCommand=x\nh3\n
 echo 124 > "$MON/h5.rc"; echo 124 > "$MON/lap2.rc"   # what the cap leaves (the cap itself: the last block's local laptop)
 mdoc h6 0 "l1:noreach" > "$MON/h6.out"; echo 255 > "$MON/local.rc"
 mdoc h1 1 d1:down d2:down st:stale du:duplicate un:unreachable ns:nostate t1:throttled t2:throttled ap:apierror bu:busy ok:ok qu:stale ch:stale nm:stale rc:down |
-  jq -c '.projects[0].bots |= map(if .bot == "nm" then del(.owner_id) else . end) | .projects += [{project: "/home/u/ws/c", bots: [], error: "health exited 3 with no document"}]' > "$MON/h1.out"
-mdoc h2 0 sp:stale | jq -c '.projects[0].project = "/home/u/it\u0027s $x here"' > "$MON/h2.out"; echo 255 > "$MON/h2.rc"; echo 0 > "$MON/h2.rc2"
+  jq -c '.projects[0].bots |= map(if .bot == "nm" then del(.owner_id) elif .bot == "un" then .owner_id = "1>@everyone <@9" else . end) | .projects += [{project: "/home/u/ws/c", bots: [], error: "health exited 3 with no document"}]' > "$MON/h1.out"
+mdoc h2 0 sp:stale | jq -c '.projects[0].project = "/home/u/it\u0027s $x here" | .projects[0].bots[0].bot = "s p\u0027q"' > "$MON/h2.out"; echo 255 > "$MON/h2.rc"; echo 0 > "$MON/h2.rc2"
 echo 255 > "$MON/h3.rc"; echo 255 > "$MON/lap.rc"; echo 'not json' > "$MON/h4.out"
 mstate --argjson n "$(date +%s)" '
   def at($s): {since: ($s | todate), since_s: $s};
@@ -3628,7 +3639,7 @@ P1=$(posts)
 [ "$(printf '%s\n' "$P1" | grep -c .)" = 16 ] || { echo "FAIL: one pass must post exactly the 16 due findings and recoveries: $P1"; exit 1; }
 C1=$(printf '%s\n' "$P1" | jq -r .content)
 for want in '<@111> [patchfail] h1' '<@222> [down] d1 on h1 (~/ws/p)' '<@222> [stale] st on h1' '<@222> [duplicate] du on h1' \
-            '<@222> [unreachable] un on h1' '<@222> [nostate] ns on h1' '<@222> [throttled] t2 on h1' '<@222> [apierror] ap on h1' \
+            '[unreachable] un on h1' '<@222> [nostate] ns on h1' '<@222> [throttled] t2 on h1' '<@222> [apierror] ap on h1' \
             '[recovered] bu on h1 (~/ws/p): answering again after 10m (was stale)' '[recovered] ok on h1 (~/ws/p): answering again after 35m (was down)' \
             '[recovered] h1 (~/ws/h): answering again after 10m (was blind)' \
             '<@111> [hostdown] h3' '<@111> [blind] h4' '<@222> [stale] ch on h1'; do
@@ -3639,6 +3650,10 @@ st=$(printf '%s\n' "$P1" | jq -c 'select(.content | startswith("<@222> [stale] s
   [ "$(jq -c .allowed_mentions <<<"$st")" = '{"users":["222"]}' ] || { echo "FAIL: a finding names owner, session, reason and recovery command, and pings only the owner: $st"; exit 1; }
 [ "$(printf '%s\n' "$P1" | jq -c 'select(.content | startswith("[recovered]")) | .allowed_mentions' | sort -u)" = '{"parse":[]}' ] || { echo "FAIL: a recovery line pings nobody"; exit 1; }
 [ "$(printf '%s\n' "$P1" | jq -c 'select(.content | contains("] nm on ")) | [(.content | startswith("[stale] nm on h1")), .allowed_mentions]')" = '[true,{"parse":[]}]' ] || { echo "FAIL: a bot with no owner_id is posted with no mention and pings nobody: $(grep '] nm on' <<<"$C1")"; exit 1; }
+# An owner_id that is not digits (a hand edit) would put whatever it holds into the message: no mention, logged.
+[ "$(printf '%s\n' "$P1" | jq -c 'select(.content | contains("] un on ")) | [(.content | startswith("[unreachable] un on h1")), .allowed_mentions]')" = '[true,{"parse":[]}]' ] &&
+  grep -q 'owner_id of h1|/home/u/ws/p|un is not a Discord id: posted without a mention$' "$MB/monitor.log" ||
+  { echo "FAIL: an owner_id that is not digits is posted with no mention, pings nobody, and is logged: $(grep '] un on' <<<"$C1")"; exit 1; }
 # The state checks below, read in one go (each keeps its own message).
 IFS=$'\t' read -r s_h2 s_h5 s_lap2 s_frozen s_local s_wsc s_alerts < <(jq -r --arg fix "ssh h1 'cd ~/ws/c && ~/.local/bin/claude-discord health'" '[
   .hosts.h2.verdict, (.hosts.h5 | .verdict == "blind" and (.detail | test("did not finish"))), .hosts.lap2.verdict,
@@ -3650,7 +3665,8 @@ grep -q 'ledger: host skipped' "$MB/monitor.log" && ! grep -q ProxyCommand "$HOM
 [ "$(printf '%s\n' "$P1" | jq -r 'select(.content | contains("[nostate]")) | .content | length')" = 1900 ] || { echo "FAIL: a message is cut to 1900 characters"; exit 1; }
 grep -q 'ControlPath=none h2 ' "$HOME/ssh.log" && grep -q 'host h2 ssh-failed rc=255 (retried with ControlPath=none)' "$MB/monitor.log" &&
   [ "$s_h2" = ok ] || { echo "FAIL: ssh exit 255 is retried with ControlPath=none before the host counts as down"; exit 1; }
-grep -qxF "복구: ssh h2 'cd \"/home/u/it'\\''s \\\$x here\" && ~/.local/bin/claude-discord refresh sp --force'" <<<"$C1" || { echo "FAIL: a project path with a space, a quote and a \$ must be quoted for both shells: $(grep 'refresh sp' <<<"$C1")"; exit 1; }
+grep -qxF "복구: ssh h2 'cd \"/home/u/it'\\''s \\\$x here\" && ~/.local/bin/claude-discord refresh '\\''s p'\\''\\'\\'''\\''q'\\'' --force'" <<<"$C1" ||
+  { echo "FAIL: a project path with a space, a quote and a \$, and a bot name with a space and a quote, must be quoted for both shells: $(grep 'refresh ' <<<"$C1")"; exit 1; }
 [ "$s_h5" = true ] || { echo "FAIL: a host that connected and went silent past the cap is blind, not hostdown: $(jq -c .hosts.h5 "$MB/state.json")"; exit 1; }
 [ "$s_lap2" = hostdown ] || { echo "FAIL: a laptop silent past the cap is hostdown (asleep), never a posted blind: $(jq -c .hosts.lap2 "$MB/state.json")"; exit 1; }
 [ "$s_frozen" = true ] ||
@@ -3716,7 +3732,7 @@ wait_log 1 'post h1\|/home/u/ws/p\|nf stale 200$'; next_pass
 jq -e '.bots["h1|/home/u/ws/p|nf"].posted == "stale" and .monitor.post_failed == false' "$MB/state.json" >/dev/null &&
   ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the pending post must be sent on a later pass, and nothing else posted: $(posts)"; exit 1; }
 [ "$(posts | tail -n 1 | jq -r .content)" = "$(printf "<@222> [stale] nf on h1 (~/ws/p)\nreason: why stale\nfix: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord refresh nf --force'")" ] || { echo "FAIL: ALERT_LANG=EN must give English labels: $(posts | tail -n 1)"; exit 1; }
-jq -e --arg sp "h2|/home/u/it's \$x here|sp" '(.hosts | keys) == ["h1", "h2", "h3", "h4", "lap", "lap2", "local"]
+jq -e --arg sp "h2|/home/u/it's \$x here|s p'q" '(.hosts | keys) == ["h1", "h2", "h3", "h4", "lap", "lap2", "local"]
   and (.bots | keys) == ["h1|/home/u/ws/p|nf", "h1|/home/u/ws/p|tm", $sp, "h3|/home/u/ws/p|y", "h3|/home/u/ws/p|z", "local|/home/u/ws/p|r1"]
   and (.hosts.h4 | .posted == "blind" and (.left_s | type) == "number") and (.hosts.h1 | has("left_s") | not)' "$MB/state.json" >/dev/null &&
   grep -q ' drop h5|-$' "$MB/monitor.log" && grep -q ' drop h6|/home/u/ws/p|l1$' "$MB/monitor.log" && grep -q ' left h4|- (kept a day)$' "$MB/monitor.log" ||

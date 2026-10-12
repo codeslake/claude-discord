@@ -56,7 +56,9 @@ lstart() {
     set -f; set -- ${st##*) }; set +f   # after "<pid> (<comm>) ", which may hold spaces: field 3 on
     [ "${1:-}" = Z ] || echo "${20:-}"   # a zombie is dead, whatever kill -0 says
   else
-    set -- $(ps -o lstart= -p "$1" 2>/dev/null); echo "$*"
+    # In C and UTC: the record is written by --holder (a hook, the session's TZ and locale) and compared here (the
+    # monitor's), and lstart is printed in the caller's locale and zone.
+    set -- $(LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null); echo "$*"
   fi
 }
 
@@ -315,12 +317,14 @@ def short($home): if $home != "" and startswith($home + "/") then "~" + .[($home
 # A path with anything but plain characters goes in double quotes, with what the shell would still expand escaped.
 def cdp: (.home // "") as $h | (.project | short($h)) as $s
   | if ($s | test("^[A-Za-z0-9._/~+-]+$")) then $s else "\"" + (.project | gsub("(?<c>[\\\\\"$`])"; "\\\(.c)")) + "\"" end;
+# A bot name with anything but plain characters goes in single quotes (wrap below escapes them again for ssh).
+def qbot: .bot | if test("^[A-Za-z0-9._+-]+$") then . else "\u0027" + gsub("\u0027"; "\u0027\\\u0027\u0027") + "\u0027" end;
 def cd: if .host == "local" then "claude-discord" else "~/.local/bin/claude-discord" end;
 # A remote command goes in single quotes for the local shell that pastes it; the remote shell then reads what cdp quoted.
 def wrap($e): if $e.host == "local" then . else "ssh \($e.host) \u0027\(gsub("\u0027"; "\u0027\\\u0027\u0027"))\u0027" end;
 def fix: . as $e
-  | if   .verdict == "down"        then ("cd \(cdp) && \(cd) --bg --name \(.bot)" | wrap($e))
-    elif .verdict == "stale"       then ("cd \(cdp) && \(cd) refresh \(.bot) --force" | wrap($e))
+  | if   .verdict == "down"        then ("cd \(cdp) && \(cd) --bg --name \(qbot)" | wrap($e))
+    elif .verdict == "stale"       then ("cd \(cdp) && \(cd) refresh \(qbot) --force" | wrap($e))
     elif .verdict == "duplicate"   then (if .host == "local" then "" else "on \(.host): " end) + "claude agents, then claude stop <id> for the copy that is not the bot\u0027s"
     elif .verdict == "unreachable" then "check DISCORD_BOT_TOKEN in \(.project)/.claude/discord-agents/\(.bot)/.env and the bot\u0027s channel permissions"
     elif .verdict == "nostate"     then (if .host == "local" then "" else "on \(.host): " end) + "claude agents by hand; the daemon is unwell"
@@ -334,14 +338,17 @@ def fix: . as $e
 def labels: if $lang == "en" then {reason: "reason", fix: "fix"} else {reason: "사유", fix: "복구"} end;
 def subject: (.home // "") as $h
   | if .bot then "\(.bot) on \(.name) (\(.project | short($h)))" elif .project then "\(.name) (\(.project | short($h)))" else .name end;
+# The owner to mention: a Discord id is digits only, so anything else (a hand-edited config) mentions nobody, logged.
+# tostring: an id written as a JSON number must not make the reducer fail every pass.
+def owner: (.owner_id // "") | tostring | if test("^[0-9]+$") then . else "" end;
 def finding_text: labels as $l
-  | ((if (.owner_id // "") != "" then "<@\(.owner_id)> " else "" end)
+  | ((if owner != "" then "<@\(owner)> " else "" end)
      + "[\(.verdict)] \(subject)\n\($l.reason): \(.detail)\n\($l.fix): \(.fix)") | .[0:1900];
 # The recovery line has no label, so it reads the same in both languages.
 def recovery_text: ((($now_s - (.posted_since_s // $now_s)) / 60) | floor) as $m
   | "[recovered] \(subject): answering again after \($m)m (was \(.posted))" | .[0:1900];
 def payload($kind): if $kind == "finding"
-  then {content: finding_text, allowed_mentions: (if (.owner_id // "") != "" then {users: [.owner_id]} else {parse: []} end)}
+  then {content: finding_text, allowed_mentions: (if owner != "" then {users: [owner]} else {parse: []} end)}
   else {content: recovery_text, allowed_mentions: {parse: []}} end;
 # observe: fold one observation into an entry; `since` moves only when the verdict changes (or is missing, as in a
 # state an older monitor or a hand wrote: due counts from it, and a reducer that fails fails every pass).
@@ -446,6 +453,8 @@ def host_step($r):
    + [$s.bots | to_entries[] | select(.value.host as $h | $frozen | index($h) == null) | {scope: "bots", key: .key, e: .value}]) as $all
 | "S" + ($s | tojson), "N\([$s.bots[] | select(.bot)] | length)",
   ($ev[] | "E" + .),
+  ($all[] | select((.e | due) == "finding" and (.e.owner_id // "" | tostring) != "" and (.e | owner) == "")
+   | "Eowner_id of \(.key) is not a Discord id: posted without a mention"),
   ($all[] | (.e | due) as $kind | select($kind != null)
    | "O" + ([.scope, .key, $kind, (if $kind == "finding" then .e.verdict else .e.posted end), (.e | payload($kind) | tojson)] | join("\u001f")))
 '
