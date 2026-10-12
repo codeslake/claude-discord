@@ -3588,11 +3588,11 @@ wait_log "$want" 'Z start$'
 mstop; rm -f "$HOME/ss.json"
 echo "ok: a dev-manager's SessionStart registers its session (the nearest claude process) as a holder and starts the monitor, which exits with that session"
 
-# And it leaves nothing on the hook's pipe: against a plugin root copy whose claude-discord takes 1 s, the caller (Claude
+# And it leaves nothing on the hook's pipe: against a plugin root copy whose claude-discord takes 3 s, the caller (Claude
 # Code reads the hook's stdout to EOF; here perl does) sees EOF at once, the output is the JSON line alone, and the stub
 # was given the perl process, the session, as holder. Copies, not links: plugin_root is cd -P of the hook's own place.
 FX="$HOME/fxroot"; mkdir -p "$FX/bin" "$FX/hooks/turn" "$FX/hooks/lib"; cp "$D/hooks/turn/on-session-start" "$FX/hooks/turn/"; cp "$D/hooks/lib/discord.sh" "$FX/hooks/lib/"
-printf '#!/bin/sh\nprintf "%%s %%s\\n" "$PWD" "$*" > "$HOME/fx.rec"\necho $$ > "$HOME/fx.pid"\nexec sleep 1\n' > "$FX/bin/claude-discord"; chmod +x "$FX/bin/claude-discord"
+printf '#!/bin/sh\nprintf "%%s %%s\\n" "$PWD" "$*" > "$HOME/fx.rec"\necho $$ > "$HOME/fx.pid"\nexec sleep 3\n' > "$FX/bin/claude-discord"; chmod +x "$FX/bin/claude-discord"
 FXR=$(cd -P "$FX" && pwd -P); rm -f "$HOME/fx.rec" "$HOME/fx.pid"
 printf '{"session_id":"sFx","source":"compact"}' > "$HOME/ss.json"
 fxout=$(perl -e 'use Time::HiRes qw(time); $0 = shift; open(STDIN, "<", shift) or die; my $t = time; my $pid = open(P, "-|"); die unless defined $pid;
@@ -3601,7 +3601,7 @@ fxout=$(perl -e 'use Time::HiRes qw(time); $0 = shift; open(STDIN, "<", shift) o
 read -r fxel fxpp <<<"$(printf '%s\n' "$fxout" | head -n 1)"
 n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
 [ -s "$HOME/fx.pid" ] && kill "$(<"$HOME/fx.pid")" 2>/dev/null || :   # the stub's 1 s sleep (exec'd, same pid): not left behind
-jq -ne --arg e "$fxel" '($e | tonumber) < 0.5' >/dev/null || { echo "FAIL: the SessionStart hook must return at once while --ensure runs (the pipe closed after $fxel s)"; exit 1; }
+jq -ne --arg e "$fxel" '($e | tonumber) < 1.5' >/dev/null || { echo "FAIL: the SessionStart hook must return at once while --ensure runs (the pipe closed after $fxel s)"; exit 1; }
 [ "$(printf '%s\n' "$fxout" | tail -n +2)" = "$(jq -nc --arg c "CLAUDE_DISCORD_TOOLS=$FXR/tools" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}')" ] ||
   { echo "FAIL: the SessionStart hook must print its context line and nothing else: $fxout"; exit 1; }
 [ "$(<"$HOME/fx.rec")" = "$MP monitor --ensure mgr --holder session $fxpp" ] || { echo "FAIL: --ensure must be called from the project with the session as holder (perl $fxpp): $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
