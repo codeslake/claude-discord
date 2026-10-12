@@ -882,11 +882,14 @@ if [ "${1:-}" = health ]; then
     # 2026-10-10: 0 of 1). The argv test on the one-line command: the first
     # word is bun, the last is start, a word sits under .../discord/. Then one
     # more ps with -E for those pids: each line is "<pid> <argv> <environment>".
+    # That second call has NO -ax: on real BSD ps -ax ORs with -p and prints the
+    # whole table (836 lines on wmac), so every shell and hook of the session
+    # that inherits DISCORD_STATE_DIR would count as a server.
     mac_ok=no mac_pids=""
     if mac_ps=$(ps -axww -o pid=,command= 2>/dev/null) && [ -n "$mac_ps" ]; then
       mac_ok=yes
       mac_pids=$(printf '%s\n' "$mac_ps" | awk '{ a0 = $2; sub(/.*\//, "", a0) } a0 == "bun" && $NF == "start" && /\/discord\// { printf "%s%s", (n++ ? "," : ""), $1 }') || mac_pids=""
-      [ -z "$mac_pids" ] || mac_env=$(ps -axEww -o pid=,command= -p "$mac_pids" 2>/dev/null) || mac_ok=no
+      [ -z "$mac_pids" ] || mac_env=$(ps -Eww -o pid=,command= -p "$mac_pids" 2>/dev/null) || mac_ok=no
     fi
   fi
   if [ -d "$proc" ]; then
@@ -903,7 +906,7 @@ if [ "${1:-}" = health ]; then
       [ "$mac_ok" = yes ] || { printf 'unknown'; return 0; }   # ps itself failed: cannot tell, never zero
       # The token after the argv text: " DISCORD_STATE_DIR=<dir>" ending the
       # line or followed by a space, so "hbot" never counts "hbot2"'s server.
-      # shortcut: a state dir with a space in its path is not counted here; quote-aware parsing if a Mac project ever has one.
+      # shortcut: ps joins env words with spaces, so a dir "/a/My" also matches a line carrying "/a/My Project/x"; quote-aware parsing if a Mac project ever has such siblings.
       local IFS=$'\n'; set -f   # one ps line at a time (a subshell: neither leaks), with no here-string (bash 3.2 writes those to TMPDIR)
       for l in $mac_env; do
         case "$l " in *" DISCORD_STATE_DIR=$1 "*) n=$((n + 1));; esac

@@ -327,12 +327,16 @@ Coverage gap: without `/proc` (macOS) `health` counts servers as `unknown`,
 so `down` and `duplicate` cannot be seen on the Macs today; `stale` still
 can. This spec adds a macOS count with the same argv-first rule: candidates
 from `ps -axww -o pid=,command=` (argv only; the argv test as on Linux),
-then `ps -axEww -o command= -p <pids>` for those pids, where a token
+then `ps -Eww -o pid=,command= -p <pids>` (no `-ax`) for those pids, where a token
 `DISCORD_STATE_DIR=<dir>` after the argv text names the bot. Measured on
 wmac (macOS 15.7.4, 2026-10-10): without `-ax` ps lists only processes with
 a terminal, so a `--bg` server is missing (0 of 1); with `-ax` a real
 `bun run --cwd <...>/discord/0.0.4 ... start` started from another ssh
-session showed its `DISCORD_STATE_DIR`. Apple platform binaries (e.g.
+session showed its `DISCORD_STATE_DIR`. The second call must not carry
+`-ax`: on real BSD ps `-ax` ORs with `-p` and prints the whole table (836
+lines on wmac), which would count every shell and hook of the session that
+inherits the state dir; `ps -Eww -p` alone returns just the named pids even
+for tty-less ones. Apple platform binaries (e.g.
 `/usr/bin/perl`) show no environment, which does not matter because the
 server is bun.
 
