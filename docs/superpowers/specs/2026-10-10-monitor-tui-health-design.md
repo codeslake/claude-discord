@@ -297,7 +297,7 @@ logged. The key is `host|project|bot` for a bot, `host|-` for a host.
 | `throttled`, `apierror` | health | 429, 000 or 5xx for that bot | 30 min (6092937121) |
 | `noreach` | health | that host's unauthenticated `GET /gateway` fails | never posted; logged and shown (6092937121) |
 | `patchfail` | `--patch` | `patch` exit 1 (a pattern no longer matches) | none: deterministic |
-| `hostdown` | monitor | ssh exit non-zero, and again with `-o ControlPath=none` (a stale master refuses falsely) | 30 min; never posted for a `laptop` host (owner 2026-10-11) |
+| `hostdown` | monitor | ssh exit 255 (ssh's own failure), and again with `-o ControlPath=none` (a stale master refuses falsely) | 30 min; never posted for a `laptop` host (owner 2026-10-11) |
 | `blind` | monitor | ssh ran but no valid document (claude-discord missing or too old for `--all`, health crashed) | 5 min |
 
 A message the session received is not `stale`: on-prompt appends each
@@ -408,9 +408,10 @@ add the channel to the manager's `access.json`, so a message in
 - A pass runs, per host, `ssh -o BatchMode=yes -o ConnectTimeout=8 <host>
   'env <KEY=VALUE...> ~/.local/bin/claude-discord health --all --json
   --patch'`, the absolute shim path because a non-interactive shell's PATH
-  may lack `~/.local/bin`. `local` runs the same command without ssh. On a
-  non-zero exit the call is repeated once with `-o ControlPath=none` before
-  the host counts as failed for that pass.
+  may lack `~/.local/bin`. `local` runs the same command without ssh. On
+  exit 255 (ssh's own failure) the call is repeated once with
+  `-o ControlPath=none` before the host counts as down for that pass; any
+  other non-zero exit is the remote command's and reads `blind`.
 - The remote side is a one-shot command: nothing stays running on a watched
   host, and patch upkeep happens there through the same call.
 - The two managers' ledgers must not share a host, or a bot is reported

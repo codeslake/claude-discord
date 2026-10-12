@@ -63,7 +63,8 @@ if [ -n "$kind$hpid" ]; then
   case $hpid in ''|*[!0-9]*) echo "claude-discord: monitor: --holder needs a pid, got '$hpid'" >&2; exit 2;; esac
   st=$(lstart "$hpid")
   [ -n "$st" ] || { echo "claude-discord: monitor: no process $hpid to hold for" >&2; exit 1; }
-  printf '%s %s %s\n' "$hpid" "$st" "$kind" > "$M/holders/$kind-$hpid"
+  # Written under a dot-name and moved in: the holder check's glob skips dot files, so it never reads a half-written record.
+  printf '%s %s %s\n' "$hpid" "$st" "$kind" > "$M/holders/.$kind-$hpid" && mv -f "$M/holders/.$kind-$hpid" "$M/holders/$kind-$hpid"
 fi
 
 if [ "$locked" = no ]; then
@@ -102,7 +103,10 @@ cap=${CLAUDE_DISCORD_MONITOR_HOST_CAP:-90}     # per host, enforced here (no tim
 # host is polled every step (1 s, or a fifth of a tick shorter than 5 s).
 read -r step pass_n cap_n tick_n < <(awk -v t="$tick" -v p="$pass" -v c="$cap" 'BEGIN {
   s = (t < 5 ? t / 5 : 1); printf "%s %d %d %d\n", s, (p / t < 1 ? 1 : int(p / t + 0.5)), int(c / s + 0.5), int(t / s + 0.5) }')
-child="" state="" h_rc=0
+child="" tp="" state="" h_rc=0
+# A pass child runs as its own process group (perl, as for the lock: setsid(1) is util-linux), so the cap and finish
+# kill its whole subtree: a health's $(...) or an ssh's children would otherwise outlive both. The pid survives the exec.
+pg='setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127'
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # One line per event; never a message body, a header or a token. $ts, when set, stamps a burst of lines with one date.
@@ -117,7 +121,8 @@ rotate() {
   # them on the new file, or they would keep growing monitor.log.1 past the cap.
   exec >> "$M/monitor.log" 2>&1
 }
-write_state() { printf '%s\n' "$state" > "$M/state.json.tmp" 2>/dev/null && mv -f "$M/state.json.tmp" "$M/state.json" 2>/dev/null || :; }
+# Never an empty state: a TERM before the first state is built, or a failed jq, would otherwise write a lone newline.
+write_state() { [ -n "$state" ] || return 0; printf '%s\n' "$state" > "$M/state.json.tmp" 2>/dev/null && mv -f "$M/state.json.tmp" "$M/state.json" 2>/dev/null || :; }
 # read_cfg: mowner from the manager project's config.env (KEY='value' or
 # KEY=value), with no fork: DISCORD_USER_ID, the manager's own owner.
 read_cfg() {
@@ -126,7 +131,7 @@ read_cfg() {
   while IFS= read -r l || [ -n "$l" ]; do
     v=${l#*=}; v=${v#\'}; v=${v%\'}
     case $l in DISCORD_USER_ID=*) mowner=$v;; esac
-  done < "$dir/../config.env" 2>/dev/null
+  done 2>/dev/null < "$dir/../config.env"   # 2> first: a missing file's error must not reach monitor.log
 }
 
 # holders_alive: removes the records of dead holders; 0 when one still lives.
@@ -153,7 +158,9 @@ holders_json() {  # sets hj: the holder records as a JSON array, with no fork
   hj="[$hj]"
 }
 finish() {  # $1 = reason: kill the pass child, leave a state that reads as stopped, drop the holder records
-  [ -z "$child" ] || kill "$child" 2>/dev/null
+  # The group; the pid alone when the signal came before the child's setpgrp.
+  [ -z "$child" ] || kill -- -"$child" 2>/dev/null || kill "$child" 2>/dev/null
+  [ -z "$tp" ] || kill "$tp" 2>/dev/null
   rm -f "$M/pass.out"
   state=$(printf '%s' "$state" | jq -c --arg now "$(now)" '.monitor.pid = null | .monitor.holders = [] | .monitor.stopped_at = $now' 2>/dev/null) && write_state
   # On no-holders every record left was dead and is already gone; a record
@@ -181,17 +188,17 @@ run_host() {  # uses $host $remote, the envs array, and run_pass's step counter 
   local t k0
   for t in first retry; do
     if [ "$host" = local ]; then
-      env ${envs[@]+"${envs[@]}"} "$HOME/.local/bin/claude-discord" health --all --json --patch > "$M/pass.out" 2>/dev/null < /dev/null 9>&- &
+      perl -e "$pg" env ${envs[@]+"${envs[@]}"} "$HOME/.local/bin/claude-discord" health --all --json --patch > "$M/pass.out" 2>/dev/null < /dev/null 9>&- &
     elif [ "$t" = first ]; then
-      ssh -o BatchMode=yes -o ConnectTimeout=8 "$host" "$remote" > "$M/pass.out" 2>/dev/null < /dev/null 9>&- &
+      perl -e "$pg" ssh -o BatchMode=yes -o ConnectTimeout=8 "$host" "$remote" > "$M/pass.out" 2>/dev/null < /dev/null 9>&- &
     else
-      ssh -o BatchMode=yes -o ConnectTimeout=8 -o ControlPath=none "$host" "$remote" > "$M/pass.out" 2>/dev/null < /dev/null 9>&- &
+      perl -e "$pg" ssh -o BatchMode=yes -o ConnectTimeout=8 -o ControlPath=none "$host" "$remote" > "$M/pass.out" 2>/dev/null < /dev/null 9>&- &
     fi
     child=$! k0=$k
     while kill -0 "$child" 2>/dev/null; do
       k=$((k + 1))
       if [ $((k - k0)) -gt "$cap_n" ]; then
-        kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; child="" h_rc=124
+        kill -- -"$child" 2>/dev/null || kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; child="" h_rc=124
         log "host $host no answer within ${cap}s"
         return 0
       fi
@@ -223,11 +230,8 @@ def observe($v; $d; $meta): (. // {}) as $o
   | $o + $meta + {verdict: $v, detail: $d}
   | if ($o.verdict // null) != $v then . + {since: $now, since_s: $now_s} else . end;
 
-[inputs] as $in
-| ($in[0] | fromjson) as $old
-| [range(1; $in | length - 1; 2) as $i | ($in[$i] | split("\u001f")) as $h
-   | {host: $h[0], laptop: ($h[1] == "true"), rc: ($h[2] | tonumber), doc: ($in[$i + 1] | try fromjson catch null)}] as $res
-| reduce $res[] as $r ({state: $old, events: [], frozen: []};
+# host_step($r): one host result folded into {state, events}. $r.bad, when set, is why its document could not be read.
+def host_step($r):
     ($r.doc | if type == "object" and (.projects | type) == "array" then . else null end) as $doc
     | ([$doc.projects[]? | .project as $p | .bots[]? | . + {project: $p}]) as $bots
     | (if $r.rc == 255 or ($r.rc == 124 and $r.laptop) then "hostdown"
@@ -240,6 +244,7 @@ def observe($v; $d; $meta): (. // {}) as $o
     | (if $hv == "hostdown" and $r.rc == 124 then "no answer from \($r.host) within the per-host limit (a laptop: asleep behind its tunnel?)"
        elif $hv == "hostdown" then "ssh to \($r.host) failed (exit 255), also with ControlPath=none"
        elif $hv == "blind" and $r.rc == 124 then "\($r.host) connected but health --all did not finish within the per-host limit"
+       elif $hv == "blind" and $r.bad != null then "health --all on \($r.host) printed a document of the wrong shape (exit \($r.rc)): \($r.bad)"
        elif $hv == "blind" and $doc != null then "health --all on \($r.host) printed its document but exited \($r.rc)"
        elif $hv == "blind" then "\($r.host) answered without a health document (exit \($r.rc)): claude-discord is missing there or older than health --all"
        elif $hv == "patchfail" then (($doc.patch.output // "") | gsub("\n"; " | "))
@@ -251,7 +256,7 @@ def observe($v; $d; $meta): (. // {}) as $o
          laptop: $r.laptop, reach: $reach, owner_id: $mowner, checked: $now}
         + (if $doc != null then {version: ($doc.version // "?"), patch: (if $doc.patch == null then "-" elif ($doc.patch.rc // 0) == 0 then "ok" else "fail" end)} else {} end))
     | (if $was != $hv and ($was != null or ($hv | good | not)) then .events += ["transition \($r.host)|- \($was // "new")->\($hv)"] else . end)
-    | if $reach != "ok" then .frozen += [$r.host]
+    | if $reach != "ok" then .
       else
         ($bots | map("\($r.host)|\(.project)|\(.bot)")) as $present
         | ([$doc.projects[] | select(.error != null) | {(.project | tostring): (.error | tostring)}] | add // {}) as $errs
@@ -271,7 +276,16 @@ def observe($v; $d; $meta): (. // {}) as $o
               and ((.key as $k | $present | index($k)) == null)) | .key]) as $gone
         | .events += ($gone | map("drop \(.)"))
         | .state.bots |= with_entries(select(.key as $k | ($gone | index($k)) == null))
-      end)
+      end;
+
+[inputs] as $in
+| ($in[0] | fromjson) as $old
+| [range(1; $in | length - 1; 2) as $i | ($in[$i] | split("\u001f")) as $h
+   | {host: $h[0], laptop: ($h[1] == "true"), rc: ($h[2] | tonumber), doc: ($in[$i + 1] | try fromjson catch null)}] as $res
+# A document that parses but has another shape inside (an older or newer claude-discord, a broken shim) makes
+# host_step raise: that host alone is blind, with the error (capped, it may quote the document); the rest still count.
+| reduce $res[] as $r ({state: $old, events: []};
+    . as $acc | try host_step($r) catch ((tostring | .[:200]) as $e | $acc | host_step($r + {doc: null, bad: $e})))
 | .state.monitor += {last_pass: $now, next_pass: (($now_s + $every) | floor | todate), pass_s: $pass_s, holders: $holders}
 | .state as $s | .events as $ev
 | "S" + ($s | tojson), "N\($s.bots | length)",
@@ -336,6 +350,7 @@ while :; do
   ! no_holders || finish no-holders
   # Straight back to the holder check after a pass: the last in-pass check may be most of a tick old.
   if [ "$n" -ge "$pass_n" ]; then run_pass; n=0; continue; fi
-  sleep "$tick" 9>&-
+  # Waited on, not run in the foreground: a trapped TERM then runs at once, not after up to a tick (finish kills the sleep).
+  sleep "$tick" 9>&- & tp=$!; wait "$tp"; tp=""
   n=$((n + 1))
 done

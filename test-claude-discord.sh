@@ -3272,8 +3272,10 @@ posts() { sed -n 's/.* --data-binary \(.*\) https:\/\/discord.com\/api\/v10\/cha
 # Single instance, the exit rule and the footprint, with every host answering ok. TMPDIR is unwritable: nothing may
 # land in /tmp. The start meets a state.json that is
 # not valid (it starts empty and says so) and a log past its cap (256 KiB: it becomes monitor.log.1, one generation).
-printf '# mine\r\nlocal HTTPS_PROXY=http://127.0.0.1:8118\r\nh1\r\nh2\r\n' > "$MR/mgr/hosts"   # saved with CRLF line endings
+printf '# mine\r\nlocal HTTPS_PROXY=http://127.0.0.1:8118\r\nh3\r\nh1\r\nh2\r\n' > "$MR/mgr/hosts"   # saved with CRLF line endings
 mdoc lambda 0 "r1:ok" > "$MON/local.out"; mdoc h1 0 "r2:ok" > "$MON/h1.out"
+# h3 (before h1) answers JSON of the wrong shape inside: that host alone is blind, the hosts after it still count.
+echo '{"projects":["x"]}' > "$MON/h3.out"
 # h2 prints a whole document and exits 3: health --all exits 0 whenever it printed one, so this is blind, not ok.
 mdoc h2 0 "r3:ok" > "$MON/h2.out"; echo 3 > "$MON/h2.rc"; : > "$MON/h2.both"
 mkdir -p "$HOME/ro"; chmod 555 "$HOME/ro"
@@ -3283,12 +3285,14 @@ mkdir -p "$MB"; echo '{"version":1,"manager":"mg' > "$MB/state.json"; head -c 26
 # leaves a waiter (0.1 s here) that must give up, never start a second monitor.
 holder
 (cd "$MP" && TMPDIR=$HOME/ro bash "$S" monitor --ensure mgr --holder tui "$HPID" && TMPDIR=$HOME/ro bash "$S" monitor --ensure mgr)
-wait_log 1 ' pass hosts='
+wait_log 1 ' pass (hosts=|failed)'
 [ "$(cut -d' ' -f1 "$MB/holders/tui-$HPID" 2>/dev/null)" = "$HPID" ] || { echo "FAIL: --holder must write <pid> <start time> <kind>"; exit 1; }
 grep -q '^health --all --json --patch|http://127.0.0.1:8118$' "$HOME/local.calls" || { echo "FAIL: local runs the shim's health --all --json --patch with the local line's env: $(cat "$HOME/local.calls")"; exit 1; }
 grep -q '^-o BatchMode=yes -o ConnectTimeout=8 h1 env ~/.local/bin/claude-discord health --all --json --patch$' "$HOME/ssh.log" || { echo "FAIL: a remote host runs the shim over ssh: $(<"$HOME/ssh.log")"; exit 1; }
 [ -z "$(posts)" ] || { echo "FAIL: nothing to say, nothing posted: $(posts)"; exit 1; }
-jq -e '.hosts.h2 | .verdict == "blind" and (.detail | test("exited 3"))' "$MB/state.json" >/dev/null && jq -e '.bots | has("h2|/home/u/ws/p|r3") | not' "$MB/state.json" >/dev/null ||
+jq -e '(.hosts.h3 | .verdict == "blind" and (.detail | test("wrong shape.*Cannot index"))) and .hosts.h1.verdict == "ok" and (.bots | has("h1|/home/u/ws/p|r2"))' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: a host whose document has the wrong shape is blind, and only it: $(jq -c .hosts "$MB/state.json") $(tail -2 "$MB/monitor.log")"; exit 1; }
+jq -e '.hosts.h2| .verdict == "blind" and (.detail | test("exited 3"))' "$MB/state.json" >/dev/null && jq -e '.bots | has("h2|/home/u/ws/p|r3") | not' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a host whose remote exits non-zero is blind (its bots unread), document or not: $(jq -c .hosts.h2 "$MB/state.json")"; exit 1; }
 # The launcher opened monitor.log as the monitor's stdout and stderr; the rotation at start renamed that file, so the
 # monitor must have reopened it, or its output would grow monitor.log.1 past the cap.
@@ -3309,7 +3313,7 @@ grep -q 'exit reason=no-holders$' "$MB/monitor.log" || { echo "FAIL: the exit mu
 grep -q 'state unreadable, starting empty$' "$MB/monitor.log" || { echo "FAIL: a state.json that is not valid must be said and replaced: $(<"$MB/monitor.log")"; exit 1; }
 [ -z "$(ls -A "$HOME/ro")" ] || { echo "FAIL: nothing may be written to TMPDIR"; exit 1; }
 chmod 755 "$HOME/ro"
-echo "ok: monitor: one instance for two --ensure calls, holder records with start times, local through the shim with the ledger's env, ssh for the rest (a CRLF ledger read as plain lines; a non-zero remote exit is blind even with a document), nothing posted when all is well; it exits within a tick of its last holder (a reused pid counts as dead), leaving only lock, state.json (stopped), monitor.log (rotated at 256 KiB, one generation, the monitor's own output reopened onto the new file) and an empty holders/, nothing in TMPDIR; a broken state.json starts empty"
+echo "ok: monitor: one instance for two --ensure calls, holder records with start times, local through the shim with the ledger's env, ssh for the rest (a CRLF ledger read as plain lines; a non-zero remote exit is blind even with a document, a wrong-shaped one blinds its host alone), nothing posted when all is well; it exits within a tick of its last holder (a reused pid counts as dead), leaving only lock, state.json (stopped), monitor.log (rotated at 256 KiB, one generation, the monitor's own output reopened onto the new file) and an empty holders/, nothing in TMPDIR; a broken state.json starts empty"
 
 # A crash leaves no lock behind: the pass's ssh is started without the lock's fd, so a new --ensure takes over while an
 # orphaned ssh still runs (that start's cap is 5 s, so its own cap never kills the ssh first). The exit race: an
@@ -3325,7 +3329,7 @@ old=$(mpid); kill -9 "$old"; rm -f "$MON/h1.sleep"; KILL_AT_EXIT="$KILL_AT_EXIT 
 (cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID")
 n=0; while { [ -z "$(mpid)" ] || [ "$(mpid)" = "$old" ]; } && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
 [ -n "$(mpid)" ] && [ "$(mpid)" != "$old" ] || { echo "FAIL: an orphaned ssh must not hold the lock: a new monitor must start within 1 s"; exit 1; }
-pkill -P "$(<"$MON/h1.pid")" 2>/dev/null || :; kill "$(<"$MON/h1.pid")" 2>/dev/null || :; mstop
+kill -- -"$(<"$MON/h1.pid")" 2>/dev/null || :; mstop   # the ssh is its own process group: its sleep goes with it
 mstate '.bots["h1|/home/u/ws/q|e1"] = {host: "h1", project: "/home/u/ws/q", bot: "e1", verdict: "ok", owner_id: "222"}'
 mdoc h1 0 "r2:ok" | jq -c '.projects += [{project: "/home/u/ws/q", bots: [], error: "health exited 3 with no document"}]' > "$MON/h1.out"
 perl -MFcntl=:flock -e 'open(my $l, ">>", $ARGV[0]) or die; flock($l, LOCK_EX); select(undef, undef, undef, 0.06)' "$MB/lock" & LP=$!
@@ -3338,6 +3342,22 @@ kill -TERM "$(mpid)"; wait_log 1 'exit reason=signal$'
 [ -z "$(ls -A "$MB/holders")" ] && [ "$(jq -r '.monitor.pid' "$MB/state.json")" = null ] || { echo "FAIL: a signalled monitor must leave no holder record and a stopped state: $(ls "$MB/holders")"; exit 1; }
 kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
 echo "ok: monitor: a crashed monitor's orphaned ssh holds no lock, an --ensure meeting an exiting monitor waits and takes over, a crashed project's bots read blind (kept, not dropped), and a signal stops it cleanly"
+
+# The 30 s exit bound in a long pass: the holder check counts steps across the whole pass, not per host. A tick of
+# 5 steps (0.05 s) and a cap of 2 (0.02 s), so every host is killed at its 3rd step, before a per-host count reaches
+# a check. 10 hung hosts (6 would do; more widen the window for the kill below under load, and cost nothing when the
+# monitor exits early): the holder dies after the first cap kill, so the monitor must leave mid-pass. Each cap kill
+# and the exit take the host's whole process group: the stub's sleep must not outlive either.
+printf 's%s\n' 1 2 3 4 5 6 7 8 9 10 > "$MR/mgr/hosts"
+for i in 1 2 3 4 5 6 7 8 9 10; do echo 4.37 > "$MON/s$i.sleep"; done
+na=$(command grep -c 'no answer' "$MB/monitor.log") || :; ex=$(command grep -c 'exit reason=no-holders$' "$MB/monitor.log") || :; np=$(passes); holder
+(cd "$MP" && CLAUDE_DISCORD_MONITOR_TICK=0.05 CLAUDE_DISCORD_MONITOR_HOST_CAP=0.02 bash "$S" monitor --ensure mgr --holder tui "$HPID")
+wait_log $(( na + 1 )) 'no answer'; kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
+wait_log $(( ex + 1 )) 'exit reason=no-holders$'
+[ "$(passes)" = "$np" ] && [ $(( $(command grep -c 'no answer' "$MB/monitor.log") - na )) -lt 10 ] ||
+  { echo "FAIL: a holder gone mid-pass must end the monitor at the pass's next tick, whatever host runs: $(tail -4 "$MB/monitor.log")"; exit 1; }
+! pgrep -f '^/bin/sleep 4\.37$' >/dev/null || { echo "FAIL: a pass child's subtree must die with it, at the cap and at exit: $(pgrep -af '^/bin/sleep 4\.37$')"; exit 1; }
+echo "ok: monitor: the holder check counts across the whole pass (a holder gone mid-pass ends it within a tick), and a killed host takes its whole process group"
 
 # The monitor blocks end here: the real shim back, the stubs and fixtures gone.
 mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"
