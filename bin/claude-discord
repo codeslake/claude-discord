@@ -367,54 +367,40 @@ same_tree() {
 # compat/VERSION holds the plugin's HEAD sha (head_sha), written last.
 # rename(2) cannot replace a non-empty directory, hence two renames; a settings
 # hook started between them finds no file and its entry's -x test skips it.
-# Every rename onto compat/ is perl's rename(2), not mv: with several bots
-# starting at once, mv would move a copy INTO a compat/ another writer has just
-# put in place; rename(2) fails instead, and that writer's complete copy stays.
-# A failed swap puts our old copy back unless another LIVE writer's compat.old.*
-# says it is mid-swap (success: its copy lands next, ours must not beat it in),
-# or unless the copy we moved aside is already current (a writer that finished
-# its swap just before our mv): that one goes back.
-# CLAUDE_DISCORD_COMPAT_SWAP_S (default 60, read only here) bounds how recently
-# another writer's compat.old.<pid> was renamed for it to count as mid-swap.
-sync_compat() {
-  local c=$helpers/compat n=$helpers/compat.new.$$ t v="" have="" mid=""
-  # A killed writer's compat.old.<pid> (renamed longer ago than a swap takes, see below) is reaped by every run, a no-op one
-  # too, not only by a swap that fails.
-  for t in "$c".old.*; do [ -d "$t" ] && ! perl -e 'exit !((lstat $ARGV[1])[10] > time - $ARGV[0])' "${CLAUDE_DISCORD_COMPAT_SWAP_S:-60}" "$t" && rm -rf "$t"; done
-  rm -rf "$n" && mkdir -p "$n/hooks" || return 1
-  for t in turn peers lib autoresearchclaw; do cp -R "$1/hooks/$t" "$n/hooks/" || { rm -rf "$n"; return 1; }; done
-  cp -R "$1/tools" "$1/rules" "$n/" && head_sha "$1" > "$n/VERSION" || { rm -rf "$n"; return 1; }
-  if [ -d "$c" ] && [ ! -L "$c" ] && same_tree "$c" "$n"; then rm -rf "$n"; return 0; fi
-  rm -rf "$c.old.$$"
-  { ! has_path "$c" || mv "$c" "$c.old.$$"; } && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$n" "$c" ||
-    { IFS= read -r v < "$n/VERSION" || :
-      if [ ! -d "$c" ]; then
-        # Another writer is between its two renames only while its pid lives AND it renamed compat/ to compat.old.<pid>
-        # within the last minute (a swap's renames are ms apart; rename sets ctime on Linux and macOS): an older one is a
-        # killed writer's leftover (under a live pid, a reused one), removed here rather than left forever. A recent one whose
-        # pid does not answer stays: it may be a writer in another pid namespace (a host and a container share this dir).
-        for t in "$c".old.*; do
-          [ "$t" != "$c.old.$$" ] && [ -d "$t" ] || continue
-          if perl -e 'exit !((lstat $ARGV[1])[10] > time - $ARGV[0])' "${CLAUDE_DISCORD_COMPAT_SWAP_S:-60}" "$t"; then
-            kill -0 "${t##*.}" 2>/dev/null && mid=1 || :
-          else rm -rf "$t"; fi
-        done
-        if [ -z "$mid" ]; then   # our swap failed: put the old copy back
-          [ -d "$c.old.$$" ] && perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$c.old.$$" "$c" && { rm -rf "$n"; return 1; }
-        # What we moved aside is a current copy (that writer landed it and has not yet removed its compat.old.<pid>): it goes
-        # back, as the only copy; should the rename fail, the check below decides. A stale copy must not beat the writer's in.
-        elif [ -d "$c.old.$$" ] && same_tree "$c.old.$$" "$n"; then perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$c.old.$$" "$c" || :
-        else rm -rf "$n" "$c.old.$$"; return 0; fi
-        # Our restore failed too: keep our old copy (the next start rebuilds) unless another writer's compat.old.* says one
-        # is swapping its copy in. Checked only after a restore: a compat/ in place at the test above may be moved aside by
-        # then, and our old copy, kept for it, would stay behind for good.
-        [ -d "$c" ] || { rm -rf "$n"; for t in "$c".old.*; do [ "$t" = "$c.old.$$" ] || [ ! -d "$t" ] || { rm -rf "$c.old.$$"; break; }; done; return 1; }
-      fi
-      rm -rf "$n" "$c.old.$$"   # a compat/ put in place by another writer (before or during our restore) makes our old copy moot
-      # Another writer's copy of this commit in place is not a failure; ours left unreplaced (mv refused) is.
-      IFS= read -r have < "$c/VERSION" 2>/dev/null || :; [ -n "$v" ] && [ "$have" = "$v" ]; return; }   # return: the trailing rm would turn this status into 0
-  rm -rf "$c.old.$$"
-}
+# Writers (bots starting at once, on a host and in its containers, or natively
+# and in Docker Desktop on one Mac) swap one at a time under compat.lock, taken
+# by mkdir: atomic on every filesystem they share, across containers and
+# kernels, where pids collide and flock may not reach. The copy is built first,
+# in a random-named directory (no pid: unique across kernels), so the lock
+# covers only a re-check and the renames. A lock older than any swap (30 s) is
+# a dead writer's: it is broken by renaming it to a random name, which exactly
+# one waiter wins. The swap onto compat/ is perl's rename(2), not mv: a writer
+# of an older release takes no lock, and mv would move our copy INTO a compat/
+# it just put in place; rename(2) fails instead. A subshell, so its traps (our
+# old copy back if compat/ is gone, the lock released) stay out of the caller.
+sync_compat() (
+  c=$helpers/compat o=$helpers/compat.old l=$helpers/compat.lock t0=$SECONDS
+  n=$(mktemp -d "$c.new.XXXXXX") && k=$(mktemp -u "$l.broken.XXXXXX") || return 1
+  b=$n/compat
+  trap 'rm -rf "$n"' EXIT; trap 'exit 1' INT TERM HUP
+  mkdir "$b" "$b/hooks" || return 1
+  for t in turn peers lib autoresearchclaw; do cp -R "$1/hooks/$t" "$b/hooks/" || return 1; done
+  cp -R "$1/tools" "$1/rules" "$b/" && head_sha "$1" > "$b/VERSION" || return 1
+  until mkdir "$l" 2>/dev/null; do
+    perl -e '@s = lstat $ARGV[0]; exit !(@s && $s[9] < time - 30 && rename($ARGV[0], $ARGV[1]) && rmdir($ARGV[1]))' "$l" "$k" && continue
+    # Past the 30 s stale bound, so a dead holder's lock is broken before a waiter gives up.
+    [ "$SECONDS" -lt $((t0 + 40)) ] || { echo "claude-discord: $l stays held; compat/ not refreshed" >&2; return 1; }
+    sleep 0.1
+  done
+  # set -e is back on inside a trap: a failing command would skip the rest (the lock release) and set our status, hence || :.
+  # shortcut: a holder stalled past 30 s releases the next holder's lock here; rename(2) still keeps compat/ whole.
+  trap 'rm -rf "$n"; has_path "$c" || [ ! -d "$o" ] || perl -e "rename shift, shift" "$o" "$c" || :; rm -rf "$o"; rmdir "$l" 2>/dev/null || :' EXIT
+  # Only we write now: compat.old is a dead holder's; an old compat.new.* or compat.old.* a dead builder's or an older release's.
+  rm -rf "$o"; perl -MFile::Path=rmtree -e 'for (@ARGV) { @s = lstat; rmtree $_ if @s && $s[9] < time - 600 }' "$c".new.* "$c".old.*
+  [ -d "$c" ] && [ ! -L "$c" ] && same_tree "$c" "$b" && return 0   # current already (another writer's swap while we built or waited)
+  { ! has_path "$c" || mv "$c" "$o"; } && perl -e 'rename shift, shift or exit 1' "$b" "$c" && return 0
+  [ -d "$c" ] && same_tree "$c" "$b"   # an older release's writer put a copy in first: fine if it is ours; else the trap restores
+)
 # compat_if_stale: run at a bot's startup and resume (on-session-start runs
 # `patch --compat`). A compat/ whose VERSION is not this plugin's HEAD sha (a
 # `git pull` by hand in the source clone, a copy older than the stamp) or
