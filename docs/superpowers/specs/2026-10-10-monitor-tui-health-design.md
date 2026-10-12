@@ -157,7 +157,7 @@ All under `~/.claude-discord/records/monitor/<bot>/`, mode 0700 directory,
 | `state.json` | monitor only, via `state.json.tmp` (same dir, fixed name) and rename | kept after exit so the TUI shows the last state |
 | `monitor.log`, `monitor.log.1` | monitor | capped at 256 KiB; on overflow `.log` replaces `.log.1` |
 | `keeper.lock` | created once; the keeper holds an flock on it (fd 8) for its whole life | the one-keeper rule (1.10.3): a starter that cannot take it finds a keeper |
-| `refused` | a detached start that met a monitor this side cannot see | until `monitor --start` |
+| `refused.<id>` | a detached start that met a monitor this side cannot see; `<id>` is the digits of `readlink /proc/self/ns/pid` (plain `refused` without `/proc`), so only the writing side reads it: `keeper_alive`, `--start` and the TUI (red bar `auto-start refused here`) | until `monitor --start`, or a start on this side that passes the unseen-lock check |
 | `holders/<kind>-<pid>` | the TUI and the keeper (plan deviations 17, 19; a 1.10.2 hook's session record is read until its session ends) | removed by their owner on exit, by the monitor when dead, all but keeper records by the monitor on a signal exit (1.10.3) (a no-holders exit keeps any that appeared at the last moment, for the exit race; the next start prunes stale ones) |
 
 Plus one machine-wide record, `~/.claude-discord/records/projects`: one
@@ -455,7 +455,10 @@ patch.
 
 - **Overview** (the only screen at start). Header: manager, monitor pid and
   holders, last and next pass, a red bar when the last POST failed or the
-  monitor is not running ("monitor stopped at T", from the kept state).
+  monitor is not running ("monitor stopped at T", from the kept state), when
+  the owner stopped it ("stopped by you", the `stopped` marker) or when this
+  side's `refused.<id>` marker stands ("auto-start refused here: another side
+  holds the monitor lock", naming `monitor --start`).
   Hosts table: host, reach, patch, claude-discord version, bots ok/total,
   checked at. Bots table: host, project (short), bot, verdict, for how long,
   detail; findings first.

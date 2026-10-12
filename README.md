@@ -961,7 +961,7 @@ Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 | `holders/<kind>-<pid>` | one record per keeper (`keeper`) or open TUI (`tui`): `<pid> <start time> <kind>` (a `session` record from 1.10.2 is read until its session ends) |
 | `stopped` | `monitor --stop` was run: nothing starts the backend until `monitor --start` |
 | `keeper.lock` | the keeper's `flock` target, held on fd 8 for its whole life: the one-keeper rule |
-| `refused` | a detached start met a monitor this side cannot see: the hooks start nothing until `monitor --start` |
+| `refused.<id>` | a detached start met a monitor this side cannot see: this side's hooks start nothing until `monitor --start` or a start that gets through (`<id>` is the digits of `readlink /proc/self/ns/pid`, so the other side of a shared home is not stopped by it; plain `refused` where there is no `/proc`, a Mac). The TUI says `auto-start refused here` |
 | `pass.out` | one host's answer, only during a pass |
 | `post.out` | one post's answer and status, only during a pass |
 
@@ -998,7 +998,7 @@ translated.
 the last 50 posts, `q` to quit (the backend keeps running), `Q` to quit and
 stop the backend (after a yes; the same as `monitor --stop`). Opened after
 `--stop`, it asks whether to start the backend again (No by default: then it
-only shows the state, with `stopped by you` in the red bar). A red bar says when the monitor is stopped,
+only shows the state, with `stopped by you` in the red bar). A red bar says when the monitor is stopped (`stopped by you`, or `auto-start refused here: another side holds the monitor lock`),
 its pid is gone (killed without cleaning up; the TUI starts it again, once
 per 30 s at most), the last pass failed (the state could not be updated;
 `monitor.log` has the line) or the last post failed. A host taken out of
@@ -1083,6 +1083,7 @@ rest of Claude Code.
 | `[hostdown] <host>` in `#bot-health-check` | ssh to that host failed twice. Run the command in the message; `up` means a stale ControlMaster or a tunnel that was reconnecting |
 | `[blind] <host>` | ssh works but `health --all` gave no document: `~/.local/bin/claude-discord` is missing there or older than 1.10.0. Run `setup` or `update` on that host |
 | `[patchfail] <host>` | the official plugin changed and a patch no longer matches; `claude-discord update` there, and if it still fails the patch needs a claude-discord fix |
+| The TUI says `auto-start refused here: another side holds the monitor lock` | an automatic start on this side met a monitor lock held by a monitor it cannot see (a home shared with a container or host): the hooks start nothing here. Set `CLAUDE_DISCORD_NO_AUTOSTART=1` on the side that must not run a backend, and run `claude-discord monitor --start <manager>` on the side where the bots run (the marker is per pid namespace, so it does not stop the other side; a start that gets through clears it) |
 | The TUI says `stopped by you` | `claude-discord monitor --stop` was run; `claude-discord monitor --start <manager>` starts the backend again |
 | The TUI says `monitor stopped` or `no state yet` | no holder is alive; opening the TUI starts it. A reason after it in the red bar is `monitor --ensure` refusing, which `monitor.log` never sees: `no hosts ledger` means `<manager>/hosts` **or** `<manager>/.env` is missing (the message names the ledger for both). With no reason and a monitor that stops again at once, `monitor.log` says why |
 | No alert for a bot on a ledger host | its project is not in that host's `~/.claude-discord/records/projects` (run `claude-discord health` there once), or the host is `noreach`/`hostdown`/`blind` (the TUI shows it) |
