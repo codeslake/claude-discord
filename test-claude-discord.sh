@@ -3588,6 +3588,26 @@ wait_log "$want" 'Z start$'
 mstop; rm -f "$HOME/ss.json"
 echo "ok: a dev-manager's SessionStart registers its session (the nearest claude process) as a holder and starts the monitor, which exits with that session"
 
+# And it leaves nothing on the hook's pipe: against a plugin root copy whose claude-discord takes 1 s, the caller (Claude
+# Code reads the hook's stdout to EOF; here perl does) sees EOF at once, the output is the JSON line alone, and the stub
+# was given the perl process, the session, as holder. Copies, not links: plugin_root is cd -P of the hook's own place.
+FX="$HOME/fxroot"; mkdir -p "$FX/bin" "$FX/hooks/turn" "$FX/hooks/lib"; cp "$D/hooks/turn/on-session-start" "$FX/hooks/turn/"; cp "$D/hooks/lib/discord.sh" "$FX/hooks/lib/"
+printf '#!/bin/sh\nprintf "%%s %%s\\n" "$PWD" "$*" > "$HOME/fx.rec"\necho $$ > "$HOME/fx.pid"\nexec sleep 1\n' > "$FX/bin/claude-discord"; chmod +x "$FX/bin/claude-discord"
+FXR=$(cd -P "$FX" && pwd -P); rm -f "$HOME/fx.rec" "$HOME/fx.pid"
+printf '{"session_id":"sFx","source":"compact"}' > "$HOME/ss.json"
+fxout=$(perl -e 'use Time::HiRes qw(time); $0 = shift; open(STDIN, "<", shift) or die; my $t = time; my $pid = open(P, "-|"); die unless defined $pid;
+    if (!$pid) { open(STDERR, ">&", \*STDOUT); exec @ARGV; die } local $/; my $o = <P>; printf "%.3f %d\n%s", time - $t, $$, $o;' \
+  "$FK/claude/versions/9.9.9" "$HOME/ss.json" env CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-session-start")
+read -r fxel fxpp <<<"$(printf '%s\n' "$fxout" | head -n 1)"
+n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+[ -s "$HOME/fx.pid" ] && kill "$(<"$HOME/fx.pid")" 2>/dev/null || :   # the stub's 1 s sleep (exec'd, same pid): not left behind
+jq -ne --arg e "$fxel" '($e | tonumber) < 0.5' >/dev/null || { echo "FAIL: the SessionStart hook must return at once while --ensure runs (the pipe closed after $fxel s)"; exit 1; }
+[ "$(printf '%s\n' "$fxout" | tail -n +2)" = "$(jq -nc --arg c "CLAUDE_DISCORD_TOOLS=$FXR/tools" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}')" ] ||
+  { echo "FAIL: the SessionStart hook must print its context line and nothing else: $fxout"; exit 1; }
+[ "$(<"$HOME/fx.rec")" = "$MP monitor --ensure mgr --holder session $fxpp" ] || { echo "FAIL: --ensure must be called from the project with the session as holder (perl $fxpp): $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
+rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json"
+echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while --ensure is still running"
+
 # The monitor blocks end here: the real shim back, the stubs and fixtures gone.
 mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"
 rm -rf "$MON" "$HOME/ssh.log" "$HOME/local.calls" "$HOME/ro" "$HOME/bin/ssh"; : > "$CURL_REPLIES"

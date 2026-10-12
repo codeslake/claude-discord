@@ -80,7 +80,11 @@ jq -nc --arg c "$ctx" '{hookSpecificOutput: {hookEventName: "SessionStart", addi
 # closed, so the hook returns at once and leaves nothing on Claude Code's pipe.
 if [ "$bot_mode" = dev-manager ] && [ -f "$DISCORD_STATE_DIR/hosts" ] && [ -x "$plugin_root/bin/claude-discord" ]; then
   spid=$(session_pid)
-  [ -z "$spid" ] || (cd "$bot_project" && "$plugin_root/bin/claude-discord" monitor --ensure "$bot_name" --holder session "$spid") </dev/null >/dev/null 2>&1 &
+  # An if, not `[ -z ] || (...) &`: the & would take the whole || list into a forked subshell that keeps the hook's own
+  # stdout open until --ensure ends, and Claude Code reads the hook's pipe to EOF.
+  if [ -n "$spid" ]; then
+    (cd "$bot_project" && "$plugin_root/bin/claude-discord" monitor --ensure "$bot_name" --holder session "$spid") </dev/null >/dev/null 2>&1 &
+  fi
 fi
 
 t=$DISCORD_STATE_DIR/turns/$session_id
