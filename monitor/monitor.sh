@@ -511,10 +511,11 @@ while :; do
     # future mtime (a clock stepped back, a copied file) would restart every tick, and bash 3.2's -nt counts whole seconds.
     # An empty signature (replaced right now) is no change: never exec a missing file.
     cur=$(sig)
-    # A file caught mid-write (git pull unlinks and rewrites it) may be cut off: exec it only if it parses, else keep the
-    # running code and look again next pass, logging each broken signature once.
+    # A file caught mid-write (git pull unlinks and rewrites it) may be cut off: exec it only if it parses and its
+    # signature held through the parse (a write still landing changes size or mtime), else keep the running code and
+    # look again next pass, logging each broken signature once.
     if [ -n "$cur" ] && [ "$cur" != "$sig0" ]; then
-      if bash -n "$0" 2>/dev/null; then log "restart: monitor.sh changed"; exec bash "$0" "$self" --locked "$bot"
+      if bash -n "$0" 2>/dev/null && [ "$(sig)" = "$cur" ]; then log "restart: monitor.sh changed"; exec bash "$0" "$self" --locked "$bot"
       elif [ "$cur" != "$bad" ]; then bad=$cur; log "update skipped: monitor.sh does not parse, keeping the running code"; fi
     fi
     run_pass; n=$((used / tick_n)) part=""
