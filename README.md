@@ -846,11 +846,20 @@ keeps up. It runs on its own: no manager session and no TUI is needed, and
 it runs until `claude-discord monitor --stop <manager>`. It is started by
 `claude-discord setup <manager> --mode` (dev-manager with a ledger; setup
 says so in one line, with the stop command), by `claude-discord tui`, and by
-the manager session's start or prompt when it finds no keeper. A container
-or machine restart kills it, and the next of those starts it again.
-`--stop` leaves a `stopped` marker: then none of them starts it (the TUI
-asks first at a terminal, and shows `stopped by you`) until
-`claude-discord monitor --start <manager>`. `CLAUDE_DISCORD_NO_AUTOSTART=1`
+the session start or prompt of **any** claude-discord bot on the machine
+that finds it dead (every dev-manager with a ledger in the projects
+`claude-discord` has recorded; a check with no fork while all keepers run).
+A container or machine restart kills it, and the next of those starts it
+again. `--stop` leaves a `stopped` marker: then none of them starts it (the
+TUI asks first, and shows `stopped by you`) until
+`claude-discord monitor --start <manager>`.
+
+**Taking a machine down (maintenance, a server move).** Run
+`claude-discord monitor --stop <manager>` first: its marker keeps every bot
+session from reviving the backend. Then stop the bots. The monitor never
+restarts a bot, it only alerts, so stopping the bots first would only post
+`[down]` alerts. `claude-discord monitor --start <manager>` brings the
+backend back afterwards. `CLAUDE_DISCORD_NO_AUTOSTART=1`
 in the environment keeps setup, the TUI and the hooks from starting one at
 all on that machine (the other side of a shared home, below); `--start` and
 `--keep` still work there.
@@ -977,7 +986,10 @@ translated.
 
 **TUI.** `claude-discord tui` shows the monitor's state (outside a project it picks among the manager bots of the projects `claude-discord` has recorded: the one, or a numbered list at a terminal, else exit 2 naming them; `tui <bot>` picks the project that has it): hosts, bots
 (findings first), `Enter` for a row's detail and recovery command, `a` for
-the last 50 posts, `q` to quit (the monitor keeps running while its keeper does; see Keeper). A red bar says when the monitor is stopped,
+the last 50 posts, `q` to quit (the backend keeps running), `Q` to quit and
+stop the backend (after a yes; the same as `monitor --stop`). Opened after
+`--stop`, it asks whether to start the backend again (No by default: then it
+only shows the state, with `stopped by you` in the red bar). A red bar says when the monitor is stopped,
 its pid is gone (killed without cleaning up; the TUI starts it again, once
 per 30 s at most), the last pass failed (the state could not be updated;
 `monitor.log` has the line) or the last post failed. A host taken out of
