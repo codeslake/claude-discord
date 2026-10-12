@@ -613,6 +613,9 @@ EOT
                   else fill([$me] + ($others | split(",") | map(gsub("\\s";"")) | map(select(. != "")))) end)
                 | del(.groups[""])
               else . end
+            # A group whose channel was known but whose allowFrom still holds "" (user ID answered later).
+            | if (.groups | type) == "object" then .groups |= map_values(if $open == "yes" then (if (.allowFrom | type) == "array" then .allowFrom |= map(select(. != "")) else . end)
+                else fill([$me] + ($others | split(",") | map(gsub("\\s";"")) | map(select(. != "")))) end) else . end
           end'
     else
       # allow_all is set only by the answer above, so it reaches this bot and

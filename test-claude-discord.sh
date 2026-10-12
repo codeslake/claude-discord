@@ -403,6 +403,14 @@ grep -q "^DISCORD_CHANNEL_ID='55'$" "$RL/config.env" && grep -q '^DISCORD_BOT_TO
   [ "$(jq -c '[(.groups | keys), .groups["55"].allowFrom, .groups["55"].requireMention, .allowFrom, .ackReaction]' "$RL/later/access.json")" = '[["55"],["11","22"],true,["11"],""]' ] ||
   { echo "FAIL: a re-run with the real IDs must fill the empty group key and ids and keep the rest: $(jq -c . "$RL/later/access.json") $(<"$RL/config.env")"; exit 1; }
 echo "ok: a bot set up with empty IDs gets the real channel and ids from a later setup run, other access.json fields kept"
+# Channel known at the first run, user ID answered later: the "55" group's allowFrom [""] must be filled too.
+printf '\n\n\n\n\nn\n' | bash "$S" setup later2 --scope project >/dev/null 2>&1 || :
+printf "DISCORD_CHANNEL_ID='77'\nDISCORD_USER_ID=''\nDISCORD_ALLOW_IDS=''\n" > "$RL/config.env"
+jq -c '.groups = {"77": {"requireMention": true, "allowFrom": [""]}} | .allowFrom = [""]' "$RL/later2/access.json" > "$RL/later2/a.tmp" && cat "$RL/later2/a.tmp" > "$RL/later2/access.json" && rm -f "$RL/later2/a.tmp"
+printf '77\n11\n\ntokL2\n\n\n' | bash "$S" setup later2 --scope project >/dev/null
+[ "$(jq -c '[(.groups | keys), .groups["77"].allowFrom, .allowFrom]' "$RL/later2/access.json")" = '[["77"],["11"],["11"]]' ] ||
+  { echo "FAIL: a known channel's group must get the user ID filled in later: $(jq -c . "$RL/later2/access.json")"; exit 1; }
+echo "ok: a known channel's group gets the later user ID"
 
 cd "$P"
 printf '999\n111\n\ntokA2\nn\n' | bash "$S" setup alpha --scope project --reset >/dev/null
