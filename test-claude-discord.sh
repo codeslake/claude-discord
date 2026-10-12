@@ -3163,6 +3163,60 @@ echo "ok: health --all --json --patch prints one document (host, version, home, 
 stop_servers
 cd "$P"
 
+# --- backend monitor ------------------------------------------------------
+# ssh, stubbed for setup's host probe and the monitor's passes: argv to ssh.log; per host, $HOME/mon/<host>.out is
+# printed, .rc is the exit status (.rc2 instead on the ControlPath=none retry), .sleep delays it; a byte left on
+# stdin is reported as "ATE" (a probe must never eat setup's piped answers).
+MON="$HOME/mon"; mkdir -p "$MON"
+cat > "$HOME/bin/ssh" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$HOME/ssh.log"
+IFS= read -r -t 0.05 l && printf 'ATE %s\n' "$l" >> "$HOME/ssh.log"
+host="" none=""
+for a in "$@"; do [ "$a" != ControlPath=none ] || none=1; done
+while [ $# -gt 0 ]; do case $1 in -o) shift 2;; *) host=$1; break;; esac; done
+d=$HOME/mon
+if [ -f "$d/$host.sleep" ]; then echo $$ > "$d/$host.pid"; /bin/sleep "$(<"$d/$host.sleep")"; fi
+rc=0; [ ! -f "$d/$host.rc" ] || rc=$(<"$d/$host.rc")
+[ -z "$none" ] || [ ! -f "$d/$host.rc2" ] || rc=$(<"$d/$host.rc2")
+[ "$rc" != 0 ] || cat "$d/$host.out" 2>/dev/null
+exit "$rc"
+STUB
+chmod +x "$HOME/bin/ssh"; rm -f "$HOME/ssh.log"
+
+# setup asks for the ledger in dev-manager mode only: local always, each new host probed once (stdin left alone), a
+# Darwin host with a battery marked laptop (a host that did not answer is written plain and said so), a host that is
+# not a plain ssh name skipped, an empty answer keeps the list (and the owner's hand edits), and leaving dev-manager
+# removes the ledger.
+MP="$HOME/monproj"; mkdir -p "$MP"; cd "$MP"; MR="$MP/.claude/discord-agents"
+jq --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted = true' "$HOME/.claude.json" > "$HOME/.claude.json.t" && mv "$HOME/.claude.json.t" "$HOME/.claude.json"
+printf 'Linux\nclaude-discord 1.10.0 (abc1234)\n' > "$MON/h1.out"
+printf 'Darwin\nbattery\nclaude-discord 1.10.0 (abc1234)\n' > "$MON/lap.out"
+echo 255 > "$MON/down.rc"
+out=$(printf '\n900\n111\n\ntokMgrUnique\nn\ndev-manager\n\nh1, lap,down,-oProxyCommand=x\nEXTRA\n' | bash "$S" setup mgr --scope project 2>&1)
+[ "$(<"$MR/mgr/hosts")" = "$(printf '# ssh host names this manager checks; "local" is this machine (no ssh)\nlocal\nh1\nlap laptop\ndown')" ] ||
+  { echo "FAIL: setup must write the ledger: local, h1, lap marked laptop, down plain: $(cat "$MR/mgr/hosts" 2>&1) / $out"; exit 1; }
+grep -q 'h1: claude-discord 1.10.0' <<<"$out" && grep -q "skipping host '-oProxyCommand=x'" <<<"$out" || { echo "FAIL: setup must print each probe's answer and skip a host that is not a plain name: $out"; exit 1; }
+grep -q 'down: could not tell' <<<"$out" && ! grep -q 'h1: could not tell' <<<"$out" || { echo "FAIL: setup must say it could not tell for a host that did not answer, and only for it: $out"; exit 1; }
+! grep -q '^ATE' "$HOME/ssh.log" && [ "$(grep -c BatchMode=yes "$HOME/ssh.log")" = 3 ] || { echo "FAIL: one probe per host, with stdin closed: $(<"$HOME/ssh.log")"; exit 1; }
+printf '# mine\nlocal HTTPS_PROXY=http://127.0.0.1:8118\nh1 X=1\nlap laptop\n' > "$MR/mgr/hosts"
+printf 'dev-manager\n\n\n' | bash "$S" setup mgr --mode >/dev/null 2>&1
+[ "$(sed 1d "$MR/mgr/hosts")" = "$(printf 'local HTTPS_PROXY=http://127.0.0.1:8118\nh1 X=1\nlap laptop')" ] || { echo "FAIL: an empty answer keeps the ledger and its hand edits: $(<"$MR/mgr/hosts")"; exit 1; }
+printf 'none\n' | bash "$S" setup mgr --mode >/dev/null 2>&1
+[ ! -e "$MR/mgr/hosts" ] || { echo "FAIL: a bot that is not a dev-manager keeps no ledger"; exit 1; }
+# This machine is marked laptop too when it is a Mac with a battery (uname and pmset stubbed for this one call).
+mkdir -p "$HOME/lapbin"; REALUNAME=$(command -v uname)
+printf '#!/bin/bash\n[ "$1" = -s ] && echo Darwin || exec %s "$@"\n' "$REALUNAME" > "$HOME/lapbin/uname"
+printf '#!/bin/bash\necho "Now drawing from Battery Power"\necho " -InternalBattery-0 (id=1) 80%%"\n' > "$HOME/lapbin/pmset"
+chmod +x "$HOME/lapbin/uname" "$HOME/lapbin/pmset"
+printf 'dev-manager\n\n\n' | PATH="$HOME/lapbin:$PATH" bash "$S" setup mgr --mode >/dev/null 2>&1
+[ "$(sed -n 2p "$MR/mgr/hosts")" = "local laptop" ] || { echo "FAIL: local on a Mac with a battery is marked laptop: $(<"$MR/mgr/hosts")"; exit 1; }
+printf 'dev-manager\n\n\n' | bash "$S" setup mgr --mode >/dev/null 2>&1
+[ "$(sed -n 2p "$MR/mgr/hosts")" = "local laptop" ] || { echo "FAIL: an existing laptop word on local is kept: $(<"$MR/mgr/hosts")"; exit 1; }
+rm -rf "$HOME/lapbin"; rm -f "$HOME/ssh.log" "$MON"/*
+echo "ok: setup writes the hosts ledger in dev-manager mode only (local always, each new host probed with stdin closed, a Darwin laptop marked, an unanswered host written plain and said so, a bad name skipped, an empty answer keeps hand edits, another mode removes it)"
+cd "$P"   # back to the main project after the ledger and monitor cases
+
 # A machine with the old install: setup replaces what install.sh put under
 # ~/.claude-discord with links into a compat copy of the real plugin (a project set up by the
 # previous release and not yet by this one still reaches its hooks through

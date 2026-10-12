@@ -430,6 +430,54 @@ report_old_hooks() {
   [ -z "$found" ] || echo "claude-discord: old claude-discord hook entries stay in$found (a symlink or the user-global file, never edited here; a session the plugin runs in skips them). They still serve every bot on this machine, and on every machine sharing that file, whose plugin is not loaded yet: only when each of those bots has a <bot dir>/plugin-sessions/ marker, remove them by hand: bash '$self_root/hooks/lib/old-hooks.sh'$found" >&2
 }
 
+# write_hosts <bot dir>: the manager's host ledger (<bot dir>/hosts), which
+# the backend monitor reads and which is also its on/off switch. One line per
+# host: the ssh host name, an optional `laptop` word (its own unreachability
+# is never posted: a closed lid is not an outage), then optional KEY=VALUE env
+# for the remote command. `local` (this machine, no ssh) is always there. An
+# empty answer keeps the current list; a host already listed keeps its line as
+# the owner left it. Each new host is probed once (the same ssh call also asks
+# `uname -s` and the battery, so no second ssh), its answer printed, and
+# written whatever the answer (a laptop may be asleep); a Darwin host with a
+# battery is marked laptop, a host that did not answer is not and is said so.
+write_hosts() {
+  local f=$1/hosts ans h line out old="" new="" probe
+  [ ! -f "$f" ] || old=$(cat "$f")
+  read -rp "ssh hosts to check, comma-separated (this machine is always included): " ans || ans=""
+  ans=${ans//[[:space:]]/}
+  new="# ssh host names this manager checks; \"local\" is this machine (no ssh)"$'\n'
+  line=$(printf '%s\n' "$old" | awk '$1 == "local"' | head -1)
+  if [ -z "$line" ]; then
+    line=local
+    [ "$(uname -s)" != Darwin ] || ! pmset -g batt 2>/dev/null | grep -q InternalBattery || line="local laptop"
+  fi
+  new="$new$line"$'\n'
+  if [ -z "$ans" ]; then
+    new="$new$(printf '%s\n' "$old" | awk 'NF && $1 !~ /^#/ && $1 != "local"')"
+  else
+    set -f; set -- ${ans//,/ }; set +f   # split on commas, never glob
+    for h in "$@"; do
+      [ "$h" != local ] || continue
+      case $h in -*|*[!A-Za-z0-9._@-]*) echo "claude-discord: skipping host '$h': not a plain ssh host name" >&2; continue;; esac
+      line=$(printf '%s\n' "$old" | awk -v h="$h" '$1 == h' | head -1)
+      # </dev/null: ssh would otherwise eat the rest of setup's piped answers.
+      out=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$h" 'uname -s; pmset -g batt 2>/dev/null | grep -q InternalBattery && echo battery; ~/.local/bin/claude-discord --version' </dev/null 2>&1) || :
+      probe=$(printf '%s\n' "$out" | grep -m1 '^claude-discord ' || printf '%s\n' "$out" | tail -1)
+      echo "  $h: ${probe:-no answer}"
+      if [ -z "$line" ]; then
+        line=$h
+        if printf '%s\n' "$out" | grep -qxE 'Darwin|Linux'; then
+          printf '%s\n' "$out" | grep -qx Darwin && printf '%s\n' "$out" | grep -qx battery && line="$h laptop"
+        else
+          echo "  $h: could not tell whether it is a laptop; written without the laptop word (add it by hand)"
+        fi
+      fi
+      new="$new$line"$'\n'
+    done
+  fi
+  printf '%s\n' "${new%$'\n'}" > "$f"
+}
+
 # --scope and --method, anywhere and in the = form too, for setup and install;
 # every other word lands in rest, in order.
 parse_install_flags() {
@@ -608,7 +656,7 @@ if [ "${1:-}" = setup ]; then
   case $name in
     ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
     hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
-    setup|install|update|patch|compat|refresh|health) echo "claude-discord: bot name '$name' is reserved: 'claude-discord $name' is a subcommand" >&2; exit 2;;
+    setup|install|update|patch|compat|refresh|health|monitor|tui) echo "claude-discord: bot name '$name' is reserved: 'claude-discord $name' is a subcommand" >&2; exit 2;;
   esac
   if [ "${3:-}" = --mode ]; then
     [ -z "$scope$method" ] || { echo "claude-discord: --mode changes only the mode and installs nothing; --scope and --method do not apply" >&2; exit 2; }
@@ -718,6 +766,10 @@ EOT
                                   else .allowFrom = (.allowFrom as $a | $a + ($ids - $a)) end)
        else . end'
     echo "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed."
+    write_hosts "$root/$name"
+  else
+    # Only a manager posts to #bot-health-check: any other mode has no ledger, so no monitor.
+    rm -f "$root/$name/hosts"
   fi
   ensure_hooks_symlink
   record_project
