@@ -3544,24 +3544,35 @@ echo "ok: monitor: every row of the failure table posts after its hold and not b
 # nothing, a failure too. The first pass meets the manager's .env without its token (read at POST time): the post
 # fails before any curl, and the log says why. This block needs several passes: one every 0.02 s, so its checks wait
 # for log lines, never count passes between two of them.
+# Before it, a TERM in the middle of a POST (of tm, h1's only finding then): bash runs the trap once curl is done,
+# before the post is recorded in the pass, so finish reads curl's own answer (post.out) and records a 2xx as sent. This
+# block's restart is the next monitor: tm, in h1's answer again, is not sent again (one POST in all).
 mstop
+rm -f "$HOME/curl.slept"; printf 'h1\n' > "$MR/mgr/hosts"; mdoc h1 1 tm:stale > "$MON/h1.out"
+printf '200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"; echo 0.15 > "$HOME/curl.sleep"
+ex=$(command grep -c 'exit reason=signal$' "$MB/monitor.log") || :; holder
+(cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID")
+wait_for_file "$HOME/curl.slept"; kill -TERM "$(mpid)"; wait_log $(( ex + 1 )) 'exit reason=signal$'
+kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
+[ "$(posts | grep -c '\] tm on')" = 1 ] || { echo "FAIL: the POST under way when the TERM came must have gone out once: $(posts)"; exit 1; }
 mstate --argjson n "$(date +%s)" '.hosts.h5.left_s = $n - 86401 | .hosts.h6.left_s = $n - 86401'
 export CLAUDE_DISCORD_MONITOR_PASS=0.02
 printf '%s\n' '429 {"retry_after": 0.01}' '429 {"retry_after": 60}' > "$CURL_REPLIES"; : > "$CURL_LOG"
-mdoc h1 1 nf:stale > "$MON/h1.out"; printf 'h1\n' > "$MR/mgr/hosts"
+mdoc h1 1 nf:stale tm:stale > "$MON/h1.out"
 printf "ALERT_LANG='EN'\n" >> "$MR/config.env"   # labels in English from here on; any case of en, anything else is ko
 cp "$MR/mgr/.env" "$MR/mgr/.env.keep"; : > "$MR/mgr/.env"
 mstart
 grep -q 'post h1|/home/u/ws/p|nf stale failed 000 (no DISCORD_BOT_TOKEN in .*/mgr/\.env)$' "$MB/monitor.log" && [ -z "$(posts)" ] || { echo "FAIL: a POST with no token in the manager's .env must fail before curl, logged with the reason: $(grep ' post ' "$MB/monitor.log")"; exit 1; }
 mv "$MR/mgr/.env.keep" "$MR/mgr/.env"; wait_log 1 ' failed 429 retry_after=60$'
-[ "$(posts | grep -c '\[stale\] nf')" -ge 2 ] && ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the restart must post only what is new (nf, twice: the 429 then its retry), never the patchfail already posted: $(posts)"; exit 1; }
+[ "$(posts | grep -c '\[stale\] nf')" -ge 2 ] && ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the restart must post only what is new (nf, twice: the 429 then its retry), never the patchfail already posted nor tm, sent while a TERM waited: $(posts)"; exit 1; }
 next_pass
 ! grep -q 'retry_after=0.01' "$MB/monitor.log" || { echo "FAIL: a 429 with retry_after under 10 s must be waited out and retried in the same pass: $(grep ' post ' "$MB/monitor.log")"; exit 1; }
 [ "$(jq -r '.bots["h1|/home/u/ws/p|nf"].posted // "none"' "$MB/state.json")" = none ] && jq -e '.monitor.post_failed and (.alerts[-1].status == "failed")' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a failed POST leaves the finding unposted and shows the failure: $(jq -c .monitor "$MB/state.json")"; exit 1; }
 # A stray file in holders/ named other than <kind>-<digits> (here a copy of the live record): removed, never read as a
 # pid, which would break the holders' JSON and with it every pass.
-cp "$MB/holders/tui-$HPID" "$MB/holders/tui-${HPID}x"; np=$(passes); wait_log $(( np + 2 )) ' pass hosts='
+cp "$MB/holders/tui-$HPID" "$MB/holders/tui-${HPID}x"; next_pass
+n=0; while [ -e "$MB/holders/tui-${HPID}x" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
 [ ! -e "$MB/holders/tui-${HPID}x" ] && ! grep -q 'pass failed' "$MB/monitor.log" || { echo "FAIL: a holder record whose name is not <kind>-<digits> must be dropped, never fail a pass: $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
 printf '200 {}\n' > "$CURL_REPLIES"
 wait_log 1 'post h1\|/home/u/ws/p\|nf stale 200$'; next_pass
@@ -3569,7 +3580,7 @@ wait_log 1 'post h1\|/home/u/ws/p\|nf stale 200$'; next_pass
   ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the pending post must be sent on a later pass, and nothing else posted: $(posts)"; exit 1; }
 [ "$(posts | tail -n 1 | jq -r .content)" = "$(printf "<@222> [stale] nf on h1 (~/ws/p)\nreason: why stale\nfix: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord refresh nf --force'")" ] || { echo "FAIL: ALERT_LANG=EN must give English labels: $(posts | tail -n 1)"; exit 1; }
 jq -e --arg sp "h2|/home/u/it's \$x here|sp" '(.hosts | keys) == ["h1", "h2", "h3", "h4", "lap", "lap2", "local"]
-  and (.bots | keys) == ["h1|/home/u/ws/p|nf", $sp, "h3|/home/u/ws/p|y", "h3|/home/u/ws/p|z", "local|/home/u/ws/p|r1"]
+  and (.bots | keys) == ["h1|/home/u/ws/p|nf", "h1|/home/u/ws/p|tm", $sp, "h3|/home/u/ws/p|y", "h3|/home/u/ws/p|z", "local|/home/u/ws/p|r1"]
   and (.hosts.h4 | .posted == "blind" and (.left_s | type) == "number") and (.hosts.h1 | has("left_s") | not)' "$MB/state.json" >/dev/null &&
   grep -q ' drop h5|-$' "$MB/monitor.log" && grep -q ' drop h6|/home/u/ws/p|l1$' "$MB/monitor.log" && grep -q ' left h4|- (kept a day)$' "$MB/monitor.log" ||
   { echo "FAIL: hosts out of the ledger are kept a day with their bots and posted, then dropped with them; bots gone from an answer are dropped; all logged: $(jq -c '[(.hosts | keys), (.bots | keys), .hosts.h4]' "$MB/state.json")"; exit 1; }
@@ -3586,25 +3597,7 @@ wait_log $(( ex + 1 )) 'exit reason=no-holders$'
   jq -e '.bots["h1|/home/u/ws/p|x1"].posted == "stale" and .bots["h1|/home/u/ws/p|x2"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a holder gone between posts ends the posting (the rest stay pending), what was sent recorded, nf not sent again: $(posts) $(jq -c '.bots | map_values(.posted)' "$MB/state.json")"; exit 1; }
 jq -e '.hosts.local | .verdict == "blind" and (.detail | test("did not finish")) and (has("left_s") | not)' "$MB/state.json" >/dev/null || { echo "FAIL: a local laptop past the cap is blind (it alerts), not hostdown, and a host back in the ledger is no longer left: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
-# A TERM in the middle of a POST: bash runs the trap once curl is done, before the post is recorded in the pass, so finish
-# reads curl's own answer (post.out) and records a 2xx as sent. The next monitor does not send it again: one POST in all.
-rm -f "$MON/local.sleep" "$HOME/curl.slept"; printf 'h1\n' > "$MR/mgr/hosts"; mdoc h1 1 nf:stale tm:stale > "$MON/h1.out"
-printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"; echo 0.2 > "$HOME/curl.sleep"
-ex=$(command grep -c 'exit reason=signal$' "$MB/monitor.log") || :; holder
-(cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID")
-wait_for_file "$HOME/curl.slept"; kill -TERM "$(mpid)"; wait_log $(( ex + 1 )) 'exit reason=signal$'
-kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
-mstart
-[ "$(posts | grep -c .)" = 1 ] && [ "$(posts | grep -c '\] tm on')" = 1 ] && [ "$(jq -r '.bots["h1|/home/u/ws/p|tm"].posted' "$MB/state.json")" = stale ] ||
-  { echo "FAIL: a POST that went out while a TERM waited must be recorded as sent, not sent again by the next monitor: $(posts)"; exit 1; }
-mstop
-# A reducer that fails (here on a state whose hosts is no object) is said in state.json, for the TUI's red bar, not only
-# in monitor.log; the next block's first pass clears it.
-mstate '.hosts = "x"'; holder; (cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID"); wait_log 1 'pass failed: the reducer'
-n=0; while ! jq -e '.monitor.error | startswith("the reducer rejected its input at ")' "$MB/state.json" >/dev/null 2>&1 && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
-[ "$n" -lt 100 ] || { echo "FAIL: a failed reducer must write state.json with monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
-mstop
-echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; bots that left are dropped and logged, hosts that left kept a day (frozen, posted kept) then dropped; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting; a POST under way when a TERM comes is recorded once it went out; a stray holder file is dropped; a failed reducer is written to state.json"
+echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; bots that left are dropped and logged, hosts that left kept a day (frozen, posted kept) then dropped; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting; a POST under way when a TERM comes is recorded once it went out; a stray holder file is dropped"
 
 # Cadence and self-update, counted, never timed. date and sleep are stubs for this monitor: date reads $HOME/clock,
 # which each local health run moves 1000 s on, and logs D for a pass's start stamp (the %s call); sleep logs its
@@ -3619,7 +3612,7 @@ CK="$HOME/clockbin"; mkdir -p "$CK"; echo 2000000000 > "$HOME/clock"; : > "$HOME
 printf '#!/bin/bash\ncase $* in *%%s*) echo D >> "$HOME/clk.log";; esac\nexec %s -d "@$(<"$HOME/clock")" "$@"\n' "$(command -v date)" > "$CK/date"
 printf '#!/bin/sh\necho "$1" >> "$HOME/clk.log"\nexec /bin/sleep "$1"\n' > "$CK/sleep"; chmod +x "$CK/date" "$CK/sleep"   # /bin/sleep: steps and ticks, none a duration the sleep stub remaps
 printf 'local\n' > "$MR/mgr/hosts"; mdoc lambda 0 r1:stale > "$MON/local.out"; echo 0.02 > "$MON/local.sleep"
-mstate '.hosts = {} | .bots = {}'; printf '200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"
+mstate '.hosts = {} | .bots = {} | .monitor.error = "an earlier pass failed"'; printf '200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"
 want=$(( $(starts) + 2 )); np=$(passes); holder
 (cd "$MP" && PATH="$CK:$PATH" CLAUDE_DISCORD_MONITOR_PASS=0.05 CLAUDE_DISCORD_MONITOR_HOST_CAP=5 bash "$S" monitor --ensure mgr --holder tui "$HPID")
 wait_log $(( np + 3 )) ' pass hosts='
@@ -3639,14 +3632,16 @@ wait_log 1 'restart: monitor\.sh changed$'; wait_log "$want" 'Z start$'; next_pa
 [ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 1 ] && [ "$(posts | grep -c .)" = 1 ] ||
   { echo "FAIL: one restart, and the stale already posted is not posted again: $(posts)"; exit 1; }
 # An mtime an hour ahead is one change (a restart), then the new process knows it: no more restarts over passes.
-touch -d '+1 hour' "$PC/monitor/monitor.sh"; wait_log 2 'restart: monitor\.sh changed$'; np=$(passes); wait_log $(( np + 2 )) ' pass hosts='
-[ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 2 ] && [ "$(mpid)" = "$rp" ] ||
-  { echo "FAIL: a monitor.sh with a future mtime must not restart the monitor again and again: $(command grep -c 'restart: monitor' "$MB/monitor.log") restarts"; exit 1; }
+# The restart count is checked after the broken file's passes below, which are more than enough for another restart.
+# The new process's start line comes after it took its own signature: the broken file below must come later.
+touch -d '+1 hour' "$PC/monitor/monitor.sh"; wait_log 2 'restart: monitor\.sh changed$'; wait_log $(( want + 1 )) 'Z start$'
 # A monitor.sh that does not parse (a git pull caught mid-write) is not exec'd: one log line, the monitor keeps passing;
 # the valid file after it is one more restart.
 cp "$PC/monitor/monitor.sh" "$HOME/monitor.good"; { cat "$HOME/monitor.good"; echo ')'; } > "$PC/monitor/monitor.sh"
-wait_log 1 'update skipped: monitor\.sh does not parse'; np=$(passes); wait_log $(( np + 2 )) ' pass hosts='
-[ "$(command grep -c 'update skipped' "$MB/monitor.log")" = 1 ] && [ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 2 ] && [ "$(mpid)" = "$rp" ] ||
+wait_log 1 'update skipped: monitor\.sh does not parse'; next_pass
+[ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 2 ] && [ "$(mpid)" = "$rp" ] ||
+  { echo "FAIL: a monitor.sh with a future mtime must not restart the monitor again and again: $(command grep -c 'restart: monitor' "$MB/monitor.log") restarts"; exit 1; }
+[ "$(command grep -c 'update skipped' "$MB/monitor.log")" = 1 ] ||
   { echo "FAIL: a monitor.sh that does not parse is not exec'd, logged once, the monitor keeps passing: $(tail -4 "$MB/monitor.log")"; exit 1; }
 cp "$HOME/monitor.good" "$PC/monitor/monitor.sh"; wait_log 3 'restart: monitor\.sh changed$'; next_pass
 [ "$(mpid)" = "$rp" ] || { echo "FAIL: the valid monitor.sh after a broken one restarts the monitor, same process"; exit 1; }
@@ -3680,12 +3675,17 @@ echo "ok: session_pid finds the nearest claude process within two levels, never 
 # session is a perl process titled .../claude/versions/9.9.9 that runs the hook as its child. mgr is a dev-manager
 # with a ledger (h1 and local laptop, from the block above).
 printf '{"session_id":"sMon","source":"compact"}' > "$HOME/ss.json"
+mstate '.hosts = "x"'   # this monitor's reducer fails every pass (a state whose hosts is no object): below
 want=$(( $(starts) + 1 ))
 perl -e '$0 = shift @ARGV; open(STDIN, "<", shift @ARGV) or die; system(@ARGV); sleep 30' "$FK/claude/versions/9.9.9" "$HOME/ss.json" \
   env CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$PC/hooks/turn/on-session-start" >/dev/null 2>&1 &
 HPID=$!; KILL_AT_EXIT="$KILL_AT_EXIT $HPID"
 wait_log "$want" 'Z start$'
 [ -f "$MB/holders/session-$HPID" ] || { echo "FAIL: the manager's SessionStart must register its session as a holder: $(ls "$MB/holders")"; exit 1; }
+# A reducer that fails is said in state.json, for the TUI's red bar, not only in monitor.log (a pass that goes through
+# clears it: the cadence block above).
+n=0; while ! jq -e '.monitor.error | startswith("the reducer rejected its input at ")' "$MB/state.json" >/dev/null 2>&1 && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+[ "$n" -lt 100 ] || { echo "FAIL: a failed reducer must write state.json with monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
 # Killed without its trap (kill -9 here; an OOM or a self-update that broke end the same way), the monitor leaves its pid
 # in state.json. The manager's next prompt (on-prompt, under the same kind of session) sees that pid dead, with no fork,
 # and ensures the monitor again, detached, as SessionStart does.
@@ -3705,7 +3705,7 @@ kill "$UP" 2>/dev/null || :; wait "$UP" 2>/dev/null || :
 mstop; rm -f "$HOME/ss.json" "$HOME/up.json"
 # A live pid that is no monitor (reused by another program) is dead to it too.
 mstate --argjson p "$$" '.monitor.pid = $p'; ! mon_alive || { echo "FAIL: a live pid that runs no monitor.sh is no monitor"; exit 1; }
-echo "ok: a dev-manager's SessionStart registers its session (the nearest claude process) as a holder and starts the monitor, which exits with that session; its next prompt starts a monitor killed without its trap again"
+echo "ok: a dev-manager's SessionStart registers its session (the nearest claude process) as a holder and starts the monitor, which exits with that session; its next prompt starts a monitor killed without its trap again; a failed reducer is written to state.json"
 
 # And it leaves nothing on the hook's pipe: against a plugin root copy whose claude-discord takes 3 s, the caller (Claude
 # Code reads the hook's stdout to EOF; here perl does) sees EOF at once, the output is the JSON line alone, and the stub
