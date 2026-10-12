@@ -73,8 +73,8 @@ def alive(pid: int, bot: str) -> bool:
 def header_lines(state: dict, note: str = "", stopped: str | None = None, refused: bool = False) -> tuple[str, str | None]:
     """The header text and the red bar's text (None when there is nothing to warn about). `note` is why
     `monitor --ensure` failed, when it did: the one place a refusal is visible. `stopped`: when the `stopped` marker
-    (monitor --stop) was left, if it stands. `refused`: the `refused` marker (a detached start met a monitor lock this
-    side cannot see) stands."""
+    (monitor --stop) was left, if it stands. `refused`: this side's `refused.<pid namespace id>` marker (a detached start met a monitor lock this
+    side cannot see; a start that gets through clears it) stands."""
     m = state.get("monitor") or {}
     holders = ", ".join(f"{h.get('kind')} {h.get('pid')}" for h in m.get("holders") or []) or "none"
     pid = m.get("pid")
@@ -88,7 +88,7 @@ def header_lines(state: dict, note: str = "", stopped: str | None = None, refuse
     elif stopped is not None or m.get("stopped_by_user"):   # monitor --stop: nothing starts it until monitor --start
         bar = (f"stopped by you{' at ' + stopped if stopped else ''} (monitor --stop); "
                f"start it again: claude-discord monitor --start {state.get('manager', '?')}")
-    elif refused:   # held until monitor --start, like the stopped marker
+    elif refused:   # held until a start gets through (monitor --start), like the stopped marker
         bar = (f"auto-start refused here: another side holds the monitor lock (shared home?). "
                f"Start here with: claude-discord monitor --start {state.get('manager', '?')}")
     elif not pid:

@@ -237,6 +237,7 @@ keeper_alive() {
   local d="$HOME/.claude-discord/records/monitor/$bot_name" f p s a0 a1 a2 a3 a4 ns
   [ ! -e "$d/stopped" ] || return 0
   # The marker is per pid namespace (monitor.sh names it); the readlink fork happens only when some marker exists.
+  # Decided: a marker of a namespace that no longer exists is not removed (it costs one readlink per prompt).
   for f in "$d"/refused*; do
     [ -e "$f" ] || break
     ns=""; [ ! -L /proc/self/ns/pid ] || { ns=$(readlink /proc/self/ns/pid); ns=${ns//[!0-9]/}; ns=${ns:+.$ns}; }
