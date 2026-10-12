@@ -46,8 +46,11 @@ enables it per session with `--settings`.
 - **ledger**: `<project>/.claude/discord-agents/<manager bot>/hosts`, the ssh
   hosts a manager bot's monitor checks. Its existence is the monitor's on/off
   switch.
-- **holder**: a process the monitor lives for: an open TUI or the manager
-  session. The monitor exits within 30 s of the last one.
+- **holder**: a process the monitor lives for: an open TUI, the manager
+  session or a keeper. The monitor exits within 30 s of the last one.
+- **keeper**: `claude-discord monitor --keep <manager>`, a holder that is
+  neither a person nor a session: it keeps the monitor up with nothing else
+  open. `tui` starts one.
 - **finding**: a verdict that needs a human (`down`, `stale`, `duplicate`,
   `unreachable`, `nostate`, `throttled`, `apierror`, `patchfail`, `hostdown`,
   `blind`). `ok` and `busy` are not findings; `noreach` is logged, never posted.
@@ -230,6 +233,7 @@ claude-discord setup alpha --mode     # change only alpha's mode (and, for dev-m
 claude-discord refresh alpha          # replace the running session with a fresh one, from its handoff
 claude-discord health                 # is every bot in this project still answering? see below
 claude-discord tui [<manager>]        # a read-only view of the manager bot's monitor, from any directory; see The monitor and the TUI
+claude-discord monitor --keep <manager>   # keep that monitor up with no TUI or session (foreground); --stop <manager> ends both
 claude-discord update [--all]         # see Install
 ```
 
@@ -820,7 +824,7 @@ posted alerts in a `[health] <bot>` thread. Both are gone: an OS
 scheduler outlives every session and brings a stopped setup back on the next
 boot without anyone seeing it. `health --uninstall-timer` removes one an older
 version installed. Alerts now come from a manager bot's monitor (next
-section), which runs only while a TUI or the manager session holds it.
+section), which runs only while a TUI, the manager session or a keeper holds it.
 
 ## The monitor and the TUI (manager bots)
 
@@ -830,7 +834,9 @@ installed in the OS: no launchd, systemd or cron.
 
 ```
 claude-discord setup <manager> --mode    # dev-manager, then: ssh hosts to check
-claude-discord tui [<manager>]           # a read-only view; starts the monitor if none runs; works outside a project
+claude-discord tui [<manager>]           # a read-only view; starts the monitor and a keeper if none runs; works outside a project
+claude-discord monitor --keep <manager>  # the keeper, in the foreground (tmux, a container entrypoint, systemd)
+claude-discord monitor --stop <manager>  # end the keeper and the monitor
 ```
 
 **Ledger.** `setup` in dev-manager mode asks `ssh hosts to check` and writes
@@ -855,7 +861,7 @@ it. Deleting the file turns the monitor off. Two managers must not list the
 same host, or its bots are reported twice; nothing enforces that across
 owners.
 
-**Monitor.** One process per manager bot, started by the TUI or by the
+**Monitor.** One process per manager bot, started by the TUI, a keeper or the
 manager session's SessionStart hook, and alive only while one of them is: it
 exits within 30 s of the last. Every 5 minutes it runs, per host,
 `ssh -o BatchMode=yes -o ConnectTimeout=8 <host> 'env <KEY=VALUE...>
@@ -872,13 +878,42 @@ followed at once by the next). After `claude-discord update` a running
 monitor goes on as the new version once the new file has held still for a
 pass, as the same process, and posts nothing it already posted. A monitor
 killed without cleaning up (`kill -9`, out of memory) is started again by the
-manager session's next prompt, or by an open TUI.
+manager session's next prompt, by an open TUI, or by a keeper within a minute.
+
+**Keeper.** `claude-discord monitor --keep <manager>` runs in the
+foreground, registers itself as a holder of kind `keeper` and runs the same
+`--ensure` the hooks run every 60 s, so a dead monitor comes back with no TUI
+and no session open. It exits 1 with the reason for a bot with no ledger or
+not in dev-manager mode, exits 0 when a keeper already runs for that bot (one
+per bot), and removes its record on TERM or INT. `claude-discord tui` starts
+one in a session of its own (it says why it did not in `monitor.log`), so
+**quitting the TUI leaves the monitor running**; the TUI's header shows
+`keeper <pid>` among the holders and the stop command.
+`claude-discord monitor --stop <manager>` TERMs the keeper, then the monitor
+(an open TUI or manager session starts the monitor again; close those first).
+claude-discord installs no OS scheduler (no launchd, cron or systemd unit):
+run the keeper where something already keeps processes, e.g. a tmux window,
+or a container's entrypoint:
+
+```
+# entry.sh (lmd79 style): from the manager's project, before the main process
+cd ~/workspace/my-project && claude-discord monitor --keep <manager> &
+```
+
+A systemd unit you write yourself works the same (`ExecStart=` the command,
+`WorkingDirectory=` the project).
 
 A host and a container that share `$HOME` share `~/.claude-discord` but not
-their process ids: run the TUI and the manager session on the same side, and
-list that machine once in the ledger. Otherwise each side reads the other's
-holder as dead (the monitor may exit under an open TUI), and a second ledger
-entry for the other side reports every bot twice, one side as `down`.
+their process ids: run the TUI, the keeper and the manager session on the
+side where the bots run, and list that machine once in the ledger. Otherwise
+each side reads the other's holder as dead (the monitor may exit under an open
+TUI), and a second ledger entry for the other side reports every bot twice,
+one side as `down`. A keeper on the wrong side would keep a monitor there that
+reads every bot as down and posts false alerts, so `--keep` (and the TUI's
+keeper) refuses, exit 1, when the lock is held and the pid the lock file names
+is no monitor of that bot this side can see: "the monitor lock is held by a
+monitor this side cannot see; run --keep where the bots run". It refuses only;
+it never takes the lock over.
 
 Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 
@@ -887,13 +922,16 @@ Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 | `lock` | the single-instance lock (`flock` through perl); holds the running monitor's pid, and a monitor whose lock file was removed or replaced exits at its next tick |
 | `state.json` | what the TUI shows; kept after exit, and what keeps a restart from repeating a finding |
 | `monitor.log`, `monitor.log.1` | one line per event, 256 KiB each at most |
-| `holders/<kind>-<pid>` | one record per open TUI or manager session |
+| `holders/<kind>-<pid>` | one record per open TUI (`tui`), manager session (`session`) or keeper (`keeper`): `<pid> <start time> <kind>` |
 | `pass.out` | one host's answer, only during a pass |
 | `post.out` | one post's answer and status, only during a pass |
 
 **Alerts.** One message per change, posted with the manager bot's token to
 channel `1558283274487341137`, and one `[recovered]` line when the bot is
-back. The channel is write-only: it is not in any bot's `access.json`, so a
+back. Two or more bots of one host found `down` in one pass are one
+message listing them (each owner mentioned once), and so are two or more of
+them back from `down`; what was posted is still kept per bot, so a bot that
+comes back alone gets its own `[recovered]` line. The channel is write-only: it is not in any bot's `access.json`, so a
 message there wakes no session.
 
 ```
@@ -918,7 +956,7 @@ translated.
 
 **TUI.** `claude-discord tui` shows the monitor's state (outside a project it picks among the manager bots of the projects `claude-discord` has recorded: the one, or a numbered list at a terminal, else exit 2 naming them; `tui <bot>` picks the project that has it): hosts, bots
 (findings first), `Enter` for a row's detail and recovery command, `a` for
-the last 50 posts, `q` to quit. A red bar says when the monitor is stopped,
+the last 50 posts, `q` to quit (the monitor keeps running while its keeper does; see Keeper). A red bar says when the monitor is stopped,
 its pid is gone (killed without cleaning up; the TUI starts it again, once
 per 30 s at most), the last pass failed (the state could not be updated;
 `monitor.log` has the line) or the last post failed. A host taken out of
@@ -928,8 +966,9 @@ before any of its bots was known is one row with bot `-` (it alerts as
 
 **Expected.** With the TUI open, stopping a bot by hand gives one `[down]`
 message within 10 minutes and one `[recovered]` line after it is started
-again. A pass that sees nothing new posts nothing. With the TUI closed and
-the manager session gone, no monitor process is left 30 s later.
+again. A pass that sees nothing new posts nothing. After
+`claude-discord monitor --stop <manager>`, with the TUI closed and the
+manager session gone, no monitor or keeper process is left 30 s later.
 
 **Rollback.** Delete `<manager>/hosts`; `rm -r
 ~/.claude-discord/records/monitor ~/.claude-discord/records/projects` removes

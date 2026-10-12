@@ -156,7 +156,7 @@ All under `~/.claude-discord/records/monitor/<bot>/`, mode 0700 directory,
 | `lock` | created once; the monitor writes its pid there | fixed; the flock target. The monitor checks every tick and before each post that it still holds its own pid, and leaves (`exit reason=lock-lost`) when the file was removed or replaced, which let a second monitor start (plan deviation 15) |
 | `state.json` | monitor only, via `state.json.tmp` (same dir, fixed name) and rename | kept after exit so the TUI shows the last state |
 | `monitor.log`, `monitor.log.1` | monitor | capped at 256 KiB; on overflow `.log` replaces `.log.1` |
-| `holders/<kind>-<pid>` | the TUI and the hook | removed by their owner on exit, by the monitor when dead, all of them by the monitor on a signal exit (a no-holders exit keeps any that appeared at the last moment, for the exit race; the next start prunes stale ones) |
+| `holders/<kind>-<pid>` | the TUI, the hook and the keeper (plan deviation 17) | removed by their owner on exit, by the monitor when dead, all of them by the monitor on a signal exit (a no-holders exit keeps any that appeared at the last moment, for the exit race; the next start prunes stale ones) |
 
 Plus one machine-wide record, `~/.claude-discord/records/projects`: one
 project root per line, written by `setup` and by a `health` run in a project
@@ -252,6 +252,10 @@ headers, never a token.
 - **Start.** The TUI writes `holders/tui-<pid>`, then runs `monitor --ensure`.
   The hook writes `holders/session-<pid>`, then runs `monitor --ensure` in
   the background and returns. Either way at most one monitor holds the lock.
+  A keeper (`monitor --keep <bot>`, started by hand or by `tui`) writes
+  `holders/keeper-<pid>` and runs `--ensure` every 60 s, so the monitor
+  outlives every TUI and session; `monitor --stop <bot>` ends both (plan
+  deviation 17).
 - **Holder record.** `<pid> <start time> <kind>`, the start time from `ps -o
   lstart= -p <pid>` so a reused pid does not count as alive. The TUI's pid is
   its own. The session's pid is the hook's **nearest** ancestor that is a
