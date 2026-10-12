@@ -3986,7 +3986,7 @@ rc=0; out=$(cd "$P" && bash "$S" tui alpha 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'no hosts ledger' <<<"$out" || { echo "FAIL: tui for a bot without a ledger must refuse (rc=$rc): $out"; exit 1; }
 PFB=$(cat "$HOME/.claude-discord/records/projects" 2>/dev/null || :); : > "$HOME/.claude-discord/records/projects"   # nothing recorded: the none case
 rc=0; out=$(cd / && bash "$S" tui mgr 2>&1) || rc=$?
-[ "$rc" = 1 ] && grep -q 'no project above /' <<<"$out" && ! grep -q '/\.claude/discord-agents/' <<<"$out" || { echo "FAIL: tui outside any project must say there is no project above, not name /.claude/discord-agents/<bot> (rc=$rc): $out"; exit 1; }
+[ "$rc" = 1 ] && grep -q 'no project above / with a manager bot' <<<"$out" && ! grep -q '/\.claude/discord-agents/' <<<"$out" || { echo "FAIL: tui outside any project must say there is no project above, not name /.claude/discord-agents/<bot> (rc=$rc): $out"; exit 1; }
 # Two dev-manager bots with a ledger of their own (not borrowed from other blocks' fixtures): which one is not guessed.
 TP="$HOME/tuiproj"; mkdir -p "$TP/.claude/discord-agents/m1" "$TP/.claude/discord-agents/m2"
 for b in m1 m2; do echo dev-manager > "$TP/.claude/discord-agents/$b/mode"; echo local > "$TP/.claude/discord-agents/$b/hosts"; done
@@ -3999,6 +3999,9 @@ printf '%s\n' "$HOME/gone" "$MP" > "$HOME/.claude-discord/records/projects"
 rm -f "$HOME/uv.args" "$HOME/uv.cwd"
 (cd "$NP" && bash "$S" tui 2>/dev/null </dev/null) || { echo "FAIL: tui outside a project must use the one recorded manager bot (a missing folder skipped)"; exit 1; }
 [ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord" ] && [ "$(<"$HOME/uv.cwd")" = "$(cd -P "$MP" && pwd -P)" ] || { echo "FAIL: tui outside a project must run the recorded bot from its project root: $(cat "$HOME/uv.args" "$HOME/uv.cwd" 2>&1)"; exit 1; }
+# Inside a plain bot's project (no manager there): the recorded manager, as from outside any project.
+rm -f "$HOME/uv.args" "$HOME/uv.cwd"
+(cd "$P" && bash "$S" tui 2>/dev/null </dev/null) && [ "$(<"$HOME/uv.cwd")" = "$(cd -P "$MP" && pwd -P)" ] || { echo "FAIL: tui in a project with no manager bot must use the recorded manager: $(cat "$HOME/uv.args" "$HOME/uv.cwd" 2>&1)"; exit 1; }
 printf '%s\n' "$MP" "$TP" > "$HOME/.claude-discord/records/projects"
 (cd "$NP" && bash "$S" tui m2 2>/dev/null </dev/null) && [ "$(<"$HOME/uv.cwd")" = "$(cd -P "$TP" && pwd -P)" ] && grep -q -- '--bot m2 ' "$HOME/uv.args" || { echo "FAIL: tui <bot> outside a project must pick the project that has it: $(cat "$HOME/uv.args" "$HOME/uv.cwd" 2>&1)"; exit 1; }
 rc=0; out=$(cd "$NP" && bash "$S" tui </dev/null 2>&1) || rc=$?

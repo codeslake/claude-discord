@@ -1821,8 +1821,16 @@ if [ "${1:-}" = tui ]; then
   # From anywhere inside the project, like the shim: up to the directory that holds .claude/discord-agents.
   here=$PWD
   while [ ! -d "$PWD/.claude/discord-agents" ] && [ "$PWD" != / ]; do cd ..; done
-  if [ ! -d "$PWD/.claude/discord-agents" ]; then
-    # No project above: the recorded ones (records/projects, as health --all reads it), the manager bots with a ledger.
+  # A project above with no manager bot (or not the one named), e.g. a plain bot's project, counts as none; a bot named
+  # that lives here stays here, so its own refusal (no ledger) is the one said.
+  mgr_here=""
+  [ -z "$bot" ] || [ ! -d "$PWD/.claude/discord-agents/$bot" ] || mgr_here=1
+  for d in "$PWD"/.claude/discord-agents/*/; do
+    d=${d%/}
+    [ -f "$d/hosts" ] && [ "$(cat "$d/mode" 2>/dev/null)" = dev-manager ] && { [ -z "$bot" ] || [ "$bot" = "${d##*/}" ]; } && { mgr_here=1; break; }
+  done
+  if [ -z "$mgr_here" ]; then
+    # No manager project above: the recorded ones (records/projects, as health --all reads it), the manager bots with a ledger.
     cands="" n=0 pf=$helpers/records/projects
     if [ -f "$pf" ]; then
       while IFS= read -r p || [ -n "$p" ]; do
@@ -1837,7 +1845,7 @@ if [ "${1:-}" = tui ]; then
         done
       done < "$pf"
     fi
-    [ "$n" -gt 0 ] || { echo "claude-discord: tui: no project above $here, and no recorded project has a dev-manager bot${bot:+ '$bot'} with a hosts ledger (claude-discord setup <bot> --mode writes one)" >&2; exit 1; }
+    [ "$n" -gt 0 ] || { echo "claude-discord: tui: no project above $here with a manager bot, and no recorded project has a dev-manager bot${bot:+ '$bot'} with a hosts ledger (claude-discord setup <bot> --mode writes one)" >&2; exit 1; }
     if [ "$n" = 1 ]; then
       pick=${cands%$'\n'}
     else
