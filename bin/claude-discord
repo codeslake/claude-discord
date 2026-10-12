@@ -372,31 +372,47 @@ same_tree() {
 # by mkdir: atomic on every filesystem they share, across containers and
 # kernels, where pids collide and flock may not reach. The copy is built first,
 # in a random-named directory (no pid: unique across kernels), so the lock
-# covers only a re-check and the renames. A lock older than any swap (30 s) is
-# a dead writer's: it is broken by renaming it to a random name, which exactly
-# one waiter wins. The swap onto compat/ is perl's rename(2), not mv: a writer
+# covers only a re-check and the renames. The lock holds an owner token (the
+# random suffix of that directory), and a writer releases only a lock holding
+# its own: a holder stalled past the stale bound (SIGSTOP, a sleeping laptop)
+# has lost its lock to the next one and must leave it. A lock older than any
+# swap (30 s) is a dead writer's: it is broken by renaming it to a name of our
+# own, which exactly one breaker wins, and dropped only if it is the lock judged
+# stale (same inode and token); a newer one (another breaker already re-took
+# it) is renamed back. The swap onto compat/ is perl's rename(2), not mv: a writer
 # of an older release takes no lock, and mv would move our copy INTO a compat/
 # it just put in place; rename(2) fails instead. A subshell, so its traps (our
 # old copy back if compat/ is gone, the lock released) stay out of the caller.
+# The bounds are read only here, so the suite can shrink them.
 sync_compat() (
   c=$helpers/compat o=$helpers/compat.old l=$helpers/compat.lock t0=$SECONDS
-  n=$(mktemp -d "$c.new.XXXXXX") && k=$(mktemp -u "$l.broken.XXXXXX") || return 1
-  b=$n/compat
+  st=${CLAUDE_DISCORD_COMPAT_STALE_S:-30} gu=${CLAUDE_DISCORD_COMPAT_WAIT_S:-40} ps=${CLAUDE_DISCORD_COMPAT_STEP_S:-0.1}
+  n=$(mktemp -d "$c.new.XXXXXX") || return 1
+  b=$n/compat tok=${n##*.}   # unique among writers while $n exists (mktemp -d), and no pid
   trap 'rm -rf "$n"' EXIT; trap 'exit 1' INT TERM HUP
+  # compat/ gone and compat.old there: a writer killed between its renames left the only copy there, it goes back; else compat.old goes.
+  undo() { has_path "$c" || [ ! -d "$o" ] || perl -e 'rename shift, shift' "$o" "$c" || :; ! has_path "$c" || ! has_path "$o" || rm -rf "$o"; }
   mkdir "$b" "$b/hooks" || return 1
   for t in turn peers lib autoresearchclaw; do cp -R "$1/hooks/$t" "$b/hooks/" || return 1; done
   cp -R "$1/tools" "$1/rules" "$b/" && head_sha "$1" > "$b/VERSION" || return 1
   until mkdir "$l" 2>/dev/null; do
-    perl -e '@s = lstat $ARGV[0]; exit !(@s && $s[9] < time - 30 && rename($ARGV[0], $ARGV[1]) && rmdir($ARGV[1]))' "$l" "$k" && continue
-    # Past the 30 s stale bound, so a dead holder's lock is broken before a waiter gives up.
-    [ "$SECONDS" -lt $((t0 + 40)) ] || { echo "claude-discord: $l stays held; compat/ not refreshed" >&2; return 1; }
-    sleep 0.1
+    # Judged stale: the lock's inode and token, so the break can tell it from a newer lock at the same path.
+    id=$(perl -e '@s = lstat $ARGV[0] or exit; $s[9] < time - $ARGV[1] or exit; open F, "<", "$ARGV[0]/owner"; chomp($t = <F> // ""); print "$s[1] $t"' "$l" "$st")
+    [ -n "$id" ] && perl -e 'use File::Path "rmtree"; ($l, $k, $id) = @ARGV; rename $l, $k or exit 1; @s = lstat $k; open F, "<", "$k/owner"; chomp($t = <F> // "");
+      if ("$s[1] $t" eq $id) { rmtree $k; exit 0 } rename $k, $l; exit 1' "$l" "$l.broken.$tok" "$id" && continue
+    # The give-up bound is past the stale bound, so a dead holder's lock is broken before a waiter gives up.
+    [ "$SECONDS" -lt $((t0 + gu)) ] || { echo "claude-discord: $l stays held; compat/ not refreshed" >&2; return 1; }
+    sleep "$ps"
   done
   # set -e is back on inside a trap: a failing command would skip the rest (the lock release) and set our status, hence || :.
-  # shortcut: a holder stalled past 30 s releases the next holder's lock here; rename(2) still keeps compat/ whole.
-  trap 'rm -rf "$n"; has_path "$c" || [ ! -d "$o" ] || perl -e "rename shift, shift" "$o" "$c" || :; rm -rf "$o"; rmdir "$l" 2>/dev/null || :' EXIT
-  # Only we write now: compat.old is a dead holder's; an old compat.new.* or compat.old.* a dead builder's or an older release's.
-  rm -rf "$o"; perl -MFile::Path=rmtree -e 'for (@ARGV) { @s = lstat; rmtree $_ if @s && $s[9] < time - 600 }' "$c".new.* "$c".old.*
+  trap 'rm -rf "$n"; undo; IFS= read -r t 2>/dev/null < "$l/owner" && [ "$t" = "$tok" ] && rm -rf "$l" || :' EXIT
+  printf '%s\n' "$tok" > "$l/owner" || return 1
+  # Only we write now. An old compat.new.*, compat.old.* or compat.lock.broken.* is a dead writer's or an older release's
+  # (a fresh compat.new.* may be a writer still building); perl only when there is one besides ours.
+  undo
+  for t in "$c".new.* "$c".old.* "$l".broken.*; do
+    [ "$t" = "$n" ] || ! has_path "$t" || { perl -MFile::Path=rmtree -e 'for (@ARGV) { @s = lstat; rmtree $_ if @s && $s[9] < time - 600 }' "$c".new.* "$c".old.* "$l".broken.*; break; }
+  done
   [ -d "$c" ] && [ ! -L "$c" ] && same_tree "$c" "$b" && return 0   # current already (another writer's swap while we built or waited)
   { ! has_path "$c" || mv "$c" "$o"; } && perl -e 'rename shift, shift or exit 1' "$b" "$c" && return 0
   [ -d "$c" ] && same_tree "$c" "$b"   # an older release's writer put a copy in first: fine if it is ours; else the trap restores
@@ -405,15 +421,17 @@ sync_compat() (
 # `patch --compat`). A compat/ whose VERSION is not this plugin's HEAD sha (a
 # `git pull` by hand in the source clone, a copy older than the stamp) or
 # that holds a file newer than its VERSION (the previous release's install.sh
-# writing through the links) is rebuilt; none at all is left to setup. Only by
+# writing through the links) is rebuilt; none at all is left to setup (unless
+# a killed writer left compat.old, which goes back). Only by
 # the source clone compat/ is built from (as in remove_old_install): with no
 # source clone, compat/ is built by setup and update only, else two clones of
 # different versions would flip it back and forth at each bot start.
 compat_if_stale() {
   local c=$helpers/compat have=""
-  [ -d "$c" ] && [ ! -L "$c" ] || return 0
+  # An absent compat/ with compat.old beside it: a writer killed between its renames; sync_compat puts it back.
+  [ -d "$c" ] && [ ! -L "$c" ] || { ! has_path "$c" && [ -d "$c.old" ]; } || return 0
   [ "$helpers/source" -ef "$self_root" ] || return 0
-  IFS= read -r have < "$c/VERSION" 2>/dev/null || :
+  IFS= read -r have 2>/dev/null < "$c/VERSION" || :
   [ "$have" != "$(head_sha "$self_root")" ] || [ -n "$(find "$c" -type f -newer "$c/VERSION" 2>/dev/null)" ] || return 0
   sync_compat "$self_root" && { touch "$c/VERSION" 2>/dev/null || :; }   # an identical rebuild is not redone at every start
 }
