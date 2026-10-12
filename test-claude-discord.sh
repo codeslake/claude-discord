@@ -3073,6 +3073,10 @@ touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.
 for _ in 1 2 3 4 5 6; do bash "$S" patch --compat >/dev/null 2>&1 & done; wait
 cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* "$OH"/compat/compat.* 2>/dev/null)" ] ||
   { echo "FAIL: six parallel refreshes must leave one complete compat/ and no temp dir: $(ls -d "$OH"/compat* "$OH"/compat/compat.* 2>&1)"; exit 1; }
+# A killed writer's leftover is reaped by any refresh, one that finds compat/ current too, not only by a failed swap.
+mkdir "$OH/compat.old.99999"; touch -d '1 minute ago' "$OH/compat/VERSION"
+rc=0; CLAUDE_DISCORD_COMPAT_SWAP_S=0 bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] && [ ! -e "$OH/compat.old.99999" ] || { echo "FAIL: a refresh that finds compat/ current must still reap an old compat.old.<pid> (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
 # A failed swap: perl's rename fails after our mv took compat/ away (a non-race failure) -> the old copy goes back and the run fails;
 # our mv fails because another writer has moved compat/ to compat.old.<its pid> and not yet renamed its copy in -> not a failure.
 SB="$HOME/swapfail-stubs"; mkdir -p "$SB"; RP=$(command -v perl)
@@ -3090,7 +3094,7 @@ rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" != 0 ] && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ "$(ls -d "$OH"/compat.* 2>/dev/null)" = "$OH/compat.old.$DP" ] ||
   { echo "FAIL: a recent compat.old.<dead pid> must neither count as mid-swap nor be reaped (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
 # The mid-swap cases below name a LIVE pid: a compat.old.<pid> counts only while that pid lives and was renamed recently.
-sleep 300 & LP=$!
+sleep 300 & LP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $LP"
 # Renamed long ago (swap window 0 s here), a compat.old.<pid> is a killed writer's leftover whether its pid answers (reused) or
 # not: no mid-swap, both reaped, the run fails.
 mkdir "$OH/compat.old.$LP"; touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
@@ -3119,7 +3123,7 @@ touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] && cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ "$(ls -d "$OH"/compat.* 2>/dev/null)" = "$OH/compat.old.$LP" ] ||
   { echo "FAIL: a current copy we moved aside while a writer finishes must go back (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-rmdir "$OH/compat.old.$LP"; kill "$LP"; wait "$LP" 2>/dev/null || :
+rmdir "$OH/compat.old.$LP"; kill "$LP"; wait "$LP" 2>/dev/null || :; KILL_AT_EXIT=${KILL_AT_EXIT% $LP}
 # Another writer's compat/ lands between our failed swap and our restore (six bots at once, lmd79): the restore's rename(2)
 # fails where mv nested our old copy at compat/compat.old.<pid>; that writer's copy carries our sha, so the run succeeds.
 rm -f "$SB/mv"

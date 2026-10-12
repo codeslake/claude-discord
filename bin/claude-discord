@@ -378,6 +378,9 @@ same_tree() {
 # another writer's compat.old.<pid> was renamed for it to count as mid-swap.
 sync_compat() {
   local c=$helpers/compat n=$helpers/compat.new.$$ t v="" have="" mid=""
+  # A killed writer's compat.old.<pid> (renamed longer ago than a swap takes, see below) is reaped by every run, a no-op one
+  # too, not only by a swap that fails.
+  for t in "$c".old.*; do [ -d "$t" ] && ! perl -e 'exit !((lstat $ARGV[1])[10] > time - $ARGV[0])' "${CLAUDE_DISCORD_COMPAT_SWAP_S:-60}" "$t" && rm -rf "$t"; done
   rm -rf "$n" && mkdir -p "$n/hooks" || return 1
   for t in turn peers lib autoresearchclaw; do cp -R "$1/hooks/$t" "$n/hooks/" || { rm -rf "$n"; return 1; }; done
   cp -R "$1/tools" "$1/rules" "$n/" && head_sha "$1" > "$n/VERSION" || { rm -rf "$n"; return 1; }
