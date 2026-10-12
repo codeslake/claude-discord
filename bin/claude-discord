@@ -836,6 +836,7 @@ if [ "${1:-}" = health ]; then
       prc=0; pout=$(patch_official 2>&1 >/dev/null) || prc=$?
     fi
     if [ -f "$pf" ]; then
+      snap=$(tr -d '\r' < "$pf")
       while IFS= read -r p || [ -n "$p" ]; do
         p=${p%$'\r'}   # a hand-edited CRLF line
         [ -n "$p" ] && [ -d "$p/.claude/discord-agents" ] || continue
@@ -853,9 +854,21 @@ if [ "${1:-}" = health ]; then
           (cd "$p" 2>/dev/null && "$self_path" health --nolog </dev/null) || any=1
         fi
       done < "$pf"
-      # Rewritten only when something was pruned. A setup recording a project
-      # during this walk can be lost; its next health run records it again.
-      printf '%s' "$keep" > "$pf.tmp.$$" 2>/dev/null && { cmp -s "$pf.tmp.$$" "$pf" || cat "$pf.tmp.$$" > "$pf" 2>/dev/null || :; }
+      # Rewritten only when the walk changed the list (pruned or deduped), judged against
+      # the snapshot taken before it, not the live file: a `setup` recording a project
+      # meanwhile would else look like a difference and be erased. Lines now in the file
+      # that the snapshot lacks are appended to the new content. mv, so a concurrent
+      # reader never sees a truncated file.
+      if [ "${keep%$'\n'}" != "$snap" ]; then
+        while IFS= read -r p || [ -n "$p" ]; do
+          p=${p%$'\r'}
+          [ -n "$p" ] || continue
+          case $'\n'$snap$'\n' in *$'\n'"$p"$'\n'*) continue;; esac
+          case $'\n'$keep in *$'\n'"$p"$'\n'*) continue;; esac
+          keep="$keep$p"$'\n'
+        done < "$pf"
+        printf '%s' "$keep" > "$pf.tmp.$$" 2>/dev/null && mv -f "$pf.tmp.$$" "$pf" 2>/dev/null || :
+      fi
       rm -f "$pf.tmp.$$"
     fi
     [ "$as_json" = yes ] || exit "$any"

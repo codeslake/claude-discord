@@ -3139,8 +3139,8 @@ rm -f "$HOME/logger.calls" "$SDS/health.log"
 grep -qxF "$(cd "$SPS" && pwd -P)" "$PF" || { echo "FAIL: a health run in a project must record it: $(<"$PF")"; exit 1; }
 [ -s "$SDS/health.log" ] && [ -s "$HOME/logger.calls" ] || { echo "FAIL: control: a health run by hand keeps health.log and the journal line"; exit 1; }
 rm -f "$HOME/logger.calls" "$SDS/health.log"
-# A project whose health crashes (config.env exits 3), listed with a CRLF; the walked project listed twice.
-CP="$HOME/crash proj"; mkdir -p "$CP/.claude/discord-agents/cbot"; echo 'exit 3' > "$CP/.claude/discord-agents/config.env"
+# A project whose health crashes (config.env exits 3), listed with a CRLF; its config.env also appends a line to the list, as a concurrent setup would during the walk; the walked project listed twice.
+CP="$HOME/crash proj"; mkdir -p "$CP/.claude/discord-agents/cbot"; printf 'echo "%s" >> "%s"\nexit 3\n' "$HOME/appended project" "$PF" > "$CP/.claude/discord-agents/config.env"
 printf '%s\n%s\r\n' "$(cd "$SPS" && pwd -P)" "$(cd "$CP" && pwd -P)" >> "$PF"
 PCACHE=$HOME/.claude/plugins/cache/claude-plugins-official/discord
 mkdir -p "$PCACHE/0.0.98"; printf 'nothing to patch here\n' > "$PCACHE/0.0.98/server.ts"
@@ -3156,6 +3156,7 @@ jq -e --arg home "$HOME" --arg p "$(cd "$SPS" && pwd -P)" --arg cp "$(cd "$CP" &
   { echo "FAIL: health --all --json --patch: wrong document: $doc"; exit 1; }
 [ ! -e "$SDS/health.log" ] && [ ! -e "$HOME/logger.calls" ] || { echo "FAIL: health --all must write no health.log line and call no logger"; exit 1; }
 grep -qF 'gone project' "$PF" && { echo "FAIL: --all must prune a project whose discord-agents is gone: $(<"$PF")"; exit 1; }
+grep -qxF "$HOME/appended project" "$PF" || { echo "FAIL: a line appended to records/projects during the walk must survive the prune rewrite: $(<"$PF")"; exit 1; }
 rm -rf "$PCACHE/0.0.98" "$HOME/bin/logger" "$HOME/logger.calls" "$SPS" "$CP"; mv "$PF.suite" "$PF"
 echo "ok: health --all --json --patch prints one document (host, version, home, the patch step's rc and stderr, each project's bots with owner_id; a project path with a space, a quote and a \$), exits 0 with a finding, prunes a gone project, and writes no health.log or journal line; setup and a health run record their project"
 
