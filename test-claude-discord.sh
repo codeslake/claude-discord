@@ -8,6 +8,10 @@ set -euo pipefail
 # otherwise point refresh at its own state dir, and a shell that wraps claude
 # would turn PLAIN into LAUNCHER. The suite sets the ones it needs below.
 for v in "${!CLAUDE_@}" "${!DISCORD_@}"; do unset "$v"; done
+# A hook run here looks two levels up for its claude session (session_pid) and a dev-manager's SessionStart starts a
+# monitor that session holds: two levels above a hook the suite runs is at most the suite's own parent. Started straight
+# under claude (no shell between), the suite runs itself one level down, so no hook here finds a real session.
+case $(ps -o args= -p "$PPID" 2>/dev/null) in claude|claude\ *|*/claude|*/claude\ *|*/claude/versions/*) bash "$0" "$@"; exit;; esac
 S=${1:?script path}; S=$(cd "$(dirname "$S")" && pwd)/$(basename "$S")   # absolute: the test cd-s into a throwaway project
 D=$(cd "$(dirname "$S")/.." && pwd -P)   # repo root = plugin root (bin/claude-discord); -P matches the hooks' plugin_root
 
@@ -3553,6 +3557,36 @@ wait_log $(( ex + 1 )) 'exit reason=no-holders$'
 jq -e '.hosts.local | .verdict == "blind" and (.detail | test("did not finish"))' "$MB/state.json" >/dev/null || { echo "FAIL: a local laptop past the cap is blind (it alerts), not hostdown: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
 mstop
 echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; hosts and bots that left are dropped and logged; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting"
+
+# The session a SessionStart hook belongs to: the nearest ancestor, two levels at most, whose argv[0] is .../claude or
+# under .../claude/versions/ and whose argv[1] is not daemon. Process chains are built with perl's $0 (what ps shows),
+# outermost first; the innermost runs session_pid in a bash child and prints the title of what it found.
+FK="$HOME/fk"
+chain() {
+  perl -e '
+    my ($lib, @titles) = @ARGV;
+    for my $t (@titles) { my $pid = fork(); if ($pid) { waitpid($pid, 0); exit 0; } $0 = $t; }
+    system("bash", "-c", ". \"\$1\"; p=\$(session_pid); t=none; [ -z \"\$p\" ] || IFS= read -r -d \"\" t < /proc/\$p/cmdline; echo \"\$t\"", "x", $lib);' "$D/hooks/lib/discord.sh" "$@"
+}
+[ "$(chain "$FK/bin/claude daemon" "$FK/claude/versions/9.9.9")" = "$FK/claude/versions/9.9.9" ] || { echo "FAIL: the nearest claude process, not the daemon above it: $(chain "$FK/bin/claude daemon" "$FK/claude/versions/9.9.9")"; exit 1; }
+[ "$(chain "$FK/bin/claude daemon")" = none ] || { echo "FAIL: claude daemon is never the session"; exit 1; }
+[ "$(chain "claude --name x" "sh -c hook")" = "claude --name x" ] || { echo "FAIL: a foreground claude through sh -c is the session"; exit 1; }
+[ "$(chain "$FK/claude/versions/9.9.9" "sh -c a" "sh -c b")" = none ] || { echo "FAIL: a claude three levels up is not this hook's session"; exit 1; }
+echo "ok: session_pid finds the nearest claude process within two levels, never claude daemon"
+
+# The manager session's SessionStart (any source; compact here, which runs no patch) registers the session, its
+# nearest claude ancestor, as a holder and ensures the monitor, detached; the monitor ends with that session. The
+# session is a perl process titled .../claude/versions/9.9.9 that runs the hook as its child. mgr is a dev-manager
+# with a ledger (h1 and local laptop, from the block above).
+printf '{"session_id":"sMon","source":"compact"}' > "$HOME/ss.json"
+want=$(( $(starts) + 1 ))
+perl -e '$0 = shift @ARGV; open(STDIN, "<", shift @ARGV) or die; system(@ARGV); sleep 30' "$FK/claude/versions/9.9.9" "$HOME/ss.json" \
+  env CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$PC/hooks/turn/on-session-start" >/dev/null 2>&1 &
+HPID=$!; KILL_AT_EXIT="$KILL_AT_EXIT $HPID"
+wait_log "$want" 'Z start$'
+[ -f "$MB/holders/session-$HPID" ] || { echo "FAIL: the manager's SessionStart must register its session as a holder: $(ls "$MB/holders")"; exit 1; }
+mstop; rm -f "$HOME/ss.json"
+echo "ok: a dev-manager's SessionStart registers its session (the nearest claude process) as a holder and starts the monitor, which exits with that session"
 
 # The monitor blocks end here: the real shim back, the stubs and fixtures gone.
 mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"

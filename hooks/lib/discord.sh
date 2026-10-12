@@ -193,3 +193,22 @@ hook_session() {
   sid=${BASH_REMATCH[1]}
   case $sid in .*) return 1;; esac
 }
+
+# session_pid: the pid of the Claude Code CLI process this hook runs under: the
+# nearest ancestor (two levels at most: Claude Code runs a hook directly or
+# through sh -c) whose argv[0] is .../claude or lies under .../claude/versions/,
+# and whose argv[1] is not `daemon`. Nearest, and capped: above a --bg session
+# sit its --bg-pty-host and `claude daemon`, which never exits, and a
+# terminal's own claude may sit above a script that runs a hook by hand.
+# Prints nothing when there is none.
+session_pid() {
+  local p=$PPID n=0
+  while [ "$n" -lt 2 ] && [ "${p:-0}" -gt 1 ]; do
+    set -f; set -- $(ps -o ppid= -o args= -p "$p" 2>/dev/null); set +f   # ppid, argv[0], argv[1], ...
+    [ $# -ge 2 ] || return 0
+    case $2 in claude|*/claude|*/claude/versions/*)
+      [ "${3:-}" = daemon ] || { printf '%s' "$p"; return 0; };;
+    esac
+    p=$1 n=$((n + 1))
+  done
+}
