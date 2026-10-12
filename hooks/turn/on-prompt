@@ -68,6 +68,10 @@ fi
 chat_id=${BASH_REMATCH[1]} message_id=${BASH_REMATCH[2]}
 [ -n "$bot_name" ] || exit 0
 user_id=""; [[ $head =~ .*\ user_id=\"([0-9]+)\" ]] && user_id=${BASH_REMATCH[1]}
+# bot="true" right after that same last user_id: claude-discord's patch of the
+# plugin adds it for a message a bot wrote, and such a message is never owed a
+# reply (other bots' status posts sent turns back for nothing, 2026-10-12).
+from_bot=""; [[ $head =~ .*\ user_id=\"[0-9]+\"\ bot=\"true\" ]] && from_bot=1
 # The sender's display name, kept per id in user-names ("<id> <name>"), so the
 # People line below can name whoever has written here. The tag's user="" is
 # the plugin's own field, but the name in it is the sender's to choose: it
@@ -89,10 +93,10 @@ if [ -n "$session_id" ] && { [ -d "$DISCORD_STATE_DIR/turns" ] || mkdir -p "$DIS
   # means a new turn. With one, this prompt is a Discord message that arrived
   # mid-turn, perhaps after the reply, and the flag must stay; the message is
   # appended, so the turn's ✅ reaches every message it answered. Either way
-  # this message is unanswered until the next reply (.pending, which on-reply
-  # removes and on-stop checks).
+  # a human's message is unanswered until the next reply or react (.pending,
+  # which on-reply removes and on-stop checks); a bot's is recorded only.
   [ -e "$DISCORD_STATE_DIR/turns/$session_id" ] || [ ! -e "$DISCORD_STATE_DIR/turns/$session_id.replied" ] || rm -f "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
-  : > "$DISCORD_STATE_DIR/turns/$session_id.pending" 2>/dev/null || :
+  [ -n "$from_bot" ] || : > "$DISCORD_STATE_DIR/turns/$session_id.pending" 2>/dev/null || :
   printf '%s %s%s\n' "$chat_id" "$message_id" "${user_id:+ $user_id}" >> "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null || :
   printf '%s\n' "$message_id" > "$DISCORD_STATE_DIR/last-message-id" 2>/dev/null || :
 fi

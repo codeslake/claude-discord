@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# PostToolUse hook (matcher: mcp__plugin_discord_discord__reply): marks that
-# this turn actually sent a Discord reply, so on-stop knows to react ✅ on
-# it, and that no Discord message is left unanswered (.pending). Must never
-# block or fail a turn.
+# PostToolUse hook (matchers: mcp__plugin_discord_discord__reply and
+# mcp__plugin_discord_discord__react): a reply marks that this turn actually
+# sent a Discord reply, so on-stop knows to react ✅ on it; a reply or a react
+# marks that no Discord message is left unanswered (.pending), since a react
+# is how a message that is owed no answer gets handled. Must never block or
+# fail a turn.
 [ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 plugin_gate || exit 0
 
 [ -n "$bot_name" ] || exit 0
-session_id=$(jq -r '.session_id // empty' 2>/dev/null) || exit 0
+read -r session_id tool < <(jq -r '"\(.session_id // "") \(.tool_name // "")"' 2>/dev/null) || exit 0
 [ -n "$session_id" ] && [ -n "$bot_name" ] || exit 0
-{ [ -d "$DISCORD_STATE_DIR/turns" ] || mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; } && : >> "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
+# A react is not a reply: ✅ still follows only a turn that answered in words.
+case $tool in
+  *__react) ;;
+  *) { [ -d "$DISCORD_STATE_DIR/turns" ] || mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; } && : >> "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null ;;
+esac
 [ ! -e "$DISCORD_STATE_DIR/turns/$session_id.pending" ] || rm -f "$DISCORD_STATE_DIR/turns/$session_id.pending" 2>/dev/null
 exit 0

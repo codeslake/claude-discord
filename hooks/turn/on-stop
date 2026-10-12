@@ -3,7 +3,8 @@
 # reply, reacts ✅ on each of them, then clears the per-turn files.
 #
 # A turn with a Discord message that no reply came after (.pending: on-prompt
-# sets it, on-reply and the thread tool clear it) is sent back once
+# sets it for a human's message, never a bot's; on-reply clears it after a
+# reply or a react, and the thread tool clears it) is sent back once
 # ("block"), so an answer written only in the terminal reaches the person who
 # asked on Discord; a terminal question in the same turn keeps its terminal
 # answer. Only once: on the second stop (stop_hook_active) it closes as
@@ -24,7 +25,7 @@ if [ -n "$session_id" ] && [ -n "$bot_name" ]; then
   replied="$turns.replied"
   if [ -f "$turns.pending" ] \
      && [ "$active" != true ]; then
-    jq -nc --arg r 'A Discord message in this turn got no reply: answer it with the discord reply tool (a terminal question keeps its terminal answer). If nothing was asked of you, just end the turn again.' \
+    jq -nc --arg r 'A Discord message in this turn got no reply: answer it with the discord reply tool, or react to it if no answer is owed (a terminal question keeps its terminal answer).' \
       '{decision: "block", reason: $r}' 2>/dev/null
     exit 0
   fi

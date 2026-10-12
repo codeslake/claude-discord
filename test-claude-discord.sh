@@ -150,7 +150,7 @@ bash -n "$D/shim/claude-discord"
 # hook command names a script that exists in the repo and is executable.
 jq -e '.name == "discord-agents" and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$D/.claude-plugin/plugin.json" >/dev/null || { echo "FAIL: plugin.json needs name discord-agents and a semver version"; exit 1; }
 cmds=$(jq -r '.hooks[][] .hooks[] .command' "$D/hooks/hooks.json") || { echo "FAIL: hooks.json is not valid"; exit 1; }
-[ "$(printf '%s\n' "$cmds" | wc -l | tr -d ' ')" = 9 ] || { echo "FAIL: hooks.json must register the nine hooks: $cmds"; exit 1; }
+[ "$(printf '%s\n' "$cmds" | sort -u | wc -l | tr -d ' ')" = 9 ] || { echo "FAIL: hooks.json must register the nine hooks: $cmds"; exit 1; }   # on-reply is listed twice (reply and react)
 while IFS= read -r c; do
   # quoted, so a plugin root with a space in its path still runs
   case $c in '"${CLAUDE_PLUGIN_ROOT}/hooks/'*'"') ;; *) echo "FAIL: hook command must be \"\${CLAUDE_PLUGIN_ROOT}/hooks/...\" (quoted): $c"; exit 1;; esac
@@ -158,6 +158,7 @@ while IFS= read -r c; do
   [ -x "$f" ] || { echo "FAIL: hooks.json names a missing or non-executable $f"; exit 1; }
 done <<<"$cmds"
 jq -e '.hooks.PreToolUse[] | select(.matcher == "mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message") | .hooks[] | select(.command | endswith("peers/thread-guard\""))' "$D/hooks/hooks.json" >/dev/null || { echo "FAIL: thread-guard must cover reply and edit_message"; exit 1; }
+jq -e '.hooks.PostToolUse[] | select(.matcher == "mcp__plugin_discord_discord__react") | .hooks[] | select(.command | endswith("turn/on-reply\""))' "$D/hooks/hooks.json" >/dev/null || { echo "FAIL: on-reply must also run after a react"; exit 1; }
 echo "ok: plugin.json and hooks.json are valid and every hook command exists"
 [ "$(grep -c "if (msg.author.bot) return" "$S")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in the wrapper"; exit 1; }
 # KILL_AT_EXIT: pids this test started (fake workers), so a failed assertion
@@ -168,7 +169,7 @@ export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'kill $KILL_AT_E
 # is a link to its one version dir, which the assertions read through.
 FAKEDIR="$HOME/.claude/plugins/cache/claude-plugins-official/discord/0.0.4"
 mkdir -p "$FAKEDIR" "$HOME/bin"; ln -s "$FAKEDIR" "$HOME/fakeplugin"
-printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(msg)\n})\nfunction isAddressed(msg) {\n  if (client.user && msg.mentions.has(client.user)) return true\n}\nasync function reply(text, limit, mode) {\n        const chunks = chunk(text, limit, mode)\n}\n' "'messageCreate'" > "$HOME/fakeplugin/server.ts"
+printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(msg)\n})\nfunction isAddressed(msg) {\n  if (client.user && msg.mentions.has(client.user)) return true\n}\nasync function reply(text, limit, mode) {\n        const chunks = chunk(text, limit, mode)\n}\n      meta: {\n        user_id: msg.author.id,\n        ts: x,\n      },\n' "'messageCreate'" > "$HOME/fakeplugin/server.ts"
 cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.pristine"
 printf '#!/bin/bash\necho "LAUNCHER $*"\n' > "$HOME/bin/claude-launcher"; chmod +x "$HOME/bin/claude-launcher"
 printf '#!/bin/bash\ncase $1 in agents) exit 1;; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
@@ -448,6 +449,15 @@ DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s1","stop_hook_act
 n=0; while [ "$(wc -l < "$CURL_LOG" 2>/dev/null || echo 0)" -lt 2 ] && [ "$n" -lt 200 ]; do nap 0.01; n=$((n+1)); done
 grep -q 'channels/111/messages/222/reactions/%E2%9C%85/@me' "$CURL_LOG" && grep -q 'channels/555/messages/666/reactions/%E2%9C%85/@me' "$CURL_LOG" || { echo "FAIL: both prompts of one turn must get the checkmark: $(<"$CURL_LOG")"; exit 1; }
 echo "ok: prompt, reply, then a mid-turn prompt: both are recorded, the reply flag survives, the second is pending until a reply, both get the checkmark"
+# A bot's message (bot="true" after the tag's user_id, from the bot-meta patch)
+# is recorded for the checkmark but never pending; a human's in the same turn is.
+DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"sB","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"701\" user=\"b\" user_id=\"42\" bot=\"true\" ts=\"t\">\nstatus\n</channel>"}' >/dev/null
+[ "$(<"$DSD/turns/sB")" = "111 701 42" ] && [ ! -e "$DSD/turns/sB.pending" ] || { echo "FAIL: a bot's message must be recorded but not pending: $(ls "$DSD/turns")"; exit 1; }
+DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"sB","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"702\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}' >/dev/null
+DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"sB","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"703\" user=\"b\" user_id=\"42\" bot=\"true\" ts=\"t\">\nstatus\n</channel>"}' >/dev/null
+[ -e "$DSD/turns/sB.pending" ] && [ "$(wc -l < "$DSD/turns/sB")" = 3 ] || { echo "FAIL: a human's message in a turn with bots' before and after it must stay pending"; exit 1; }
+rm -f "$DSD/turns/sB" "$DSD/turns/sB.pending" "$DSD/turns/sB.primed"
+echo "ok: a bot's message is recorded but never pending; a human's beside it in the same turn is"
 
 # Esc ends a turn without its Stop. A prompt typed in the terminal after it
 # drops the turns file when the transcript shows an interrupt later than the
@@ -723,12 +733,16 @@ grep -q 'tokA2' "$CURL_LOG" && { echo "FAIL: the bot token appeared in curl's ar
 grep -qF 'Authorization: Bot tokA2' "$CURL_STDIN_LOG" || { echo "FAIL: the token must reach curl via stdin (-H @-), so dropping that would break the real call"; exit 1; }
 [ ! -e "$DSD/turns/s5" ] && [ ! -e "$DSD/turns/s5.replied" ] || { echo "FAIL: on-stop must remove both per-turn files"; exit 1; }
 echo "ok: on-stop reacts with a checkmark only after on-reply, removes both per-turn files, keeps the token out of curl's argv, and sends it correctly via stdin"
+mkdir -p "$DSD/turns"; : > "$DSD/turns/sR.pending"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-reply" <<<'{"session_id":"sR","tool_name":"mcp__plugin_discord_discord__react"}'
+[ ! -e "$DSD/turns/sR.pending" ] && [ ! -e "$DSD/turns/sR.replied" ] || { echo "FAIL: a react must clear the pending flag without marking the turn replied"; exit 1; }
+echo "ok: a react marks the message handled (no pending) but is not a reply (no checkmark)"
 
 mkdir -p "$DSD/turns"
 printf '111 222\n' > "$DSD/turns/s6"; : > "$DSD/turns/s6.pending"
 : > "$CURL_LOG"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s6"}')
-[ "$(jq -r .decision <<<"$out")" = block ] && grep -qF 'got no reply' <<<"$(jq -r .reason <<<"$out")" && [ -e "$DSD/turns/s6" ] \
+[ "$(jq -r .decision <<<"$out")" = block ] && grep -qF 'got no reply: answer it with the discord reply tool, or react to it if no answer is owed' <<<"$(jq -r .reason <<<"$out")" && [ -e "$DSD/turns/s6" ] \
   || { echo "FAIL: a Discord message with no reply must send the turn back once, keeping its turns file: $out"; exit 1; }
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s6","stop_hook_active":true}')
 nap 0.05
@@ -818,7 +832,8 @@ echo "ok: run goes through claude-launcher, patches server.ts (bot + @everyone),
 bash "$S" --name alpha >/dev/null 2>&1
 [ "$(grep -c 'client.user?.id) return' "$HOME/fakeplugin/server.ts")" = 1 ]
 [ "$(grep -c 'ignoreEveryone' "$HOME/fakeplugin/server.ts")" = 1 ]
-echo "ok: both patches are idempotent"
+[ "$(grep -cF '...(msg.author.bot ? { bot: "true" } : {}),' "$HOME/fakeplugin/server.ts")" = 1 ] && grep -A1 'user_id: msg.author.id,' "$HOME/fakeplugin/server.ts" | grep -qxF '        ...(msg.author.bot ? { bot: "true" } : {}),' || { echo "FAIL: bot-meta must add bot: \"true\" once, right after user_id: $(<"$HOME/fakeplugin/server.ts")"; exit 1; }
+echo "ok: the bot-authors, ignore-everyone and bot-meta patches are idempotent"
 
 CALL='const chunks = chunk(text, limit, mode)'
 PATCHED="const chunks = (await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chunk(text, limit, mode)"
@@ -856,6 +871,7 @@ out=$(bash "$S" patch 2>&1) || { echo "FAIL: patch on clean and patched version 
 for v in 0.0.5 0.0.6; do
   grep -q 'msg.author.id === client.user?.id' "$PCACHE/$v/server.ts" &&
   grep -q 'ignoreEveryone: true' "$PCACHE/$v/server.ts" &&
+  grep -qF 'bot: "true"' "$PCACHE/$v/server.ts" &&
   grep -qF "(await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chunk(text, limit, mode)" "$PCACHE/$v/server.ts" &&
   grep -qF "$HOME/.claude-discord/runtime/discord-proxy.ts" "$PCACHE/$v/bunfig.toml" &&
   [ "$(jq -c '.mcpServers.discord.env' "$PCACHE/$v/.mcp.json")" = '{"CLAUDE_DISCORD_BOT":"${DISCORD_STATE_DIR:-}"}' ] &&
@@ -898,7 +914,7 @@ mkdir -p "$PCACHE/0.0.7"
 printf 'client.on(x, msg => {\n  if (msg.author.isBot()) return\n})\n' > "$PCACHE/0.0.7/server.ts"
 printf '{"mcpServers":{"discord":{"command":"bun"}}}\n' > "$PCACHE/0.0.7/.mcp.json"
 out=$(bash "$S" patch 2>&1) && { echo "FAIL: a pattern that no longer matches must exit 1"; exit 1; }
-grep -q 'patch: .*0.0.7/server.ts: bot-authors no longer matches' <<<"$out" || { echo "FAIL: wrong no-match report: $out"; exit 1; }
+grep -q 'patch: .*0.0.7/server.ts: bot-authors no longer matches' <<<"$out" && grep -q 'patch: .*0.0.7/server.ts: bot-meta no longer matches' <<<"$out" || { echo "FAIL: wrong no-match report: $out"; exit 1; }
 ! grep -q '0.0.[456]/server.ts: ' <<<"$out" || { echo "FAIL: only the moved dir may be reported: $out"; exit 1; }
 grep -qF "$HOME/.claude-discord/runtime/discord-proxy.ts" "$PCACHE/0.0.7/bunfig.toml" &&
   [ "$(jq -r '.mcpServers.discord.env.CLAUDE_DISCORD_BOT' "$PCACHE/0.0.7/.mcp.json")" = '${DISCORD_STATE_DIR:-}' ] || { echo "FAIL: the patches that still match must be applied beside the moved one"; exit 1; }
