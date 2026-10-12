@@ -211,7 +211,8 @@ patch name, nothing else.
 A project whose `health` printed no array (it crashed: unreadable `config.env`,
 a directory it cannot enter) carries `"error": "health exited N with no
 document"` and `"bots": []`. The monitor reads a project with `error` as
-`blind` (its bots frozen, alert after 5 min), never as "no bots".
+`blind` (each known bot of it reads `blind` and alerts after 5 min; with no
+known bot, one `host|project|-` entry does), never as "no bots".
 
 ### `state.json`
 
@@ -230,7 +231,10 @@ document"` and `"bots": []`. The monitor reads a project with `error` as
 ```
 
 `alerts` keeps the last 50. `posted` is what the channel was last told about
-that key, which is what makes a restart quiet.
+that key, which is what makes a restart quiet. A `bots` entry keyed
+`host|project|-` has no `bot` field: a reader shows it as a project row, leaves
+it out of the bots ok/total count, and takes its recovery command from its
+`fix` field.
 
 ### `monitor.log`
 
@@ -285,7 +289,10 @@ A finding is posted when it has held continuously for its hold time; a
 change to a different finding that holds for its own hold time is a new
 message; the first pass back at `ok` (or `busy`) after a posted finding
 posts the recovery line. A finding that clears before its hold time is only
-logged. The key is `host|project|bot` for a bot, `host|-` for a host.
+logged. The key is `host|project|bot` for a bot, `host|-` for a host, and
+`host|project|-` for a project whose health crashed before any bot of it was
+known: that entry has no `bot` field, takes the manager's owner, alerts as
+`blind`, posts its recovery line once its project answers, and is then dropped.
 
 | finding | from | probe | hold |
 |---|---|---|---|
