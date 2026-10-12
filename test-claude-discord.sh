@@ -3909,7 +3909,8 @@ rc=0; (cd "$MP" && bash "$S" monitor --locked mgr </dev/null >/dev/null 2>&1) ||
 : > "$MB/lock"
 # --start (and every monitor verb) works from anywhere: the project above the cwd that has the bot, else the recorded one.
 want=$(( $(starts) + 1 )); PFK=$(cat "$HOME/.claude-discord/records/projects" 2>/dev/null || :); printf '%s\n' "$MP" > "$HOME/.claude-discord/records/projects"
-out=$(cd "$HOME" && bash "$S" monitor --start mgr 2>&1); printf '%s\n' "$PFK" > "$HOME/.claude-discord/records/projects"
+rc=0; out=$(cd "$HOME" && bash "$S" monitor --start mgr 2>&1) || rc=$?; printf '%s\n' "$PFK" > "$HOME/.claude-discord/records/projects"
+[ "$rc" = 0 ] || { echo "FAIL: monitor --start from outside the project must find the recorded project (rc=$rc): $out"; exit 1; }
 KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
 wait_log "$want" 'Z start$'
 [ "$out" = "claude-discord: started the backend of mgr (a keeper and the monitor, detached); stop it with: claude-discord monitor --stop mgr" ] &&
