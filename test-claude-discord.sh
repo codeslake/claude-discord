@@ -3927,6 +3927,13 @@ kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
   [ -e "$MB/stopped" ] && jq -e '.monitor.stopped_by_user == true' "$MB/state.json" >/dev/null ||
   { echo "FAIL: --stop must end the keeper and the monitor, leave no holder record, and mark the bot stopped by its owner (rc=$rc): $out $(ls "$MB/holders") $(jq -c .monitor "$MB/state.json")"; exit 1; }
 out=$(cd "$MP" && bash "$S" monitor --stop mgr 2>&1) && grep -q 'no keeper or monitor of mgr runs here' <<<"$out" || { echo "FAIL: --stop with nothing running exits 0 saying so: $out"; exit 1; }
+# A keeper record whose pid is alive with the recorded start time but runs something else (a pid reused on the other side
+# of a shared home) is not signalled: --stop checks the command line too.
+/bin/sleep 30 & DP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $DP"; read -r st < "/proc/$DP/stat"; read -ra stf <<<"${st##*) }"
+printf '%s %s keeper\n' "$DP" "${stf[19]}" > "$MB/holders/keeper-$DP"
+out=$(cd "$MP" && bash "$S" monitor --stop mgr 2>&1); nap 0.05
+running "$DP" && ! grep -q 'stopped keeper' <<<"$out" || { echo "FAIL: --stop must not signal a keeper record whose pid runs something else: $out"; exit 1; }
+kill "$DP" 2>/dev/null || :; wait "$DP" 2>/dev/null || :; rm -f "$MB/holders/keeper-$DP"
 # Stopped by its owner: --keep starts nothing (exit 0, says how to start), --ensure is refused (the TUI's red bar), and
 # setup starts nothing; --start clears the marker and starts the keeper, detached, in one line.
 rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?

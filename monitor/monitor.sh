@@ -85,14 +85,16 @@ lstart() {
 }
 # sig: this file's signature (mtime to the sub-second, size, inode), to see `claude-discord update` change it.
 sig() { perl -MTime::HiRes=stat -e '@s = stat $ARGV[0] and print "$s[9] $s[7] $s[1]"' "$0" 2>/dev/null; }
-# a_monitor <pid>: the pid runs this bot's monitor (bash .../monitor/monitor.sh <wrapper> --locked <bot>) as this side sees it.
-a_monitor() {
+# a_cmd <pid> <flag>: the pid runs bash .../monitor/monitor.sh <wrapper> <flag> <bot> as this side sees it.
+a_cmd() {
   local c=""
   case $1 in ''|*[!0-9]*) return 1;; esac
   if [ -r "/proc/$1/cmdline" ]; then c=$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null); else c=$(ps -p "$1" -o command= 2>/dev/null); fi
-  case "$c " in *"/monitor/monitor.sh "*" --locked $bot "*) return 0;; esac
+  case "$c " in *"/monitor/monitor.sh "*" $2 $bot "*) return 0;; esac
   return 1
 }
+a_monitor() { a_cmd "$1" --locked; }
+a_keeper() { a_cmd "$1" --keep; }
 # live_rec <record>: its pid runs and started when the record says (a reused pid reads dead); sets rp to the pid.
 live_rec() {
   local p="" rest=""
@@ -108,7 +110,8 @@ if [ -n "$stop" ]; then
   said=""
   for f in "$M"/holders/keeper-*; do
     [ -f "$f" ] || continue
-    if live_rec "$f"; then
+    # Its command line too: a pid reused on the other side of a shared home is never signalled.
+    if live_rec "$f" && a_keeper "$rp"; then
       kill -TERM "$rp" 2>/dev/null; echo "claude-discord: monitor: stopped keeper $rp"; said=1
       # Gone (its record with it) before the monitor goes: a monitor its last --ensure starts then finds no holder.
       n=0; while [ -n "$(lstart "$rp")" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
