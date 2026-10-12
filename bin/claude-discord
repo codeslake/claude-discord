@@ -1832,6 +1832,27 @@ fi
 # the whole story). --keep and --stop are for people; --ensure is the TUI's and the hooks'.
 if [ "${1:-}" = monitor ]; then
   shift
+  # Run from anywhere: the project is the one above the cwd that has the bot, else the recorded one (records/projects),
+  # as tui finds it. Not found: monitor.sh says so (no ledger) from where it is.
+  mb="" sk=0
+  for a in "$@"; do
+    if [ "$sk" -gt 0 ]; then sk=$((sk - 1)); continue; fi
+    case $a in --holder) sk=2;; -*) ;; *) mb=$a; break;; esac
+  done
+  case $mb in ''|.|..|*/*) ;; *)
+    mp=$PWD
+    while [ ! -d "$mp/.claude/discord-agents/$mb" ] && [ "$mp" != / ]; do mp=$(dirname "$mp"); done
+    if [ -d "$mp/.claude/discord-agents/$mb" ]; then cd "$mp"
+    elif [ -f "$helpers/records/projects" ]; then
+      mc="" mn=0
+      while IFS= read -r p || [ -n "$p" ]; do
+        p=${p%$'\r'}
+        [ -n "$p" ] && [ -f "$p/.claude/discord-agents/$mb/hosts" ] || continue
+        mc=$p; mn=$((mn + 1))
+      done < "$helpers/records/projects"
+      [ "$mn" != 1 ] || cd "$mc"
+    fi;;
+  esac
   exec bash "$self_root/monitor/monitor.sh" "$self_path" "$@"
 fi
 

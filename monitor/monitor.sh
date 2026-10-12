@@ -29,6 +29,7 @@
 #   monitor.log, monitor.log.1 256 KiB each at most
 #   holders/<kind>-<pid>       "<pid> <start time> <kind>"
 #   stopped                    `--stop` was run: no automatic start until `--start`
+#   refused                    a detached start met a monitor this side cannot see: the hooks start nothing until `--start`
 #   pass.out                   one host's answer, only during a pass
 #   post.out                   one POST's answer and status, only during a pass
 # Nothing in /tmp: no mktemp and no here-document or here-string anywhere in
@@ -122,7 +123,7 @@ if [ -n "$stop" ]; then
   echo "claude-discord: monitor: $bot stays stopped until: claude-discord monitor --start $bot"
   exit 0
 fi
-[ -z "$start" ] || rm -f "$M/stopped"
+[ -z "$start" ] || rm -f "$M/stopped" "$M/refused"
 # What an automatic start meets after --stop: nothing is started until --start.
 stopped_msg="claude-discord: monitor: $bot was stopped by you (monitor --stop); start it again with: claude-discord monitor --start $bot"
 
@@ -154,7 +155,8 @@ if [ -n "$keep" ]; then
     }
     if unseen; then
       sleep "${CLAUDE_DISCORD_MONITOR_LOCK_WAIT:-5}"
-      ! unseen || { tell_err "claude-discord: monitor: --keep: the monitor lock is held by a monitor this side cannot see; run --keep where the bots run"; exit 1; }
+      # An automatic start (detached) leaves `refused`, so a hook does not fork this again on every prompt; --start clears it.
+      ! unseen || { [ -z "$detach" ] || : > "$M/refused"; tell_err "claude-discord: monitor: --keep: the monitor lock is held by a monitor this side cannot see; run --keep where the bots run"; exit 1; }
     fi
     # One keeper per bot: the keeper takes $M/keeper.lock (flock, as the monitor takes its lock) BEFORE it detaches and
     # holds it on fd 8 for its whole life, through its self re-exec; the kernel drops it on any death. A starter that
@@ -211,6 +213,9 @@ fi
 
 # The TUI's --ensure after --stop: refused, and said in its red bar.
 [ "$locked" = yes ] || [ ! -e "$M/stopped" ] || { echo "$stopped_msg" >&2; exit 1; }
+# A waiter that won the lock after --stop killed the monitor (or a monitor re-exec'd while --stop ran) leaves at once:
+# before the lock pid, the state and the log's start line, none of which may say it started.
+[ "$locked" = no ] || [ ! -e "$M/stopped" ] || exit 0
 
 if [ -n "$kind$hpid" ]; then
   case $kind in tui|keeper) ;; *) echo "claude-discord: monitor: --holder takes tui or keeper, got '$kind'" >&2; exit 2;; esac
@@ -500,14 +505,19 @@ def payload($kind): if $kind == "finding"
   then {content: finding_text, allowed_mentions: (if owner != "" then {users: [owner]} else {parse: []} end)}
   else {content: recovery_text, allowed_mentions: {parse: []}} end;
 # group_payload: one message for several bots of one host (an array of entries), each distinct owner mentioned once.
+# Whole entries only, as many as fit in 1900 characters; the bots past that are named in one last line, so none is dropped
+# unseen (their `posted` is set with the rest).
+def fit($head; $es; $names): ([range($es | length; -1; -1)] | map(. as $n | $head + ($es[0:$n] | join("\n"))
+    + (if $n < ($es | length) then "\n… and \(($es | length) - $n) more: " + ($names[$n:] | join(", ")) else "" end))
+  | map(select(length <= 1900)) | first) // ($head | .[0:1900]);
 def group_payload($kind): labels as $l | (map(owner) | map(select(. != "")) | unique) as $os
   | (map((.home // "") as $h | "\(.bot) (\(.project | short($h)))")) as $who
   | if $kind == "finding"
-    then {content: (($os | map("<@\(.)> ") | join("")) + "[down] \(length) bots on \(.[0].name)\n"
-            + ([range(length) as $i | "\($who[$i])\n\($l.reason): \(.[$i].detail)\n\($l.fix): \(.[$i].fix)"] | join("\n"))) | .[0:1900],
+    then {content: fit(($os | map("<@\(.)> ") | join("")) + "[down] \(length) bots on \(.[0].name)\n";
+                       [range(length) as $i | "\($who[$i])\n\($l.reason): \(.[$i].detail)\n\($l.fix): \(.[$i].fix)"]; map(.bot)),
           allowed_mentions: (if ($os | length) > 0 then {users: $os} else {parse: []} end)}
-    else {content: ("[recovered] \(length) bots on \(.[0].name): answering again (was down)\n"
-            + ([range(length) as $i | "\($who[$i]) after \(((($now_s - (.[$i].posted_since_s // $now_s)) / 60) | floor))m"] | join("\n"))) | .[0:1900],
+    else {content: fit("[recovered] \(length) bots on \(.[0].name): answering again (was down)\n";
+                       [range(length) as $i | "\($who[$i]) after \(((($now_s - (.[$i].posted_since_s // $now_s)) / 60) | floor))m"]; map(.bot)),
           allowed_mentions: {parse: []}} end;
 # observe: fold one observation into an entry; `since` moves only when the verdict changes (or is missing, as in a
 # state an older monitor or a hand wrote: due counts from it, and a reducer that fails fails every pass).

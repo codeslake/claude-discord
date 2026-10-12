@@ -305,13 +305,20 @@ async def main():
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "holders").mkdir()
             (Path(d) / "state.json").write_text(json.dumps(variant("keeper")))
-            app = tui.MonitorTUI(Path(d), "mgr", stub(d, 'echo "$*" >> "$(dirname "$0")/args"'))
+            app = tui.MonitorTUI(Path(d), "mgr", stub(d, 'echo "$*" >> "$(dirname "$0")/args"; case "$*" in *--stop*) sleep 1;; esac'))
             async with app.run_test() as pilot:
                 await pilot.pause()
                 await pilot.press("Q")
                 await pilot.pause()
                 assert isinstance(app.screen, tui.Confirm) and "keeper and monitor stop" in app.screen.text, app.screen
                 await pilot.press(answer)
+                if answer == "y":
+                    # The stub's --stop takes a second: the screen must stay alive meanwhile and say what it does.
+                    assert app.return_code is None and "stopping the backend of mgr" in text(app, "#bar"), (app.return_code, text(app, "#bar"))
+                    for _ in range(100):
+                        if app.return_code is not None:
+                            break
+                        await asyncio.sleep(0.05)
                 await pilot.pause()
                 args = (Path(d) / "args").read_text().splitlines()
                 if answer == "y":

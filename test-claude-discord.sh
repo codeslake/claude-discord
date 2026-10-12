@@ -3855,6 +3855,13 @@ perl -MFcntl=:flock -e 'open(my $l, ">>", $ARGV[0]) or die; flock($l, LOCK_EX) o
 KILL_AT_EXIT="$KILL_AT_EXIT $LP"; n=0; l=""
 until [ "$l" = "$LP" ] || [ "$n" -ge 200 ]; do nap 0.01; n=$((n + 1)); { read -r l < "$MB/lock"; } 2>/dev/null || :; done
 rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?
+# An automatic (detached) start that is refused leaves `refused`, and keeper_alive then reads the backend as handled, so
+# a hook does not fork the same refusal on every prompt; the foreground refusal above leaves none.
+[ ! -e "$MB/refused" ] || { echo "FAIL: a foreground refusal must leave no refused marker"; exit 1; }
+rc2=0; (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" monitor --keep mgr --detach >/dev/null 2>&1) || rc2=$?
+[ "$rc2" = 1 ] && [ -e "$MB/refused" ] && bash -c '. "$1"; bot_name=mgr; keeper_alive' x "$D/hooks/lib/discord.sh" ||
+  { echo "FAIL: a detached start refused for an unseen lock must leave refused, which keeper_alive honours (rc=$rc2)"; exit 1; }
+rm -f "$MB/refused"
 kill "$LP" 2>/dev/null || :; wait "$LP" 2>/dev/null || :
 [ "$rc" = 1 ] && grep -q 'held by a monitor this side cannot see; run --keep where the bots run' <<<"$out" && [ -z "$(ls "$MB/holders")" ] ||
   { echo "FAIL: --keep must refuse a lock held by a monitor it cannot see (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
@@ -3893,8 +3900,16 @@ out3=$(printf 'dev-manager\n\n\n' | env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S"
 [ "$rc" = 0 ] && [ "$rc2" = 1 ] && grep -q 'was stopped by you (monitor --stop); start it again with: claude-discord monitor --start mgr' <<<"$out$out2" &&
   grep -q 'was stopped by you' <<<"$out3" && [ -z "$(ls "$MB/holders")" ] ||
   { echo "FAIL: after --stop, --keep (rc=$rc), --ensure (rc=$rc2) and setup must start nothing and say so: $out / $out2 / $out3 $(ls "$MB/holders")"; exit 1; }
-want=$(( $(starts) + 1 ))
-out=$(cd "$MP" && bash "$S" monitor --start mgr 2>&1)
+# A monitor that starts after --stop (a waiter of an --ensure that won the lock the stop just freed) leaves at once, before
+# it writes its pid, its state or a start line.
+printf '123\n' > "$MB/lock"; want=$(starts)
+rc=0; (cd "$MP" && bash "$S" monitor --locked mgr </dev/null >/dev/null 2>&1) || rc=$?
+[ "$rc" = 0 ] && [ "$(<"$MB/lock")" = 123 ] && [ "$(starts)" = "$want" ] ||
+  { echo "FAIL: a monitor started while the stopped marker stands must exit before it writes its pid or logs a start (rc=$rc, lock '$(<"$MB/lock")')"; exit 1; }
+: > "$MB/lock"
+# --start (and every monitor verb) works from anywhere: the project above the cwd that has the bot, else the recorded one.
+want=$(( $(starts) + 1 )); PFK=$(cat "$HOME/.claude-discord/records/projects" 2>/dev/null || :); printf '%s\n' "$MP" > "$HOME/.claude-discord/records/projects"
+out=$(cd "$HOME" && bash "$S" monitor --start mgr 2>&1); printf '%s\n' "$PFK" > "$HOME/.claude-discord/records/projects"
 KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
 wait_log "$want" 'Z start$'
 [ "$out" = "claude-discord: started the backend of mgr (a keeper and the monitor, detached); stop it with: claude-discord monitor --stop mgr" ] &&
@@ -3902,10 +3917,16 @@ wait_log "$want" 'Z start$'
   { echo "FAIL: --start clears the marker and starts the keeper, saying so in one line: '$out' '$KP' $(jq -c .monitor "$MB/state.json")"; exit 1; }
 # claude-discord update changed monitor.sh: the keeper goes on as the new file once it held still for an interval, the
 # same process (its record stays valid). Then the ledger removed: the keeper leaves, its record with it.
+# The log rotated meanwhile (renamed here): the detached keeper appends to monitor.log by name, so its restart and start lines
+# land in the new file; and its keeper lock survives the re-exec (a starter still finds it).
+mv -f "$MB/monitor.log" "$MB/monitor.log.1"
 cp "$PC/monitor/monitor.sh" "$HOME/monitor.keep"; echo '# probe' >> "$PC/monitor/monitor.sh"
-wait_log 1 "keeper $KP restart: monitor\.sh changed\$"; wait_log 2 " keeper $KP start "
+wait_log 1 "keeper $KP restart: monitor\.sh changed\$"; wait_log 1 " keeper $KP start "
 running "$KP" && [ -e "$MB/holders/keeper-$KP" ] || { echo "FAIL: the keeper must run a changed monitor.sh as the same process: $(command grep " keeper $KP " "$MB/monitor.log")"; exit 1; }
-cp "$HOME/monitor.keep" "$PC/monitor/monitor.sh"; rm -f "$HOME/monitor.keep"; wait_log 2 "keeper $KP restart: monitor\.sh changed\$"
+out=$(cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" monitor --keep mgr --detach 2>&1)
+[ "$out" = "claude-discord: monitor: a keeper already runs for mgr" ] ||
+  { echo "FAIL: a keeper that re-exec'd itself must still hold its keeper lock: $out"; exit 1; }
+cp "$HOME/monitor.keep" "$PC/monitor/monitor.sh"; rm -f "$HOME/monitor.keep" "$MB/monitor.log.1"; wait_log 2 "keeper $KP restart: monitor\.sh changed\$"
 mv "$MR/mgr/hosts" "$MR/mgr/hosts.off"
 n=0; while running "$KP" && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
 mv "$MR/mgr/hosts.off" "$MR/mgr/hosts"
@@ -3917,11 +3938,10 @@ wait_for_file "$MB/holders/keeper-$KP"; : > "$MB/stopped"; rc=0; wait "$KP" || r
 # One keeper per bot, by a lock the keeper holds (keeper.lock): three starters at once (a container restart fires every bot's
 # hook together) leave one keeper, and a starter that loses says so; the record an older monitor deleted as a stray file
 # changes nothing (a second starter after that finds the lock held, not a missing record).
-rm -f "$HOME"/ks.*; kp=(); want=$(( $(starts) + 1 ))
+rm -f "$HOME"/ks.*; kp=()
 for i in 1 2 3; do (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" monitor --keep mgr --detach > "$HOME/ks.$i" 2>&1) & kp+=($!); done
 for q in "${kp[@]}"; do wait "$q"; done
 KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
-wait_log "$want" 'Z start$'
 [ "$(cat "$HOME"/ks.* | command grep -c 'started the backend of mgr')" = 1 ] && [ "$(cat "$HOME"/ks.* | command grep -c 'a keeper already runs for mgr$')" = 2 ] &&
   [ "$(ls "$MB/holders" | command grep -c '^keeper-')" = 1 ] ||
   { echo "FAIL: three starters at once must leave one keeper (one started, two found it): $(cat "$HOME"/ks.*) $(ls "$MB/holders")"; exit 1; }
@@ -3929,7 +3949,7 @@ rm -f "$MB/holders/keeper-$KP"
 out=$(cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" monitor --keep mgr --detach 2>&1)
 [ "$out" = "claude-discord: monitor: a keeper already runs for mgr" ] ||
   { echo "FAIL: a keeper whose record was deleted still holds the keeper lock: a starter must find it, not start another: $out"; exit 1; }
-(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null); rm -f "$MB/stopped" "$HOME"/ks.*
+kill -TERM "$KP"; rm -f "$HOME"/ks.*
 n=0; while running "$KP" && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
 # setup in dev-manager mode starts the backend when none runs, and says so in one line.
 out=$(printf 'dev-manager\n\n\n' | env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" setup mgr --mode 2>&1)
@@ -4024,26 +4044,6 @@ n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)
 [ -s "$HOME/fx.pid" ] && [ "$(<"$HOME/fx.rec")" = "$MP monitor --keep mgr --detach" ] ||
   { echo "FAIL: a prompt with a keeper record naming a live pid that is no keeper must start the keeper: $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
 kill "$SP" 2>/dev/null || :; wait "$SP" 2>/dev/null || :
-rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json" "$HOME/up.json" "$MB/holders/keeper-$SP"
-printf '%s\n' "$PFB" > "$HOME/.claude-discord/records/projects"
-echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while the keeper's start is still running"
-
-# claude-discord tui: the project's one dev-manager bot with a ledger unless named; it hands the bot, the monitor's
-# state dir and the wrapper to the TUI script through `uv run --script`. uv is needed for this verb only and its
-# absence is said. The script itself is exercised outside the budget (tests/tui/test_tui.py).
-echo dev-manager > "$MR/mgr/mode"
-printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "$HOME/uv.args"; pwd -P > "$HOME/uv.cwd"\n' > "$HOME/bin/uv"; chmod +x "$HOME/bin/uv"
-mkdir -p "$MP/sub/dir"   # from a subdirectory: the project is found above it
-(cd "$MP/sub/dir" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui 2>/dev/null) || { echo "FAIL: tui from a subdirectory of the project must find the project above it"; exit 1; }
-[ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord" ] || { echo "FAIL: tui must run the script through uv with the bot, the state dir and the wrapper: $(cat "$HOME/uv.args" 2>&1)"; exit 1; }
-# It started a keeper, detached (a session of its own), so the monitor outlives the TUI; the next tui starts none.
-n=0; KP=""; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
-[ -n "$KP" ] && [ "$(ps -o sid= -p "$KP" | tr -d ' ')" = "$KP" ] || { echo "FAIL: tui must start a keeper in a session of its own: '$KP' $(ls "$MB/holders")"; exit 1; }
-(cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui 2>/dev/null) || { echo "FAIL: a second tui must run"; exit 1; }
-[ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] && grep -q "a keeper already runs for mgr" "$MB/monitor.log" ||
-  { echo "FAIL: tui must not start a second keeper while one lives: $(ls "$MB/holders")"; exit 1; }
-rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1) || rc=$?
-[ "$rc" = 1 ] && grep -q 'tui needs uv' <<<"$out" || { echo "FAIL: without uv, tui must say so (rc=$rc): $out"; exit 1; }
 # Every bot's hook starts the keeper from the project, without the calling session's own DISCORD_STATE_DIR, CLAUDE_PROJECT_DIR,
 # CLAUDE_PLUGIN_ROOT and CLAUDECODE (the keeper and its monitor outlive that session); a manager name that two recorded projects
 # share starts ONE keeper (one state dir per name); a manager with no .env is not started (the front refuses it every time).
@@ -4066,6 +4066,26 @@ rc=0; out=$(cd "$D3" && printf 'none\n' | bash "$S" setup mgr --mode 2>&1) || rc
 [ "$rc" = 0 ] && [ "$(<"$D3/.claude/discord-agents/mgr/mode")" = none ] || { echo "FAIL: only the dev-manager mode is refused (rc=$rc): $out"; exit 1; }
 rm -rf "$D3"
 rm -rf "$DUP" "$HOME/fx2.rec"
+rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json" "$HOME/up.json" "$MB/holders/keeper-$SP"
+printf '%s\n' "$PFB" > "$HOME/.claude-discord/records/projects"
+echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while the keeper's start is still running"
+
+# claude-discord tui: the project's one dev-manager bot with a ledger unless named; it hands the bot, the monitor's
+# state dir and the wrapper to the TUI script through `uv run --script`. uv is needed for this verb only and its
+# absence is said. The script itself is exercised outside the budget (tests/tui/test_tui.py).
+echo dev-manager > "$MR/mgr/mode"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "$HOME/uv.args"; pwd -P > "$HOME/uv.cwd"\n' > "$HOME/bin/uv"; chmod +x "$HOME/bin/uv"
+mkdir -p "$MP/sub/dir"   # from a subdirectory: the project is found above it
+(cd "$MP/sub/dir" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui 2>/dev/null) || { echo "FAIL: tui from a subdirectory of the project must find the project above it"; exit 1; }
+[ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord" ] || { echo "FAIL: tui must run the script through uv with the bot, the state dir and the wrapper: $(cat "$HOME/uv.args" 2>&1)"; exit 1; }
+# It started a keeper, detached (a session of its own), so the monitor outlives the TUI; the next tui starts none.
+n=0; KP=""; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
+[ -n "$KP" ] && [ "$(ps -o sid= -p "$KP" | tr -d ' ')" = "$KP" ] || { echo "FAIL: tui must start a keeper in a session of its own: '$KP' $(ls "$MB/holders")"; exit 1; }
+(cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui 2>/dev/null) || { echo "FAIL: a second tui must run"; exit 1; }
+[ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] && grep -q "a keeper already runs for mgr" "$MB/monitor.log" ||
+  { echo "FAIL: tui must not start a second keeper while one lives: $(ls "$MB/holders")"; exit 1; }
+rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1) || rc=$?
+[ "$rc" = 1 ] && grep -q 'tui needs uv' <<<"$out" || { echo "FAIL: without uv, tui must say so (rc=$rc): $out"; exit 1; }
 rc=0; out=$(cd "$P" && bash "$S" tui alpha 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'no hosts ledger' <<<"$out" || { echo "FAIL: tui for a bot without a ledger must refuse (rc=$rc): $out"; exit 1; }
 PFB=$(cat "$HOME/.claude-discord/records/projects" 2>/dev/null || :); : > "$HOME/.claude-discord/records/projects"   # nothing recorded: the none case
@@ -4129,6 +4149,16 @@ gdoc g1:ok g2:ok g3:ok; gpass
   jq -e '[.bots[].posted] == [null, null, null] and ([.alerts[].status] | length == 6)' "$MB/state.json" >/dev/null ||
   { echo "FAIL: two recoveries on one host in one pass are one post: $G $(jq -c '[.bots[].posted]' "$MB/state.json")"; exit 1; }
 echo "ok: monitor: downs on one host in one pass are one post (each owner mentioned once), so are recoveries from down; posted stays per bot"
+
+# A group too long for one post (about 1900 characters) keeps whole entries and names the rest on a last line: no bot is dropped
+# unseen, and posted is set for every one of them.
+gdoc $(printf "g%02d:down " {1..22})
+mstate --argjson n "$(date +%s)" '.hosts = {} | .alerts = [] | .bots = ({} | reduce range(1; 23) as $i (.;
+  .["h1|/home/u/ws/p|g" + ($i | tostring | if length < 2 then "0" + . else . end)] = {host: "h1", verdict: "down", since: ($n - 301 | todate), since_s: ($n - 301)}))'
+gpass
+[ "$(printf '%s\n' "$G" | grep -c .)" = 1 ] && [ "${#GC}" -le 1900 ] && command grep -qE '^… and [0-9]+ more: g[0-9]+(, g[0-9]+)*$' <<<"$GC" &&
+  [ "$(grep -o 'g[0-9][0-9]' <<<"$GC" | sort -u | wc -l)" = 22 ] && jq -e '[.bots[].posted] | all(. == "down") and length == 22' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: a group past the post limit must name every bot (whole entries, then '… and K more: names'), all marked posted (len ${#GC}): $GC"; exit 1; }
 
 # The monitor blocks end here: the real shim back, the stubs and fixtures gone.
 mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"

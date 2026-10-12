@@ -304,10 +304,16 @@ class MonitorTUI(App):
 
         def answered(yes: bool | None) -> None:
             if yes:
-                self.backend("--stop")
-                self.exit()
+                # --stop waits up to 5 s per keeper and 5 s for the monitor: off the event loop, the bar saying so.
+                self.note = f"stopping the backend of {self.bot} ..."
+                self.refresh_state()
+                self.run_worker(self.stop_and_quit, thread=True)
         self.push_screen(Confirm(f"Quit and stop the backend of {self.bot}: its keeper and monitor stop, and so do its alerts "
                                  f"until claude-discord monitor --start {self.bot}."), answered)
+
+    def stop_and_quit(self) -> None:
+        self.backend("--stop")
+        self.call_from_thread(self.exit)
 
     def action_alerts(self) -> None:
         self.push_screen(Alerts(self.state.get("alerts") or []))
