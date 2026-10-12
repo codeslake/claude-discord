@@ -3555,6 +3555,15 @@ ex=$(command grep -c 'exit reason=signal$' "$MB/monitor.log") || :; holder
 wait_for_file "$HOME/curl.slept"; kill -TERM "$(mpid)"; wait_log $(( ex + 1 )) 'exit reason=signal$'
 kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
 [ "$(posts | grep -c '\] tm on')" = 1 ] || { echo "FAIL: the POST under way when the TERM came must have gone out once: $(posts)"; exit 1; }
+# The lock file removed while the first of two new findings is being posted: the check before the next post ends the
+# monitor (lock-lost), so lb is not sent, and la, sent, is in state.json as posted (no successor has read it yet), so
+# the next monitor does not send it again.
+mdoc h1 1 tm:stale la:stale lb:stale > "$MON/h1.out"; printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; echo 0.15 > "$HOME/curl.sleep"; holder
+(cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID")
+wait_for_file "$HOME/curl.slept"; rm -f "$MB/lock"; wait_log 1 'exit reason=lock-lost'
+kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
+[ "$(posts | grep -c '\] l[ab] on')" = 1 ] && jq -e '.bots["h1|/home/u/ws/p|la"].posted == "stale" and .bots["h1|/home/u/ws/p|lb"].posted == null' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: a monitor whose lock file is gone posts nothing more and records what it sent: $(posts | grep '\] l[ab] on') $(jq -c '.bots | map_values(.posted)' "$MB/state.json")"; exit 1; }
 mstate --argjson n "$(date +%s)" '.hosts.h5.left_s = $n - 86401 | .hosts.h6.left_s = $n - 86401'
 export CLAUDE_DISCORD_MONITOR_PASS=0.02
 printf '%s\n' '429 {"retry_after": 0.01}' '429 {"retry_after": 60}' > "$CURL_REPLIES"; : > "$CURL_LOG"
@@ -3648,7 +3657,7 @@ cp "$HOME/monitor.good" "$PC/monitor/monitor.sh"; wait_log 3 'restart: monitor\.
 # The lock file replaced under the running monitor (removed, then a new empty one, as a second --ensure would make, which
 # then wins the lock): it leaves at its next tick, logged, and leaves state.json to that successor (its pid still there).
 [ "$(<"$MB/lock")" = "$rp" ] || { echo "FAIL: the lock file must hold the monitor's pid: $(<"$MB/lock")"; exit 1; }
-rm -f "$MB/lock"; : > "$MB/lock"; wait_log 1 'exit reason=lock-lost'
+ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :; rm -f "$MB/lock"; : > "$MB/lock"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
 n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
 ! running "$rp" && [ "$(mpid)" = "$rp" ] || { echo "FAIL: a monitor whose lock file was replaced must exit without writing state.json: $(tail -2 "$MB/monitor.log")"; exit 1; }
 mstop; touch "$PC/monitor/monitor.sh"; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep" "$HOME/monitor.good"

@@ -171,31 +171,40 @@ holders_json() {  # sets hj: the holder records as a JSON array, with no fork
   done
   hj="[$hj]"
 }
-# lock_check, every tick: the lock file still names this process. One removed under a running monitor (or replaced by
-# a new file) lets a second monitor start on the new file, so this one leaves, without finish: that successor may
-# already own state.json and the holder records. The pid in the file, not [ /dev/fd/9 -ef lock ]: on macOS stat of
+# lock_check, every tick and before each post: the lock file still names this process. One removed under a running
+# monitor (or replaced by a new file) lets a second monitor start on the new file, so this one leaves, without finish:
+# that successor may already own state.json and the holder records. The pid in the file, not [ /dev/fd/9 -ef lock ]: on macOS stat of
 # /dev/fd/9 reports another st_dev than the file's (measured, bash 3.2.57), so -ef never holds there.
 lock_check() {
   local l=""
   { read -r l < "$M/lock"; } 2>/dev/null
   [ "$l" != "$$" ] || return 0
   [ -z "$child" ] || kill -- -"$child" 2>/dev/null || kill "$child" 2>/dev/null
+  # Checked between posts too, so a monitor that lost its lock posts nothing more. What this pass already sent goes into
+  # state.json as finish records it, or the next monitor would post it again; but only while the lock file is gone or
+  # empty (no successor has read state.json yet): one that holds another pid already started from state.json, and a
+  # write now would only clobber its monitor.pid. The holder records stay either way.
+  [ -n "$l" ] || [ -z "${posts:-}${inflight:-}" ] || { record_posts; write_state; }
   log "exit reason=lock-lost (the lock file was removed or replaced)"
   exit 0
+}
+# record_posts: the posts this pass sent, applied to the state (not written). Mid-pass, run_pass's locals are visible
+# here. A TERM during a POST lands only once curl is done (bash defers a trap for its foreground pipeline), before the
+# post is added to `posts`: curl's own output in post.out says whether it went out, and a 2xx counts as sent.
+record_posts() {
+  if [ -n "${inflight:-}" ]; then
+    o=$(< "$M/post.out") 2>/dev/null || o=""
+    case ${o##*$'\n'} in 2??) posts="${posts:-}$inflight"$'\x1f'sent$'\n';; esac
+  fi
+  [ -z "${posts:-}" ] || state=$(printf '%s' "$state" | jq -c --arg results "$posts" --arg now "${ts:-$(now)}" "$apply" 2>/dev/null || printf '%s' "$state")
 }
 finish() {  # $1 = reason: kill the pass child, leave a state that reads as stopped, drop the holder records
   # The group; the pid alone when the signal came before the child's setpgrp.
   [ -z "$child" ] || kill -- -"$child" 2>/dev/null || kill "$child" 2>/dev/null
   [ -z "$tp" ] || kill "$tp" 2>/dev/null
-  # A TERM during a POST runs this only once curl is done (bash defers a trap for its foreground pipeline), before the
-  # post is added to `posts`: curl's own output in post.out says whether it went out, and a 2xx counts as sent.
-  if [ -n "${inflight:-}" ]; then
-    o=$(< "$M/post.out") 2>/dev/null || o=""
-    case ${o##*$'\n'} in 2??) posts="${posts:-}$inflight"$'\x1f'sent$'\n';; esac
-  fi
+  # The posts already sent are recorded, or a restart would send them again.
+  record_posts
   rm -f "$M/pass.out" "$M/post.out"
-  # Mid-pass (run_pass's locals are visible here): the posts already sent are recorded, or a restart would send them again.
-  [ -z "${posts:-}" ] || state=$(printf '%s' "$state" | jq -c --arg results "$posts" --arg now "${ts:-$(now)}" "$apply" 2>/dev/null || printf '%s' "$state")
   state=$(printf '%s' "$state" | jq -c --arg now "$(now)" '.monitor.pid = null | .monitor.holders = [] | .monitor.stopped_at = $now' 2>/dev/null) && write_state
   # On no-holders every record left was dead and is already gone; a record
   # that appears now belongs to a holder whose --ensure is waiting for this
@@ -507,8 +516,8 @@ run_pass() {
       O*) set -f; IFS=$'\x1f'; set -- $rest; IFS=$' \t\n'; set +f   # split with no fork: tojson escapes any US in the payload
           scope=$1 key=$2 knd=$3 verdict=$4 payload=$5
           # The holder check between posts (a POST may take 10 s and more): once none is left the rest stay
-          # pending, and finish records what was sent before the monitor leaves.
-          ! no_holders || finish no-holders
+          # pending, and finish records what was sent before the monitor leaves. The lock likewise (lock_check).
+          lock_check; ! no_holders || finish no-holders
           [ "$knd" != finding ] || findings=$((findings + 1))
           lk=$key; [ "$scope" != hosts ] || lk="$key|-"   # the log's key, as the TUI and the spec name a host
           # In flight from here until it is in `posts` (finish records a 2xx); post.out emptied first, so an
