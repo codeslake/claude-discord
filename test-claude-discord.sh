@@ -3512,6 +3512,14 @@ next_pass() { wait_log $(( $(passes) + 1 )) ' pass hosts='; }
 holder() { sleep 30 & HPID=$!; KILL_AT_EXIT="$KILL_AT_EXIT $HPID"; }
 # A monitor is detached (setsid), so its exit may leave a zombie until something reaps it: a zombie counts as gone.
 running() { local st=""; { read -r st < "/proc/$1/stat"; } 2>/dev/null || return 1; st=${st##*) }; [ "${st%% *}" != Z ]; }
+# wait_tick: a holder check of the running monitor that began after this call is over: it drops a record whose pid
+# cannot live (past pid_max). Proof that a tick ran, where the case is that the tick did nothing else.
+wait_tick() {
+  local f="$MB/holders/tui-4194999" n=0
+  echo "4194999 - tui" > "$f"
+  while [ -e "$f" ] && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); done
+  [ ! -e "$f" ] || { echo "FAIL: the monitor ran no holder check within 3 s: $(tail -3 "$MB/monitor.log")"; exit 1; }
+}
 mstop() {  # the holder goes and the monitor is TERMed (it does not end for want of a holder); gone at once
   local p n=0; p=$(mpid)
   kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
@@ -3566,9 +3574,9 @@ n=0; while pgrep -f "Fcntl=:flock.*$MB/lock" >/dev/null && [ "$n" -lt 100 ]; do 
 nap 0.05
 [ "$(starts)" = 1 ] && [ "$n" -lt 100 ] || { echo "FAIL: two --ensure calls must leave one monitor, the loser gone after its wait: $(<"$MB/monitor.log")"; exit 1; }
 # The last holder gone does not end the monitor (its record goes, within a tick): only --stop, a removed ledger or a
-# signal does. 20 ticks later it still runs.
+# signal does. A tick later it still checks its holders.
 mp=$(mpid); kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
-n=0; while [ -e "$MB/holders/tui-$HPID" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; nap 0.2
+n=0; while [ -e "$MB/holders/tui-$HPID" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; wait_tick
 [ ! -e "$MB/holders/tui-$HPID" ] && running "$mp" && ! grep -q 'exit reason=' "$MB/monitor.log" ||
   { echo "FAIL: a monitor with no holder left must drop the record and go on: $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
 mstop
@@ -3922,7 +3930,7 @@ rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?
   { echo "FAIL: a second --keep exits 0 saying one runs, and registers nothing (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
 n=0; mp=""; while { [ -z "$mp" ] || [ "$(<"$MB/lock")" != "$mp" ] || ! running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); mp=$(mpid); done
 kill -STOP "$mp"; kill -TERM "$KP"; rc=0; wait "$KP" || rc=$?; rec=$(ls "$MB/holders"); kill -CONT "$mp"
-nap 0.2   # 20 ticks: the monitor does not leave with its last holder (and starts no keeper here: the suite's NO_AUTOSTART)
+wait_tick; wait_tick   # the tick after the one that met no holder: the monitor does not leave with its last holder (and starts no keeper here: the suite's NO_AUTOSTART)
 [ "$rc" = 0 ] && [ -z "$rec" ] && running "$mp" && [ "$(mpid)" = "$mp" ] && [ -z "$(ls "$MB/holders")" ] ||
   { echo "FAIL: a TERM ends the keeper (rc 0) and removes its record, and the monitor goes on without it (rc=$rc): '$rec' $(tail -2 "$MB/monitor.log")"; exit 1; }
 kill "$mp"; n=0; while running "$mp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
@@ -4154,25 +4162,32 @@ wait_keeper "$k1" && running "$m1" && [ "$(mpid)" = "$m1" ] && [ "$(ls "$MB/hold
 k2=$K
 # That keeper holds no lock of the monitor's (fd 9 closed for it): the monitor killed, the keeper starts the next one,
 # which a lock still held would keep out.
-nap 0.1; kill -9 "$m1"   # after the keeper's first --ensure is over: the next round is what brings it back
+kill -9 "$m1"
 wait_monitor "$m1" && running "$k2" || { echo "FAIL: a keeper the monitor started must not hold the monitor's lock: a killed monitor comes back: $(tail -3 "$MB/monitor.log")"; exit 1; }
 m2=$Mp
-# Once a minute at most: the start just now is on the clock, so a keeper killed again is not started again (0.1 s is 10
-# ticks); with that time a minute old it is. Nor while this side's refused marker stands, whatever the clock says.
-kill -9 "$k2"; nap 0.1
-[ -z "$(kp)" ] && running "$m2" || { echo "FAIL: the monitor must not start a keeper twice within 60 s: $(ls "$MB/holders")"; exit 1; }
-: > "$MB/$rf"; echo 0 > "$LS"; nap 0.1
+# Once a minute at most: with the last start 30 s old a keeper killed again is not started again, and the clock is not
+# touched (the tick that dropped its record is over); with that time a minute old it is. Nor while this side's refused
+# marker stands, whatever the clock says (the marker first, a tick before the clock, so no tick reads one without the other).
+ls0=$(( $(date +%s) - 30 )); echo "$ls0" > "$LS"; kill -9 "$k2"
+n=0; while [ -e "$MB/holders/keeper-$k2" ] && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); done; wait_tick
+[ ! -e "$MB/holders/keeper-$k2" ] && [ -z "$(kp)" ] && running "$m2" && [ "$(<"$LS")" = "$ls0" ] || { echo "FAIL: the monitor must not start a keeper twice within 60 s: $(ls "$MB/holders") $(<"$LS") (was $ls0)"; exit 1; }
+: > "$MB/$rf"; wait_tick; echo 0 > "$LS"; wait_tick; wait_tick
 [ -z "$(kp)" ] && running "$m2" && [ "$(<"$LS")" = 0 ] || { echo "FAIL: the monitor must start no keeper while this side's refused marker stands: $(ls "$MB" "$MB/holders")"; exit 1; }
 rm -f "$MB/$rf"
 wait_keeper "$k2" && running "$m2" || { echo "FAIL: with the marker gone and the last start a minute old the monitor must start a keeper: $(tail -3 "$MB/monitor.log")"; exit 1; }
 k3=$K
 # A live keeper whose record was removed: keeper.lock decides, not the record. The start the monitor tries finds the lock
-# held and leaves; the same keeper registers again at its next round.
-c=$(command grep -c 'a keeper already runs for mgr$' "$MB/monitor.log") || :; echo 0 > "$LS"; rm -f "$MB/holders/keeper-$k3"
-wait_log $(( c + 1 )) 'a keeper already runs for mgr$'; wait_for_file "$MB/holders/keeper-$k3"
+# held and leaves; the same keeper registers again at its next round. The keeper is held still meanwhile (it keeps its
+# lock), and the record removed until the monitor met it missing: an --ensure of the keeper's under way writes it once more.
+c=$(command grep -c 'a keeper already runs for mgr$' "$MB/monitor.log") || :; kill -STOP "$k3"; echo 0 > "$LS"
+n=0; while [ "$(command grep -c 'a keeper already runs for mgr$' "$MB/monitor.log")" -le "$c" ] && [ "$n" -lt 300 ]; do rm -f "$MB/holders/keeper-$k3"; nap 0.01; n=$((n + 1)); done
+kill -CONT "$k3"; wait_log $(( c + 1 )) 'a keeper already runs for mgr$'; wait_for_file "$MB/holders/keeper-$k3"
 running "$k3" && [ "$(kp)" = "$k3" ] && [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] || { echo "FAIL: a live keeper with no record must stay the only one: $(ls "$MB/holders") $(tail -3 "$MB/monitor.log")"; exit 1; }
-# --stop ends both, and nothing comes back: the monitor leaves on the marker (or the TERM), and neither starts the other.
-out=$(cd "$MP" && bash "$S" monitor --stop mgr 2>&1); echo 0 > "$LS"; nap 0.1
+# --stop ends both, and nothing comes back. The monitor leaves on the marker before the TERM here (the keeper is held
+# still until it has, and --stop waits for the keeper first), and --stop names it all the same.
+c=$(command grep -c 'exit reason=stopped$' "$MB/monitor.log") || :; kill -STOP "$k3"; echo 0 > "$LS"
+(cd "$MP" && bash "$S" monitor --stop mgr) > "$HOME/stop.out" 2>&1 & sp=$!
+wait_log $(( c + 1 )) 'exit reason=stopped$'; kill -CONT "$k3"; wait "$sp"; out=$(<"$HOME/stop.out"); rm -f "$HOME/stop.out"
 ! running "$k3" && ! running "$m2" && [ -z "$(ls "$MB/holders")" ] && grep -q "stopped keeper $k3$" <<<"$out" && grep -q "stopped monitor $m2$" <<<"$out" && [ "$(mpid)" != "$m2" ] ||
   { echo "FAIL: --stop must end the keeper and the monitor for good: $out $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
 rm -f "$MB/stopped" "$MB"/last-start*

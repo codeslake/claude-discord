@@ -158,7 +158,7 @@ All under `~/.claude-discord/records/monitor/<bot>/`, mode 0700 directory,
 | `monitor.log`, `monitor.log.1` | monitor | capped at 256 KiB; on overflow `.log` replaces `.log.1` |
 | `keeper.lock` | created once; the keeper holds an flock on it (fd 8) for its whole life | the one-keeper rule (1.10.3): a starter that cannot take it finds a keeper |
 | `refused.<id>` | a detached start that met a monitor this side cannot see; `<id>` is the digits of `readlink /proc/self/ns/pid` (plain `refused` without `/proc`), so only the writing side reads it: `keeper_alive`, `--start` and the TUI (red bar `auto-start refused here`) | until `monitor --start`, or a start on this side that passes the unseen-lock check |
-| `holders/<kind>-<pid>` | the TUI and the keeper (plan deviations 17, 19; a 1.10.2 hook's session record is read until its session ends) | removed by their owner on exit, by the monitor when dead, all but keeper records by the monitor on a signal exit (1.10.3) (since 1.10.4 a record is display only: the monitor never exits for want of one, and starts a keeper when no keeper record is left) |
+| `holders/<kind>-<pid>` | the TUI and the keeper (plan deviations 17, 19; a 1.10.2 hook's session record is read until its session ends) | removed by their owner on exit, by the monitor when dead, all but keeper records by the monitor on a signal exit (1.10.3) (since 1.10.4 a record is what the TUI shows and a fork-free hint: the monitor never exits for want of one, and with no keeper record left it tries a keeper start, which `keeper.lock` decides) |
 
 Plus one machine-wide record, `~/.claude-discord/records/projects`: one
 project root per line, written by `setup` and by a `health` run in a project

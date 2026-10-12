@@ -16,8 +16,9 @@
 # Every tick it starts the keeper again when none runs, as the keeper starts it.
 #   claude-discord monitor --keep <bot> [--detach]
 # the keeper: a holder of its own that runs the same --ensure every 60 s, so a
-# dead monitor comes back with nothing else open (and the monitor brings a dead keeper back: a watch with neither left
-# needs both gone inside one tick). Foreground (tmux, a container
+# dead monitor comes back with nothing else open (and the monitor brings a dead
+# keeper back: a watch with neither left needs both gone inside one tick).
+# Foreground (tmux, a container
 # entrypoint, systemd); --detach (setup, the TUI, a manager session that finds
 # none) checks, then runs it in its own session and returns. One per bot: it holds keeper.lock for its life. It
 # runs the new monitor.sh once `claude-discord update` changed it. No OS scheduler, ever.
@@ -112,6 +113,8 @@ if [ -n "$stop" ]; then
   # The marker first, so nothing automatic starts a keeper meanwhile; then the keepers (one would start the monitor
   # again), then the monitor the lock file names, if it runs here. The monitor is looked up before the marker: it
   # leaves on the marker by itself at its next tick, which may come before the TERM below, and is reported either way.
+  # A keeper whose start passed its stopped check just before the marker has no record yet and is not named here: it
+  # leaves by itself within one interval (its --ensure is refused, its next round meets the marker) and starts nothing.
   l0=""; { read -r l0 < "$M/lock"; } 2>/dev/null; a_monitor "$l0" || l0=""
   : > "$M/stopped"
   said=""
@@ -404,6 +407,7 @@ record_posts() {
   [ -z "${posts:-}" ] || state=$(printf '%s' "$state" | jq -c --arg results "$posts" --arg now "${ts:-$(now)}" "$apply" 2>/dev/null || printf '%s' "$state")
 }
 finish() {  # $1 = reason (signal, stopped, no-ledger): kill the pass child, leave a state that reads as stopped, drop the holder records
+  trap '' TERM INT HUP   # once: a --stop that TERMs a monitor already leaving on the marker would record its posts twice
   # The group; the pid alone when the signal came before the child's setpgrp.
   [ -z "$child" ] || kill -- -"$child" 2>/dev/null || kill "$child" 2>/dev/null
   [ -z "$tp" ] || kill "$tp" 2>/dev/null

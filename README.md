@@ -49,7 +49,9 @@ enables it per session with `--settings`.
 - **backend**: a manager bot's keeper and the monitor it keeps up. It runs
   on its own, with no session and no TUI, until `claude-discord monitor --stop`.
 - **holder**: a process recorded next to the monitor: its keeper, or an open
-  TUI. The record is for display; the monitor does not exit for want of one.
+  TUI. The record is what the TUI shows and a hint that saves a fork;
+  `keeper.lock` decides whether a keeper runs. The monitor does not exit for
+  want of one.
 - **keeper**: `claude-discord monitor --keep <manager>`: it keeps the monitor
   up with nothing else open. setup, the TUI and a manager session start one.
 - **finding**: a verdict that needs a human (`down`, `stale`, `duplicate`,
