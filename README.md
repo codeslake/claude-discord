@@ -74,7 +74,8 @@ git clone https://github.com/codeslake/claude-discord ~/.claude-discord/source &
 then `claude-discord setup <bot>` there for each bot. `install` reads no stdin
 at all and is safe to re-run (a bootstrap script calls it); it installs or
 refreshes the plugin, the shim, `~/.claude-discord/runtime/`, the compat copy
-(see Migrating) and the install record. Without flags it takes the install
+(see Migrating) and the install record, and it ends by patching the official
+discord plugin's cache (as `claude-discord patch` does). Without flags it takes the install
 already there, else scope project and method link, and in an untrusted
 project it prints a one-line hint instead of asking. `~/.claude-discord/source`
 is the machine's **source clone**; nothing is removed from it afterwards.

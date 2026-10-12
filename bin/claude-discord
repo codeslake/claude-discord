@@ -493,6 +493,72 @@ install_all() {
 }
 pdir=$PWD/.claude/skills/claude-discord gdir=$HOME/.claude/skills/claude-discord
 
+# Patches the official discord plugin's install(s) so bots can work together.
+# Every version dir in the cache, not just the active one: an auto-update adds
+# an unpatched dir while bots run on the old one, and the next start, respawn
+# or config-changing /reload-plugins uses the new one (measured, 2.1.296).
+# Five patches, each idempotent because its pattern is gone once applied:
+#   bot-authors     let other bots reach access.json's allowFrom gate
+#   ignore-everyone @everyone/@here wake no bot
+#   chunk           fence-safe chunking, imported from the stable runtime copy
+#                   (an import of any other path is rewritten to it)
+#   proxy           bunfig preload pinning fetch and WebSocket to HTTPS_PROXY
+#   failure-cache   a per-bot env in .mcp.json, so Claude Code's 15-minute MCP
+#                   failure cache (keyed on the config hashed after ${VAR}
+#                   expansion) no longer blocks every bot for one bot's failure
+# The runtime files are copied to ~/.claude-discord/runtime/ because the plugin
+# cache is machine-wide while clones are per project. Exit 1 names the file and
+# patch whose pattern moved; the others are still applied.
+patch_official() {
+  local rt=$HOME/.claude-discord/runtime d f rc=0 changed=""
+  mark() { case " $changed " in *" $1 "*) ;; *) changed="$changed $1";; esac; }   # list a file once
+  sync_runtime || return 1
+  [ -z "${runtime_newer:-}" ] || return 0   # a newer version's runtime: that code patches the cache
+  for d in "$HOME"/.claude/plugins/cache/claude-plugins-official/discord/*/; do
+    d=${d%/}; f=$d/server.ts   # no trailing slash, so messages name the file cleanly
+    [ -f "$f" ] || continue
+    if grep -q 'if (msg.author.bot) return' "$f"; then
+      perl -pi -e 's/^(\s*)if \(msg\.author\.bot\) return$/$1if (msg.author.id === client.user?.id) return/' "$f"; mark "$f"
+    elif ! grep -qF 'msg.author.id === client.user?.id' "$f"; then
+      echo "claude-discord: patch: $f: bot-authors no longer matches" >&2; rc=1
+    fi
+    if grep -q 'msg.mentions.has(client.user))' "$f"; then
+      perl -pi -e 's/msg\.mentions\.has\(client\.user\)\)/msg.mentions.has(client.user, { ignoreEveryone: true }))/' "$f"; mark "$f"
+    elif ! grep -qF 'ignoreEveryone: true' "$f"; then
+      echo "claude-discord: patch: $f: ignore-everyone no longer matches" >&2; rc=1
+    fi
+    if grep -qE '^[[:space:]]*const chunks = chunk\(text, limit, mode\);?[[:space:]]*$' "$f"; then
+      CHUNK_TS=$rt/discord-chunk.ts perl -pi -e 's/^(\s*)const chunks = chunk\(text, limit, mode\)(;?\s*)$/$1const chunks = (await import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)$2/' "$f"; mark "$f"
+    elif grep -qF "import(\"$rt/discord-chunk.ts\")).chunk(text, limit, mode)" "$f"; then :
+    elif grep -qE 'import\("[^"]*"\)\)\.chunk\(text, limit, mode\)' "$f"; then
+      # An earlier release imported it from another path (~/.claude-discord/discord-chunk.ts, a compat link that goes in a later release).
+      CHUNK_TS=$rt/discord-chunk.ts perl -pi -e 's/import\("[^"]*"\)\)\.chunk\(text, limit, mode\)/import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)/' "$f"; mark "$f"
+    else
+      echo "claude-discord: patch: $f: chunk no longer matches" >&2; rc=1
+    fi
+    [ "$(cat "$d/bunfig.toml" 2>/dev/null)" = "preload = [\"$rt/discord-proxy.ts\"]" ] ||
+      { printf 'preload = ["%s"]\n' "$rt/discord-proxy.ts" > "$d/bunfig.toml"; mark "$d/bunfig.toml"; }
+    # The key is ours, not the server's DISCORD_STATE_DIR: unset, "${DISCORD_STATE_DIR}"
+    # would stay a literal string and mask the server's own default state dir for
+    # a user of the official plugin without claude-discord; "${VAR:-}" expands to
+    # "" (measured, 2.1.296). An earlier release's DISCORD_STATE_DIR line is removed.
+    if [ -f "$d/.mcp.json" ] && ! jq -e '(.mcpServers.discord.env.CLAUDE_DISCORD_BOT == "${DISCORD_STATE_DIR:-}") and (.mcpServers.discord.env.DISCORD_STATE_DIR != "${DISCORD_STATE_DIR}")' "$d/.mcp.json" >/dev/null 2>&1; then
+      # Only a file that already defines the discord server is edited (jq would
+      # otherwise create a command-less one); jq_edit leaves bad JSON alone and
+      # returns 0, so the result is verified, not assumed.
+      jq -e '.mcpServers.discord.command' "$d/.mcp.json" >/dev/null 2>&1 &&
+        jq_edit "$d/.mcp.json" '.mcpServers.discord.env = ((.mcpServers.discord.env // {}) + {CLAUDE_DISCORD_BOT: "${DISCORD_STATE_DIR:-}"})
+          | if .mcpServers.discord.env.DISCORD_STATE_DIR == "${DISCORD_STATE_DIR}" then del(.mcpServers.discord.env.DISCORD_STATE_DIR) else . end'
+      if jq -e '(.mcpServers.discord.env.CLAUDE_DISCORD_BOT == "${DISCORD_STATE_DIR:-}") and (.mcpServers.discord.env.DISCORD_STATE_DIR != "${DISCORD_STATE_DIR}")' "$d/.mcp.json" >/dev/null 2>&1; then
+        mark "$d/.mcp.json"
+      else
+        echo "claude-discord: patch: $d/.mcp.json: failure-cache no longer matches" >&2; rc=1
+      fi
+    fi
+  done
+  [ -z "$changed" ] || echo "claude-discord: patched$changed"
+  return "$rc"
+}
 # install: the plugin and what goes with it (the bootstrap's command): it reads
 # no stdin at all, so a script's stdin is left alone. An install already there
 # decides the scope, else project; the method is link unless --method says
@@ -503,6 +569,8 @@ if [ "${1:-}" = install ]; then
   [ "${#rest[@]}" = 0 ] || { echo "usage: claude-discord install [--scope project|global] [--method link|clone]" >&2; exit 2; }
   check_install_scope
   install_all || exit $?
+  # A bot's start patches the cache, but install then /reload-plugins with no restart would leave it unpatched (measured on lmd79). A failed patch must not fail the install.
+  patch_official || echo "claude-discord: some patches no longer apply (see above); the install is done anyway" >&2
   echo "claude-discord: installed at $plugin_target; set up a bot with: claude-discord setup <name>"
   exit 0
 fi
@@ -1421,72 +1489,6 @@ if [ "${1:-}" = refresh ]; then
   exit "$rc"
 fi
 
-# Patches the official discord plugin's install(s) so bots can work together.
-# Every version dir in the cache, not just the active one: an auto-update adds
-# an unpatched dir while bots run on the old one, and the next start, respawn
-# or config-changing /reload-plugins uses the new one (measured, 2.1.296).
-# Five patches, each idempotent because its pattern is gone once applied:
-#   bot-authors     let other bots reach access.json's allowFrom gate
-#   ignore-everyone @everyone/@here wake no bot
-#   chunk           fence-safe chunking, imported from the stable runtime copy
-#                   (an import of any other path is rewritten to it)
-#   proxy           bunfig preload pinning fetch and WebSocket to HTTPS_PROXY
-#   failure-cache   a per-bot env in .mcp.json, so Claude Code's 15-minute MCP
-#                   failure cache (keyed on the config hashed after ${VAR}
-#                   expansion) no longer blocks every bot for one bot's failure
-# The runtime files are copied to ~/.claude-discord/runtime/ because the plugin
-# cache is machine-wide while clones are per project. Exit 1 names the file and
-# patch whose pattern moved; the others are still applied.
-patch_official() {
-  local rt=$HOME/.claude-discord/runtime d f rc=0 changed=""
-  mark() { case " $changed " in *" $1 "*) ;; *) changed="$changed $1";; esac; }   # list a file once
-  sync_runtime || return 1
-  [ -z "${runtime_newer:-}" ] || return 0   # a newer version's runtime: that code patches the cache
-  for d in "$HOME"/.claude/plugins/cache/claude-plugins-official/discord/*/; do
-    d=${d%/}; f=$d/server.ts   # no trailing slash, so messages name the file cleanly
-    [ -f "$f" ] || continue
-    if grep -q 'if (msg.author.bot) return' "$f"; then
-      perl -pi -e 's/^(\s*)if \(msg\.author\.bot\) return$/$1if (msg.author.id === client.user?.id) return/' "$f"; mark "$f"
-    elif ! grep -qF 'msg.author.id === client.user?.id' "$f"; then
-      echo "claude-discord: patch: $f: bot-authors no longer matches" >&2; rc=1
-    fi
-    if grep -q 'msg.mentions.has(client.user))' "$f"; then
-      perl -pi -e 's/msg\.mentions\.has\(client\.user\)\)/msg.mentions.has(client.user, { ignoreEveryone: true }))/' "$f"; mark "$f"
-    elif ! grep -qF 'ignoreEveryone: true' "$f"; then
-      echo "claude-discord: patch: $f: ignore-everyone no longer matches" >&2; rc=1
-    fi
-    if grep -qE '^[[:space:]]*const chunks = chunk\(text, limit, mode\);?[[:space:]]*$' "$f"; then
-      CHUNK_TS=$rt/discord-chunk.ts perl -pi -e 's/^(\s*)const chunks = chunk\(text, limit, mode\)(;?\s*)$/$1const chunks = (await import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)$2/' "$f"; mark "$f"
-    elif grep -qF "import(\"$rt/discord-chunk.ts\")).chunk(text, limit, mode)" "$f"; then :
-    elif grep -qE 'import\("[^"]*"\)\)\.chunk\(text, limit, mode\)' "$f"; then
-      # An earlier release imported it from another path (~/.claude-discord/discord-chunk.ts, a compat link that goes in a later release).
-      CHUNK_TS=$rt/discord-chunk.ts perl -pi -e 's/import\("[^"]*"\)\)\.chunk\(text, limit, mode\)/import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)/' "$f"; mark "$f"
-    else
-      echo "claude-discord: patch: $f: chunk no longer matches" >&2; rc=1
-    fi
-    [ "$(cat "$d/bunfig.toml" 2>/dev/null)" = "preload = [\"$rt/discord-proxy.ts\"]" ] ||
-      { printf 'preload = ["%s"]\n' "$rt/discord-proxy.ts" > "$d/bunfig.toml"; mark "$d/bunfig.toml"; }
-    # The key is ours, not the server's DISCORD_STATE_DIR: unset, "${DISCORD_STATE_DIR}"
-    # would stay a literal string and mask the server's own default state dir for
-    # a user of the official plugin without claude-discord; "${VAR:-}" expands to
-    # "" (measured, 2.1.296). An earlier release's DISCORD_STATE_DIR line is removed.
-    if [ -f "$d/.mcp.json" ] && ! jq -e '(.mcpServers.discord.env.CLAUDE_DISCORD_BOT == "${DISCORD_STATE_DIR:-}") and (.mcpServers.discord.env.DISCORD_STATE_DIR != "${DISCORD_STATE_DIR}")' "$d/.mcp.json" >/dev/null 2>&1; then
-      # Only a file that already defines the discord server is edited (jq would
-      # otherwise create a command-less one); jq_edit leaves bad JSON alone and
-      # returns 0, so the result is verified, not assumed.
-      jq -e '.mcpServers.discord.command' "$d/.mcp.json" >/dev/null 2>&1 &&
-        jq_edit "$d/.mcp.json" '.mcpServers.discord.env = ((.mcpServers.discord.env // {}) + {CLAUDE_DISCORD_BOT: "${DISCORD_STATE_DIR:-}"})
-          | if .mcpServers.discord.env.DISCORD_STATE_DIR == "${DISCORD_STATE_DIR}" then del(.mcpServers.discord.env.DISCORD_STATE_DIR) else . end'
-      if jq -e '(.mcpServers.discord.env.CLAUDE_DISCORD_BOT == "${DISCORD_STATE_DIR:-}") and (.mcpServers.discord.env.DISCORD_STATE_DIR != "${DISCORD_STATE_DIR}")' "$d/.mcp.json" >/dev/null 2>&1; then
-        mark "$d/.mcp.json"
-      else
-        echo "claude-discord: patch: $d/.mcp.json: failure-cache no longer matches" >&2; rc=1
-      fi
-    fi
-  done
-  [ -z "$changed" ] || echo "claude-discord: patched$changed"
-  return "$rc"
-}
 if [ "${1:-}" = patch ]; then
   crc=0; [ "${2:-}" != --compat ] || compat_if_stale || crc=1
   patch_official || crc=1; exit "$crc"

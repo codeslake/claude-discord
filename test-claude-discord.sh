@@ -3294,6 +3294,15 @@ for _ in 1 2; do
   [ "$rc" = 0 ] && [ "$left" = leftover ] && [ "$(readlink "$IP/.claude/skills/claude-discord")" = "$HOME/.claude-discord/source" ] && [ ! -e "$IP/.claude/discord-agents" ] || { echo "FAIL: install must install, read nothing from stdin and write no bot file (rc=$rc, left=$left): $(<"$HOME/inst.out")"; exit 1; }
 done
 grep -qxF "$IP/.claude/skills/claude-discord" "$HOME/.claude-discord/records/installs" && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" && [ -d "$HOME/.claude-discord/compat/hooks/turn" ] || { echo "FAIL: install must record the install and refresh the shim and compat copy"; exit 1; }
+# install ends with one patch of the official plugin cache: an install then /reload-plugins with no bot start must
+# find .mcp.json and server.ts patched. A version dir whose pattern moved warns on stderr and leaves the install at rc 0.
+for v in 0.0.20 0.0.21; do mkdir -p "$PCACHE/$v"; done
+cp "$HOME/server.ts.pristine" "$PCACHE/0.0.20/server.ts"; printf 'nothing to patch here\n' > "$PCACHE/0.0.21/server.ts"
+printf '{"mcpServers":{"discord":{"command":"bun"}}}\n' > "$PCACHE/0.0.20/.mcp.json"
+rc=0; (cd "$IP" && bash "$S" install >"$HOME/inst.out" 2>"$HOME/inst.err") || rc=$?
+[ "$rc" = 0 ] && [ "$(jq -r '.mcpServers.discord.env.CLAUDE_DISCORD_BOT' "$PCACHE/0.0.20/.mcp.json")" = '${DISCORD_STATE_DIR:-}' ] && grep -q 'ignoreEveryone: true' "$PCACHE/0.0.20/server.ts" && grep -qF "$PCACHE/0.0.20/.mcp.json" "$HOME/inst.out" &&
+  grep -q '^claude-discord: some patches no longer apply' "$HOME/inst.err" || { echo "FAIL: install must patch the official plugin cache and survive a patch that no longer applies (rc=$rc): $(<"$HOME/inst.out") $(<"$HOME/inst.err")"; exit 1; }
+rm -rf "$PCACHE/0.0.20" "$PCACHE/0.0.21" "$HOME/inst.err"
 # No flags, an untrusted project: still no stdin read (no scope, method or trust question), a hint instead; </dev/null too.
 UI="$HOME/untrusted inst"; mkdir -p "$UI"
 rc=0; left=$(printf 'l1\nl2\nl3\nl4\n' | { (cd "$UI" && bash "$S" install >"$HOME/inst.out" 2>&1) || rc=$?; cat; })
@@ -3312,7 +3321,7 @@ rc=0; out=$(cd "$FP" && printf '900\n111\n\ntokF\nn\n' | PATH="$GW:$PATH" CLAUDE
 ! command -v timeout >/dev/null || grep -q '^0 timeout clone$' "$GW/log" || { echo "FAIL: a clone must run with GIT_TERMINAL_PROMPT=0 under timeout: $(<"$GW/log")"; exit 1; }
 rm -rf "$GW"
 rm -rf "$IP" "$FP" "$HOME/inst.out"
-echo "ok: install installs and refreshes (twice) reading no stdin at all (no flags and untrusted too: a trust hint instead) and writing no bot file, refuses other words; a setup whose clone fails writes no bot file, and git runs with no prompt under a timeout"
+echo "ok: install installs and refreshes (twice), patches the official plugin cache once (a patch that no longer applies only warns), reading no stdin at all (no flags and untrusted too: a trust hint instead) and writing no bot file, refuses other words; a setup whose clone fails writes no bot file, and git runs with no prompt under a timeout"
 
 # Scopes: a bot in $HOME is a global install (its .claude is ~/.claude); a project link and the global link to
 # the one source coexist (one code, loaded once); a clone on either side beside another install is refused.
