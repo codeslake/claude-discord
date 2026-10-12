@@ -3951,6 +3951,7 @@ rc=0; (cd "$MP" && bash "$S" monitor --locked mgr </dev/null >/dev/null 2>&1) ||
 : > "$MB/lock"
 # --start (and every monitor verb) works from anywhere: the project above the cwd that has the bot, else the recorded one.
 want=$(( $(starts) + 1 )); PFK=$(cat "$HOME/.claude-discord/records/projects" 2>/dev/null || :); printf '%s\n' "$MP" > "$HOME/.claude-discord/records/projects"
+printf '%s\n' "$(date +%s)" > "$MB/${rf/refused/last-start}"   # an automatic start a moment ago: --start does not wait for the backoff
 rc=0; out=$(cd "$HOME" && bash "$S" monitor --start mgr 2>&1) || rc=$?; printf '%s\n' "$PFK" > "$HOME/.claude-discord/records/projects"
 [ "$rc" = 0 ] || { echo "FAIL: monitor --start from outside the project must find the recorded project (rc=$rc): $out"; exit 1; }
 KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
@@ -4018,7 +4019,7 @@ newkeeper() {  # $1 = a keeper pid that does not count; sets KP to the one whose
   KP=""; local n=0 f
   while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || [ "${f##*-}" = "$1" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
 }
-want=$(( $(starts) + 1 )); hook on-session-start ss.json; newkeeper ""; wait_log "$want" 'Z start$'
+rm -f "$MB"/last-start*; want=$(( $(starts) + 1 )); hook on-session-start ss.json; newkeeper ""; wait_log "$want" 'Z start$'
 [ -n "$KP" ] && [ "$(ps -o sid= -p "$KP" | tr -d ' ')" = "$KP" ] && ! ls "$MB/holders" | grep -q '^session-' ||
   { echo "FAIL: the manager's SessionStart must start a detached keeper and register no session: '$KP' $(ls "$MB/holders")"; exit 1; }
 # A reducer that fails is said in state.json, for the TUI's red bar, not only in monitor.log (a pass that goes through
@@ -4029,16 +4030,17 @@ ka() { bash -c '. "$1"; bot_name=mgr; keeper_alive' x "$D/hooks/lib/discord.sh";
 ka || { echo "FAIL: keeper_alive must see the running keeper $KP"; exit 1; }
 old=$KP; kill -9 "$old"; n=0; while running "$old" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
 ! ka || { echo "FAIL: keeper_alive must see a keeper killed with -9 as dead"; exit 1; }
+rm -f "$MB"/last-start*   # the start above was under a minute ago: the backoff is its own case below
 hook on-prompt up.json; newkeeper "$old"
 [ -n "$KP" ] || { echo "FAIL: the manager's next prompt must start a keeper killed with -9 again: $(ls "$MB/holders")"; exit 1; }
 (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null)
 ka || { echo "FAIL: keeper_alive must count a backend stopped by its owner as nothing to start"; exit 1; }
-hook on-prompt up.json; nap 0.1; [ -z "$(ls "$MB/holders")" ] || { echo "FAIL: after monitor --stop a prompt starts nothing: $(ls "$MB/holders")"; exit 1; }
+hook on-prompt up.json; nap 0.05; [ -z "$(ls "$MB/holders")" ] || { echo "FAIL: after monitor --stop a prompt starts nothing: $(ls "$MB/holders")"; exit 1; }
 # Any bot revives it, not only the manager: a plain bot's prompt (alpha in P) starts nothing while the marker stands,
 # and the dead manager's keeper once it is gone.
 plain() { env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$P" DISCORD_STATE_DIR="$R/alpha" bash "$PC/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1; }
-plain; nap 0.1; [ -z "$(ls "$MB/holders")" ] || { echo "FAIL: a plain bot's prompt must not start a backend its owner stopped: $(ls "$MB/holders")"; exit 1; }
-rm -f "$MB/stopped"; old=$KP; plain; newkeeper "$old"
+plain; nap 0.05; [ -z "$(ls "$MB/holders")" ] || { echo "FAIL: a plain bot's prompt must not start a backend its owner stopped: $(ls "$MB/holders")"; exit 1; }
+rm -f "$MB/stopped" "$MB"/last-start*; old=$KP; plain; newkeeper "$old"
 [ -n "$KP" ] || { echo "FAIL: a plain bot's prompt must start a dead manager's keeper: $(ls "$MB/holders")"; exit 1; }
 (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null); rm -f "$MB/stopped" "$HOME/ss.json" "$HOME/up.json"; unset CLAUDE_DISCORD_KEEP_INTERVAL
 n=0; while running "$KP" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
@@ -4064,7 +4066,7 @@ echo "ok: a dev-manager's SessionStart starts its backend's keeper detached (no 
 # was asked for the keeper from the project. Copies, not links: plugin_root is cd -P of the hook's own place.
 FX="$HOME/fxroot"; mkdir -p "$FX/bin" "$FX/hooks/turn" "$FX/hooks/lib"; cp "$D/hooks/turn/on-session-start" "$FX/hooks/turn/"; cp "$D/hooks/lib/discord.sh" "$FX/hooks/lib/"
 printf '#!/bin/sh\nprintf "%%s %%s\\n" "$PWD" "$*" > "$HOME/fx.rec"\necho $$ > "$HOME/fx.pid"\nexec sleep 3\n' > "$FX/bin/claude-discord"; chmod +x "$FX/bin/claude-discord"
-FXR=$(cd -P "$FX" && pwd -P); rm -f "$HOME/fx.rec" "$HOME/fx.pid"
+FXR=$(cd -P "$FX" && pwd -P); rm -f "$HOME/fx.rec" "$HOME/fx.pid" "$MB"/last-start*
 printf '{"session_id":"sFx","source":"compact"}' > "$HOME/ss.json"
 fxout=$(perl -e 'use Time::HiRes qw(time); open(STDIN, "<", shift) or die; my $t = time; my $pid = open(P, "-|"); die unless defined $pid;
     if (!$pid) { open(STDERR, ">&", \*STDOUT); exec @ARGV; die } local $/; my $o = <P>; printf "%.3f\n%s", time - $t, $o;' \
@@ -4078,7 +4080,7 @@ jq -ne --arg e "$fxel" '($e | tonumber) < 1.5' >/dev/null || { echo "FAIL: the S
 [ "$(<"$HOME/fx.rec")" = "$MP monitor --keep mgr --detach" ] || { echo "FAIL: the keeper must be started from the project, detached: $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
 # And the prompt hook: a keeper record naming a live pid that is no keeper (a sleep here, a pid another program got after
 # the keeper was killed) is no keeper to it: the keeper is started again.
-rm -f "$HOME/fx.rec" "$HOME/fx.pid"; cp "$D/hooks/turn/on-prompt" "$FX/hooks/turn/"
+rm -f "$HOME/fx.rec" "$HOME/fx.pid" "$MB"/last-start*; cp "$D/hooks/turn/on-prompt" "$FX/hooks/turn/"
 /bin/sleep 30 & SP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $SP"; : > "$MB/holders/keeper-$SP"
 printf '{"session_id":"sFx","prompt":"hi"}' > "$HOME/up.json"
 env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1
@@ -4090,7 +4092,7 @@ kill "$SP" 2>/dev/null || :; wait "$SP" 2>/dev/null || :
 # Every bot's hook starts the keeper from the project, without the calling session's own DISCORD_STATE_DIR, CLAUDE_PROJECT_DIR,
 # CLAUDE_PLUGIN_ROOT and CLAUDECODE (the keeper and its monitor outlive that session); a manager name that two recorded projects
 # share starts ONE keeper (one state dir per name); a manager with no .env is not started (the front refuses it every time).
-rm -f "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/fx2.rec"; rm -f "$MB"/holders/keeper-*
+rm -f "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/fx2.rec" "$MB"/last-start*; rm -f "$MB"/holders/keeper-*
 printf '#!/bin/sh\nprintf "%%s %%s|%%s|%%s|%%s|%%s\\n" "$PWD" "$*" "${DISCORD_STATE_DIR-unset}" "${CLAUDE_PROJECT_DIR-unset}" "${CLAUDE_PLUGIN_ROOT-unset}" "${CLAUDECODE-unset}" >> "$HOME/fx2.rec"\n' > "$FX/bin/claude-discord"
 DUP="$HOME/dupproj"; mkdir -p "$DUP/.claude/discord-agents/mgr" "$DUP/.claude/discord-agents/noenv"
 for b in mgr noenv; do echo dev-manager > "$DUP/.claude/discord-agents/$b/mode"; echo local > "$DUP/.claude/discord-agents/$b/hosts"; done
@@ -4100,6 +4102,16 @@ env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDECODE=1 CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE
 n=0; while [ ! -s "$HOME/fx2.rec" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; nap 0.05
 [ "$(<"$HOME/fx2.rec")" = "$MP monitor --keep mgr --detach|unset|unset|unset|unset" ] ||
   { echo "FAIL: a prompt must start one keeper per manager name, from its project, with none of the session's own env, and none for a manager with no .env: $(cat "$HOME/fx2.rec" 2>&1)"; exit 1; }
+# A start that keeps failing (the stub starts no keeper, as one that dies at once): the prompt just now wrote this side's
+# last-start, so a second prompt within a minute forks nothing; with that time a minute old (0 here) it starts again.
+LS=$MB/${rf/refused/last-start}
+[ -s "$LS" ] || { echo "FAIL: an automatic start must record its time in $LS: $(ls "$MB")"; exit 1; }
+env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1; nap 0.1
+[ "$(wc -l < "$HOME/fx2.rec")" = 1 ] || { echo "FAIL: a second prompt within 60 s of a start must not start again: $(cat "$HOME/fx2.rec")"; exit 1; }
+echo 0 > "$LS"
+env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1
+n=0; while [ "$(wc -l < "$HOME/fx2.rec")" != 2 ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+[ "$(wc -l < "$HOME/fx2.rec")" = 2 ] && [ "$(<"$LS")" != 0 ] || { echo "FAIL: a prompt over a minute after the last start must start again and record the time: $(cat "$HOME/fx2.rec") '$(<"$LS")'"; exit 1; }
 # And setup refuses a dev-manager name another recorded project already runs, naming that project (the same project may re-run).
 D3="$HOME/dupproj3"; mkdir -p "$D3/.claude/discord-agents/mgr"; echo DISCORD_BOT_TOKEN=x > "$D3/.claude/discord-agents/mgr/.env"; echo '{}' > "$D3/.claude/discord-agents/mgr/access.json"
 rc=0; out=$(cd "$D3" && printf 'dev-manager\n\n\n' | bash "$S" setup mgr --mode 2>&1) || rc=$?
@@ -4111,7 +4123,7 @@ rm -rf "$D3"
 rm -rf "$DUP" "$HOME/fx2.rec"
 rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json" "$HOME/up.json" "$MB/holders/keeper-$SP"
 printf '%s\n' "$PFB" > "$HOME/.claude-discord/records/projects"
-echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while the keeper's start is still running"
+echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while the keeper's start is still running; a start that keeps failing is tried once a minute, not on every prompt"
 
 # claude-discord tui: the project's one dev-manager bot with a ledger unless named; it hands the bot, the monitor's
 # state dir and the wrapper to the TUI script through `uv run --script`. uv is needed for this verb only and its

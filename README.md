@@ -962,6 +962,7 @@ Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 | `stopped` | `monitor --stop` was run: nothing starts the backend until `monitor --start` |
 | `keeper.lock` | the keeper's `flock` target, held on fd 8 for its whole life: the one-keeper rule |
 | `refused.<id>` | a detached start met a monitor this side cannot see: this side's hooks start nothing until `monitor --start` or a start that gets through (`<id>` is the digits of `readlink /proc/self/ns/pid`, so the other side of a shared home is not stopped by it; plain `refused` where there is no `/proc`, a Mac). The TUI says `auto-start refused here` |
+| `last-start.<id>` | the epoch second of this side's last automatic start (a hook, not `monitor --start` or the TUI): a prompt within 60 s of it starts nothing, so a keeper that dies at once is not forked again on every prompt of every bot (`<id>` as for `refused.<id>`) |
 | `pass.out` | one host's answer, only during a pass |
 | `post.out` | one post's answer and status, only during a pass |
 

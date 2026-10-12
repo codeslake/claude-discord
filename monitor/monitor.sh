@@ -33,6 +33,7 @@
 #                              `--start` or a start that gets through. <id> is the pid namespace (the digits of
 #                              `readlink /proc/self/ns/pid`), so the other side of a shared home is not stopped by it;
 #                              plain `refused` where /proc has none (a Mac)
+#   last-start.<id>            the hooks' last automatic start (epoch seconds, same <id>): none again within 60 s
 #   pass.out                   one host's answer, only during a pass
 #   post.out                   one POST's answer and status, only during a pass
 # Nothing in /tmp: no mktemp and no here-document or here-string anywhere in

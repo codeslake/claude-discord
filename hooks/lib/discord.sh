@@ -223,6 +223,15 @@ revive_backends() {
 # and backgrounded, so the hook leaves nothing on Claude Code's pipe. The session is no holder: the backend outlives it.
 ensure_keeper() {
   [ -x "$plugin_root/bin/claude-discord" ] || return 0
+  # A start that keeps failing (the keeper dies at once) would fork this on every prompt of every bot: at most one
+  # attempt a minute per pid namespace. The time is stored as epoch seconds and read with no fork on Linux
+  # (EPOCHSECONDS is bash 5; `date` elsewhere). Not --start's or the TUI's: they never come through here.
+  local d="$HOME/.claude-discord/records/monitor/$bot_name" f="" now last="" ns=""
+  [ ! -L /proc/self/ns/pid ] || { ns=$(readlink /proc/self/ns/pid); ns=${ns//[!0-9]/}; ns=${ns:+.$ns}; }
+  f=$d/last-start$ns now=${EPOCHSECONDS:-$(date +%s)}
+  { read -r last < "$f"; } 2>/dev/null
+  case $last in ''|*[!0-9]*) ;; *) [ $((now - last)) -ge 60 ] || return 0;; esac
+  mkdir -p "$d" 2>/dev/null && printf '%s\n' "$now" > "$f" 2>/dev/null
   # Without the calling session's own: the keeper and its monitor outlive it, and any bot's hook starts them, so they keep
   # neither its state dir nor its plugin and project paths. Proxies for the monitor belong in the ledger's per-host words.
   (cd "$bot_project" && env -u DISCORD_STATE_DIR -u CLAUDE_PROJECT_DIR -u CLAUDE_PLUGIN_ROOT -u CLAUDECODE \
