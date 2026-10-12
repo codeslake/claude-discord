@@ -885,6 +885,7 @@ Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 | `monitor.log`, `monitor.log.1` | one line per event, 256 KiB each at most |
 | `holders/<kind>-<pid>` | one record per open TUI or manager session |
 | `pass.out` | one host's answer, only during a pass |
+| `post.out` | one post's answer and status, only during a pass |
 
 **Alerts.** One message per change, posted with the manager bot's token to
 channel `1558283274487341137`, and one `[recovered]` line when the bot is

@@ -18,6 +18,7 @@
 #   monitor.log, monitor.log.1 256 KiB each at most
 #   holders/<kind>-<pid>       "<pid> <start time> <kind>"
 #   pass.out                   one host's answer, only during a pass
+#   post.out                   one POST's answer and status, only during a pass
 # Nothing in /tmp: no mktemp and no here-document or here-string anywhere in
 # this file (bash 3.2 backs both with a temp file).
 # Runs under macOS /bin/bash 3.2: no associative arrays, no fractional read -t.
@@ -185,7 +186,13 @@ finish() {  # $1 = reason: kill the pass child, leave a state that reads as stop
   # The group; the pid alone when the signal came before the child's setpgrp.
   [ -z "$child" ] || kill -- -"$child" 2>/dev/null || kill "$child" 2>/dev/null
   [ -z "$tp" ] || kill "$tp" 2>/dev/null
-  rm -f "$M/pass.out"
+  # A TERM during a POST runs this only once curl is done (bash defers a trap for its foreground pipeline), before the
+  # post is added to `posts`: curl's own output in post.out says whether it went out, and a 2xx counts as sent.
+  if [ -n "${inflight:-}" ]; then
+    o=$(< "$M/post.out") 2>/dev/null || o=""
+    case ${o##*$'\n'} in 2??) posts="${posts:-}$inflight"$'\x1f'sent$'\n';; esac
+  fi
+  rm -f "$M/pass.out" "$M/post.out"
   # Mid-pass (run_pass's locals are visible here): the posts already sent are recorded, or a restart would send them again.
   [ -z "${posts:-}" ] || state=$(printf '%s' "$state" | jq -c --arg results "$posts" --arg now "${ts:-$(now)}" "$apply" 2>/dev/null || printf '%s' "$state")
   state=$(printf '%s' "$state" | jq -c --arg now "$(now)" '.monitor.pid = null | .monitor.holders = [] | .monitor.stopped_at = $now' 2>/dev/null) && write_state
@@ -214,9 +221,11 @@ post() {
   [ -n "$tok" ] || { p_code="000 (no DISCORD_BOT_TOKEN in $dir/.env)" p_retry=""; return 1; }
   for try in 1 2; do
     p_retry=""
-    out=$(printf 'Authorization: Bot %s\n' "$tok" | env ${local_env[@]+"${local_env[@]}"} curl -s --max-time 10 -w '\n%{http_code}' \
+    # Into post.out, which curl itself writes, not a $(...): finish reads it when a TERM came during the POST.
+    printf 'Authorization: Bot %s\n' "$tok" | env ${local_env[@]+"${local_env[@]}"} curl -s --max-time 10 -w '\n%{http_code}' \
       -X POST -H @- -H 'Content-Type: application/json' --data-binary "$1" \
-      "https://discord.com/api/v10/channels/$alert_channel/messages" 2>/dev/null 9>&-) || out=""
+      "https://discord.com/api/v10/channels/$alert_channel/messages" > "$M/post.out" 2>/dev/null 9>&-
+    out=$(< "$M/post.out") 2>/dev/null || out=""
     p_code=${out##*$'\n'}
     case $p_code in ''|*[!0-9]*) p_code=000;; esac
     case $p_code in 2*) return 0;; esac
@@ -439,7 +448,7 @@ apply='
 '
 run_pass() {
   local t0=$SECONDS now_s start line w host laptop remote doc results="" out l rest hosts=0 nb=0 mowner ts="" hj k=0 \
-    lang scope key lk knd verdict payload st posts="" findings=0 posted=0
+    lang scope key lk knd verdict payload st posts="" findings=0 posted=0 inflight=""
   local envs=()
   local_env=()   # a ledger that lost its local line: POSTs with the monitor's own env
   rotate
@@ -487,14 +496,19 @@ run_pass() {
           ! no_holders || finish no-holders
           [ "$knd" != finding ] || findings=$((findings + 1))
           lk=$key; [ "$scope" != hosts ] || lk="$key|-"   # the log's key, as the TUI and the spec name a host
+          # In flight from here until it is in `posts` (finish records a 2xx); post.out emptied first, so an
+          # earlier POST's status is never read as this one's.
+          : > "$M/post.out"; inflight="$scope"$'\x1f'"$key"$'\x1f'"$knd"$'\x1f'"$verdict"
           if post "$payload"; then
             posted=$((posted + 1)); log "post $lk $verdict $p_code"; st=sent
           else
             log "post $lk $verdict failed $p_code${p_retry:+ retry_after=$p_retry}"; st=failed
           fi
-          posts="$posts$scope"$'\x1f'"$key"$'\x1f'"$knd"$'\x1f'"$verdict"$'\x1f'"$st"$'\n';;
+          # One command for both: a trap runs between commands, never inside one, so it sees the post once.
+          posts="$posts$inflight"$'\x1f'"$st"$'\n' inflight="";;
     esac
   done < <(printf '%s\n' "$out")
+  rm -f "$M/post.out"
   # A failed apply keeps the state as it was (nothing marked posted: the next pass posts again), never an empty one.
   if [ -n "$posts" ]; then
     out=$(printf '%s' "$state" | jq -c --arg results "$posts" --arg now "$ts" "$apply" 2>/dev/null) && state=$out posts="" ||

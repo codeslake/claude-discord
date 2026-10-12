@@ -224,6 +224,7 @@ cat > "$HOME/bin/curl" <<'EOF'
 printf '%s\n' "$*" >> "$CURL_LOG"
 [ -z "${HTTPS_PROXY:-}" ] || printf '%s\n' "$HTTPS_PROXY" >> "$HOME/curl.proxy"   # the env a call ran with (the monitor's POST)
 while IFS= read -r l || [ -n "$l" ]; do printf '%s\n' "$l"; done >> "$CURL_STDIN_LOG" 2>/dev/null
+[ ! -f "$HOME/curl.sleep" ] || { echo 1 > "$HOME/curl.slept"; /bin/sleep "$(<"$HOME/curl.sleep")"; }   # a slow answer, after the request
 line=""; rest=()
 { IFS= read -r line && while IFS= read -r l; do rest+=("$l"); done; } < "$CURL_REPLIES" 2>/dev/null || :   # no mapfile: bash 3.2 runs this on a Mac
 if [ -n "$line" ]; then
@@ -3578,6 +3579,17 @@ wait_log $(( ex + 1 )) 'exit reason=no-holders$'
   jq -e '.bots["h1|/home/u/ws/p|x1"].posted == "stale" and .bots["h1|/home/u/ws/p|x2"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a holder gone between posts ends the posting (the rest stay pending), what was sent recorded, nf not sent again: $(posts) $(jq -c '.bots | map_values(.posted)' "$MB/state.json")"; exit 1; }
 jq -e '.hosts.local | .verdict == "blind" and (.detail | test("did not finish"))' "$MB/state.json" >/dev/null || { echo "FAIL: a local laptop past the cap is blind (it alerts), not hostdown: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
+# A TERM in the middle of a POST: bash runs the trap once curl is done, before the post is recorded in the pass, so finish
+# reads curl's own answer (post.out) and records a 2xx as sent. The next monitor does not send it again: one POST in all.
+rm -f "$MON/local.sleep" "$HOME/curl.slept"; printf 'h1\n' > "$MR/mgr/hosts"; mdoc h1 1 nf:stale tm:stale > "$MON/h1.out"
+printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"; echo 0.2 > "$HOME/curl.sleep"
+ex=$(command grep -c 'exit reason=signal$' "$MB/monitor.log") || :; holder
+(cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID")
+wait_for_file "$HOME/curl.slept"; kill -TERM "$(mpid)"; wait_log $(( ex + 1 )) 'exit reason=signal$'
+kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
+mstart
+[ "$(posts | grep -c .)" = 1 ] && [ "$(posts | grep -c '\] tm on')" = 1 ] && [ "$(jq -r '.bots["h1|/home/u/ws/p|tm"].posted' "$MB/state.json")" = stale ] ||
+  { echo "FAIL: a POST that went out while a TERM waited must be recorded as sent, not sent again by the next monitor: $(posts)"; exit 1; }
 mstop
 # A reducer that fails (here on a state whose hosts is no object) is said in state.json, for the TUI's red bar, not only
 # in monitor.log; the next block's first pass clears it.
@@ -3585,7 +3597,7 @@ mstate '.hosts = "x"'; holder; (cd "$MP" && bash "$S" monitor --ensure mgr --hol
 n=0; while ! jq -e '.monitor.error | startswith("the reducer rejected its input at ")' "$MB/state.json" >/dev/null 2>&1 && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
 [ "$n" -lt 100 ] || { echo "FAIL: a failed reducer must write state.json with monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
 mstop
-echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; hosts and bots that left are dropped and logged; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting; a stray holder file is dropped; a failed reducer is written to state.json"
+echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; hosts and bots that left are dropped and logged; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting; a POST under way when a TERM comes is recorded once it went out; a stray holder file is dropped; a failed reducer is written to state.json"
 
 # Cadence and self-update, counted, never timed. date and sleep are stubs for this monitor: date reads $HOME/clock,
 # which each local health run moves 1000 s on, and logs D for a pass's start stamp (the %s call); sleep logs its
