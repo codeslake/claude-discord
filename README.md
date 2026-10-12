@@ -912,7 +912,8 @@ killed keeper by the manager session's next prompt or the next TUI.
 foreground, registers itself as a holder of kind `keeper` and runs
 `monitor --ensure` every 60 s, so a dead monitor comes back. It exits 1 with
 the reason for a bot with no ledger or not in dev-manager mode, exits 0 when
-a keeper already runs for that bot (one per bot) or the bot was stopped with
+a keeper already runs for that bot (one per bot: it holds `keeper.lock` for
+its whole life, so starters that race leave one) or the bot was stopped with
 `--stop`, leaves when the ledger is deleted, and removes its record on TERM or
 INT. setup, the TUI and the hooks start it detached, in a session of its own
 (why one did not start is in `monitor.log`), so **quitting the TUI or ending
@@ -944,6 +945,12 @@ is no monitor of that bot this side can see: "the monitor lock is held by a
 monitor this side cannot see; run --keep where the bots run". It refuses only;
 it never takes the lock over.
 
+A monitor verb works from any directory: it finds the project above the
+current one that has the bot, else the one `records/projects` lists. One
+manager bot name is one backend per machine (its state dir is keyed by the
+name), so `setup --mode dev-manager` refuses a name that another recorded
+project already runs as a manager.
+
 Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 
 | file | what |
@@ -953,6 +960,8 @@ Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 | `monitor.log`, `monitor.log.1` | one line per event, 256 KiB each at most |
 | `holders/<kind>-<pid>` | one record per keeper (`keeper`) or open TUI (`tui`): `<pid> <start time> <kind>` (a `session` record from 1.10.2 is read until its session ends) |
 | `stopped` | `monitor --stop` was run: nothing starts the backend until `monitor --start` |
+| `keeper.lock` | the keeper's `flock` target, held on fd 8 for its whole life: the one-keeper rule |
+| `refused` | a detached start met a monitor this side cannot see: the hooks start nothing until `monitor --start` |
 | `pass.out` | one host's answer, only during a pass |
 | `post.out` | one post's answer and status, only during a pass |
 
