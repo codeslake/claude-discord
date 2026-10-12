@@ -403,9 +403,9 @@ sync_compat() (
     [ "$SECONDS" -lt $((t0 + gu)) ] || { echo "claude-discord: $l stays held; compat/ not refreshed" >&2; return 1; }
     sleep "$ps"
   done
-  # compat/ gone: our old copy (unless we landed) goes back, and $n holding it stays if that fails. set -e is back on
-  # inside a trap: a failing command would skip the rest (the lock release) and set our status, hence || :.
-  trap '{ has_path "$c" || [ ! -d "$o" ] || perl -e "rename shift, shift or exit 1" "$o" "$c"; } && rm -rf "$n" || :; IFS= read -r t 2>/dev/null < "$l/owner" && [ "$t" = "$tok" ] && rm -rf "$l" || :' EXIT
+  # compat/ gone: our old copy (unless we landed) goes back; $n holding it stays if that fails with compat/ still gone.
+  # set -e is back on inside a trap: a failing command would skip the rest (the lock release) and set our status, hence || :.
+  trap '{ has_path "$c" || [ ! -d "$o" ] || perl -e "rename shift, shift or exit 1" "$o" "$c" || has_path "$c"; } && rm -rf "$n" || :; IFS= read -r t 2>/dev/null < "$l/owner" && [ "$t" = "$tok" ] && rm -rf "$l" || :' EXIT
   printf '%s\n' "$tok" > "$l/owner" || return 1
   # compat/ gone: a writer killed between its renames left the only copy in its compat.new.*/old; the newest goes back.
   has_path "$c" || perl -e '$c = shift; ($o) = sort { (lstat "$b/..")[9] <=> (lstat "$a/..")[9] } grep { -d } @ARGV; rename $o, $c if $o' "$c" "$c".new.*/old || :

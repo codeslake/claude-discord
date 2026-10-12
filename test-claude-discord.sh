@@ -3120,13 +3120,13 @@ touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.
 rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 [ "$rc" != 0 ] && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] ||
   { echo "FAIL: a failed rename must put the old compat/ back, fail and release the lock (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-# The restore fails too: compat/ is gone, the run fails, our compat.new.* holding the only copy in old/ stays, the lock goes.
-printf '#!/bin/sh\ncase $3 in */compat.new.*/compat|*/compat.new.*/old) exit 1;; esac\nexec "%s" "$@"\n' "$RP" > "$SB/perl"
-touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
-rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
+# The restore fails too: ours goes if another writer landed meanwhile, else the run fails and our compat.new.*/old stays.
+printf '#!/bin/sh\ncase $3 in */compat.new.*/compat) exit 1;; */compat.new.*/old) [ ! -e "%s/mw" ] || cp -R "%s/cur" "$4"; exit 1;; esac\nexec "%s" "$@"\n' "$SB" "$HOME" "$RP" > "$SB/perl"
+: > "$SB/mw"; touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || :
+diff -r "$OH/compat" "$HOME/cur" >/dev/null && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] || { echo "FAIL: a restore beaten by another writer's landing must drop ours: $(ls -d "$OH"/compat* "$OH"/compat.*/* 2>&1)"; exit 1; }
+rm "$SB/mw"; touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"; rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
 j=$(ls -d "$OH"/compat.* 2>/dev/null || :); [ "$rc" != 0 ] && [ ! -e "$OH/compat" ] && [ -d "$j/old" ] ||
   { echo "FAIL: a failed restore must keep its compat.new.*/old and still release the lock (rc=$rc): $(ls -d "$OH"/compat* "$OH"/compat.*/* 2>&1)"; exit 1; }
-rm -r "$j/old"; bash "$S" patch --compat >/dev/null 2>&1 || :; [ ! -e "$OH/compat" ] || { echo "FAIL: with compat/ absent and no old copy, a bot start must leave it to setup"; exit 1; }
 # A writer killed between its two renames leaves the same. A bot start puts the newest old copy back under the lock before
 # the sweep, which then removes the older one (a current copy stays: same inode); the emptied one is fresh again, and stays.
 rm -r "$j" "$SB/perl"; mkdir "$OH/compat.new.a" "$OH/compat.new.b"; cp -R "$HOME/cur" "$OH/compat.new.a/old"; cp -R "$HOME/cur" "$OH/compat.new.b/old"
@@ -3150,7 +3150,7 @@ rm -rf "$HOME/cur"
 rm -rf "$SB"
 bash "$S" patch --compat >/dev/null 2>&1   # leave a fresh compat/
 rm -rf "$HOME/cbproj"
-echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, writers swap one at a time under a lock (a held one is waited for, a stale one broken by exactly one breaker, a dead writer's leftovers removed), two holders at once leave one whole current copy, a failed swap restores the old copy, a killed writer's old copy goes back at a bot start, a refused move aside fails, a lockless writer's copy landing at our swap stays whole, a writer whose lock was broken leaves the next holder's, and with no source clone no bot start rebuilds it"
+echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, writers swap one at a time under a lock (a held one is waited for, a stale one broken by exactly one breaker, a dead writer's leftovers removed), two holders at once leave one whole current copy, a failed swap restores the old copy (drops it if another writer landed meanwhile), a killed writer's old copy goes back at a bot start, a refused move aside fails, a lockless writer's copy landing at our swap stays whole, a writer whose lock was broken leaves the next holder's, and with no source clone no bot start rebuilds it"
 
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.
