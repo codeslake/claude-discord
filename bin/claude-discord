@@ -1888,14 +1888,9 @@ if [ "${1:-}" = tui ]; then
   uv=${CLAUDE_DISCORD_UV:-uv}
   command -v "$uv" >/dev/null 2>&1 || { echo "claude-discord: tui needs uv (https://docs.astral.sh/uv/); nothing else in claude-discord does" >&2; exit 1; }
   # The backend's keeper, detached, so the monitor outlives the TUI (none is started when one runs; monitor.log says
-  # why). Stopped by its owner (monitor --stop): started again only on a yes at a terminal.
-  ka=--detach
-  if [ -e "$HOME/.claude-discord/records/monitor/$bot/stopped" ]; then
-    ka=""; a=""
-    [ ! -t 0 ] || read -rp "The backend of $bot was stopped with monitor --stop. Start it again? [y/N] " a || a=""
-    case $a in [yY]*) ka=--start;; esac
-  fi
-  [ -z "$ka" ] || bash "$self_root/monitor/monitor.sh" "$self_path" --keep "$bot" $ka </dev/null >/dev/null || :
+  # why). Stopped by its owner (monitor --stop): the TUI asks whether to start it again.
+  [ -e "$HOME/.claude-discord/records/monitor/$bot/stopped" ] ||
+    bash "$self_root/monitor/monitor.sh" "$self_path" --keep "$bot" --detach </dev/null >/dev/null || :
   # The cwd stays the project root: the TUI's `monitor --ensure` call reads the ledger from there.
   exec "$uv" run --script "$self_root/tui/claude_discord_tui.py" --bot "$bot" \
     --state-dir "$HOME/.claude-discord/records/monitor/$bot" --claude-discord "$self_path"

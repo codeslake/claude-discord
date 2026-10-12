@@ -194,6 +194,26 @@ hook_session() {
   case $sid in .*) return 1;; esac
 }
 
+# revive_backends: every dev-manager bot with a hosts ledger in the projects recorded on this machine
+# (records/projects, as tui and health --all read it) gets its keeper started, detached, when none runs and its owner
+# did not stop it. Any bot's session start and prompt run it, so a backend killed by a restart comes back with the
+# first bot that wakes. No records, no manager, every keeper alive: builtins only (no fork on Linux), and silent.
+# CLAUDE_DISCORD_NO_AUTOSTART turns it off on a machine (the other side of a shared home; the suite).
+revive_backends() {
+  local pf="$HOME/.claude-discord/records/projects" p d m bot_name bot_project
+  [ -z "${CLAUDE_DISCORD_NO_AUTOSTART:-}" ] && [ -f "$pf" ] || return 0
+  while IFS= read -r p || [ -n "$p" ]; do
+    p=${p%$'\r'}; [ -n "$p" ] || continue
+    for d in "$p"/.claude/discord-agents/*/; do
+      d=${d%/}
+      [ -f "$d/hosts" ] || continue
+      m=""; { read -r m < "$d/mode"; } 2>/dev/null
+      [ "$m" = dev-manager ] || continue
+      bot_name=${d##*/} bot_project=$p
+      keeper_alive || ensure_keeper
+    done
+  done < "$pf"
+}
 # ensure_keeper: the manager bot's backend (a keeper and its monitor), started detached when none runs. The --keep
 # front checks (one keeper per bot; nothing while the owner's --stop marker stands) and returns at once; stdio closed
 # and backgrounded, so the hook leaves nothing on Claude Code's pipe. The session is no holder: the backend outlives it.

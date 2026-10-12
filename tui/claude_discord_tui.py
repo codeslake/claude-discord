@@ -23,9 +23,9 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
-from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Button, DataTable, Footer, Static
 
 GOOD = ("ok", "busy")
 
@@ -70,21 +70,23 @@ def alive(pid: int, bot: str) -> bool:
     return "monitor/monitor.sh" in cmd and cmd.endswith(f" --locked {bot}")
 
 
-def header_lines(state: dict, note: str = "") -> tuple[str, str | None]:
+def header_lines(state: dict, note: str = "", stopped: str | None = None) -> tuple[str, str | None]:
     """The header text and the red bar's text (None when there is nothing to warn about). `note` is why
-    `monitor --ensure` failed, when it did: the one place a refusal is visible."""
+    `monitor --ensure` failed, when it did: the one place a refusal is visible. `stopped`: when the `stopped` marker
+    (monitor --stop) was left, if it stands."""
     m = state.get("monitor") or {}
     holders = ", ".join(f"{h.get('kind')} {h.get('pid')}" for h in m.get("holders") or []) or "none"
     pid = m.get("pid")
     text = (f"manager {state.get('manager', '?')}   monitor pid {pid if pid else '-'}   holders {holders}\n"
             f"last pass {m.get('last_pass') or '-'}   next pass {m.get('next_pass') or '-'}   pass took {m.get('pass_s', '-')}s")
     if any(h.get("kind") == "keeper" for h in m.get("holders") or []):   # why quitting leaves the monitor running
-        text += f"\na keeper keeps the monitor up after quit; to stop both: claude-discord monitor --stop {state.get('manager', '?')}"
+        text += f"\nthe backend runs on after q; Q quits and stops it (claude-discord monitor --stop {state.get('manager', '?')})"
     bar = None
     if not state:
         bar = "no state yet: the monitor has not written state.json"
-    elif m.get("stopped_by_user"):   # monitor --stop: nothing starts it until monitor --start
-        bar = f"stopped by you (monitor --stop); start it again: claude-discord monitor --start {state.get('manager', '?')}"
+    elif stopped is not None or m.get("stopped_by_user"):   # monitor --stop: nothing starts it until monitor --start
+        bar = (f"stopped by you{' at ' + stopped if stopped else ''} (monitor --stop); "
+               f"start it again: claude-discord monitor --start {state.get('manager', '?')}")
     elif not pid:
         bar = f"monitor stopped at {m.get('stopped_at') or '?'}"
     elif not alive(pid, state.get("manager") or ""):   # killed without its trap (kill -9, OOM): its pid stays in state.json
@@ -162,10 +164,36 @@ class Alerts(Screen):
         yield Footer()
 
 
+class Confirm(ModalScreen[bool]):
+    """A yes/no question, No by default (focused, and Enter, n and Escape answer it)."""
+    CSS = "Confirm { align: center middle; } #confirm { width: 70; height: auto; border: thick $error; padding: 1 2; }"
+    BINDINGS = [Binding("y", "answer(True)", "yes"), Binding("n", "answer(False)", "no"), Binding("escape", "answer(False)", "no")]
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm"):
+            yield Static(self.text, markup=False)
+            with Horizontal():
+                yield Button("No", id="no")
+                yield Button("Yes", id="yes", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#no", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "yes")
+
+    def action_answer(self, yes: bool) -> None:
+        self.dismiss(yes)
+
+
 class MonitorTUI(App):
     TITLE = "claude-discord monitor"
     CSS = "#bar { background: darkred; color: white; } #bar.hidden { display: none; }"
-    BINDINGS = [Binding("q", "quit", "quit"), Binding("a", "alerts", "alerts")]
+    BINDINGS = [Binding("q", "quit", "quit"), Binding("Q", "quit_stop", "quit + stop backend"), Binding("a", "alerts", "alerts")]
 
     def __init__(self, state_dir: Path, bot: str, wrapper: str | None) -> None:
         super().__init__()
@@ -199,8 +227,34 @@ class MonitorTUI(App):
         except OSError as e:   # a missing or non-executable wrapper: say so instead of crashing the mount
             self.note = f"cannot run {self.wrapper}: {e.strerror or e}"
 
+    def stopped(self) -> str | None:
+        """When `monitor --stop` left its marker (UTC), or None when there is none."""
+        try:
+            t = (self.state_dir / "stopped").stat().st_mtime
+        except OSError:
+            return None
+        return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def backend(self, verb: str) -> None:
+        """`monitor --start` or `--stop` of this bot; a failure is shown in the red bar."""
+        try:
+            r = subprocess.run([self.wrapper, "monitor", verb, self.bot], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, text=True, errors="replace", check=False)
+            self.note = (" ".join(r.stderr.split()) or f"monitor {verb} exited {r.returncode}") if r.returncode else ""
+        except OSError as e:
+            self.note = f"cannot run {self.wrapper}: {e.strerror or e}"
+
+    def started(self, yes: bool | None) -> None:
+        if yes:
+            self.backend("--start")
+            self.ensure()
+        self.refresh_state()   # No: read-only, the bar says stopped by you
+
     def on_mount(self) -> None:
-        if self.wrapper:
+        stopped = self.stopped()
+        if self.wrapper and stopped:
+            self.push_screen(Confirm(f"The backend of {self.bot} was stopped by you at {stopped}. Start it again?"), self.started)
+        elif self.wrapper:
             self.ensure()
         self.refresh_state()
         self.set_interval(2, self.refresh_state)
@@ -217,9 +271,10 @@ class MonitorTUI(App):
             self.state = load(path)
         # Checked on every refresh, not only on a new state.json: a monitor that died without its trap writes none.
         pid = (self.state.get("monitor") or {}).get("pid")
-        if self.wrapper and not alive(pid, self.bot) and time.monotonic() - self.ensured >= 30:
+        stopped = self.stopped()
+        if self.wrapper and not stopped and not alive(pid, self.bot) and time.monotonic() - self.ensured >= 30:
             self.ensure()
-        text, bar = header_lines(self.state, self.note)
+        text, bar = header_lines(self.state, self.note, stopped)
         self.query_one("#head", Static).update(text)
         b = self.query_one("#bar", Static)
         b.update(bar or "")
@@ -242,6 +297,17 @@ class MonitorTUI(App):
         entry = (self.state.get(scope) or {}).get(key) or {}
         # A host's posts are keyed host|- in `alerts`; a bot's and a project row's by their own key.
         self.push_screen(Detail(key, key + "|-" if scope == "hosts" else key, entry, self.state.get("alerts") or []))
+
+    def action_quit_stop(self) -> None:
+        if not self.wrapper:
+            return
+
+        def answered(yes: bool | None) -> None:
+            if yes:
+                self.backend("--stop")
+                self.exit()
+        self.push_screen(Confirm(f"Quit and stop the backend of {self.bot}: its keeper and monitor stop, and so do its alerts "
+                                 f"until claude-discord monitor --start {self.bot}."), answered)
 
     def action_alerts(self) -> None:
         self.push_screen(Alerts(self.state.get("alerts") or []))

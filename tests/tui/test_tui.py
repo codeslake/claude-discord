@@ -280,6 +280,45 @@ async def main():
         other.kill()
         other.wait()
     print("ok: a live pid that is no monitor of this bot is shown gone and ensured")
+    # Launched with the `stopped` marker (monitor --stop): a dialog asks, No by default. Yes runs monitor --start, then
+    # the usual --ensure; No (Enter) runs nothing and the bar says stopped by you, with the marker's time.
+    for answer in ("y", "enter"):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "holders").mkdir()
+            (Path(d) / "state.json").write_text(json.dumps(variant("stopped_by_user")))
+            (Path(d) / "stopped").write_text("")
+            app = tui.MonitorTUI(Path(d), "mgr", stub(d, 'echo "$*" >> "$(dirname "$0")/args"'))
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert isinstance(app.screen, tui.Confirm) and "stopped by you at" in str(app.screen.text), app.screen
+                await pilot.press(answer)
+                await pilot.pause()
+                args = (Path(d) / "args").read_text().splitlines() if (Path(d) / "args").exists() else []
+                if answer == "y":
+                    assert args == ["monitor --start mgr", f"monitor --ensure mgr --holder tui {os.getpid()}"], args
+                else:
+                    assert args == [], args
+                    assert "stopped by you at " in text(app, "#bar"), text(app, "#bar")
+    print("ok: launched after monitor --stop, a dialog asks: yes starts the backend, no (the default) stays read-only")
+    # Q: quit and stop the backend, after a dialog, No by default. Yes runs monitor --stop and quits; No (Enter) stays.
+    for answer in ("y", "enter"):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "holders").mkdir()
+            (Path(d) / "state.json").write_text(json.dumps(variant("keeper")))
+            app = tui.MonitorTUI(Path(d), "mgr", stub(d, 'echo "$*" >> "$(dirname "$0")/args"'))
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("Q")
+                await pilot.pause()
+                assert isinstance(app.screen, tui.Confirm) and "keeper and monitor stop" in app.screen.text, app.screen
+                await pilot.press(answer)
+                await pilot.pause()
+                args = (Path(d) / "args").read_text().splitlines()
+                if answer == "y":
+                    assert args[-1] == "monitor --stop mgr" and app.return_code is not None, (args, app.return_code)
+                else:
+                    assert "monitor --stop mgr" not in args and not isinstance(app.screen, tui.Confirm) and app.return_code is None, args
+    print("ok: Q asks, then stops the backend and quits on yes, and does nothing on no (the default)")
 
 
 try:

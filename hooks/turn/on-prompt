@@ -12,9 +12,9 @@ set -u
 plugin_gate || exit 0
 
 [ -n "$bot_name" ] || exit 0
-# A manager whose backend is gone (its keeper killed, a container restart) gets it back at its next prompt, unless its
-# owner stopped it (monitor --stop). No fork while the keeper runs: this is every prompt's path.
-[ "$bot_mode" != dev-manager ] || [ ! -f "$DISCORD_STATE_DIR/hosts" ] || keeper_alive || ensure_keeper
+# A manager backend on this machine that is gone (its keeper killed, a container restart) comes back at any bot's next
+# prompt, unless its owner stopped it (monitor --stop). No fork while every keeper runs: this is every prompt's path.
+revive_backends
 input=$(cat 2>/dev/null) || exit 0
 # No tag anywhere in the raw JSON: a terminal prompt. Nothing to do unless a
 # turns file (a bare session id, no dot) is present.

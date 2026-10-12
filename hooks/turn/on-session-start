@@ -74,10 +74,10 @@ $ctx"
 fi
 jq -nc --arg c "$ctx" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}' 2>/dev/null || :
 
-# A manager bot with a hosts ledger checks its backend (every source) and
-# starts the keeper, detached, when none runs and its owner did not stop it.
-# The session is no holder: the backend runs without it.
-if [ "$bot_mode" = dev-manager ] && [ -f "$DISCORD_STATE_DIR/hosts" ]; then keeper_alive || ensure_keeper; fi
+# Any bot (every source) starts the keeper of each manager backend on this
+# machine that is gone, detached, unless its owner stopped it. No session is a
+# holder: the backends run without them.
+revive_backends
 
 t=$DISCORD_STATE_DIR/turns/$session_id
 case $source in
