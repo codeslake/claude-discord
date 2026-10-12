@@ -1850,7 +1850,8 @@ if [ "${1:-}" = tui ]; then
       pick=${cands%$'\n'}
     else
       [ -t 0 ] || { echo "claude-discord: tui: more than one recorded manager bot; run it in a project, or at a terminal to choose:" >&2; while IFS=$'\t' read -r b p; do [ -z "$b" ] || echo "  $b  $p" >&2; done <<<"$cands"; exit 2; }
-      i=0; while IFS=$'\t' read -r b p; do [ -z "$b" ] || { i=$((i + 1)); echo "$i) $b  ${p/#"$HOME"/"~"}"; }; done <<<"$cands"
+      # The replacement in a variable: bash 3.2 prints quotes inside ${p/#..} literally ("~"/x, measured on wmac).
+      t='~' i=0; while IFS=$'\t' read -r b p; do [ -z "$b" ] || { i=$((i + 1)); echo "$i) $b  ${p/#"$HOME"/$t}"; }; done <<<"$cands"
       read -rp "Number: " i || i=""
       case $i in ''|*[!0-9]*|0*) echo "claude-discord: tui: not a number: '$i'" >&2; exit 2;; esac
       pick=$(sed -n "${i}p" <<<"$cands")
