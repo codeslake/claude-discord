@@ -42,6 +42,7 @@ plant_old() {
 # the process is descheduled between bash's alarm check and read(2), the alarm fires first and the read never returns
 # (bash 5.1; measured 2026-10-11, 0.01 s naps on one contended CPU hung 3 of 3 loops, /bin/sleep 0 of 3).
 nap() { /bin/sleep "$1"; }
+echo() { case ${1-} in ok:*) LAST_OK=$1;; esac; builtin echo "$@"; }   # the last ok: line, which the TERM trap names
 wait_for_file() {  # $1 = path; up to 2s in 0.01s steps, for an async write to land
   local n=0
   while [ ! -s "$1" ] && [ "$n" -lt 200 ]; do nap 0.01; n=$((n+1)); done
@@ -167,14 +168,30 @@ echo "ok: plugin.json and hooks.json are valid and every hook command exists"
 # cannot leave one running.
 KILL_AT_EXIT=""
 export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'kill $KILL_AT_EXIT 2>/dev/null || :; rm -rf /tmp/claude-discord-test-$$' EXIT
-# Watchdog: a hang fails the suite with where it hung instead of blocking its caller. The hung block is the one after the
-# last ok: line; the watchdog lists the suite's children (what a hung command was), then kills the suite and them, so the
-# suite's TERM trap runs and names the function stack (a nap or other builtin that hung). Its own trap takes its sleep down.
-( trap 'kill $s 2>/dev/null; exit' TERM; /bin/sleep 60 & s=$!; wait $s || exit 0
-  me=$BASHPID; kids=$(ps -eo pid=,ppid=,args= | awk -v p=$$ -v me=$me '$2 == p && $1 != me')
-  echo "FAIL: suite still running after 60 s (budget 40 s): hung in the block after the last ok: line${kids:+; its child processes:$'\n'$kids}"
-  kill $$ $(printf '%s\n' "$kids" | awk '{print $1}') 2>/dev/null ) & KILL_AT_EXIT="$KILL_AT_EXIT $!"; disown $!   # disowned: a bare `wait` below must not wait for it
-trap 'echo "FAIL: killed by the watchdog in ${FUNCNAME[*]:-the top level}, called from line(s) ${BASH_LINENO[*]}"; exit 1' TERM
+# Watchdog: a hang fails the suite, saying where, instead of blocking its caller. After $1 s it lists every process under
+# the shell that armed it (a hung command, a nap too: it is /bin/sleep) and kills that shell and all of them at once: a
+# grandchild in a $(...) holds the capture pipe open, so killing the children alone left the shell blocked. The shell's
+# TERM trap then names the block (the last ok: line) and the function stack. The watchdog's own trap takes its sleep down,
+# and it says nothing once its shell is gone (SIGKILLed, the pid free for reuse): then it is no longer that shell's child.
+arm_watchdog() {
+  local target=$BASHPID
+  ( trap 'kill $(jobs -p) 2>/dev/null; exit' TERM; /bin/sleep "$1" & wait $! || exit 0
+    me=$BASHPID; [ "$(ps -o ppid= -p $me)" -eq "$target" ] 2>/dev/null || exit 0   # $me: inside $(...) $BASHPID is that subshell
+    kids=$(ps -eo pid=,ppid=,args= | awk -v p="$target" -v me="$me" '{ pp[$1] = $2; a[$1] = $0 }
+      END { d[p] = 1; do { n = 0; for (q in pp) if (!(q in d) && q != me && (pp[q] in d)) { d[q] = 1; n = 1 } } while (n)
+            for (q in d) if (q != p) print a[q] }') || :
+    echo "FAIL: still running after $1 s (budget 40 s), in the block after the last ok: line${kids:+; the processes under it:$'\n'$kids}"
+    kill "$target" $(printf '%s\n' "$kids" | awk '{print $1}') 2>/dev/null ) & KILL_AT_EXIT="$KILL_AT_EXIT $!"; disown $!   # disowned: a bare `wait` below must not wait for it
+  trap 'echo "FAIL: stopped by SIGTERM (the watchdog, or a kill from outside) in the block after \"${LAST_OK:-the start}\"${FUNCNAME[0]+, in ${FUNCNAME[*]}, called from line(s) ${BASH_LINENO[*]}}"; exit 1' TERM
+}
+arm_watchdog 60
+# The watchdog itself, armed at 0.1 s in a subshell over a hung grandchild inside a $(...) (the shape of a hook hung under
+# a plugin_hook capture): the shell fails within a second, the listing names the hung process, and nothing is left.
+printf '/bin/sleep 3.%s; :\n' $$ > "$HOME/hang.sh"   # `; :` keeps bash from exec-ing the sleep: it stays a grandchild
+rc=0; t=$SECONDS; out=$( (arm_watchdog 0.1; x=$(bash "$HOME/hang.sh")) 2>&1 ) || rc=$?; t=$((SECONDS - t)); left=$(ps -eo args=)
+[ "$rc" != 0 ] && [ "$t" -le 1 ] && grep -qF 'FAIL: still running after 0.1 s' <<<"$out" && grep -qF "/bin/sleep 3.$$" <<<"$out" && ! grep -qxF "/bin/sleep 3.$$" <<<"$left" ||
+  { echo "FAIL: the watchdog must kill a hung grandchild and its shell within a second (rc=$rc, ${t} s): $out"; exit 1; }
+echo "ok: the watchdog kills the whole process tree under a hung shell, a grandchild holding a \$(...) pipe included"
 # The fake plugin sits in the cache layout the patch verb walks; $HOME/fakeplugin
 # is a link to its one version dir, which the assertions read through.
 FAKEDIR="$HOME/.claude/plugins/cache/claude-plugins-official/discord/0.0.4"
@@ -1944,8 +1961,10 @@ out=$(tguard "$(body 43 $'| 식 | 값 |\n|---|---|\n| x \\| y | 2 |')")   # GFM 
 [ "$(newtext <<<"$out")" = $'```\n식    | 값\n------+---\nx | y | 2\n```' ] || { echo "FAIL: an escaped pipe must stay in its cell, unescaped: $(newtext <<<"$out")"; exit 1; }
 out=$(tguard "$(body 43 $'| name | description |\n|---|---|\n| x | '"$(printf 'y%.0s' $(seq 70))"$' |\n| z | w |')")
 [ "$(newtext <<<"$out")" = $'```\nname: x · description: '"$(printf 'y%.0s' $(seq 70))"$'\nname: z · description: w\n```' ] || { echo "FAIL: a table wider than 72 columns must become header: value lines in a code block: $out"; exit 1; }
-LONG=$'| hhhhhhhhhhhhhhhhhhhh | b |\n|-|-|'; for _ in $(seq 25); do LONG+=$'\n|1|2|'; done   # 184 characters, 682 once padded
+LONG=$'| hhhhhhhhhhhhhhhhhhhhh | b |\n|-|-|'; for _ in $(seq 17); do LONG+=$'\n|1|2|'; done   # 137 characters, 501 once padded: the limit's edge
 [ "${#LONG}" -le 500 ] || { echo "FAIL: the sample must be within 500 characters before conversion"; exit 1; }
+out=$(tguard "$(body 43 "$LONG")"); t=$(newtext <<<"$out")
+[ "${#t}" = 501 ] || { echo "FAIL: fixture: the sample must convert to exactly 501 characters, got ${#t}: $t"; exit 1; }
 out=$(tguard "$(body 42 "$LONG")")
 [ "$(reason <<<"$out")" = "$TG_REASON" ] && ! grep -q updatedInput <<<"$out" || { echo "FAIL: a channel reply over 500 characters once converted must be denied, without updatedInput: $out"; exit 1; }
 mkdir -p "$HOME/nopy"; for c in jq grep head cat basename dirname; do ln -sf "$(command -v "$c")" "$HOME/nopy/$c"; done
@@ -2916,7 +2935,7 @@ agents_say() { cat > "$HOME/bin/claude" <<STUB
 [ "\$1" = agents ] && echo '$1'
 STUB
 chmod +x "$HOME/bin/claude"; }
-WORKING="[{\"id\":\"aa111111\",\"pid\":41,\"name\":\"wbot\",\"cwd\":\"$WP\",\"state\":\"working\",\"status\":\"busy\"}]"
+WORKING="[{\"id\":\"aa111111\",\"pid\":41,\"name\":\"wbot\",\"cwd\":\"$WP\",\"state\":\"working\"}]"   # state alone: the "working" clause must hold by itself
 stale_one() { queue; qbot "$MENTION"; }
 agents_say "$WORKING"
 stale_one
