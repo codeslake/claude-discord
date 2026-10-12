@@ -38,7 +38,10 @@ plant_old() {
   fi
   printf '%s\n' "${PLANTED[$base]}" > "$f"
 }
-nap() { read -rt "$1" <> <(:) || :; }   # sleep without a process: the test's own waits are ~140 short naps
+# The test's own waits (~140 short naps). /bin/sleep, past the sleep stub. Not `read -t` on a pipe the shell holds open: when
+# the process is descheduled between bash's alarm check and read(2), the alarm fires first and the read never returns
+# (bash 5.1; measured 2026-10-11, 0.01 s naps on one contended CPU hung 3 of 3 loops, /bin/sleep 0 of 3).
+nap() { /bin/sleep "$1"; }
 wait_for_file() {  # $1 = path; up to 2s in 0.01s steps, for an async write to land
   local n=0
   while [ ! -s "$1" ] && [ "$n" -lt 200 ]; do nap 0.01; n=$((n+1)); done
@@ -164,6 +167,14 @@ echo "ok: plugin.json and hooks.json are valid and every hook command exists"
 # cannot leave one running.
 KILL_AT_EXIT=""
 export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"; trap 'kill $KILL_AT_EXIT 2>/dev/null || :; rm -rf /tmp/claude-discord-test-$$' EXIT
+# Watchdog: a hang fails the suite with where it hung instead of blocking its caller. The hung block is the one after the
+# last ok: line; the watchdog lists the suite's children (what a hung command was), then kills the suite and them, so the
+# suite's TERM trap runs and names the function stack (a nap or other builtin that hung). Its own trap takes its sleep down.
+( trap 'kill $s 2>/dev/null; exit' TERM; /bin/sleep 60 & s=$!; wait $s || exit 0
+  me=$BASHPID; kids=$(ps -eo pid=,ppid=,args= | awk -v p=$$ -v me=$me '$2 == p && $1 != me')
+  echo "FAIL: suite still running after 60 s (budget 40 s): hung in the block after the last ok: line${kids:+; its child processes:$'\n'$kids}"
+  kill $$ $(printf '%s\n' "$kids" | awk '{print $1}') 2>/dev/null ) & KILL_AT_EXIT="$KILL_AT_EXIT $!"; disown $!   # disowned: a bare `wait` below must not wait for it
+trap 'echo "FAIL: killed by the watchdog in ${FUNCNAME[*]:-the top level}, called from line(s) ${BASH_LINENO[*]}"; exit 1' TERM
 # The fake plugin sits in the cache layout the patch verb walks; $HOME/fakeplugin
 # is a link to its one version dir, which the assertions read through.
 FAKEDIR="$HOME/.claude/plugins/cache/claude-plugins-official/discord/0.0.4"
