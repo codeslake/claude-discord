@@ -78,6 +78,8 @@ def header_lines(state: dict, note: str = "") -> tuple[str, str | None]:
     pid = m.get("pid")
     text = (f"manager {state.get('manager', '?')}   monitor pid {pid if pid else '-'}   holders {holders}\n"
             f"last pass {m.get('last_pass') or '-'}   next pass {m.get('next_pass') or '-'}   pass took {m.get('pass_s', '-')}s")
+    if any(h.get("kind") == "keeper" for h in m.get("holders") or []):   # why quitting leaves the monitor running
+        text += f"\na keeper keeps the monitor up after quit; to stop both: claude-discord monitor --stop {state.get('manager', '?')}"
     bar = None
     if not state:
         bar = "no state yet: the monitor has not written state.json"

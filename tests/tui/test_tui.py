@@ -70,6 +70,8 @@ def variant(name):
         s["bots"]["wmac|/Users/u/p|MAC"]["detail"] = "before"
     elif name == "stopped":
         s["monitor"].update(pid=None, stopped_at=NOW, holders=[])
+    elif name == "keeper":
+        s["monitor"]["holders"] = [{"kind": "keeper", "pid": 789}, {"kind": "tui", "pid": 456}]
     elif name == "post_failed":
         s["monitor"]["post_failed"] = True
     elif name == "pass_failed":
@@ -108,6 +110,7 @@ def cells(table, key):
 async def all_ok(app, pilot):
     assert f"monitor pid {MON.pid}" in text(app, "#head"), text(app, "#head")
     assert app.query_one("#bar").has_class("hidden")
+    assert "--stop" not in text(app, "#head"), "no keeper, no stop hint"
     hosts = app.query_one("#hosts")
     assert hosts.row_count == 2
     assert cells(hosts, "wmac")[0] == "wmac (laptop)" and cells(hosts, "wmac")[4] == "1/1", cells(hosts, "wmac")
@@ -147,6 +150,12 @@ async def crashed_project(app, pilot):
 async def stopped(app, pilot):
     assert not app.query_one("#bar").has_class("hidden")
     assert f"monitor stopped at {NOW}" in text(app, "#bar")
+
+
+async def keeper(app, pilot):
+    head = text(app, "#head")
+    assert "holders keeper 789, tui 456" in head and "claude-discord monitor --stop mgr" in head, head
+    assert app.query_one("#bar").has_class("hidden")   # a keeper is no warning
 
 
 async def post_failed(app, pilot):
@@ -210,6 +219,7 @@ async def main():
     await case("findings", findings)
     await case("crashed_project", crashed_project)
     await case("stopped", stopped)
+    await case("keeper", keeper)
     await case("post_failed", post_failed)
     await case("pass_failed", pass_failed)
     await case("markup", markup)

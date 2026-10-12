@@ -44,8 +44,13 @@
 #                                        scheduler is installed any more
 #   claude-discord tui [<name>]          a read-only view of a manager bot's
 #                                        backend monitor (needs uv); starts the
-#                                        monitor if none runs; outside a project
+#                                        monitor and its keeper if none runs (both
+#                                        outlive the TUI); outside a project
 #                                        it picks among the recorded projects
+#   claude-discord monitor --keep <name> keeps the manager's monitor up with no
+#                                        TUI or session (foreground: tmux, a
+#                                        container entrypoint, systemd)
+#   claude-discord monitor --stop <name> stops the keeper and the monitor
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
@@ -1806,7 +1811,7 @@ if [ "${1:-}" = update ]; then
 fi
 
 # monitor: the backend health monitor of a manager bot (monitor/monitor.sh has
-# the whole story). Not in --help: the TUI and the SessionStart hook run it.
+# the whole story). --keep and --stop are for people; --ensure is the TUI's and the hooks'.
 if [ "${1:-}" = monitor ]; then
   shift
   exec bash "$self_root/monitor/monitor.sh" "$self_path" "$@"
@@ -1877,6 +1882,8 @@ if [ "${1:-}" = tui ]; then
   [ -f "$root/$bot/hosts" ] || { echo "claude-discord: tui: $root/$bot has no hosts ledger (claude-discord setup $bot --mode writes one)" >&2; exit 1; }
   uv=${CLAUDE_DISCORD_UV:-uv}
   command -v "$uv" >/dev/null 2>&1 || { echo "claude-discord: tui needs uv (https://docs.astral.sh/uv/); nothing else in claude-discord does" >&2; exit 1; }
+  # The keeper, detached, so the monitor outlives the TUI (none is started when one runs; it says why in monitor.log).
+  bash "$self_root/monitor/monitor.sh" "$self_path" --keep "$bot" --detach </dev/null || :
   # The cwd stays the project root: the TUI's `monitor --ensure` call reads the ledger from there.
   exec "$uv" run --script "$self_root/tui/claude_discord_tui.py" --bot "$bot" \
     --state-dir "$HOME/.claude-discord/records/monitor/$bot" --claude-discord "$self_path"

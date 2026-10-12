@@ -3972,6 +3972,53 @@ kill "$SP" 2>/dev/null || :; wait "$SP" 2>/dev/null || :
 rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json" "$HOME/up.json"
 echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while --ensure is still running"
 
+# The keeper (monitor --keep): a holder of kind keeper that runs --ensure every interval, so the monitor needs no TUI or
+# session. It refuses a bot with no ledger or that is not a dev-manager (exit 1), and a lock held by a monitor this side
+# cannot see (a home shared with a container: here a lock whose pid is no monitor); a second keeper exits 0; a monitor
+# killed without its trap is back within an interval; TERM removes its record; --stop takes keeper and monitor down,
+# and says so when nothing runs.
+export CLAUDE_DISCORD_MONITOR_PASS=60 CLAUDE_DISCORD_KEEP_INTERVAL=0.05
+printf 'local\n' > "$MR/mgr/hosts"; mdoc lambda 0 r1:ok > "$MON/local.out"; rm -f "$MON/local.sleep" "$MON/local.rc"
+mstate '.hosts = {} | .bots = {} | .alerts = []'; echo dev-manager > "$MR/mgr/mode"
+rc=0; out=$(cd "$P" && bash "$S" monitor --keep alpha 2>&1) || rc=$?
+[ "$rc" = 1 ] && grep -q 'no hosts ledger' <<<"$out" || { echo "FAIL: --keep for a bot without a ledger exits 1 saying so (rc=$rc): $out"; exit 1; }
+echo none > "$MR/mgr/mode"; rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?; echo dev-manager > "$MR/mgr/mode"
+[ "$rc" = 1 ] && grep -q 'not a dev-manager' <<<"$out" || { echo "FAIL: --keep for a bot that is not a dev-manager exits 1 saying so (rc=$rc): $out"; exit 1; }
+perl -MFcntl=:flock -e 'open(my $l, ">>", $ARGV[0]) or die; flock($l, LOCK_EX) or die; open(my $w, ">", $ARGV[0]) or die; print $w "$$\n"; close $w; sleep 30' "$MB/lock" & LP=$!
+KILL_AT_EXIT="$KILL_AT_EXIT $LP"; n=0; l=""
+until [ "$l" = "$LP" ] || [ "$n" -ge 200 ]; do nap 0.01; n=$((n + 1)); { read -r l < "$MB/lock"; } 2>/dev/null || :; done
+rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?
+kill "$LP" 2>/dev/null || :; wait "$LP" 2>/dev/null || :
+[ "$rc" = 1 ] && grep -q 'held by a monitor this side cannot see; run --keep where the bots run' <<<"$out" && [ -z "$(ls "$MB/holders")" ] ||
+  { echo "FAIL: --keep must refuse a lock held by a monitor it cannot see (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
+want=$(( $(starts) + 1 ))
+(cd "$MP" && exec bash "$S" monitor --keep mgr) > "$HOME/keep.out" 2>&1 & KP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $KP"
+wait_for_file "$MB/holders/keeper-$KP"; wait_log "$want" 'Z start$'; rec=$(<"$MB/holders/keeper-$KP")
+[[ $rec == "$KP "?*" keeper" ]] || { echo "FAIL: --keep registers a keeper holder with its start time: '$rec' $(ls "$MB/holders")"; exit 1; }
+mp=$(mpid); want=$(( $(starts) + 1 )); kill -9 "$mp"; wait_log "$want" 'Z start$'
+[ "$(mpid)" != "$mp" ] && running "$(mpid)" || { echo "FAIL: the keeper must start a monitor killed without its trap again: $(tail -3 "$MB/monitor.log")"; exit 1; }
+rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?
+[ "$rc" = 0 ] && grep -q "a keeper already runs for mgr (pid $KP)" <<<"$out" && [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] ||
+  { echo "FAIL: a second --keep exits 0 saying one runs, and registers nothing (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
+mp=$(mpid); kill -TERM "$KP"; rc=0; wait "$KP" || rc=$?
+n=0; while running "$mp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+[ "$rc" = 0 ] && [ ! -e "$MB/holders/keeper-$KP" ] && ! running "$mp" ||
+  { echo "FAIL: a TERM ends the keeper (rc 0) and removes its record, and the monitor ends with its last holder (rc=$rc): $(ls "$MB/holders")"; exit 1; }
+# --stop with a TUI holder too, so the monitor does not leave on its own once the keeper is gone: --stop ends it.
+want=$(( $(starts) + 1 ))
+(cd "$MP" && exec bash "$S" monitor --keep mgr) >> "$HOME/keep.out" 2>&1 & KP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $KP"
+wait_for_file "$MB/holders/keeper-$KP"; wait_log "$want" 'Z start$'; holder; (cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID")
+# The monitor both hold (a waiter of the previous keeper's last --ensure may have started one that left at once).
+n=0; mp=""; while { [ -z "$mp" ] || [ "$(<"$MB/lock")" != "$mp" ] || ! running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); mp=$(mpid); done
+out=$(cd "$MP" && bash "$S" monitor --stop mgr 2>&1); rc=0; wait "$KP" || rc=$?
+n=0; while running "$mp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
+[ "$rc" = 0 ] && ! running "$mp" && [ -z "$(ls "$MB/holders")" ] && grep -q "stopped keeper $KP$" <<<"$out" && grep -q "stopped monitor $mp " <<<"$out" ||
+  { echo "FAIL: --stop must end the keeper and the monitor and leave no holder record (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
+out=$(cd "$MP" && bash "$S" monitor --stop mgr 2>&1) && grep -q 'no keeper or monitor of mgr runs here' <<<"$out" || { echo "FAIL: --stop with nothing running exits 0 saying so: $out"; exit 1; }
+unset CLAUDE_DISCORD_KEEP_INTERVAL; rm -f "$HOME/keep.out"
+echo "ok: monitor --keep refuses no ledger, a non-manager and a lock held by a monitor this side cannot see; registers a keeper holder with its start time, brings a killed monitor back, is one per bot, ends on TERM with its record; --stop ends keeper and monitor"
+
 # claude-discord tui: the project's one dev-manager bot with a ledger unless named; it hands the bot, the monitor's
 # state dir and the wrapper to the TUI script through `uv run --script`. uv is needed for this verb only and its
 # absence is said. The script itself is exercised outside the budget (tests/tui/test_tui.py).
@@ -3980,6 +4027,12 @@ printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "$HOME/uv.args"; pwd -P > "$HOME/uv.
 mkdir -p "$MP/sub/dir"   # from a subdirectory: the project is found above it
 (cd "$MP/sub/dir" && bash "$S" tui 2>/dev/null) || { echo "FAIL: tui from a subdirectory of the project must find the project above it"; exit 1; }
 [ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord" ] || { echo "FAIL: tui must run the script through uv with the bot, the state dir and the wrapper: $(cat "$HOME/uv.args" 2>&1)"; exit 1; }
+# It started a keeper, detached (a session of its own), so the monitor outlives the TUI; the next tui starts none.
+n=0; KP=""; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
+[ -n "$KP" ] && [ "$(ps -o sid= -p "$KP" | tr -d ' ')" = "$KP" ] || { echo "FAIL: tui must start a keeper in a session of its own: '$KP' $(ls "$MB/holders")"; exit 1; }
+(cd "$MP" && bash "$S" tui 2>/dev/null) || { echo "FAIL: a second tui must run"; exit 1; }
+[ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] && grep -q "a keeper already runs for mgr (pid $KP)" "$MB/monitor.log" ||
+  { echo "FAIL: tui must not start a second keeper while one lives: $(ls "$MB/holders")"; exit 1; }
 rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'tui needs uv' <<<"$out" || { echo "FAIL: without uv, tui must say so (rc=$rc): $out"; exit 1; }
 rc=0; out=$(cd "$P" && bash "$S" tui alpha 2>&1) || rc=$?
@@ -4013,8 +4066,34 @@ printf '%s\n' "$P" > "$HOME/.claude-discord/records/projects"   # recorded, but 
 rc=0; out=$(cd "$NP" && bash "$S" tui </dev/null 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'writes one' <<<"$out" || { echo "FAIL: tui outside a project with no recorded manager bot must exit 1 (rc=$rc): $out"; exit 1; }
 printf '%s\n' "$PFB" > "$HOME/.claude-discord/records/projects"
+mp=$(mpid); (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null)
+n=0; while { running "$KP" || running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
+! running "$KP" && ! running "$mp" || { echo "FAIL: --stop must end the keeper tui started and its monitor"; exit 1; }
 rm -rf "$HOME/bin/uv" "$HOME/uv.args" "$HOME/uv.cwd" "$TP" "$MP/sub" "$NP" "$HOME/tuiproj2"
-echo "ok: tui runs the script through uv for the project's one manager bot (or the named one, from a subdirectory too), says when uv is missing, refuses a bot without a ledger, and asks for the name when it cannot tell, and outside a project picks among the recorded managers (cwd = its project)"
+echo "ok: tui runs the script through uv for the project's one manager bot (or the named one, from a subdirectory too), says when uv is missing, refuses a bot without a ledger, and asks for the name when it cannot tell, and outside a project picks among the recorded managers (cwd = its project); it starts a detached keeper when none lives, and none when one does"
+
+# Alerts grouped by host: two or more downs of one host's bots in one pass are ONE post naming them all, each owner
+# mentioned once; `posted` stays per bot, so one that recovers alone gets its own recovered line, and two that recover
+# in one pass share one.
+printf 'h1\n' > "$MR/mgr/hosts"; rm -f "$MON"/h1.*
+gdoc() { mdoc h1 0 "$@" | jq -c '.projects[0].bots |= map(if .bot == "g2" then .owner_id = "333" else . end)' > "$MON/h1.out"; }
+gpass() { printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"; mstart; mstop; G=$(posts); GC=$(printf '%s\n' "$G" | jq -r .content); }
+gdoc g1:down g2:down g3:down
+mstate --argjson n "$(date +%s)" '.hosts = {} | .alerts = [] | .bots = ({} | reduce ("g1", "g2", "g3") as $b (.;
+  .["h1|/home/u/ws/p|" + $b] = {host: "h1", verdict: "down", since: ($n - 301 | todate), since_s: ($n - 301)}))'
+gpass
+[ "$(printf '%s\n' "$G" | grep -c .)" = 1 ] && [ "$(head -n 1 <<<"$GC")" = '<@222> <@333> [down] 3 bots on h1' ] && grep -qx 'g3 (~/ws/p)' <<<"$GC" &&
+  [ "$(jq -c .allowed_mentions <<<"$G")" = '{"users":["222","333"]}' ] && jq -e '[.bots[].posted] == ["down", "down", "down"]' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: three downs on one host are one post naming each, each owner once, posted per bot: $G $(jq -c '[.bots[].posted]' "$MB/state.json")"; exit 1; }
+gdoc g1:ok g2:down g3:down; gpass
+[ "$(printf '%s\n' "$G" | grep -c .)" = 1 ] && [[ $GC == "[recovered] g1 on h1 (~/ws/p): answering again after 5m (was down)" ]] &&
+  jq -e '[.bots[].posted] == [null, "down", "down"]' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: a bot that recovers alone gets its own recovered line, the others stay posted: $G $(jq -c '[.bots[].posted]' "$MB/state.json")"; exit 1; }
+gdoc g1:ok g2:ok g3:ok; gpass
+[ "$(printf '%s\n' "$G" | grep -c .)" = 1 ] && [ "$GC" = "$(printf '[recovered] 2 bots on h1: answering again (was down)\ng2 (~/ws/p) after 5m\ng3 (~/ws/p) after 5m')" ] &&
+  jq -e '[.bots[].posted] == [null, null, null] and ([.alerts[].status] | length == 6)' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: two recoveries on one host in one pass are one post: $G $(jq -c '[.bots[].posted]' "$MB/state.json")"; exit 1; }
+echo "ok: monitor: downs on one host in one pass are one post (each owner mentioned once), so are recoveries from down; posted stays per bot"
 
 # The monitor blocks end here: the real shim back, the stubs and fixtures gone.
 mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"

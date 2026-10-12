@@ -6,11 +6,18 @@
 # one message per state change to #bot-health-check with the manager bot's
 # token. It never restarts or stops anything.
 #
-# Run by the wrapper only:
-#   claude-discord monitor [--ensure] <bot> [--holder tui|session <pid>]
+# Run through the wrapper:
+#   claude-discord monitor [--ensure] <bot> [--holder tui|session|keeper <pid>]
 # registers the holder (when given), then starts the monitor detached unless
 # one already holds the lock. The monitor lives while a holder lives (the TUI,
-# the manager session) and exits within one tick (30 s) of the last one.
+# the manager session, a keeper) and exits within one tick (30 s) of the last one.
+#   claude-discord monitor --keep <bot> [--detach]
+# the keeper: a holder of its own that runs the same --ensure every 60 s, so a
+# dead monitor comes back with no TUI or session open. Foreground (tmux, a
+# container entrypoint, systemd); --detach (the TUI's start) checks, then runs
+# it in its own session and returns. One per bot. No OS scheduler, ever.
+#   claude-discord monitor --stop <bot>
+# TERMs the bot's keepers and its monitor; a TUI or session still open starts it again.
 #
 # Everything it keeps is under ~/.claude-discord/records/monitor/<bot>/:
 #   lock                       the flock target (fd 9 of the monitor), holding its pid
@@ -25,24 +32,28 @@
 set -u
 self=${1:?wrapper path}; shift
 alert_channel=1558283274487341137   # #bot-health-check: both owners' managers post here; write-only
-locked=no kind="" hpid="" bot=""
+locked=no kind="" hpid="" bot="" keep="" stop="" detach=""
+usage="usage: claude-discord monitor [--ensure] <bot> [--holder tui|session|keeper <pid>] | --keep <bot> [--detach] | --stop <bot>"
 while [ $# -gt 0 ]; do
   case $1 in
     --ensure) ;;
     --locked) locked=yes;;   # internal: this process holds the lock on fd 9
+    --keep) keep=yes;;
+    --stop) stop=yes;;
+    --detach) detach=yes;;
     --holder) kind=${2:-} hpid=${3:-}; shift 3 2>/dev/null || shift $#; continue;;
-    -*) echo "usage: claude-discord monitor [--ensure] <bot> [--holder tui|session <pid>]" >&2; exit 2;;
+    -*) echo "$usage" >&2; exit 2;;
     *) bot=$1;;
   esac
   shift
 done
-case $bot in ''|.|..|*/*) echo "usage: claude-discord monitor [--ensure] <bot> [--holder tui|session <pid>]" >&2; exit 2;; esac
+case $bot in ''|.|..|*/*) echo "$usage" >&2; exit 2;; esac
 dir=$PWD/.claude/discord-agents/$bot
-# The ledger is the on/off switch: no hosts file, no monitor.
-[ -f "$dir/hosts" ] && [ -f "$dir/.env" ] || { echo "claude-discord: monitor: $dir has no hosts ledger (claude-discord setup $bot --mode writes one)" >&2; exit 1; }
 M=$HOME/.claude-discord/records/monitor/$bot
+# The ledger is the on/off switch: no hosts file, no monitor. --stop needs none: it stops what runs.
+[ -n "$stop" ] || { [ -f "$dir/hosts" ] && [ -f "$dir/.env" ]; } || { echo "claude-discord: monitor: $dir has no hosts ledger (claude-discord setup $bot --mode writes one)" >&2; exit 1; }
 umask 077
-mkdir -p "$M/holders" || exit 1
+[ -n "$stop" ] || mkdir -p "$M/holders" || exit 1
 
 # lstart <pid>: the process's start time. A pid alone can be reused; a pid
 # with its start time cannot. Linux: field 22 of /proc/<pid>/stat, read with
@@ -61,9 +72,81 @@ lstart() {
     set -- $(LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null); echo "$*"
   fi
 }
+# a_monitor <pid>: the pid runs this bot's monitor (bash .../monitor/monitor.sh <wrapper> --locked <bot>) as this side sees it.
+a_monitor() {
+  local c=""
+  case $1 in ''|*[!0-9]*) return 1;; esac
+  if [ -r "/proc/$1/cmdline" ]; then c=$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null); else c=$(ps -p "$1" -o command= 2>/dev/null); fi
+  case "$c " in *"/monitor/monitor.sh "*" --locked $bot "*) return 0;; esac
+  return 1
+}
+# live_rec <record>: its pid runs and started when the record says (a reused pid reads dead); sets rp to the pid.
+live_rec() {
+  local p="" rest=""
+  { read -r p rest < "$1"; } 2>/dev/null
+  case $p in ''|*[!0-9]*) return 1;; esac
+  kill -0 "$p" 2>/dev/null && [ "$(lstart "$p")" = "${rest% *}" ] && rp=$p
+}
+
+if [ -n "$stop" ]; then
+  # The keepers first (a keeper would start the monitor again), then the monitor the lock file names, if it runs here.
+  said=""
+  for f in "$M"/holders/keeper-*; do
+    [ -f "$f" ] || continue
+    if live_rec "$f"; then
+      kill -TERM "$rp" 2>/dev/null; echo "claude-discord: monitor: stopped keeper $rp"; said=1
+      # Gone (its record with it) before the monitor goes: a monitor its last --ensure starts then finds no holder.
+      n=0; while [ -n "$(lstart "$rp")" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+    fi
+    rm -f "$f"
+  done
+  l=""; { read -r l < "$M/lock"; } 2>/dev/null
+  ! a_monitor "$l" || { kill -TERM "$l" 2>/dev/null; echo "claude-discord: monitor: stopped monitor $l (an open TUI or manager session starts it again)"; said=1; }
+  [ -n "$said" ] || echo "claude-discord: monitor: no keeper or monitor of $bot runs here"
+  exit 0
+fi
+
+if [ -n "$keep" ]; then
+  # Started by the TUI, which is about to take the terminal: what this says goes to monitor.log.
+  [ -z "$detach" ] || exec >>"$M/monitor.log" 2>&1
+  m=""; { read -r m < "$dir/mode"; } 2>/dev/null
+  [ "$m" = dev-manager ] || { echo "claude-discord: monitor: --keep: $bot is not a dev-manager bot (mode '$m')" >&2; exit 1; }
+  for f in "$M"/holders/keeper-*; do
+    [ -f "$f" ] && live_rec "$f" && { echo "claude-discord: monitor: a keeper already runs for $bot (pid $rp)"; exit 0; }
+  done
+  # A home shared by two sides (a container and its host): the lock held, and the pid in it no monitor of this bot that
+  # this side can see, means the monitor runs on the other side, with the bots; a keeper here would read them all as
+  # down. A refusal only, never a takeover. Looked at twice, a lock wait apart: a monitor that just won the lock writes
+  # its pid a moment later.
+  unseen() {
+    perl -MFcntl=:flock -e 'open(my $l, ">>", $ARGV[0]) or exit 1; exit(flock($l, LOCK_EX | LOCK_NB) ? 1 : 0)' "$M/lock" || return 1
+    l=""; { read -r l < "$M/lock"; } 2>/dev/null
+    ! a_monitor "$l"
+  }
+  if unseen; then
+    sleep "${CLAUDE_DISCORD_MONITOR_LOCK_WAIT:-5}"
+    ! unseen || { echo "claude-discord: monitor: --keep: the monitor lock is held by a monitor this side cannot see; run --keep where the bots run" >&2; exit 1; }
+  fi
+  if [ -n "$detach" ]; then
+    perl -MPOSIX -e 'defined(my $pid = fork()) or exit 1; exit 0 if $pid; POSIX::setsid(); exec @ARGV' \
+      bash "$0" "$self" --keep "$bot" </dev/null >>"$M/monitor.log" 2>&1
+    exit
+  fi
+  iv=${CLAUDE_DISCORD_KEEP_INTERVAL:-60}   # read here only; the suite shortens it
+  sp=""
+  trap '[ -z "$sp" ] || kill "$sp" 2>/dev/null; rm -f "$M/holders/keeper-$$"; exit 0' TERM INT HUP
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) keeper $$ start (every ${iv}s)"
+  while :; do
+    [ -f "$dir/hosts" ] || { rm -f "$M/holders/keeper-$$"; echo "claude-discord: monitor: keeper $$: $dir/hosts is gone; exiting" >&2; exit 1; }
+    # Registered again each time: a monitor taken down by a signal removes every holder record, this one too.
+    bash "$0" "$self" --ensure "$bot" --holder keeper "$$" </dev/null
+    # Waited on, so a TERM runs the trap at once.
+    sleep "$iv" & sp=$!; wait "$sp"; sp=""
+  done
+fi
 
 if [ -n "$kind$hpid" ]; then
-  case $kind in tui|session) ;; *) echo "claude-discord: monitor: --holder takes tui or session, got '$kind'" >&2; exit 2;; esac
+  case $kind in tui|session|keeper) ;; *) echo "claude-discord: monitor: --holder takes tui, session or keeper, got '$kind'" >&2; exit 2;; esac
   case $hpid in ''|*[!0-9]*) echo "claude-discord: monitor: --holder needs a pid, got '$hpid'" >&2; exit 2;; esac
   st=$(lstart "$hpid")
   [ -n "$st" ] || { echo "claude-discord: monitor: no process $hpid to hold for" >&2; exit 1; }
@@ -146,9 +229,9 @@ read_cfg() {
   done 2>/dev/null < "$dir/../config.env"   # 2> first: a missing file's error must not reach monitor.log
 }
 
-# is_holder <path>: a record's name is tui-<digits> or session-<digits>, as --holder writes it. Anything else there (a
+# is_holder <path>: a record's name is tui-, session- or keeper-<digits>, as --holder writes it. Anything else there (a
 # stray file) is no holder: as a pid it would make holders_json invalid JSON and fail every pass.
-is_holder() { case ${1##*/} in tui-*|session-*) case ${1##*-} in ''|*[!0-9]*) return 1;; esac;; *) return 1;; esac; }
+is_holder() { case ${1##*/} in tui-*|session-*|keeper-*) case ${1##*-} in ''|*[!0-9]*) return 1;; esac;; *) return 1;; esac; }
 # holders_alive: removes the records of dead holders (and stray files); 0 when one still lives.
 holders_alive() {
   local f p rest alive=1
@@ -212,8 +295,8 @@ finish() {  # $1 = reason: kill the pass child, leave a state that reads as stop
   # that appears now belongs to a holder whose --ensure is waiting for this
   # lock, so it stays for the monitor that ensure starts (a stale one is pruned
   # by the next start's first holder check). On a signal the monitor is being taken down, and no
-  # record may outlive it.
-  [ "$1" = no-holders ] || rm -f "$M"/holders/* 2>/dev/null
+  # record may outlive it, but a keeper's: the keeper lives on to start the next one (--stop TERMs it first).
+  [ "$1" = no-holders ] || for f in "$M"/holders/*; do case ${f##*/} in keeper-*) ;; *) rm -f "$f";; esac; done
   log "exit reason=$1"
   exit 0
 }
@@ -350,6 +433,16 @@ def recovery_text: ((($now_s - (.posted_since_s // $now_s)) / 60) | floor) as $m
 def payload($kind): if $kind == "finding"
   then {content: finding_text, allowed_mentions: (if owner != "" then {users: [owner]} else {parse: []} end)}
   else {content: recovery_text, allowed_mentions: {parse: []}} end;
+# group_payload: one message for several bots of one host (an array of entries), each distinct owner mentioned once.
+def group_payload($kind): labels as $l | (map(owner) | map(select(. != "")) | unique) as $os
+  | (map((.home // "") as $h | "\(.bot) (\(.project | short($h)))")) as $who
+  | if $kind == "finding"
+    then {content: (($os | map("<@\(.)> ") | join("")) + "[down] \(length) bots on \(.[0].name)\n"
+            + ([range(length) as $i | "\($who[$i])\n\($l.reason): \(.[$i].detail)\n\($l.fix): \(.[$i].fix)"] | join("\n"))) | .[0:1900],
+          allowed_mentions: (if ($os | length) > 0 then {users: $os} else {parse: []} end)}
+    else {content: ("[recovered] \(length) bots on \(.[0].name): answering again (was down)\n"
+            + ([range(length) as $i | "\($who[$i]) after \(((($now_s - (.[$i].posted_since_s // $now_s)) / 60) | floor))m"] | join("\n"))) | .[0:1900],
+          allowed_mentions: {parse: []}} end;
 # observe: fold one observation into an entry; `since` moves only when the verdict changes (or is missing, as in a
 # state an older monitor or a hand wrote: due counts from it, and a reducer that fails fails every pass).
 def observe($v; $d; $meta): (. // {}) as $o
@@ -455,14 +548,22 @@ def host_step($r):
   ($ev[] | "E" + .),
   ($all[] | select((.e | due) == "finding" and (.e.owner_id // "" | tostring) != "" and (.e | owner) == "")
    | "Eowner_id of \(.key) is not a Discord id: posted without a mention"),
-  ($all[] | (.e | due) as $kind | select($kind != null)
-   | "O" + ([.scope, .key, $kind, (if $kind == "finding" then .e.verdict else .e.posted end), (.e | payload($kind) | tojson)] | join("\u001f")))
+  ([$all[] | . + {kind: (.e | due)} | select(.kind != null)] as $due
+   # Two or more downs among the bots of one host in one pass, or two or more recoveries from down there, go out as ONE
+   # message (the sessions of a host tend to fall and come back together); its key field lists their keys, RS-separated.
+   | ($due | map(select(.scope == "bots" and .e.bot != null and (if .kind == "finding" then .e.verdict else .e.posted end) == "down"))
+      | group_by([.e.host, .kind]) | map(select(length > 1))) as $groups
+   | ([$groups[][].key]) as $grouped
+   | ($due[] | select(.key as $k | $grouped | index($k) | not)
+      | "O" + ([.scope, .key, .kind, (if .kind == "finding" then .e.verdict else .e.posted end), (.kind as $kind | .e | payload($kind) | tojson)] | join("\u001f"))),
+     ($groups[] | "O" + (["bots", (map(.key) | join("\u001e")), .[0].kind, "down", (.[0].kind as $kind | map(.e) | group_payload($kind) | tojson)] | join("\u001f"))))
 '
 # apply: the POST results back into the state. A sent finding sets `posted`
 # (what makes a restart, and the next pass, quiet); a sent recovery clears it;
 # a failed one changes nothing, so the next pass tries again.
 apply='
-($results | split("\n") | map(select(. != "") | split("\u001f") | {scope: .[0], key: .[1], kind: .[2], verdict: .[3], status: .[4]})) as $rs
+# A grouped post (keys RS-separated) counts for each of its bots: `posted` stays per bot.
+($results | split("\n") | map(select(. != "") | split("\u001f") | {scope: .[0], key: (.[1] | split("\u001e")[]), kind: .[2], verdict: .[3], status: .[4]})) as $rs
 | reduce $rs[] as $r (.;
     (if $r.status != "sent" then .
      elif $r.kind == "finding" then .[$r.scope][$r.key] |= (. + {posted: .verdict, posted_at: $now, posted_since_s: .since_s})
@@ -529,6 +630,7 @@ run_pass() {
           lock_check; ! no_holders || finish no-holders
           [ "$knd" != finding ] || findings=$((findings + 1))
           lk=$key; [ "$scope" != hosts ] || lk="$key|-"   # the log's key, as the TUI and the spec name a host
+          lk=${lk//$'\x1e'/,}   # a grouped post's keys
           # In flight from here until it is in `posts` (finish records a 2xx); post.out emptied first, so an
           # earlier POST's status is never read as this one's.
           : > "$M/post.out"; inflight="$scope"$'\x1f'"$key"$'\x1f'"$knd"$'\x1f'"$verdict"
