@@ -3910,6 +3910,10 @@ mv "$MR/mgr/hosts" "$MR/mgr/hosts.off"
 n=0; while running "$KP" && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
 mv "$MR/mgr/hosts.off" "$MR/mgr/hosts"
 ! running "$KP" && [ ! -e "$MB/holders/keeper-$KP" ] || { echo "FAIL: a keeper whose ledger is gone must leave, its record with it"; exit 1; }
+# A keeper that finds the stopped marker (a start that passed its own check while --stop ran) leaves too.
+(cd "$MP" && exec bash "$S" monitor --keep mgr) >> "$HOME/keep.out" 2>&1 & KP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $KP"
+wait_for_file "$MB/holders/keeper-$KP"; : > "$MB/stopped"; rc=0; wait "$KP" || rc=$?; rm -f "$MB/stopped"
+[ "$rc" = 0 ] && [ ! -e "$MB/holders/keeper-$KP" ] || { echo "FAIL: a keeper that finds the stopped marker must leave, its record with it (rc=$rc)"; exit 1; }
 # setup in dev-manager mode starts the backend when none runs, and says so in one line.
 out=$(printf 'dev-manager\n\n\n' | env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" setup mgr --mode 2>&1)
 KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done

@@ -163,6 +163,8 @@ if [ -n "$keep" ]; then
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) keeper $$ start (every ${iv}s)"
   while :; do
     [ -f "$dir/hosts" ] || { rm -f "$M/holders/keeper-$$"; echo "claude-discord: monitor: keeper $$: $dir/hosts is gone; exiting" >&2; exit 1; }
+    # Stopped meanwhile (a start that passed its check while --stop ran): this keeper goes too.
+    [ ! -e "$M/stopped" ] || { rm -f "$M/holders/keeper-$$"; echo "$stopped_msg"; exit 0; }
     # Registered again each time: a monitor taken down by a signal removes every holder record but a keeper's.
     bash "$0" "$self" --ensure "$bot" --holder keeper "$$" </dev/null
     # claude-discord update changed this file: go on as the new one (same pid, so the record stays), once its signature
