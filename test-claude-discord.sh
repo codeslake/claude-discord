@@ -3371,7 +3371,7 @@ echo "ok: monitor: the holder check counts across the whole pass (a holder gone 
 #   h1's project ws/h, posted blind (it had crashed with no bot known) and now answering: its recovery.
 #   h2's bot sp stale, in a project whose path holds a space, a quote and a $: the recovery command must survive both
 #   shells (h2 itself answered 255, then ok with ControlPath=none).
-# Not posted: d2 down (new), rc down after an ok seeded 1000 s ago (since restarts on the change, so the hold starts
+# Not posted: d2 down (seeded with no since, as an older state may be: its hold starts now), rc down after an ok seeded 1000 s ago (since restarts on the change, so the hold starts
 # over), t1 throttled (301 s), qu stale already posted, a ledger line that is not a plain host name (skipped, never
 # passed to ssh), lap hostdown (a laptop), h6 noreach and its bot l1 frozen (no recovery for its posted down), h3's
 # bots frozen (y's down, 900 s old, is not posted), local (its health exits 255: blind, never hostdown, which is ssh's
@@ -3396,6 +3396,7 @@ mstate --argjson n "$(date +%s)" '
   | b("ok"; "down"; 2100) | .bots["h1|/home/u/ws/p|ok"] += {posted: "down", posted_since_s: ($n - 2100)}
   | b("qu"; "stale"; 900) | .bots["h1|/home/u/ws/p|qu"] += {posted: "stale", posted_since_s: ($n - 900)}
   | b("ch"; "down"; 900) | .bots["h1|/home/u/ws/p|ch"] += {posted: "down", posted_since_s: ($n - 900)} | b("rc"; "ok"; 1000)
+  | .bots["h1|/home/u/ws/p|d2"] = {host: "h1", verdict: "down"}
   | .bots["h1|/home/u/ws/h|-"] = ({host: "h1", name: "h1", project: "/home/u/ws/h", home: "/home/u", verdict: "blind", posted: "blind", posted_since_s: ($n - 600)} + at($n - 600))
   | .bots["h6|/home/u/ws/p|l1"] = ({host: "h6", verdict: "down", posted: "down", posted_since_s: ($n - 900)} + at($n - 900))
   | .bots["h3|/home/u/ws/p|z"] = ({host: "h3", verdict: "stale", posted: "stale", posted_since_s: ($n - 900)} + at($n - 900))
@@ -3465,7 +3466,7 @@ printf "ALERT_LANG='EN'\n" >> "$MR/config.env"   # labels in English from here o
 cp "$MR/mgr/.env" "$MR/mgr/.env.keep"; : > "$MR/mgr/.env"
 mstart
 grep -q 'post h1|/home/u/ws/p|nf stale failed 000 (no DISCORD_BOT_TOKEN in .*/mgr/\.env)$' "$MB/monitor.log" && [ -z "$(posts)" ] || { echo "FAIL: a POST with no token in the manager's .env must fail before curl, logged with the reason: $(grep ' post ' "$MB/monitor.log")"; exit 1; }
-mv "$MR/mgr/.env.keep" "$MR/mgr/.env"; wait_log 1 'post h1\|/home/u/ws/p\|nf stale failed 429 retry_after=60$'
+mv "$MR/mgr/.env.keep" "$MR/mgr/.env"; wait_log 1 ' failed 429 retry_after=60$'
 [ "$(posts | grep -c '\[stale\] nf')" -ge 2 ] && ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the restart must post only what is new (nf, twice: the 429 then its retry), never the patchfail already posted: $(posts)"; exit 1; }
 next_pass
 ! grep -q 'retry_after=0.01' "$MB/monitor.log" || { echo "FAIL: a 429 with retry_after under 10 s must be waited out and retried in the same pass: $(grep ' post ' "$MB/monitor.log")"; exit 1; }

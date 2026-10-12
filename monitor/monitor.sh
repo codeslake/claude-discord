@@ -301,10 +301,11 @@ def recovery_text: ((($now_s - (.posted_since_s // $now_s)) / 60) | floor) as $m
 def payload($kind): if $kind == "finding"
   then {content: finding_text, allowed_mentions: (if (.owner_id // "") != "" then {users: [.owner_id]} else {parse: []} end)}
   else {content: recovery_text, allowed_mentions: {parse: []}} end;
-# observe: fold one observation into an entry; `since` moves only when the verdict changes.
+# observe: fold one observation into an entry; `since` moves only when the verdict changes (or is missing, as in a
+# state an older monitor or a hand wrote: due counts from it, and a reducer that fails fails every pass).
 def observe($v; $d; $meta): (. // {}) as $o
   | $o + $meta + {verdict: $v, detail: $d}
-  | if ($o.verdict // null) != $v then . + {since: $now, since_s: $now_s} else . end
+  | if ($o.verdict // null) != $v or ($o.since_s | type) != "number" then . + {since: $now, since_s: $now_s} else . end
   | . + {fix: fix};
 def due:
   if (.verdict | good) and (.posted // null) != null then "recovery"
