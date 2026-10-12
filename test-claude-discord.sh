@@ -3863,7 +3863,9 @@ mstate --argjson p "$$" '.monitor.pid = $p'; ! mon_alive || { echo "FAIL: a live
 # Nor is a live monitor.sh of another bot, or the same program run by another command line: the pid has to be
 # `bash .../monitor/monitor.sh <wrapper> --locked mgr`. Decoys under a monitor/monitor.sh of their own (a sleep); each is
 # waited for until ps shows its command line, so a decoy still in bash's fork before its exec cannot pass for the answer.
-mkdir -p "$HOME/decoy/monitor"; printf 'sleep 30\n' > "$HOME/decoy/monitor/monitor.sh"
+# A decoy's sleep is a child of its bash: the TERM trap takes it down too, or it outlives the kill below (ppid 1) and
+# holds the suite's stdout for 30 s. The trap is set before the fork, so a TERM at any moment leaves no sleep behind.
+mkdir -p "$HOME/decoy/monitor"; printf '%s\n' 'trap "kill \$! 2>/dev/null; exit" TERM; sleep 30 & wait' > "$HOME/decoy/monitor/monitor.sh"
 decoy() {  # $@ = the arguments after monitor.sh; the pid in state.json
   bash "$HOME/decoy/monitor/monitor.sh" "$@" & DP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $DP"
   n=0; while [[ $(ps -p "$DP" -o command= 2>/dev/null) != *monitor.sh* ]] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
@@ -4314,9 +4316,22 @@ rc=0; out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || rc=$?
 rm -rf "$UP" "$UC"
 echo "ok: --version prints the version and the clone's sha (a link's is the source's); update pulls the source behind a link once, runs the pulled commit's patch step, refills the runtime copy and the shim and asks for /reload-plugins; --all pulls each real clone once, prunes a removed project, skips a detached (pinned) clone without failing, and exits 1 on a diverged clone (left as it was) or an unwritable shim"
 
-# Nothing this suite started is still running: no process runs from its
-# HOME (hooks, stubs, the fake worker).
-strays() { ps -eo pid=,args= | grep "[/]${HOME#/}/" || :; }   # the [/] keeps grep out of its own match
+# Nothing this suite started is still running once its exit trap has run (done here, so this check sees what the trap
+# leaves). On Linux a process is found by the HOME it inherited, whatever its argv: an orphaned `/bin/sleep 30` names
+# no path of the suite's, and held the suite's stdout (a `| tail -1` waited 30 s for it). Elsewhere, by argv.
+kill $KILL_AT_EXIT 2>/dev/null || :; KILL_AT_EXIT=""
+strays() {
+  local me=$BASHPID f p
+  if [ -r "/proc/$$/environ" ]; then
+    # The grep is exec'd in its own $(...), so its pid is the one echoed first; this function's subshell and the suite
+    # carry the HOME too and are skipped. A zombie's environ is empty: a zombie is gone.
+    set -- $(echo "$BASHPID"; exec grep -lszE "^HOME=$HOME(/|\$)" /proc/[0-9]*/environ)
+    p=$1; shift
+    for f; do f=${f#/proc/}; f=${f%/environ}; [ "$f" = "$$" ] || [ "$f" = "$me" ] || [ "$f" = "$p" ] || ps -o pid=,ppid=,args= -p "$f" || :; done
+  else
+    ps -eo pid=,args= | grep "[/]${HOME#/}/" || :   # the [/] keeps grep out of its own match
+  fi
+}
 for _ in $(seq 20); do left=$(strays); [ -z "$left" ] && break; nap 0.1; done
 [ -z "$left" ] || { echo "FAIL: processes left behind: $(strays)"; exit 1; }
 echo "ok: no process is left behind"
