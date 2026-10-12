@@ -21,8 +21,20 @@ tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
 
 NOW = "2026-10-11T12:00:00Z"
+FAKES = tempfile.TemporaryDirectory()
+
+
+def fake_monitor(bot):
+    """A live process whose command line is a monitor's: `bash <root>/monitor/monitor.sh <wrapper> --locked <bot>`."""
+    script = Path(FAKES.name) / "monitor" / "monitor.sh"
+    script.parent.mkdir(exist_ok=True)
+    script.write_text("sleep 30\n")
+    return subprocess.Popen(["bash", str(script), "/x/bin/claude-discord", "--locked", bot])
+
+
+MON = fake_monitor("mgr")
 BASE = {"version": 1, "manager": "mgr",
-        "monitor": {"pid": os.getpid(), "started": NOW, "last_pass": NOW, "next_pass": NOW, "pass_s": 2,
+        "monitor": {"pid": MON.pid, "started": NOW, "last_pass": NOW, "next_pass": NOW, "pass_s": 2,
                     "holders": [{"kind": "tui", "pid": 456}], "post_failed": False},
         "hosts": {"local": {"host": "local", "name": "lambda", "reach": "ok", "patch": "ok", "version": "1.10.0 (abc)",
                             "verdict": "ok", "checked": NOW, "laptop": False},
@@ -94,7 +106,7 @@ def cells(table, key):
 
 
 async def all_ok(app, pilot):
-    assert f"monitor pid {os.getpid()}" in text(app, "#head"), text(app, "#head")
+    assert f"monitor pid {MON.pid}" in text(app, "#head"), text(app, "#head")
     assert app.query_one("#bar").has_class("hidden")
     hosts = app.query_one("#hosts")
     assert hosts.row_count == 2
@@ -168,7 +180,7 @@ async def markup(app, pilot):
 async def missing_wrapper(app, pilot):
     assert not app.query_one("#bar").has_class("hidden")
     assert "/nonexistent/claude-discord" in text(app, "#bar"), text(app, "#bar")
-    assert f"monitor pid {os.getpid()}" in text(app, "#head")   # the rest of the screen still came up
+    assert f"monitor pid {MON.pid}" in text(app, "#head")   # the rest of the screen still came up
 
 
 async def refused(app, pilot):
@@ -218,7 +230,7 @@ async def main():
     # A monitor gone without its trap (kill -9, OOM): its pid stays in state.json and the mtime does not move. The bar
     # says so and --ensure runs again, once per 30 s at most.
     with tempfile.TemporaryDirectory() as d:
-        mon = subprocess.Popen(["sleep", "30"])
+        mon = fake_monitor("mgr")
         s = variant("all_ok")
         s["monitor"]["pid"] = mon.pid
         (Path(d) / "holders").mkdir()
@@ -236,6 +248,26 @@ async def main():
             calls = (Path(d) / "args").read_text().splitlines()
             assert calls == [f"monitor --ensure mgr --holder tui {os.getpid()}"] * 2, calls
     print("ok: a vanished monitor is shown and ensured again")
+    # A pid that lives but is no monitor of this bot (reused by another program; another bot's monitor) is as gone as a dead one.
+    for what, other in (("a reused pid", subprocess.Popen(["sleep", "30"])), ("another bot's monitor", fake_monitor("other"))):
+        with tempfile.TemporaryDirectory() as d:
+            s = variant("all_ok")
+            s["monitor"]["pid"] = other.pid
+            (Path(d) / "holders").mkdir()
+            (Path(d) / "state.json").write_text(json.dumps(s))
+            app = tui.MonitorTUI(Path(d), "mgr", stub(d, 'echo "$*" >> "$(dirname "$0")/args"'))
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert f"monitor pid {other.pid} is gone" in text(app, "#bar"), (what, text(app, "#bar"))
+                assert (Path(d) / "args").read_text().splitlines() == [f"monitor --ensure mgr --holder tui {os.getpid()}"], what
+        other.kill()
+        other.wait()
+    print("ok: a live pid that is no monitor of this bot is shown gone and ensured")
 
 
-asyncio.run(main())
+try:
+    asyncio.run(main())
+finally:
+    MON.kill()
+    MON.wait()
+    FAKES.cleanup()

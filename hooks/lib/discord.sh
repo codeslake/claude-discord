@@ -226,18 +226,20 @@ ensure_monitor() {
     (cd "$bot_project" && "$plugin_root/bin/claude-discord" monitor --ensure "$bot_name" --holder session "$spid") </dev/null >/dev/null 2>&1 &
   fi
 }
-# monitor_alive: the manager's monitor runs, told with no fork (on-prompt asks
-# on every prompt): the pid state.json names in "monitor" (written first there,
-# within the first 512 bytes), then on Linux that pid's argv[1] (a pid reused by
-# another program, or a zombie, is no monitor), kill -0 elsewhere.
+# monitor_alive: the manager's monitor runs. The pid state.json names in "monitor" (written first there, within the
+# first 512 bytes) must be a `bash <root>/monitor/monitor.sh <wrapper> --locked <bot>` command line: a pid reused by
+# another program, a zombie or another bot's monitor is no monitor. Linux reads /proc/<pid>/cmdline with no fork
+# (on-prompt asks on every prompt); elsewhere one `ps` fork per prompt, the price of telling a reused pid on a Mac.
 monitor_alive() {
-  local s="" a0="" a1="" re='"monitor":\{([^{}]*,)?"pid":([0-9]+)'
+  local s="" pid a0="" a1="" a2="" a3="" a4="" re='"monitor":\{([^{}]*,)?"pid":([0-9]+)'
   { IFS= read -r -n 512 s < "$HOME/.claude-discord/records/monitor/$bot_name/state.json"; } 2>/dev/null
   [[ $s =~ $re ]] || return 1
+  pid=${BASH_REMATCH[2]}
   if [ -d /proc/self ]; then
-    { IFS= read -rd '' a0; IFS= read -rd '' a1; } 2>/dev/null < "/proc/${BASH_REMATCH[2]}/cmdline"
-    [ "${a1##*/}" = monitor.sh ]
+    { IFS= read -rd '' a0; IFS= read -rd '' a1; IFS= read -rd '' a2; IFS= read -rd '' a3; IFS= read -rd '' a4; } 2>/dev/null < "/proc/$pid/cmdline"
+    [[ $a1 == */monitor/monitor.sh && $a3 == --locked && $a4 == "$bot_name" ]]
   else
-    kill -0 "${BASH_REMATCH[2]}" 2>/dev/null
+    s=$(ps -p "$pid" -o command= 2>/dev/null)
+    [[ $s == *monitor/monitor.sh*" --locked $bot_name" ]]
   fi
 }

@@ -3680,9 +3680,15 @@ rm -f "$HOME/curl.slept"; printf 'h1\n' > "$MR/mgr/hosts"; mdoc h1 1 tm:stale > 
 printf '200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"; echo 0.15 > "$HOME/curl.sleep"
 ex=$(command grep -c 'exit reason=signal$' "$MB/monitor.log") || :; holder
 (cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID")
-wait_for_file "$HOME/curl.slept"; kill -TERM "$(mpid)"; wait_log $(( ex + 1 )) 'exit reason=signal$'
+# The lock file names the monitor from its start: a read, not a $(mpid) fork inside the stub's 0.15 s sleep.
+wait_for_file "$HOME/curl.slept"; read -r mp < "$MB/lock"; kill -TERM "$mp"; wait_log $(( ex + 1 )) 'exit reason=signal$'
 kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
 [ "$(posts | grep -c '\] tm on')" = 1 ] || { echo "FAIL: the POST under way when the TERM came must have gone out once: $(posts)"; exit 1; }
+# The in-flight path ran, not the ordinary one: a TERM that came after curl returned would have the pass log the post
+# (and record it) itself, and this case would pass without finish ever reading post.out. Here no 'post ... tm' line
+# exists, and state.json has tm as posted all the same: finish took it from curl's own answer.
+! command grep -q 'post h1|/home/u/ws/p|tm ' "$MB/monitor.log" && [ "$(jq -r '.bots["h1|/home/u/ws/p|tm"].posted' "$MB/state.json")" = stale ] ||
+  { echo "FAIL: a TERM during a POST must be recorded from post.out by finish, not by the pass (late TERM, or tm unrecorded): $(command grep ' post ' "$MB/monitor.log") $(jq -c '.bots["h1|/home/u/ws/p|tm"]' "$MB/state.json")"; exit 1; }
 mstate --argjson n "$(date +%s)" '.hosts.h5.left_s = $n - 86401 | .hosts.h6.left_s = $n - 86401'
 export CLAUDE_DISCORD_MONITOR_PASS=0.02
 printf '%s\n' '429 {"retry_after": 0.01}' '429 {"retry_after": 60}' > "$CURL_REPLIES"; : > "$CURL_LOG"
@@ -3779,8 +3785,8 @@ cp "$HOME/monitor.good" "$PC/monitor/monitor.sh"; wait_log 3 'restart: monitor\.
 # state.json yet), so the next monitor does not send it again. Its pid stays there, for the successor to replace.
 [ "$(<"$MB/lock")" = "$rp" ] || { echo "FAIL: the lock file must hold the monitor's pid: $(<"$MB/lock")"; exit 1; }
 mdoc lambda 0 r1:stale la:stale lb:stale > "$MON/local.out"; printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; echo 0.15 > "$HOME/curl.sleep"
-wait_for_file "$HOME/curl.slept"
-ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :; rm -f "$MB/lock"; : > "$MB/lock"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
+ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :   # before the marker is waited for: no fork inside the stub's sleep
+wait_for_file "$HOME/curl.slept"; rm -f "$MB/lock"; : > "$MB/lock"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
 n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
 ! running "$rp" && [ "$(mpid)" = "$rp" ] && [ "$(posts | grep -c '\] l[ab] on')" = 1 ] &&
   jq -e '.bots["local|/home/u/ws/p|la"].posted == "stale" and .bots["local|/home/u/ws/p|lb"].posted == null' "$MB/state.json" >/dev/null ||
@@ -3791,8 +3797,8 @@ mstop; mdoc lambda 0 r1:stale la:stale lb:stale > "$MON/local.out"; printf '200 
 (cd "$MP" && PATH="$CK:$PATH" CLAUDE_DISCORD_MONITOR_PASS=0.05 CLAUDE_DISCORD_MONITOR_HOST_CAP=5 bash "$S" monitor --ensure mgr --holder tui "$HPID")
 wait_log $(( np + 1 )) ' pass hosts='; rp=$(mpid)
 mdoc lambda 0 r1:stale la:stale lb:stale lc:stale ld:stale > "$MON/local.out"; printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; echo 0.15 > "$HOME/curl.sleep"
-wait_for_file "$HOME/curl.slept"
-ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :; printf '1\n' > "$MB/lock"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
+ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :
+wait_for_file "$HOME/curl.slept"; printf '1\n' > "$MB/lock"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
 n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
 ! running "$rp" && [ "$(<"$MB/lock")" = 1 ] && [ "$(posts | grep -c '\] l[cd] on')" = 1 ] &&
   jq -e '.bots["local|/home/u/ws/p|lc"].posted == null and .bots["local|/home/u/ws/p|ld"].posted == null' "$MB/state.json" >/dev/null ||
@@ -3851,6 +3857,22 @@ kill "$UP" 2>/dev/null || :; wait "$UP" 2>/dev/null || :
 mstop; rm -f "$HOME/ss.json" "$HOME/up.json"
 # A live pid that is no monitor (reused by another program) is dead to it too.
 mstate --argjson p "$$" '.monitor.pid = $p'; ! mon_alive || { echo "FAIL: a live pid that runs no monitor.sh is no monitor"; exit 1; }
+# Nor is a live monitor.sh of another bot, or the same program run by another command line: the pid has to be
+# `bash .../monitor/monitor.sh <wrapper> --locked mgr`. Decoys under a monitor/monitor.sh of their own (a sleep); each is
+# waited for until ps shows its command line, so a decoy still in bash's fork before its exec cannot pass for the answer.
+mkdir -p "$HOME/decoy/monitor"; printf 'sleep 30\n' > "$HOME/decoy/monitor/monitor.sh"
+decoy() {  # $@ = the arguments after monitor.sh; the pid in state.json
+  bash "$HOME/decoy/monitor/monitor.sh" "$@" & DP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $DP"
+  n=0; while [[ $(ps -p "$DP" -o command= 2>/dev/null) != *monitor.sh* ]] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+  mstate --argjson p "$DP" '.monitor.pid = $p'
+}
+decoy "$S" --locked mgr; mon_alive || { echo "FAIL: monitor_alive must see a command line shaped as the monitor's (control for the cases below)"; exit 1; }
+kill "$DP" 2>/dev/null || :; wait "$DP" 2>/dev/null || :
+decoy "$S" --locked other; ! mon_alive || { echo "FAIL: the monitor of another bot is no monitor of this one"; exit 1; }
+kill "$DP" 2>/dev/null || :; wait "$DP" 2>/dev/null || :
+decoy "$S" --ensure mgr; ! mon_alive || { echo "FAIL: a monitor.sh that is not the locked monitor (the --ensure front, which ends at once) is no monitor"; exit 1; }
+kill "$DP" 2>/dev/null || :; wait "$DP" 2>/dev/null || :
+rm -rf "$HOME/decoy"
 echo "ok: a dev-manager's SessionStart registers its session (the nearest claude process) as a holder and starts the monitor, which exits with that session; its next prompt starts a monitor killed without its trap again; a failed reducer is written to state.json"
 
 # And it leaves nothing on the hook's pipe: against a plugin root copy whose claude-discord takes 3 s, the caller (Claude
@@ -3870,7 +3892,21 @@ jq -ne --arg e "$fxel" '($e | tonumber) < 1.5' >/dev/null || { echo "FAIL: the S
 [ "$(printf '%s\n' "$fxout" | tail -n +2)" = "$(jq -nc --arg c "CLAUDE_DISCORD_TOOLS=$FXR/tools" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}')" ] ||
   { echo "FAIL: the SessionStart hook must print its context line and nothing else: $fxout"; exit 1; }
 [ "$(<"$HOME/fx.rec")" = "$MP monitor --ensure mgr --holder session $fxpp" ] || { echo "FAIL: --ensure must be called from the project with the session as holder (perl $fxpp): $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
-rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json"
+# And the prompt hook: a state.json naming a live pid that is no monitor (a sleep here, a pid another program got after the
+# monitor was killed without its trap) is a dead monitor to it: --ensure runs again, with the session as holder.
+rm -f "$HOME/fx.rec" "$HOME/fx.pid"; cp "$D/hooks/turn/on-prompt" "$FX/hooks/turn/"
+/bin/sleep 30 & SP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $SP"; mstate --argjson p "$SP" '.monitor.pid = $p'
+printf '{"session_id":"sFx","prompt":"hi"}' > "$HOME/up.json"
+fxout=$(perl -e '$0 = shift; open(STDIN, "<", shift) or die; my $pid = open(P, "-|"); die unless defined $pid;
+    if (!$pid) { open(STDERR, ">&", \*STDOUT); exec @ARGV; die } local $/; my $o = <P>; printf "%d\n%s", $$, $o;' \
+  "$FK/claude/versions/9.9.9" "$HOME/up.json" env CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt")
+fxpp=${fxout%%$'\n'*}
+n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+[ -s "$HOME/fx.pid" ] && kill "$(<"$HOME/fx.pid")" 2>/dev/null || :
+[ -s "$HOME/fx.pid" ] && [ "$(<"$HOME/fx.rec")" = "$MP monitor --ensure mgr --holder session $fxpp" ] ||
+  { echo "FAIL: a prompt with a live pid that is no monitor in state.json must ensure the monitor again (perl $fxpp): $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
+kill "$SP" 2>/dev/null || :; wait "$SP" 2>/dev/null || :
+rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json" "$HOME/up.json"
 echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while --ensure is still running"
 
 # claude-discord tui: the project's one dev-manager bot with a ledger unless named; it hands the bot, the monitor's

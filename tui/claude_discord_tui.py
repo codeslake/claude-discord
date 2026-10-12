@@ -54,15 +54,20 @@ def short(project: str, home: str) -> str:
     return "~" + project[len(home):] if home and project.startswith(home + "/") else project
 
 
-def alive(pid: int) -> bool:
-    """kill -0; a pid another user owns (EPERM) is alive too."""
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
-        return True
-    except (OSError, OverflowError, TypeError):
+def alive(pid: int, bot: str) -> bool:
+    """The monitor of `bot` runs: pid's command line is `bash <root>/monitor/monitor.sh <wrapper> --locked <bot>`. A pid
+    reused by another program, a zombie or another bot's monitor is not one (state.json keeps the pid of a monitor that
+    died without its trap). /proc on Linux, one `ps` elsewhere."""
+    if not isinstance(pid, int) or pid <= 0:
         return False
-    return True
+    try:
+        if os.path.isdir("/proc/self"):
+            cmd = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").replace("\0", " ").strip()
+        else:
+            cmd = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "monitor/monitor.sh" in cmd and cmd.endswith(f" --locked {bot}")
 
 
 def header_lines(state: dict, note: str = "") -> tuple[str, str | None]:
@@ -78,7 +83,7 @@ def header_lines(state: dict, note: str = "") -> tuple[str, str | None]:
         bar = "no state yet: the monitor has not written state.json"
     elif not pid:
         bar = f"monitor stopped at {m.get('stopped_at') or '?'}"
-    elif not alive(pid):   # killed without its trap (kill -9, OOM): its pid stays in state.json
+    elif not alive(pid, state.get("manager") or ""):   # killed without its trap (kill -9, OOM): its pid stays in state.json
         bar = f"monitor pid {pid} is gone"
     elif m.get("error"):   # the last pass could not be folded into the state: nothing in it is current
         bar = f"the last pass failed: {m['error']}"
@@ -208,7 +213,7 @@ class MonitorTUI(App):
             self.state = load(path)
         # Checked on every refresh, not only on a new state.json: a monitor that died without its trap writes none.
         pid = (self.state.get("monitor") or {}).get("pid")
-        if self.wrapper and not (pid and alive(pid)) and time.monotonic() - self.ensured >= 30:
+        if self.wrapper and not alive(pid, self.bot) and time.monotonic() - self.ensured >= 30:
             self.ensure()
         text, bar = header_lines(self.state, self.note)
         self.query_one("#head", Static).update(text)
