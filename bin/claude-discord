@@ -374,7 +374,8 @@ same_tree() {
 # in a random-named directory (no pid: unique across kernels), so the lock
 # covers only a re-check and the renames. The lock holds an owner token (the
 # random suffix of that directory), and a writer releases only a lock holding
-# its own. A lock older than any swap (30 s) is a dead writer's: it is broken by
+# its own. A lock older than 5 s is taken for a dead writer's (a bot start must
+# not wait long, and a live holder past it is harmless, see below): it is broken by
 # renaming it to a name of our own, which exactly one breaker wins, and dropped
 # only if it is still the lock judged stale (same inode and token). The lock
 # only saves work: two holders at once (a holder stalled past the stale bound, a
@@ -387,7 +388,7 @@ same_tree() {
 # the caller. The bounds are read only here, so the suite can shrink them.
 sync_compat() (
   c=$helpers/compat l=$helpers/compat.lock t0=$SECONDS
-  st=${CLAUDE_DISCORD_COMPAT_STALE_S:-30} gu=${CLAUDE_DISCORD_COMPAT_WAIT_S:-40} ps=${CLAUDE_DISCORD_COMPAT_STEP_S:-0.1}
+  st=${CLAUDE_DISCORD_COMPAT_STALE_S:-5} gu=${CLAUDE_DISCORD_COMPAT_WAIT_S:-10} ps=${CLAUDE_DISCORD_COMPAT_STEP_S:-0.1}
   n=$(mktemp -d "$c.new.XXXXXX") || return 1
   b=$n/compat o=$n/old tok=${n##*.}   # unique among writers while $n exists (mktemp -d), and no pid
   trap 'rm -rf "$n"' EXIT; trap 'exit 1' INT TERM HUP
@@ -406,7 +407,7 @@ sync_compat() (
   # compat/ gone: our old copy (unless we landed) goes back; $n holding it stays if that fails with compat/ still gone.
   # set -e is back on inside a trap: a failing command would skip the rest (the lock release) and set our status, hence || :.
   trap '{ has_path "$c" || [ ! -d "$o" ] || perl -e "rename shift, shift or exit 1" "$o" "$c" || has_path "$c"; } && rm -rf "$n" || :; IFS= read -r t 2>/dev/null < "$l/owner" && [ "$t" = "$tok" ] && rm -rf "$l" || :' EXIT
-  printf '%s\n' "$tok" > "$l/owner" || return 1
+  printf '%s\n' "$tok" > "$l/owner" || { rm -rf "$l"; return 1; }   # an ownerless lock would hold every writer off until stale
   # compat/ gone: a writer killed between its renames left the only copy in its compat.new.*/old; the newest goes back.
   has_path "$c" || perl -e '$c = shift; ($o) = sort { (lstat "$b/..")[9] <=> (lstat "$a/..")[9] } grep { -d } @ARGV; rename $o, $c if $o' "$c" "$c".new.*/old || :
   # An old compat.new.* (its old/ too), compat.old.* or compat.lock.broken.* is a dead writer's or an older release's
