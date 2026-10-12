@@ -3615,8 +3615,14 @@ wait_log 1 'update skipped: monitor\.sh does not parse'; np=$(passes); wait_log 
   { echo "FAIL: a monitor.sh that does not parse is not exec'd, logged once, the monitor keeps passing: $(tail -4 "$MB/monitor.log")"; exit 1; }
 cp "$HOME/monitor.good" "$PC/monitor/monitor.sh"; wait_log 3 'restart: monitor\.sh changed$'; next_pass
 [ "$(mpid)" = "$rp" ] || { echo "FAIL: the valid monitor.sh after a broken one restarts the monitor, same process"; exit 1; }
+# The lock file replaced under the running monitor (removed, then a new empty one, as a second --ensure would make, which
+# then wins the lock): it leaves at its next tick, logged, and leaves state.json to that successor (its pid still there).
+[ "$(<"$MB/lock")" = "$rp" ] || { echo "FAIL: the lock file must hold the monitor's pid: $(<"$MB/lock")"; exit 1; }
+rm -f "$MB/lock"; : > "$MB/lock"; wait_log 1 'exit reason=lock-lost'
+n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+! running "$rp" && [ "$(mpid)" = "$rp" ] || { echo "FAIL: a monitor whose lock file was replaced must exit without writing state.json: $(tail -2 "$MB/monitor.log")"; exit 1; }
 mstop; touch "$PC/monitor/monitor.sh"; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep" "$HOME/monitor.good"
-echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd within a pass by the same process, lock kept, nothing posted again; a future mtime restarts it once, not every tick; one that does not parse is skipped, logged once"
+echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd within a pass by the same process, lock kept, nothing posted again; a future mtime restarts it once, not every tick; one that does not parse is skipped, logged once; a lock file replaced under it ends it at the next tick"
 
 # The session a SessionStart hook belongs to: the nearest ancestor, two levels at most, whose argv[0] is .../claude or
 # under .../claude/versions/ and whose argv[1] is not daemon. Process chains are built with perl's $0 (what ps shows),

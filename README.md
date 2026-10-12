@@ -877,7 +877,7 @@ Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 
 | file | what |
 |---|---|
-| `lock` | the single-instance lock (`flock` through perl) |
+| `lock` | the single-instance lock (`flock` through perl); holds the running monitor's pid, and a monitor whose lock file was removed or replaced exits at its next tick |
 | `state.json` | what the TUI shows; kept after exit, and what keeps a restart from repeating a finding |
 | `monitor.log`, `monitor.log.1` | one line per event, 256 KiB each at most |
 | `holders/<kind>-<pid>` | one record per open TUI or manager session |

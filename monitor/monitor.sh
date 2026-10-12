@@ -13,7 +13,7 @@
 # the manager session) and exits within one tick (30 s) of the last one.
 #
 # Everything it keeps is under ~/.claude-discord/records/monitor/<bot>/:
-#   lock                       the flock target (fd 9 of the monitor)
+#   lock                       the flock target (fd 9 of the monitor), holding its pid
 #   state.json (+ .tmp)        what the TUI shows; `posted` makes a restart quiet
 #   monitor.log, monitor.log.1 256 KiB each at most
 #   holders/<kind>-<pid>       "<pid> <start time> <kind>"
@@ -165,6 +165,18 @@ holders_json() {  # sets hj: the holder records as a JSON array, with no fork
   done
   hj="[$hj]"
 }
+# lock_check, every tick: the lock file still names this process. One removed under a running monitor (or replaced by
+# a new file) lets a second monitor start on the new file, so this one leaves, without finish: that successor may
+# already own state.json and the holder records. The pid in the file, not [ /dev/fd/9 -ef lock ]: on macOS stat of
+# /dev/fd/9 reports another st_dev than the file's (measured, bash 3.2.57), so -ef never holds there.
+lock_check() {
+  local l=""
+  { read -r l < "$M/lock"; } 2>/dev/null
+  [ "$l" != "$$" ] || return 0
+  [ -z "$child" ] || kill -- -"$child" 2>/dev/null || kill "$child" 2>/dev/null
+  log "exit reason=lock-lost (the lock file was removed or replaced)"
+  exit 0
+}
 finish() {  # $1 = reason: kill the pass child, leave a state that reads as stopped, drop the holder records
   # The group; the pid alone when the signal came before the child's setpgrp.
   [ -z "$child" ] || kill -- -"$child" 2>/dev/null || kill "$child" 2>/dev/null
@@ -244,7 +256,7 @@ run_host() {  # uses $host $remote, the envs array, and run_pass's step counter 
       fi
       # One counter for the whole pass, not per host: however many hosts are
       # slow, the holder check comes every tick.
-      [ $((k % tick_n)) != 0 ] || ! no_holders || finish no-holders
+      [ $((k % tick_n)) != 0 ] || { lock_check; ! no_holders || finish no-holders; }
       sleep "$step" 9>&-
     done
     wait "$child" 2>/dev/null; h_rc=$?; child=""
@@ -485,6 +497,9 @@ run_pass() {
 }
 
 rotate
+# This monitor's pid in the lock file (lock_check reads it). By path, truncating: only the lock's holder writes it, and
+# --ensure and the lock waiter open it for append and write nothing.
+printf '%s\n' "$$" > "$M/lock"
 # Start from the kept state (its `posted` is what keeps a restart quiet). A
 # state file that is not ours (truncated, another version, another manager)
 # starts empty and says so: findings still standing are then posted once more.
@@ -500,6 +515,7 @@ log start
 n=$pass_n   # the first pass right after start
 while :; do
   [ -f "$dir/hosts" ] || finish no-ledger
+  lock_check
   ! no_holders || finish no-holders
   # Straight back to the holder check after a pass: the last in-pass check may be most of a tick old.
   # Passes start PASS apart, not PASS after the last one ended: the ticks its hosts took count, and the first sleep
