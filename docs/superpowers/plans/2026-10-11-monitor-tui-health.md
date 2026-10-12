@@ -4,7 +4,7 @@
 
 **Goal:** A manager bot's machine notices, within one pass, any bot on its ledger hosts that stopped answering and tells that bot's owner in `#bot-health-check` once, with a command that fixes it, through a backend monitor that lives only while the TUI or the manager session holds it, with no OS scheduler.
 
-**Architecture:** `claude-discord health --all --json --patch` becomes the one command a pass runs per host (locally, or over `ssh -o BatchMode=yes`); `stale` becomes a delivery check against `<bot>/delivered`, which `on-prompt` writes; macOS counts plugin servers through `ps -axww` then `ps -axEww -p`. A new `monitor/monitor.sh` (bash 3.2, run by the wrapper verb `claude-discord monitor`) holds a perl `flock` on fd 9, folds each pass into `state.json` through one jq reducer, and posts one message per state change with the manager bot's token. `setup` writes the ledger `<bot>/hosts` in dev-manager mode; the SessionStart hook and `claude-discord tui` (Python + Textual via `uv run --script`) register holders and ensure the monitor.
+**Architecture:** `claude-discord health --all --json --patch` becomes the one command a pass runs per host (locally, or over `ssh -o BatchMode=yes`); `stale` becomes a delivery check against `<bot>/delivered`, which `on-prompt` writes; macOS counts plugin servers through `ps -axww` then `ps -Eww -p` (Ruling T3-1). A new `monitor/monitor.sh` (bash 3.2, run by the wrapper verb `claude-discord monitor`) holds a perl `flock` on fd 9, folds each pass into `state.json` through one jq reducer, and posts one message per state change with the manager bot's token. `setup` writes the ledger `<bot>/hosts` in dev-manager mode; the SessionStart hook and `claude-discord tui` (Python + Textual via `uv run --script`) register holders and ensure the monitor.
 
 **Tech Stack:** bash (3.2-compatible: macOS `/bin/bash`), perl (`flock`, `setsid`), jq (1.6 on lmd42), curl, ssh, Python 3.9+ with Textual `>=8.2.8,<9` through uv (TUI only), the stub-only suite `test-claude-discord.sh`.
 
@@ -19,8 +19,11 @@ Every piece of code below was run before this plan was written: the full suite p
 4. The holder record's start time comes from `/proc/<pid>/stat` (field 22, no fork) on Linux and from `ps -o lstart=` elsewhere: the check runs every tick and `ps` costs 22 ms a call on lmd42.
 5. `pass.out` (one host's answer, removed at the end of each pass) joins the spec's fixed file list: a command substitution cannot be polled every tick, and an ssh ControlMaster could hold its pipe open.
 6. A fourth interval override, `CLAUDE_DISCORD_MONITOR_LOCK_WAIT` (default 5 s), lets the suite test the lock wait in 0.15 s; `CLAUDE_DISCORD_PROC` and `CLAUDE_DISCORD_UV` exist only so the suite can exercise the macOS count on Linux and a missing uv.
-7. The suite grows by about 4.5 s, not the spec's ~3 s (see Global Constraints).
+7. The suite grows by more than the spec's ~3 s: measured 28.3 s after Task 0b and 35.3 s at f3a0cec (main's merge in between), 36.5 s after the final fix round (35.2 to 35.5 s for f3a0cec in the same alternating runs), serial at load 15 to 17; R3's end-state cap is 37 s.
 8. A `no-holders` exit keeps `holders/*`: every record left was found dead and removed by the check just before, so one that is there at exit belongs to a holder whose `--ensure` is waiting for the lock (the exit race), and it must stay for the monitor that wait starts. The next start's first holder check, before its first pass, prunes any stale record. A signal exit still removes them all.
+9. `session_pid` looks two ancestor levels up at most (the hook's shell, then its `sh -c`), not for the nearest claude at any depth (Ruling P5): a claude three levels up is not this hook's session.
+10. A `stale` candidate is also cleared by a later message of the bot in the same chat (channel or thread) in the fetched page (Ruling T2-1): a message lost in a refresh or handoff gap and answered by catch-up stops alerting, while one stuck thread still alerts.
+11. `claude-discord install` ends with one `patch_official` run (idempotent; Ruling R4, dong 02:16Z), so install plus `/reload-plugins` without a restart leaves the official cache patched. The spec does not ask for it.
 
 ## Global Constraints
 
@@ -243,7 +246,7 @@ HARD HOME RULE (repeat verbatim in this task's dispatch prompt): any probe outsi
 
 ```bash
 # macOS has no /proc: the servers are counted from ps, argv first (ps -axww: bun, a .../discord/ argument, last word
-# start), then the environment of only those pids (ps -axEww -p). A shell of the session carries the same
+# start), then the environment of only those pids (ps -Eww -p). A shell of the session carries the same
 # DISCORD_STATE_DIR and must not count; neither may sbot2's server. CLAUDE_DISCORD_PROC points health at a missing
 # /proc; the ps stub sits on PATH for these runs only.
 mkdir -p "$HOME/psbin"
@@ -251,7 +254,7 @@ cat > "$HOME/psbin/ps" <<'STUB'
 #!/bin/bash
 case "$*" in
   "-axww -o pid=,command=") [ ! -f "$HOME/ps.fail" ] || exit 1; cat "$HOME/ps.argv";;
-  "-axEww -o pid=,command= -p "*) printf '%s\n' "$*" >> "$HOME/ps.calls"; cat "$HOME/ps.env";;
+  "-Eww -o pid=,command= -p "*) printf '%s\n' "$*" >> "$HOME/ps.calls"; cat "$HOME/ps.env";;
   *) exec /bin/ps "$@";;
 esac
 STUB
@@ -264,12 +267,12 @@ rm -f "$HOME/ps.calls"
 macrun() { queue "200 $NONE" '200 {"threads":[]}'; PATH="$HOME/psbin:$PATH" CLAUDE_DISCORD_PROC=/nonexistent bash "$S" health --json 2>/dev/null || :; }
 out=$(macrun)
 [ "$(verdict_of sbot "$out")" = duplicate ] && [ "$(field_of sbot servers "$out")" = 2 ] || { echo "FAIL: two bun servers carrying sbot's DISCORD_STATE_DIR must read as a duplicate: $out"; exit 1; }
-[ "$(<"$HOME/ps.calls")" = "-axEww -o pid=,command= -p 101,102,104" ] || { echo "FAIL: only the bun servers' environment may be read: $(<"$HOME/ps.calls")"; exit 1; }
+[ "$(<"$HOME/ps.calls")" = "-Eww -o pid=,command= -p 101,102,104" ] || { echo "FAIL: only the bun servers' environment may be read: $(<"$HOME/ps.calls")"; exit 1; }
 : > "$HOME/ps.fail"
 out=$(macrun)
 [ "$(field_of sbot servers "$out")" = unknown ] && [ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: a ps that fails is unknown, never down: $out"; exit 1; }
 rm -rf "$HOME/psbin" "$HOME/ps.argv" "$HOME/ps.env" "$HOME/ps.calls" "$HOME/ps.fail"
-echo "ok: without /proc the servers are counted from ps -axww argv first, then ps -axEww for those pids only; another bot's server and a shell with the same state dir do not count; a failing ps is unknown"
+echo "ok: without /proc the servers are counted from ps -axww argv first, then ps -Eww for those pids only; another bot's server and a shell with the same state dir do not count; a failing ps is unknown"
 ```
 
 - [ ] **Step 2: Run it**
@@ -305,7 +308,7 @@ with
     if mac_ps=$(ps -axww -o pid=,command= 2>/dev/null) && [ -n "$mac_ps" ]; then
       mac_ok=yes
       mac_pids=$(printf '%s\n' "$mac_ps" | awk '{ a0 = $2; sub(/.*\//, "", a0) } a0 == "bun" && $NF == "start" && /\/discord\// { printf "%s%s", (n++ ? "," : ""), $1 }') || mac_pids=""
-      [ -z "$mac_pids" ] || mac_env=$(ps -axEww -o pid=,command= -p "$mac_pids" 2>/dev/null) || mac_ok=no
+      [ -z "$mac_pids" ] || mac_env=$(ps -Eww -o pid=,command= -p "$mac_pids" 2>/dev/null) || mac_ok=no
     fi
   fi
   if [ -d "$proc" ]; then
@@ -350,7 +353,7 @@ and in the same function replace `pid=${c#/proc/}; pid=${pid%/cmdline}` with `pi
 - [ ] **Step 6: Commit**
 
 ```bash
-git commit -m "health on macOS: plugin servers counted from ps -axww argv first, then ps -axEww for those pids (down and duplicate visible on the Macs)" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>" -- bin/claude-discord test-claude-discord.sh
+git commit -m "health on macOS: plugin servers counted from ps -axww argv first, then ps -Eww for those pids (down and duplicate visible on the Macs)" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>" -- bin/claude-discord test-claude-discord.sh
 ```
 
 ---
@@ -2551,7 +2554,7 @@ Not subagent work: the lead runs it, and dong-dev-bot reviews before main (proje
 
 HARD HOME RULE (repeat verbatim in any dispatch prompt here): any probe outside the test suite sets a literal sandbox HOME in the SAME Bash call, chained with &&; never write the real ~/.claude.json, ~/.claude, ~/.claude-discord or ~/.local/bin; run hand-run hooks/tools with env -u DISCORD_STATE_DIR.
 
-- [ ] **Step 1:** Push `impl/monitor-tui`, post the diff summary in the item's Discord thread to dong-dev-bot with the eight deviations above, close every review finding (re-review each fix commit) before main.
+- [ ] **Step 1:** Push `impl/monitor-tui`, post the diff summary in the item's Discord thread to dong-dev-bot with the eleven deviations above, close every review finding (re-review each fix commit) before main.
 - [ ] **Step 2:** On lmd42, `claude-discord update` from the branch, one `claude-discord health` in each bot project, then `claude-discord setup junyong-dev-bot --mode` answering `wmac, pmac`; `claude-discord tui`. Proof: the hosts table lists `local`, `wmac`, `pmac` with versions; `ls ~/.claude-discord/records/monitor/junyong-dev-bot` shows only `holders lock monitor.log state.json`.
 - [ ] **Step 3:** Stop one non-critical bot by hand (`claude stop <id>`). Proof: one `[down]` message in `#bot-health-check` within 10 minutes mentioning its owner; after `claude-discord --bg --name <bot>`, one `[recovered]` line; nothing else posted.
 - [ ] **Step 4:** Quit the TUI with no manager session holding: `ps` shows no `monitor/monitor.sh` process 30 s later; `state.json` reads `"pid": null` with `stopped_at`.

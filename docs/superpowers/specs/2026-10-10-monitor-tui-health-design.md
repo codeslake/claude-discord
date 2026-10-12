@@ -297,7 +297,7 @@ known: that entry has no `bot` field, takes the manager's owner, alerts as
 | finding | from | probe | hold |
 |---|---|---|---|
 | `down` | health | no plugin server for the bot, nothing unanswered | 5 min (two passes): a pass that lands inside a `refresh` sees `down` for seconds |
-| `stale` | health | oldest addressed message unanswered 15 min, no live turn, AND its message id not in `<bot>/delivered` (health's own filters: allowFrom, requireMention, replies, turn-file and `claude agents` holds) | none: the 15 min is already in the probe |
+| `stale` | health | oldest addressed message unanswered 15 min, no live turn, AND its message id not in `<bot>/delivered`, AND no later message of the bot in the same chat (channel or thread) in the fetched page (health's own filters: allowFrom, requireMention, replies, turn-file and `claude agents` holds) | none: the 15 min is already in the probe |
 | `duplicate` | health | more than one plugin server on the bot's token | 5 min |
 | `unreachable` | health | Discord answered 401/403 for the bot's token or channel | 5 min |
 | `nostate` | health | unanswered and `claude agents` silent for 6 runs | none: already 30 min |
