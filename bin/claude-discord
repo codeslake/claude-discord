@@ -1540,7 +1540,8 @@ if [ "${1:-}" = health ]; then
   # The findings flag goes on its own LAST line, so what precedes it stays
   # exactly the JSON a caller would parse; the shell strips that line off
   # before printing. A marker merged into the document would corrupt the one
-  # thing --json exists to produce.
+  # thing --json exists to produce. The document comes out already indented
+  # (-r prints only a string raw), so printing it needs no second jq.
   rows=$(printf '%s' "$rows" | jq -rRs --argjson show "$([ "$as_json" = yes ] && echo true || echo false)" --arg owner "${DISCORD_USER_ID:-}" '
     [ splits("\u001f") ] | .[:-1]
     | [ range(0; length; 10) as $i
@@ -1548,12 +1549,12 @@ if [ "${1:-}" = health ]; then
             turn_min: .[$i+4], oldest_unanswered: .[$i+5], last_seen: .[$i+6],
             unanswered_min: (.[$i+7] | tonumber? // 0), refresh_tail: .[$i+8],
             trusted: .[$i+9], owner_id: $owner } ]
-    | (if $show then (tojson + "\n") else "" end)
-      + (if all(.[]; .verdict == "ok" or .verdict == "busy") then "ok" else "finding" end)
+    | (if $show then . else empty end),
+      (if all(.[]; .verdict == "ok" or .verdict == "busy") then "ok" else "finding" end)
     ' 2>/dev/null) || rows=finding
   verdicts=${rows##*$'\n'}
   if [ "$as_json" = yes ] && [ "$rows" != "$verdicts" ]; then
-    printf '%s' "${rows%$'\n'*}" | jq .
+    printf '%s\n' "${rows%$'\n'*}"
   fi
   [ "$verdicts" = ok ] || exit 1
   exit 0
