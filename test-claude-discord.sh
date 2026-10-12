@@ -246,11 +246,11 @@ chmod +x "$HOME/bin/sleep"
 # run in parallel); a reader takes it only when it holds its own key and ends in \004, so a half-written one is a miss.
 # Inputs and entries are read line by line (c ends up byte for byte the content): bash reads a file in blocks that way,
 # and a byte per syscall with any other delimiter.
-mkdir -p "$HOME/jq.cache"
-{ printf '#!/bin/bash\nJQ_REAL=%q; JQ_CACHE=%q\n' "$(command -v jq)" "$HOME/jq.cache"; cat <<'EOF'
+mkdir -p "$HOME/jq.cache"; JQR=$(command -v jq)
+{ printf '#!/bin/bash\nJQ_REAL=%q; JQ_CACHE=%q\n' "$JQR" "$HOME/jq.cache"; cat <<'EOF'
 args=("$@"); filter=""; have=0; null=0; inputs=0; files=()
 real() { exec "$JQ_REAL" "${args[@]}"; }
-slurp() { local l; c=""; while IFS= read -r l; do c+=$l$'\n'; done; c+=$l; }   # shortcut: drops a NUL; no caller sends one (JSON has none)
+slurp() { local l; c=""; while IFS= read -r l; do c+=$l$'\n'; done; c+=$l; }   # shortcut: drops a NUL, so a\0b and ab share a key and jq -R sees ab; no caller sends one (JSON has none), and spotting one costs a byte-wise read
 while [ $# -gt 0 ]; do
   a=$1; shift
   case $a in
@@ -262,14 +262,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ $have = 1 ] || real
-re='(^|[^.A-Za-z0-9_])(now|env|ENV|input[a-z_]*|[a-z]*local[a-z]*|debug|stderr|halt[a-z_]*|import|include|modulemeta|get_[a-z_]*)([^A-Za-z0-9_]|$)'
+re='(^|[^.A-Za-z0-9_])(now|env|ENV|input[a-z_]*|[a-z]*local[a-z]*|debug|stderr|halt[a-z_]*|import|include|modulemeta|get_[a-z_]*|strptime|strftime|mktime|gmtime|todate[a-z0-9]*|fromdate[a-z0-9]*|date[a-z0-9]*)([^A-Za-z0-9_]|$)'
 [[ ! $filter =~ $re ]] || real
 key=""; for a in "${args[@]}"; do key+=$a$'\001'; done
-name=${#key}
+name=${#key}; fk=""
 for f in "${files[@]}"; do
   { [ -f "$f" ] && [ -r "$f" ]; } || real
-  slurp < "$f"; key+=$c$'\002'; name+=-${#c}
+  slurp < "$f"; fk+=$c$'\002'; name+=-${#c}
 done
+key+=$fk
 t=$JQ_CACHE/t$$; piped=0
 if [ $null = 0 ] && [ $inputs = 0 ]; then slurp; in=$c; key+=$c; name+=-${#c}; piped=1; fi
 i=0
@@ -281,13 +282,25 @@ done
 rc=0
 if [ $piped = 1 ]; then printf '%s' "$in" > "$t.i"; "$JQ_REAL" "${args[@]}" < "$t.i" > "$t.o" 2> "$t.e" || rc=$?
 else "$JQ_REAL" "${args[@]}" > "$t.o" 2> "$t.e" || rc=$?; fi
-slurp < "$t.o"; out=$c
+slurp < "$t.o"; out=$c   # shortcut: t<pid>.* stay (an rm per miss costs ~0.8 s of the suite); HOME goes at exit
 printf '%s' "$out"
 if [ -s "$t.e" ]; then slurp < "$t.e"; printf '%s' "$c" >&2; exit "$rc"; fi
+# Real jq opened the files by path after the key was read: one replaced in between (mv -f) answered for other contents.
+n=""; for f in "${files[@]}"; do { slurp < "$f"; } 2>/dev/null || exit "$rc"; n+=$c$'\002'; done; [ "$n" = "$fk" ] || exit "$rc"
 case $rc in 0|1|4) case $key$out in *$'\004'*) ;; *) set -C; { printf '%s\n%s%s\004' "$rc" "$key" "$out" > "$JQ_CACHE/$name.$i"; } 2>/dev/null;; esac;; esac
 exit "$rc"
 EOF
 } > "$HOME/bin/jq"; chmod +x "$HOME/bin/jq"
+# A file replaced between the stub's read and real jq's open (a "real" jq that does the mv -f first) must store nothing:
+# the later call on the old contents gets the real answer, not the new contents' one.
+JT=$HOME/jqtoctou; mkdir -p "$JT/c"; printf '{"v":"old"}' > "$JT/f"; printf '{"v":"new"}' > "$JT/new"
+printf '#!/bin/bash\nmv -f %q %q 2>/dev/null; exec %q "$@"\n' "$JT/new" "$JT/f" "$JQR" > "$JT/real"; chmod +x "$JT/real"
+sed "2s|.*|JQ_REAL=$JT/real; JQ_CACHE=$JT/c|" "$HOME/bin/jq" > "$JT/jq"
+[ "$(bash "$JT/jq" -r .v "$JT/f")" = new ] && ! compgen -G "$JT/c/[0-9]*" >/dev/null && printf '{"v":"old"}' > "$JT/f" && [ "$(bash "$JT/jq" -r .v "$JT/f")" = old ] \
+  && rm "$JT"/c/[0-9]* && bash "$JT/jq" -n '0 | todate' >/dev/null && ! compgen -G "$JT/c/[0-9]*" >/dev/null \
+  || { echo "FAIL: a file replaced while real jq ran must not be cached under its old contents, nor a time-zone builtin: $(ls "$JT/c")"; exit 1; }
+rm -rf "$JT"
+echo "ok: the jq stub stores no answer for a file replaced while real jq ran or a time-zone builtin"
 # Stands in for a session's claude process: runs each argument through
 # sh -c, as Claude Code runs a hook command, and reads its output to EOF (a
 # hook that left a child holding that pipe would hang here), appending it to
