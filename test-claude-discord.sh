@@ -3122,6 +3122,39 @@ bash "$S" health --uninstall-timer | grep -q 'no timer was installed' || { echo 
 rm -f "$HOME/bin/systemctl"
 echo "ok: health installs no timer (--install-timer and --proxy are refused), and --uninstall-timer removes one an older version left, or says there was none"
 
+# health --all: every project in records/projects, one document (host, version, home, patch, projects[].bots[] with
+# owner_id), exit 0 whenever it printed it (over ssh a non-zero exit means "no answer"). --patch runs the patch step
+# first and carries its rc and stderr. A project whose .claude/discord-agents is gone is pruned. Neither health.log nor
+# logger is written at a monitor's cadence; a health run by hand keeps both.
+PF="$HOME/.claude-discord/records/projects"
+# project-upper was set up above and never ran health: only setup can have recorded it.
+grep -qxF "$(cd "$PU" && pwd -P)" "$PF" || { echo "FAIL: setup must record its project in records/projects: $(cat "$PF" 2>&1)"; exit 1; }
+mv "$PF" "$PF.suite"
+# The project --all walks is a copy of single-project whose path has a space, a quote and a $; the gone one a space.
+SPS="$HOME/single pro'ject \$x"; cp -a "$SP" "$SPS"; SDS="$SPS/.claude/discord-agents/sbot"
+printf '%s\n' "$HOME/gone project" > "$PF"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "$HOME/logger.calls"\n' > "$HOME/bin/logger"; chmod +x "$HOME/bin/logger"
+rm -f "$HOME/logger.calls" "$SDS/health.log"
+(cd "$SPS" && queue "200 $NONE" '200 {"threads":[]}' && bash "$S" health >/dev/null 2>&1) || :
+grep -qxF "$(cd "$SPS" && pwd -P)" "$PF" || { echo "FAIL: a health run in a project must record it: $(<"$PF")"; exit 1; }
+[ -s "$SDS/health.log" ] && [ -s "$HOME/logger.calls" ] || { echo "FAIL: control: a health run by hand keeps health.log and the journal line"; exit 1; }
+rm -f "$HOME/logger.calls" "$SDS/health.log"
+PCACHE=$HOME/.claude/plugins/cache/claude-plugins-official/discord
+mkdir -p "$PCACHE/0.0.98"; printf 'nothing to patch here\n' > "$PCACHE/0.0.98/server.ts"
+queue "200 $MENTION" '200 {"threads":[]}'
+rc=0; doc=$(cd "$HOME" && bash "$S" health --all --json --patch 2>/dev/null) || rc=$?
+[ "$rc" = 0 ] || { echo "FAIL: health --all --json must exit 0 when it printed the document, a finding or not (rc=$rc): $doc"; exit 1; }
+jq -e --arg home "$HOME" --arg p "$(cd "$SPS" && pwd -P)" '
+  (.host | length > 0) and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+ \\(")) and .home == $home
+  and .patch.rc == 1 and (.patch.output | test("0.0.98/server.ts: bot-authors no longer matches"))
+  and (.projects | length) == 1 and .projects[0].project == $p
+  and .projects[0].bots[0].bot == "sbot" and .projects[0].bots[0].verdict == "stale" and .projects[0].bots[0].owner_id == "111"' <<<"$doc" >/dev/null ||
+  { echo "FAIL: health --all --json --patch: wrong document: $doc"; exit 1; }
+[ ! -e "$SDS/health.log" ] && [ ! -e "$HOME/logger.calls" ] || { echo "FAIL: health --all must write no health.log line and call no logger"; exit 1; }
+grep -qF 'gone project' "$PF" && { echo "FAIL: --all must prune a project whose discord-agents is gone: $(<"$PF")"; exit 1; }
+rm -rf "$PCACHE/0.0.98" "$HOME/bin/logger" "$HOME/logger.calls" "$SPS"; mv "$PF.suite" "$PF"
+echo "ok: health --all --json --patch prints one document (host, version, home, the patch step's rc and stderr, each project's bots with owner_id; a project path with a space, a quote and a \$), exits 0 with a finding, prunes a gone project, and writes no health.log or journal line; setup and a health run record their project"
+
 stop_servers
 cd "$P"
 

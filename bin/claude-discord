@@ -34,6 +34,10 @@
 #   claude-discord health [--json]
 #                                        is every bot in this project still
 #                                        answering? exit 1 on a finding
+#   claude-discord health --all [--json] [--patch]
+#                                        every project recorded on this machine,
+#                                        one document; --patch runs `patch`
+#                                        first (what a monitor pass runs)
 #   claude-discord health --uninstall-timer
 #                                        remove the systemd --user timer an
 #                                        older version installed; no OS
@@ -262,6 +266,15 @@ prune_installs() {
   done < "$f"
   printf '%s' "$keep" > "$f.tmp.$$" && { cmp -s "$f.tmp.$$" "$f" || cat "$f.tmp.$$" > "$f"; }
   rm -f "$f.tmp.$$"
+}
+# record_project: this project's root (physical) into records/projects, once.
+# `health --all` walks that list; setup and a health run in a project add to it.
+record_project() {
+  local f=$helpers/records/projects p l
+  p=$(pwd -P) || return 0
+  # Already listed (every health run after the first): found with no fork.
+  if [ -f "$f" ]; then while IFS= read -r l || [ -n "$l" ]; do [ "$l" != "$p" ] || return 0; done < "$f"; fi
+  mkdir -p "$helpers/records" 2>/dev/null && printf '%s\n' "$p" >> "$f" 2>/dev/null || :
 }
 install_plugin() {  # uses $scope $method $pdir $gdir
   local repo=${CLAUDE_DISCORD_REPO:-https://github.com/codeslake/claude-discord}
@@ -707,6 +720,7 @@ EOT
     echo "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed."
   fi
   ensure_hooks_symlink
+  record_project
   if [ "${3:-}" = --mode ]; then
     echo "claude-discord: $root/$name/mode set to $mode"
   else
@@ -745,6 +759,7 @@ takes_value() {
 # the session, so it still speaks when the session is the thing that died.
 #
 #   claude-discord health [--json]
+#   claude-discord health --all [--json] [--patch]
 #   claude-discord health --uninstall-timer
 #
 # What it judges by, and why not the obvious thing: `claude agents`' `.state`
@@ -793,14 +808,60 @@ if [ "${1:-}" = health ]; then
   # silent for days with nobody told. Deliberately generous -- well past any
   # honest turn -- so it only fires when something is really wrong.
   busy_cap_min=240    # 4 h unanswered ends the hold whatever the session says
-  as_json=no timer=""
+  as_json=no timer="" all=no do_patch=no nolog=no
   for a in "$@"; do
     case $a in
       --json) as_json=yes;;
+      --all) all=yes;;
+      --patch) do_patch=yes;;
+      --nolog) nolog=yes;;   # internal: --all's per-project runs write no health.log line and no journal line
       --uninstall-timer) timer=uninstall;;
-      *) echo "usage: claude-discord health [--json] | health --uninstall-timer" >&2; exit 2;;
+      *) echo "usage: claude-discord health [--json] | health --all [--json] [--patch] | health --uninstall-timer" >&2; exit 2;;
     esac
   done
+  [ "$do_patch" = no ] || [ "$all" = yes ] || { echo "claude-discord: health --patch needs --all" >&2; exit 2; }
+  # --all: every project in ~/.claude-discord/records/projects, one document.
+  # This is the one command a monitor pass runs per host (locally or over
+  # ssh), so with --json it exits 0 whenever it printed the document: over
+  # ssh a non-zero status means "no answer from that host", never "a bot has
+  # a finding". Each project is judged by this same script run there with
+  # --nolog; a project whose .claude/discord-agents is gone is pruned.
+  # Before the DISCORD_STATE_DIR fallback below: --all is about the machine,
+  # so a bot session's own project must not stand in for the working directory.
+  if [ "$all" = yes ]; then
+    command -v jq >/dev/null 2>&1 || { echo "claude-discord: health needs jq" >&2; exit 1; }
+    pf=$helpers/records/projects keep="" docs="" prc=null pout="" any=0
+    if [ "$do_patch" = yes ]; then
+      # The `patch` verb's own function, in a subshell; stderr only: file and patch name.
+      prc=0; pout=$(patch_official 2>&1 >/dev/null) || prc=$?
+    fi
+    if [ -f "$pf" ]; then
+      while IFS= read -r p || [ -n "$p" ]; do
+        [ -n "$p" ] && [ -d "$p/.claude/discord-agents" ] || continue
+        keep="$keep$p"$'\n'
+        if [ "$as_json" = yes ]; then
+          # </dev/null: the loop's stdin is the list itself, and a reader in the run would eat its lines.
+          one=$(cd "$p" 2>/dev/null && "$self_path" health --json --nolog 2>/dev/null </dev/null) || :
+          # Two plain assignments: bash 3.2 misreads a quoted jq program inside "$( )" inside double quotes.
+          one=$(printf '%s' "${one:-[]}" | jq -c --arg p "$p" '{project: $p, bots: (if type == "array" then . else [] end)}' 2>/dev/null) || one=$(jq -nc --arg p "$p" '{project: $p, bots: []}')
+          docs=$docs$one$'\n'
+        else
+          echo "== $p"
+          (cd "$p" 2>/dev/null && "$self_path" health --nolog </dev/null) || any=1
+        fi
+      done < "$pf"
+      # Rewritten only when something was pruned. A setup recording a project
+      # during this walk can be lost; its next health run records it again.
+      printf '%s' "$keep" > "$pf.tmp.$$" 2>/dev/null && { cmp -s "$pf.tmp.$$" "$pf" || cat "$pf.tmp.$$" > "$pf" 2>/dev/null || :; }
+      rm -f "$pf.tmp.$$"
+    fi
+    [ "$as_json" = yes ] || exit "$any"
+    h=$(uname -n); h=${h%%.*}
+    printf '%s' "$docs" | jq -s --arg host "$h" --arg home "$HOME" --argjson prc "$prc" --arg pout "$pout" \
+      --arg ver "$(plugin_version "$self_root") ($(git -C "$self_root" rev-parse --short HEAD 2>/dev/null || echo nogit))" \
+      '{host: $host, version: $ver, home: $home, patch: (if $prc == null then null else {rc: $prc, output: $pout} end), projects: .}'
+    exit 0
+  fi
   # The working directory decides, and only when it holds no bots does the
   # environment stand in. `refresh` leans on DISCORD_STATE_DIR because a
   # session refreshes ITSELF, but `health` is about a project: measured,
@@ -834,6 +895,7 @@ if [ "${1:-}" = health ]; then
   fi
 
   [ -d "$root" ] || { echo "claude-discord: no bot set up in $root" >&2; exit 1; }
+  record_project
   command -v jq >/dev/null 2>&1 || { echo "claude-discord: health needs jq" >&2; exit 1; }
   command -v curl >/dev/null 2>&1 || { echo "claude-discord: health needs curl" >&2; exit 1; }
   [ ! -f "$root/config.env" ] || . "$root/config.env"
@@ -1302,10 +1364,13 @@ if [ "${1:-}" = health ]; then
 
 
     line="claude-discord health: $bot $verdict${detail:+ -- $detail}"
-    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line" >> "$d/health.log" 2>/dev/null || :
-    # journal too, because the log above lives in the state dir of a bot
-    # whose whole problem may be that nobody is looking at it.
-    ! command -v logger >/dev/null 2>&1 || logger -t claude-discord-health -- "$line" 2>/dev/null || :
+    # Not under --all (--nolog): at a monitor's 5-minute cadence both would grow without bound.
+    if [ "$nolog" = no ]; then
+      printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line" >> "$d/health.log" 2>/dev/null || :
+      # journal too, because the log above lives in the state dir of a bot
+      # whose whole problem may be that nobody is looking at it.
+      ! command -v logger >/dev/null 2>&1 || logger -t claude-discord-health -- "$line" 2>/dev/null || :
+    fi
 
     [ "$as_json" = yes ] || echo "$line"
   done
@@ -1318,13 +1383,13 @@ if [ "${1:-}" = health ]; then
   # exactly the JSON a caller would parse; the shell strips that line off
   # before printing. A marker merged into the document would corrupt the one
   # thing --json exists to produce.
-  rows=$(printf '%s' "$rows" | jq -rRs --argjson show "$([ "$as_json" = yes ] && echo true || echo false)" '
+  rows=$(printf '%s' "$rows" | jq -rRs --argjson show "$([ "$as_json" = yes ] && echo true || echo false)" --arg owner "${DISCORD_USER_ID:-}" '
     [ splits("\u001f") ] | .[:-1]
     | [ range(0; length; 10) as $i
         | { bot: .[$i], verdict: .[$i+1], detail: .[$i+2], servers: .[$i+3],
             turn_min: .[$i+4], oldest_unanswered: .[$i+5], last_seen: .[$i+6],
             unanswered_min: (.[$i+7] | tonumber? // 0), refresh_tail: .[$i+8],
-            trusted: .[$i+9] } ]
+            trusted: .[$i+9], owner_id: $owner } ]
     | (if $show then (tojson + "\n") else "" end)
       + (if all(.[]; .verdict == "ok" or .verdict == "busy") then "ok" else "finding" end)
     ' 2>/dev/null) || rows=finding
