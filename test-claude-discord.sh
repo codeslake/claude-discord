@@ -454,9 +454,11 @@ echo "ok: on-prompt names the channel's people (access.json, config.env's owner,
 
 # UserPromptSubmit also fires for a Discord message that arrives mid-turn, so
 # two prompts with no Stop in between are one turn, even when the first was
-# already answered: both keep their records, the reply flag survives the
-# second prompt, and both messages get the checkmark. No prompt leaves any
-# flag beside the turns file: nothing holds a turn to a reply (owner, 2026-10-12).
+# already answered: both keep their records and the reply flag survives the
+# second prompt, but only the message the reply came after gets the checkmark:
+# .replied holds the message count at the reply, so the later one gets ☑️ (task
+# #16). No prompt leaves any flag beside the turns file: nothing holds a turn
+# to a reply (owner, 2026-10-12).
 DISCORD_STATE_DIR="$DSD" bash "$H/on-reply" <<<'{"session_id":"s1"}'
 DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"555\" message_id=\"666\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi again\n</channel>"}' >/dev/null
 [ -e "$DSD/turns/s1.replied" ] && [ ! -e "$DSD/turns/s1.pending" ] || { echo "FAIL: a mid-turn prompt after the reply must keep the turn's reply flag and create no .pending: $(ls "$DSD/turns")"; exit 1; }
@@ -464,8 +466,9 @@ DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<c
 : > "$CURL_LOG"
 DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s1"}'
 n=0; while [ "$(wc -l < "$CURL_LOG" 2>/dev/null || echo 0)" -lt 2 ] && [ "$n" -lt 200 ]; do nap 0.01; n=$((n+1)); done
-grep -q 'channels/111/messages/222/reactions/%E2%9C%85/@me' "$CURL_LOG" && grep -q 'channels/555/messages/666/reactions/%E2%9C%85/@me' "$CURL_LOG" || { echo "FAIL: both prompts of one turn must get the checkmark: $(<"$CURL_LOG")"; exit 1; }
-echo "ok: prompt, reply, then a mid-turn prompt: both are recorded, the reply flag survives, no .pending is created, both get the checkmark"
+grep -q 'channels/111/messages/222/reactions/%E2%9C%85/@me' "$CURL_LOG" && grep -q 'channels/555/messages/666/reactions/%E2%98%91%EF%B8%8F/@me' "$CURL_LOG" &&
+  [ "$(grep -c '%E2%9C%85' "$CURL_LOG")" = 1 ] || { echo "FAIL: the message before the reply must get ✅ and the one recorded after it ☑️: $(<"$CURL_LOG")"; exit 1; }
+echo "ok: prompt, reply, then a mid-turn prompt: both are recorded, the reply flag survives, no .pending is created, ✅ on the first and ☑️ on the one after the reply"
 
 # Esc ends a turn without its Stop. A prompt typed in the terminal after it
 # drops the turns file when the transcript shows an interrupt later than the
@@ -732,7 +735,7 @@ rm -rf "$DSD/turns"; mkdir -p "$DSD/turns"
 printf '111 222\n' > "$DSD/turns/s5"
 : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
 DISCORD_STATE_DIR="$DSD" bash "$H/on-reply" <<<'{"session_id":"s5"}'
-[ -f "$DSD/turns/s5.replied" ] || { echo "FAIL: on-reply must set the .replied flag"; exit 1; }
+[ "$(<"$DSD/turns/s5.replied")" = 1 ] || { echo "FAIL: on-reply must write the turn's message count into .replied"; exit 1; }
 DISCORD_STATE_DIR="$DSD" bash "$H/on-reply" <<<'{"tool_name":"mcp__plugin_discord_discord__reply"}'
 [ ! -e "$DSD/turns/mcp__plugin_discord_discord__reply.replied" ] || { echo "FAIL: on-reply with no session_id must not take the tool name as the session"; exit 1; }
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s5"}' 2>"$HOME/stop.err"); rc=$?
@@ -766,6 +769,14 @@ fi
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"nod1"}')
 [ -z "$out" ] || { echo "FAIL: a turn with no Discord message must print nothing: $out"; exit 1; }
 echo "ok: on-stop never blocks and prints nothing; a turn with no reply gets ☑️ on its message and its files cleared; a turn with no Discord message prints nothing"
+
+# An empty .replied (written before 1.9.4, by a turn that started before the
+# upgrade) still covers every message of the turn.
+printf '111 222\n111 333\n' > "$DSD/turns/s9"; : > "$DSD/turns/s9.replied"; : > "$CURL_LOG"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s9"}'
+n=0; while [ "$(wc -l < "$CURL_LOG")" -lt 2 ] && [ "$n" -lt 200 ]; do nap 0.01; n=$((n+1)); done
+[ "$(grep -c '%E2%9C%85' "$CURL_LOG")" = 2 ] && [ ! -e "$DSD/turns/s9.replied" ] || { echo "FAIL: an empty .replied from before 1.9.4 must give ✅ to every message: $(<"$CURL_LOG")"; exit 1; }
+echo "ok: an empty .replied from before 1.9.4 gives ✅ to every message of the turn"
 
 out=$(printf 'not json' | DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" 2>/dev/null); rc=$?
 [ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: on-stop must exit 0 with no output on invalid JSON"; exit 1; }
@@ -852,7 +863,7 @@ echo "ok: both patches are idempotent, and the channel tag's meta is left alone"
 # late-token: no token waits instead of exiting, and login polls .env; once, both anchors gone, the login's .catch kept.
 [ "$(grep -c 'no token yet; waiting for it' "$HOME/fakeplugin/server.ts")" = 1 ] && [ "$(grep -c 'setInterval' "$HOME/fakeplugin/server.ts")" = 1 ] &&
   [ "$(grep -c 'process.exit(1)' "$HOME/fakeplugin/server.ts")" = 1 ] && ! grep -qF 'client.login(TOKEN).catch(' "$HOME/fakeplugin/server.ts" &&
-  grep -qF '.then(t => client.login(t)).catch(err => {' "$HOME/fakeplugin/server.ts" || { echo "FAIL: late-token must replace the exit and the login once: $(<"$HOME/fakeplugin/server.ts")"; exit 1; }
+  grep -q '^;(async () => {' "$HOME/fakeplugin/server.ts" && grep -qF '})().catch(err => {' "$HOME/fakeplugin/server.ts" && grep -qF 'code !== "TokenInvalid"' "$HOME/fakeplugin/server.ts" || { echo "FAIL: late-token must replace the exit and the login once: $(<"$HOME/fakeplugin/server.ts")"; exit 1; }
 echo "ok: late-token replaces the no-token exit and the login once"
 
 CALL='const chunks = chunk(text, limit, mode)'
@@ -928,6 +939,17 @@ grep -qF "(await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chu
   grep -qF "$PCACHE/0.0.6/server.ts" <<<"$out" && grep -qF "$PCACHE/0.0.6/bunfig.toml" <<<"$out" || { echo "FAIL: patch must re-point an old chunk import and proxy preload to runtime/: $out"; exit 1; }
 out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch after the rewrite must change nothing: $out"; exit 1; }
 echo "ok: patch rewrites a chunk import and a proxy preload left at the old paths to runtime/, and a second run is silent"
+# A server.ts 1.9.3 patched (its guard line in, its login giving up on a refused token): only the login is replaced, once.
+OLD193='new Promise<string>(ok => { if (TOKEN) return ok(TOKEN); const t = setInterval(() => { let m; try { m = readFileSync(ENV_FILE, "utf8").match(/^DISCORD_BOT_TOKEN=(.+)$/m) } catch {} if (m?.[1].trim()) { clearInterval(t); ok(m[1].trim()) } }, 10000) }).then(t => client.login(t)).catch('
+mkdir -p "$PCACHE/0.0.3"
+CD_OLD=$OLD193 perl -0777 -pe 's/^  process\.exit\(1\)\n\}\n/  process.stderr.write("discord channel: no token yet; waiting for it (re-read every 10 s)\\n")\n}\n/m; s/^client\.login\(TOKEN\)\.catch\(/$ENV{CD_OLD}/m' "$HOME/server.ts.pristine" > "$PCACHE/0.0.3/server.ts"
+grep -qF "$OLD193" "$PCACHE/0.0.3/server.ts" && [ "$(grep -c 'process.exit(1)' "$PCACHE/0.0.3/server.ts")" = 1 ] || { echo "FAIL: the 1.9.3-patched fixture was not planted: $(<"$PCACHE/0.0.3/server.ts")"; exit 1; }
+out=$(bash "$S" patch 2>&1) && grep -qF "$PCACHE/0.0.3/server.ts" <<<"$out" && ! grep -qF '.then(t => client.login(t))' "$PCACHE/0.0.3/server.ts" &&
+  [ "$(grep -c 'code !== "TokenInvalid"' "$PCACHE/0.0.3/server.ts")" = 1 ] && grep -qF '})().catch(err => {' "$PCACHE/0.0.3/server.ts" &&
+  [ "$(grep -c 'no token yet; waiting for it' "$PCACHE/0.0.3/server.ts")" = 1 ] && [ "$(grep -c 'process.exit(1)' "$PCACHE/0.0.3/server.ts")" = 1 ] || { echo "FAIL: patch must upgrade a 1.9.3 login to the refused-token loop: $out $(<"$PCACHE/0.0.3/server.ts")"; exit 1; }
+out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch after the 1.9.3 upgrade must change nothing: $out"; exit 1; }
+rm -rf "$PCACHE/0.0.3"
+echo "ok: patch upgrades a server.ts 1.9.3 patched to wait out a refused token, and a second run is silent"
 # A moved pattern: exit 1 naming file and patch, the other patches still applied.
 mkdir -p "$PCACHE/0.0.7"
 printf 'client.on(x, msg => {\n  if (msg.author.isBot()) return\n})\nif (!TOKEN) {\n  process.exit(1)\n}\nclient.connect(TOKEN).catch(err => {})\n' > "$PCACHE/0.0.7/server.ts"
@@ -2036,10 +2058,10 @@ rc=0; out=$(thread start $'two\nlines' 2>&1) || rc=$?
 replies '200 {"id":"5"}' '201 {"id":"5"}'
 # It answers that turn's message, and drops what is over a week old from
 # open-threads (every id so far is a small number: a 2015 snowflake).
-touch "$R4/mgr/turns/dt9"
+printf '1 2\n' > "$R4/mgr/turns/dt9"
 NOWID=$(( ($(date +%s) * 1000 - 1420070400000) << 22 )); echo "$NOWID" >> "$R4/mgr/open-threads"
 out=$(CLAUDE_CODE_SESSION_ID=dt9 thread start '[guard] from Discord') && [ "$out" = 5 ] || { echo "FAIL: thread start from a Discord turn must open the thread: $out"; exit 1; }
-[ -e "$R4/mgr/turns/dt9.replied" ] || { echo "FAIL: thread start in a Discord turn must answer its message like a reply"; exit 1; }
+[ "$(<"$R4/mgr/turns/dt9.replied")" = 1 ] || { echo "FAIL: thread start in a Discord turn must answer its message like a reply (the message count in .replied)"; exit 1; }
 [ "$(<"$R4/mgr/open-threads")" = "$(printf '%s\n5' "$NOWID")" ] || { echo "FAIL: a start must drop week-old open threads and keep a new one: $(<"$R4/mgr/open-threads")"; exit 1; }
 
 # A 120-character Korean title: the channel message keeps all 120, the thread

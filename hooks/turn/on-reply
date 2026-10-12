@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # PostToolUse hook (matcher: mcp__plugin_discord_discord__reply): marks that
 # this turn actually sent a Discord reply, so on-stop knows to react ✅ on
-# it. Must never block or fail a turn.
+# it. .replied holds how many of the turn's messages were recorded at the
+# latest reply: one recorded after it was not answered and gets ☑️. Must
+# never block or fail a turn.
 [ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
@@ -10,5 +12,5 @@ plugin_gate || exit 0
 [ -n "$bot_name" ] || exit 0
 session_id=$(jq -r '.session_id // empty' 2>/dev/null) || exit 0
 [ -n "$session_id" ] && [ -n "$bot_name" ] || exit 0
-{ [ -d "$DISCORD_STATE_DIR/turns" ] || mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; } && : >> "$DISCORD_STATE_DIR/turns/$session_id.replied" 2>/dev/null
+{ [ -d "$DISCORD_STATE_DIR/turns" ] || mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; } && { grep -c '' < "$DISCORD_STATE_DIR/turns/$session_id" > "$DISCORD_STATE_DIR/turns/$session_id.replied"; } 2>/dev/null
 exit 0

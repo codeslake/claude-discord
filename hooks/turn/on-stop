@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Stop hook: if this turn recorded any Discord messages, reacts on each of
-# them, then clears the per-turn files: ✅ when the turn sent a reply (on-reply
-# or the thread tool set .replied), else ☑️ (read, no reply). A session
+# them, then clears the per-turn files: ✅ on each message recorded by the
+# turn's latest reply (on-reply or the thread tool wrote that count into
+# .replied; an empty one, from before 1.9.4, covers them all), else ☑️ (read,
+# no reply). A session
 # has read a message once it receives it, so a turn is never sent back for
 # want of a reply (owner, 2026-10-12). Prints nothing on stdout or stderr in
 # any path and always exits 0: it never blocks or fails a turn.
@@ -19,10 +21,13 @@ if [ -n "$session_id" ] && [ -n "$bot_name" ]; then
   turns="$DISCORD_STATE_DIR/turns/$session_id"
   replied="$turns.replied"
   if [ -f "$turns" ]; then
-    mark='%E2%98%91%EF%B8%8F'; [ -f "$replied" ] && mark='%E2%9C%85'
+    n=-1; [ -f "$replied" ] && n=$(cat "$replied")
+    case $n in -1) ;; ''|*[!0-9]*) n=999999 ;; esac   # not a count: a reply from before 1.9.4, so all of them
+    i=0
     while IFS=' ' read -r chat_id message_id _; do
+      i=$((i + 1))
       [ -n "$chat_id" ] && [ -n "$message_id" ] || continue
-      react "$chat_id" "$message_id" "$mark"
+      if [ "$i" -le "$n" ]; then react "$chat_id" "$message_id" '%E2%9C%85'; else react "$chat_id" "$message_id" '%E2%98%91%EF%B8%8F'; fi
     done < "$turns"
   fi 2>/dev/null   # an unreadable turns file must not reach stderr either: this hook prints nothing
   rm -f "$turns" "$replied" 2>/dev/null
