@@ -3865,7 +3865,7 @@ wait_for_file "$MB/holders/keeper-$KP"; wait_log "$want" 'Z start$'; rec=$(<"$MB
 mp=$(mpid); want=$(( $(starts) + 1 )); kill -9 "$mp"; wait_log "$want" 'Z start$'
 [ "$(mpid)" != "$mp" ] && running "$(mpid)" || { echo "FAIL: the keeper must start a monitor killed without its trap again: $(tail -3 "$MB/monitor.log")"; exit 1; }
 rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?
-[ "$rc" = 0 ] && grep -q "a keeper already runs for mgr (pid $KP)" <<<"$out" && [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] ||
+[ "$rc" = 0 ] && grep -q "a keeper already runs for mgr" <<<"$out" && [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] ||
   { echo "FAIL: a second --keep exits 0 saying one runs, and registers nothing (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
 n=0; mp=""; while { [ -z "$mp" ] || [ "$(<"$MB/lock")" != "$mp" ] || ! running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); mp=$(mpid); done
 kill -STOP "$mp"; kill -TERM "$KP"; rc=0; wait "$KP" || rc=$?; rec=$(ls "$MB/holders"); kill -CONT "$mp"
@@ -3914,6 +3914,23 @@ mv "$MR/mgr/hosts.off" "$MR/mgr/hosts"
 (cd "$MP" && exec bash "$S" monitor --keep mgr) >> "$HOME/keep.out" 2>&1 & KP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $KP"
 wait_for_file "$MB/holders/keeper-$KP"; : > "$MB/stopped"; rc=0; wait "$KP" || rc=$?; rm -f "$MB/stopped"
 [ "$rc" = 0 ] && [ ! -e "$MB/holders/keeper-$KP" ] || { echo "FAIL: a keeper that finds the stopped marker must leave, its record with it (rc=$rc)"; exit 1; }
+# One keeper per bot, by a lock the keeper holds (keeper.lock): three starters at once (a container restart fires every bot's
+# hook together) leave one keeper, and a starter that loses says so; the record an older monitor deleted as a stray file
+# changes nothing (a second starter after that finds the lock held, not a missing record).
+rm -f "$HOME"/ks.*; kp=(); want=$(( $(starts) + 1 ))
+for i in 1 2 3; do (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" monitor --keep mgr --detach > "$HOME/ks.$i" 2>&1) & kp+=($!); done
+for q in "${kp[@]}"; do wait "$q"; done
+KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
+wait_log "$want" 'Z start$'
+[ "$(cat "$HOME"/ks.* | command grep -c 'started the backend of mgr')" = 1 ] && [ "$(cat "$HOME"/ks.* | command grep -c 'a keeper already runs for mgr$')" = 2 ] &&
+  [ "$(ls "$MB/holders" | command grep -c '^keeper-')" = 1 ] ||
+  { echo "FAIL: three starters at once must leave one keeper (one started, two found it): $(cat "$HOME"/ks.*) $(ls "$MB/holders")"; exit 1; }
+rm -f "$MB/holders/keeper-$KP"
+out=$(cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" monitor --keep mgr --detach 2>&1)
+[ "$out" = "claude-discord: monitor: a keeper already runs for mgr" ] ||
+  { echo "FAIL: a keeper whose record was deleted still holds the keeper lock: a starter must find it, not start another: $out"; exit 1; }
+(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null); rm -f "$MB/stopped" "$HOME"/ks.*
+n=0; while running "$KP" && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
 # setup in dev-manager mode starts the backend when none runs, and says so in one line.
 out=$(printf 'dev-manager\n\n\n' | env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" setup mgr --mode 2>&1)
 KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
@@ -4023,7 +4040,7 @@ mkdir -p "$MP/sub/dir"   # from a subdirectory: the project is found above it
 n=0; KP=""; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
 [ -n "$KP" ] && [ "$(ps -o sid= -p "$KP" | tr -d ' ')" = "$KP" ] || { echo "FAIL: tui must start a keeper in a session of its own: '$KP' $(ls "$MB/holders")"; exit 1; }
 (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui 2>/dev/null) || { echo "FAIL: a second tui must run"; exit 1; }
-[ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] && grep -q "a keeper already runs for mgr (pid $KP)" "$MB/monitor.log" ||
+[ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] && grep -q "a keeper already runs for mgr" "$MB/monitor.log" ||
   { echo "FAIL: tui must not start a second keeper while one lives: $(ls "$MB/holders")"; exit 1; }
 rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'tui needs uv' <<<"$out" || { echo "FAIL: without uv, tui must say so (rc=$rc): $out"; exit 1; }
