@@ -262,8 +262,9 @@ chmod +x "$HOME/bin/sleep"
 # run in parallel); a reader takes it only when it holds its own key and ends in \004, so a half-written one is a miss.
 # Inputs and entries are read line by line (c ends up byte for byte the content): bash reads a file in blocks that way,
 # and a byte per syscall with any other delimiter.
+# JQ_REAL and JQ_CACHE in the environment override the built-in paths (the self-test below).
 mkdir -p "$HOME/jq.cache"; JQR=$(command -v jq)
-{ printf '#!/bin/bash\nJQ_REAL=%q; JQ_CACHE=%q\n' "$JQR" "$HOME/jq.cache"; cat <<'EOF'
+{ printf '#!/bin/bash\nJQ_REAL=${JQ_REAL:-%q}; JQ_CACHE=${JQ_CACHE:-%q}\n' "$JQR" "$HOME/jq.cache"; cat <<'EOF'
 args=("$@"); filter=""; have=0; null=0; sl=0; inputs=0; files=(); key=""   # key: the arguments, a file as \003
 real() { exec "$JQ_REAL" "${args[@]}"; }
 slurp() { local l; c=""; while IFS= read -r l; do c+=$l$'\n'; done; c+=$l; }   # shortcut: drops a NUL, so a\0b and ab share a key and jq -R sees ab; no caller sends one (JSON has none), and spotting one costs a byte-wise read
@@ -311,17 +312,137 @@ n=""; for f in "${files[@]}"; do { slurp < "$f"; } 2>/dev/null || exit "$rc"; n+
 case $rc in 0|1|4) case $key$out in *$'\004'*) ;; *) set -C; { printf '%s\n%s%s\004' "$rc" "$key" "$out" > "$JQ_CACHE/$name.$i"; } 2>/dev/null;; esac;; esac
 exit "$rc"
 EOF
-} > "$HOME/bin/jq"; chmod +x "$HOME/bin/jq"
+} > "$HOME/jqstub.sh"; chmod +x "$HOME/jqstub.sh"; cp "$HOME/jqstub.sh" "$HOME/bin/jq"
+# The same stub in C, used instead wherever a C compiler builds it: one exec a call, no bash start (a hit costs ~0.9 ms
+# against ~1.9, a miss ~1.5 ms less, ~1800 calls a run). Same calls kept, same calls passed to real jq, same answer for a
+# missing lone file. Its entry is "<rc>\n<key length>\n<key><stdout>\004", named by the key's hash (decimal), created
+# with O_EXCL and taken only whole; real jq's stdin, stdout and stderr are files, as above, and removed after.
+cat > "$HOME/jqstub.c" <<'EOF'
+#include <errno.h>
+#include <fcntl.h>
+#include <regex.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+static char **av; static const char *jqr, *cache;
+static void real(void) { av[0] = (char *)jqr; execv(jqr, av); _exit(127); }
+typedef struct { char *p; size_t n, cap; } buf;
+static void put(buf *b, const void *s, size_t n) {
+  if (b->n + n + 1 > b->cap) { b->cap = (b->n + n + 1) * 2; b->p = realloc(b->p, b->cap); }
+  memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
+}
+static void puts0(buf *b, const char *s) { put(b, s, strlen(s)); }
+static int slurp_fd(int fd, buf *b) {
+  char t[65536]; ssize_t r;
+  while ((r = read(fd, t, sizeof t)) != 0) { if (r < 0) { if (errno == EINTR) continue; return -1; } put(b, t, (size_t)r); }
+  return 0;
+}
+static int slurp(const char *f, buf *b) { int fd = open(f, O_RDONLY), r; if (fd < 0) return -1; r = slurp_fd(fd, b); close(fd); return r; }
+static int regfile(const char *f) { struct stat s; return stat(f, &s) == 0 && S_ISREG(s.st_mode) && access(f, R_OK) == 0; }
+static void out(int fd, const char *p, size_t n) { while (n) { ssize_t w = write(fd, p, n); if (w <= 0) break; p += w; n -= (size_t)w; } }
+int main(int argc, char **argv) {
+  av = argv;
+  jqr = getenv("JQ_REAL"); if (!jqr || !*jqr) jqr = JQR;
+  cache = getenv("JQ_CACHE"); if (!cache || !*cache) cache = JQC;
+  buf key = {0}, fk = {0}, in = {0}; const char *filter = NULL, *files[256]; int nul = 0, sl = 0, inputs = 0, nf = 0;
+  for (int i = 1; i < argc; i++) {   /* the key: the arguments, \001 after each, a file as \003 */
+    const char *a = argv[i];
+    if (!strcmp(a, "--arg") || !strcmp(a, "--argjson")) {
+      if (i + 2 >= argc) real();
+      puts0(&key, a); put(&key, "\1", 1); puts0(&key, argv[i + 1]); put(&key, "\1", 1); puts0(&key, argv[i + 2]); put(&key, "\1", 1); i += 2;
+    } else if (!strcmp(a, "--slurpfile") || !strcmp(a, "--rawfile")) {
+      if (i + 2 >= argc || nf == 256) real();
+      files[nf++] = argv[i + 2]; puts0(&key, a); put(&key, "\1", 1); puts0(&key, argv[i + 1]); put(&key, "\1\3\1", 3); i += 2;
+    } else if (a[0] == '-' && ((a[1] >= 'a' && a[1] <= 'z') || (a[1] >= 'A' && a[1] <= 'Z'))) {
+      if (a[strspn(a + 1, "nrcesSjaRMC") + 1]) real();
+      if (strchr(a, 'n')) nul = 1;
+      if (strchr(a, 's')) sl = 1;
+      puts0(&key, a); put(&key, "\1", 1);
+    } else if (a[0] == '-') {
+      real();
+    } else if (!filter) {
+      filter = a; puts0(&key, a); put(&key, "\1", 1);
+    } else {
+      if (nf == 256) real();
+      files[nf++] = a; inputs = 1; put(&key, "\3\1", 2);
+    }
+  }
+  if (!filter) real();
+  regex_t re;
+  if (regcomp(&re, "(^|[^.A-Za-z0-9_])(now|env|ENV|input[a-z_]*|[a-z]*local[a-z]*|debug|stderr|halt[a-z_]*|import|include|modulemeta|get_[a-z_]*|strptime|strftime|mktime|gmtime|todate[a-z0-9]*|fromdate[a-z0-9]*|date[a-z0-9]*)([^A-Za-z0-9_]|$)", REG_EXTENDED | REG_NOSUB) != 0
+      || regexec(&re, filter, 0, NULL, 0) == 0) real();
+  if (nf == 1 && inputs && !nul && !sl) {   /* -n opens nothing, -s still prints [] */
+    const char *f = files[0], *s = strrchr(f, '/'); struct stat st; char d[4096]; size_t dl;
+    if (s && (dl = (size_t)(s - f)) < sizeof d) {
+      memcpy(d, f, dl); d[dl] = 0; if (!dl) strcpy(d, "/");
+      if (lstat(f, &st) != 0 && stat(d, &st) == 0 && S_ISDIR(st.st_mode) && access(d, X_OK) == 0) {
+        fprintf(stderr, "jq: error: Could not open file %s: No such file or directory\n", f); return 2;
+      }
+    }
+  }
+  for (int i = 0; i < nf; i++) { if (!regfile(files[i]) || slurp(files[i], &fk) < 0) real(); put(&fk, "\2", 1); }
+  put(&key, fk.p ? fk.p : "", fk.n);
+  int piped = !nul && !inputs;
+  if (piped) { if (slurp_fd(0, &in) < 0) real(); put(&key, in.p ? in.p : "", in.n); }
+  unsigned long long h = 1469598103934665603ULL;   /* FNV-1a */
+  for (size_t i = 0; i < key.n; i++) { h ^= (unsigned char)key.p[i]; h *= 1099511628211ULL; }
+  char path[4096], ti[4200], to[4200], te[4200]; int i = 0;
+  for (;; i++) {
+    buf e = {0}; char *n1, *n2;
+    snprintf(path, sizeof path, "%s/%llu.%d", cache, h, i);
+    if (slurp(path, &e) < 0) break;
+    if (e.n && e.p[e.n - 1] == '\4' && (n1 = memchr(e.p, '\n', e.n)) && (n2 = memchr(n1 + 1, '\n', e.n - (size_t)(n1 + 1 - e.p)))
+        && strtoull(n1 + 1, NULL, 10) == key.n && (size_t)(e.p + e.n - (n2 + 1)) > key.n && !memcmp(n2 + 1, key.p, key.n)) {
+      out(1, n2 + 1 + key.n, (size_t)(e.p + e.n - 1 - (n2 + 1 + key.n))); return atoi(e.p);
+    }
+    free(e.p);
+  }
+  snprintf(ti, sizeof ti, "%s/t%d.i", cache, (int)getpid()); snprintf(to, sizeof to, "%s/t%d.o", cache, (int)getpid());
+  snprintf(te, sizeof te, "%s/t%d.e", cache, (int)getpid());
+  if (piped) { int fd = open(ti, O_WRONLY | O_CREAT | O_TRUNC, 0600); if (fd < 0) real(); out(fd, in.p ? in.p : "", in.n); close(fd); }
+  pid_t c = fork();
+  if (c < 0) real();
+  if (c == 0) {
+    int fo = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0600), fe = open(te, O_WRONLY | O_CREAT | O_TRUNC, 0600), fi;
+    if (fo < 0 || fe < 0) _exit(127);
+    if (piped) { if ((fi = open(ti, O_RDONLY)) < 0) _exit(127); dup2(fi, 0); close(fi); }
+    dup2(fo, 1); dup2(fe, 2); close(fo); close(fe);
+    av[0] = (char *)jqr; execv(jqr, av); _exit(127);
+  }
+  int st, rc; buf o = {0}, er = {0}, nk = {0};
+  while (waitpid(c, &st, 0) < 0) if (errno != EINTR) return 127;
+  rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+  slurp(to, &o); slurp(te, &er); unlink(to); unlink(te); if (piped) unlink(ti);
+  out(1, o.p ? o.p : "", o.n);
+  if (er.n) { out(2, er.p, er.n); return rc; }
+  /* Real jq opened the files by path after the key was read: one replaced in between answered for other contents. */
+  for (int j = 0; j < nf; j++) { if (slurp(files[j], &nk) < 0) return rc; put(&nk, "\2", 1); }
+  if (nk.n != fk.n || (nk.n && memcmp(nk.p, fk.p, nk.n)) || (rc != 0 && rc != 1 && rc != 4)) return rc;
+  int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  if (fd >= 0) {
+    char hd[64]; int hl = snprintf(hd, sizeof hd, "%d\n%zu\n", rc, key.n); buf e = {0};
+    put(&e, hd, (size_t)hl); put(&e, key.p, key.n); put(&e, o.p ? o.p : "", o.n); put(&e, "\4", 1); out(fd, e.p, e.n); close(fd);
+  }
+  return rc;
+}
+EOF
+JQS=("$HOME/jqstub.sh")   # every stub built here, for the self-test below
+if cc -O2 -o "$HOME/jqstub" -DJQR="\"$JQR\"" -DJQC="\"$HOME/jq.cache\"" "$HOME/jqstub.c" 2>/dev/null; then cp "$HOME/jqstub" "$HOME/bin/jq"; JQS+=("$HOME/jqstub"); fi
 # A file replaced between the stub's read and real jq's open (a "real" jq that does the mv -f first) must store nothing:
-# the later call on the old contents gets the real answer, not the new contents' one.
-JT=$HOME/jqtoctou; mkdir -p "$JT/c"; printf '{"v":"old"}' > "$JT/f"; printf '{"v":"new"}' > "$JT/new"
-printf '#!/bin/bash\nmv -f %q %q 2>/dev/null; exec %q "$@"\n' "$JT/new" "$JT/f" "$JQR" > "$JT/real"; chmod +x "$JT/real"
-sed "2s|.*|JQ_REAL=$JT/real; JQ_CACHE=$JT/c|" "$HOME/bin/jq" > "$JT/jq"
-[ "$(bash "$JT/jq" -r .v "$JT/f")" = new ] && ! compgen -G "$JT/c/[0-9]*" >/dev/null && printf '{"v":"old"}' > "$JT/f" && [ "$(bash "$JT/jq" -r .v "$JT/f")" = old ] \
-  && rm "$JT"/c/[0-9]* && bash "$JT/jq" -n '0 | todate' >/dev/null && ! compgen -G "$JT/c/[0-9]*" >/dev/null \
-  && [ "$(bash "$JT/jq" -e .x "$JT/none" 2>&1; echo "rc=$?")" = "$("$JQR" -e .x "$JT/none" 2>&1; echo "rc=$?")" ] \
-  || { echo "FAIL: a file replaced while real jq ran must not be cached under its old contents, nor a time-zone builtin; a missing file answers as real jq: $(ls "$JT/c")"; exit 1; }
-rm -rf "$JT"
+# the later call on the old contents gets the real answer, not the new contents' one. For each stub built.
+JT=$HOME/jqtoctou; printf '#!/bin/bash\nmv -f %q %q 2>/dev/null; exec %q "$@"\n' "$JT/new" "$JT/f" "$JQR" > "$HOME/jqtoctou.real"; chmod +x "$HOME/jqtoctou.real"
+for js in "${JQS[@]}"; do
+  mkdir -p "$JT/c"; printf '{"v":"old"}' > "$JT/f"; printf '{"v":"new"}' > "$JT/new"
+  jt() { JQ_REAL=$HOME/jqtoctou.real JQ_CACHE=$JT/c "$js" "$@"; }
+  [ "$(jt -r .v "$JT/f")" = new ] && ! compgen -G "$JT/c/[0-9]*" >/dev/null && printf '{"v":"old"}' > "$JT/f" && [ "$(jt -r .v "$JT/f")" = old ] \
+    && rm "$JT"/c/[0-9]* && jt -n '0 | todate' >/dev/null && ! compgen -G "$JT/c/[0-9]*" >/dev/null \
+    && [ "$(jt -e .x "$JT/none" 2>&1; echo "rc=$?")" = "$("$JQR" -e .x "$JT/none" 2>&1; echo "rc=$?")" ] \
+    || { echo "FAIL: a file replaced while real jq ran must not be cached under its old contents, nor a time-zone builtin; a missing file answers as real jq ($js): $(ls "$JT/c")"; exit 1; }
+  rm -rf "$JT"
+done
 echo "ok: the jq stub stores no answer for a file replaced while real jq ran or a time-zone builtin"
 # Stands in for a session's claude process: runs each argument through
 # sh -c, as Claude Code runs a hook command, and reads its output to EOF (a
@@ -1945,6 +2066,8 @@ out=$(guard '{"session_id":"g2","tool_input":{"chat_id":"42","text":"<@901> than
 [ -z "$out" ] || { echo "FAIL: answering a peer with its mention must pass: $out"; exit 1; }
 out=$(guard '{"session_id":"g2","tool_input":{"chat_id":"42","text":"<@111> over to you"}}')
 [ -z "$out" ] || { echo "FAIL: a message that mentions someone else is addressed to them, not an answer to the peer: $out"; exit 1; }
+out=$(guard '{"session_id":"g2","tool_input":{"chat_id":"42","reply_to":"555","text":"thanks, merged"}}')
+[ -z "$out" ] || { echo "FAIL: a reply_to the peer's own last message reaches it unmentioned and must pass: $out"; exit 1; }
 # One turn, two messages (the second arrives mid-turn, as a prompt of its
 # own): the peer's, then the human's. Rule B looks at the turn's LAST message
 # only, and not at all for a reply_to, which reaches its author unmentioned.
@@ -3317,15 +3440,20 @@ mv "$HOME/.local/bin/claude-discord" "$HOME/shim.real"
 printf '#!/bin/bash\nprintf "%%s|%%s\\n" "$*" "${HTTPS_PROXY:-}" >> "$HOME/local.calls"\n[ ! -f "$HOME/mon/local.sleep" ] || /bin/sleep "$(<"$HOME/mon/local.sleep")"\n[ ! -f "$HOME/clock" ] || echo $(( $(<"$HOME/clock") + 1000 )) > "$HOME/clock"\ncat "$HOME/mon/local.out" 2>/dev/null\n[ ! -f "$HOME/mon/local.rc" ] || exit "$(<"$HOME/mon/local.rc")"\n' > "$HOME/.local/bin/claude-discord"
 chmod +x "$HOME/.local/bin/claude-discord"
 # mdoc <host> <patch rc> <bot:verdict>...: a health --all document with those bots in project /home/u/ws/p, owner 222.
+# Written by printf, not jq (~12 calls): every argument is a plain word, so nothing needs escaping.
+D3000=$(printf 'd%.0s' {1..3000})
 mdoc() {
-  local h=$1 prc=$2; shift 2
-  printf '%s\n' "$@" | jq -Rsc --arg h "$h" --argjson prc "$prc" '{host: $h, version: "1.10.0 (abc1234)", home: "/home/u",
-    patch: {rc: $prc, output: (if $prc == 0 then "" else "claude-discord: patch: /x/server.ts: chunk no longer matches" end)},
-    projects: [{project: "/home/u/ws/p", bots: [split("\n")[] | select(. != "") | split(":")
-      | {bot: .[0], verdict: .[1], detail: (if .[1] == "nostate" then ("d" * 3000) else "why \(.[1])" end), owner_id: "222", servers: "1"}]}]}'
+  local h=$1 prc=$2 b d bots="" out=""; shift 2
+  [ "$prc" = 0 ] || out="claude-discord: patch: /x/server.ts: chunk no longer matches"
+  for b in "$@"; do
+    d="why ${b#*:}"; [ "${b#*:}" != nostate ] || d=$D3000
+    bots="$bots${bots:+,}{\"bot\":\"${b%%:*}\",\"verdict\":\"${b#*:}\",\"detail\":\"$d\",\"owner_id\":\"222\",\"servers\":\"1\"}"
+  done
+  printf '{"host":"%s","version":"1.10.0 (abc1234)","home":"/home/u","patch":{"rc":%s,"output":"%s"},"projects":[{"project":"/home/u/ws/p","bots":[%s]}]}\n' "$h" "$prc" "$out" "$bots"
 }
 mstate() { jq -c "$@" "$MB/state.json" > "$MB/state.json.t" && mv "$MB/state.json.t" "$MB/state.json"; }
-mpid() { jq -r '.monitor.pid // empty' "$MB/state.json" 2>/dev/null || :; }
+# The monitor's pid in state.json, read as monitor_alive reads it (no jq start: ~20 calls).
+mpid() { local s="" re='"monitor":\{([^{}]*,)?"pid":([0-9]+)'; { IFS= read -r s < "$MB/state.json"; } 2>/dev/null || :; [[ ! $s =~ $re ]] || echo "${BASH_REMATCH[2]}"; }
 # wait_log <n> <regex>: until monitor.log holds n lines matching it (3 s at most).
 wait_log() {
   local n=0 c=0
@@ -3379,7 +3507,7 @@ grep -q '^-o BatchMode=yes -o ConnectTimeout=8 h1 env ~/.local/bin/claude-discor
 [ -z "$(posts)" ] || { echo "FAIL: nothing to say, nothing posted: $(posts)"; exit 1; }
 jq -e '(.hosts.h3 | .verdict == "blind" and (.detail | test("wrong shape.*Cannot index"))) and .hosts.h1.verdict == "ok" and (.bots | has("h1|/home/u/ws/p|r2"))' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a host whose document has the wrong shape is blind, and only it: $(jq -c .hosts "$MB/state.json") $(tail -2 "$MB/monitor.log")"; exit 1; }
-jq -e '.hosts.h2| .verdict == "blind" and (.detail | test("exited 3"))' "$MB/state.json" >/dev/null && jq -e '.bots | has("h2|/home/u/ws/p|r3") | not' "$MB/state.json" >/dev/null ||
+jq -e '(.hosts.h2| .verdict == "blind" and (.detail | test("exited 3"))) and (.bots | has("h2|/home/u/ws/p|r3") | not)' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a host whose remote exits non-zero is blind (its bots unread), document or not: $(jq -c .hosts.h2 "$MB/state.json")"; exit 1; }
 # The launcher opened monitor.log as the monitor's stdout and stderr; the rotation at start renamed that file, so the
 # monitor must have reopened it, or its output would grow monitor.log.1 past the cap.
@@ -3392,7 +3520,7 @@ n=0; while pgrep -f "Fcntl=:flock.*$MB/lock" >/dev/null && [ "$n" -lt 100 ]; do 
 nap 0.05
 [ "$(starts)" = 1 ] && [ "$n" -lt 100 ] || { echo "FAIL: two --ensure calls must leave one monitor, the loser gone after its wait: $(<"$MB/monitor.log")"; exit 1; }
 mstop
-[ -z "$(ls -A "$MB/holders")" ] && [ "$(jq -r '.monitor.pid' "$MB/state.json")" = null ] && jq -e '.monitor.stopped_at | length > 0' "$MB/state.json" >/dev/null ||
+[ -z "$(ls -A "$MB/holders")" ] && jq -e '.monitor.pid == null and (.monitor.stopped_at | length > 0)' "$MB/state.json" >/dev/null ||
   { echo "FAIL: an exit leaves no holder record and a state that reads as stopped: $(jq -c .monitor "$MB/state.json")"; exit 1; }
 grep -q 'exit reason=no-holders$' "$MB/monitor.log" || { echo "FAIL: the exit must be logged"; exit 1; }
 [ "$(cd "$MB" && find . | sort | tr '\n' ' ')" = ". ./holders ./lock ./monitor.log ./monitor.log.1 ./state.json " ] || { echo "FAIL: only the fixed files may stay: $(cd "$MB" && find . | sort)"; exit 1; }
@@ -3555,15 +3683,6 @@ ex=$(command grep -c 'exit reason=signal$' "$MB/monitor.log") || :; holder
 wait_for_file "$HOME/curl.slept"; kill -TERM "$(mpid)"; wait_log $(( ex + 1 )) 'exit reason=signal$'
 kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
 [ "$(posts | grep -c '\] tm on')" = 1 ] || { echo "FAIL: the POST under way when the TERM came must have gone out once: $(posts)"; exit 1; }
-# The lock file removed while the first of two new findings is being posted: the check before the next post ends the
-# monitor (lock-lost), so lb is not sent, and la, sent, is in state.json as posted (no successor has read it yet), so
-# the next monitor does not send it again.
-mdoc h1 1 tm:stale la:stale lb:stale > "$MON/h1.out"; printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; echo 0.15 > "$HOME/curl.sleep"; holder
-(cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID")
-wait_for_file "$HOME/curl.slept"; rm -f "$MB/lock"; wait_log 1 'exit reason=lock-lost'
-kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
-[ "$(posts | grep -c '\] l[ab] on')" = 1 ] && jq -e '.bots["h1|/home/u/ws/p|la"].posted == "stale" and .bots["h1|/home/u/ws/p|lb"].posted == null' "$MB/state.json" >/dev/null ||
-  { echo "FAIL: a monitor whose lock file is gone posts nothing more and records what it sent: $(posts | grep '\] l[ab] on') $(jq -c '.bots | map_values(.posted)' "$MB/state.json")"; exit 1; }
 mstate --argjson n "$(date +%s)" '.hosts.h5.left_s = $n - 86401 | .hosts.h6.left_s = $n - 86401'
 export CLAUDE_DISCORD_MONITOR_PASS=0.02
 printf '%s\n' '429 {"retry_after": 0.01}' '429 {"retry_after": 60}' > "$CURL_REPLIES"; : > "$CURL_LOG"
@@ -3576,7 +3695,7 @@ mv "$MR/mgr/.env.keep" "$MR/mgr/.env"; wait_log 1 ' failed 429 retry_after=60$'
 [ "$(posts | grep -c '\[stale\] nf')" -ge 2 ] && ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the restart must post only what is new (nf, twice: the 429 then its retry), never the patchfail already posted nor tm, sent while a TERM waited: $(posts)"; exit 1; }
 next_pass
 ! grep -q 'retry_after=0.01' "$MB/monitor.log" || { echo "FAIL: a 429 with retry_after under 10 s must be waited out and retried in the same pass: $(grep ' post ' "$MB/monitor.log")"; exit 1; }
-[ "$(jq -r '.bots["h1|/home/u/ws/p|nf"].posted // "none"' "$MB/state.json")" = none ] && jq -e '.monitor.post_failed and (.alerts[-1].status == "failed")' "$MB/state.json" >/dev/null ||
+jq -e '(.bots["h1|/home/u/ws/p|nf"].posted // "none") == "none" and .monitor.post_failed and (.alerts[-1].status == "failed")' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a failed POST leaves the finding unposted and shows the failure: $(jq -c .monitor "$MB/state.json")"; exit 1; }
 # A stray file in holders/ named other than <kind>-<digits> (here a copy of the live record): removed, never read as a
 # pid, which would break the holders' JSON and with it every pass.
@@ -3585,7 +3704,7 @@ n=0; while [ -e "$MB/holders/tui-${HPID}x" ] && [ "$n" -lt 100 ]; do nap 0.01; n
 [ ! -e "$MB/holders/tui-${HPID}x" ] && ! grep -q 'pass failed' "$MB/monitor.log" || { echo "FAIL: a holder record whose name is not <kind>-<digits> must be dropped, never fail a pass: $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
 printf '200 {}\n' > "$CURL_REPLIES"
 wait_log 1 'post h1\|/home/u/ws/p\|nf stale 200$'; next_pass
-[ "$(jq -r '.bots["h1|/home/u/ws/p|nf"].posted' "$MB/state.json")" = stale ] && [ "$(jq -r .monitor.post_failed "$MB/state.json")" = false ] &&
+jq -e '.bots["h1|/home/u/ws/p|nf"].posted == "stale" and .monitor.post_failed == false' "$MB/state.json" >/dev/null &&
   ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the pending post must be sent on a later pass, and nothing else posted: $(posts)"; exit 1; }
 [ "$(posts | tail -n 1 | jq -r .content)" = "$(printf "<@222> [stale] nf on h1 (~/ws/p)\nreason: why stale\nfix: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord refresh nf --force'")" ] || { echo "FAIL: ALERT_LANG=EN must give English labels: $(posts | tail -n 1)"; exit 1; }
 jq -e --arg sp "h2|/home/u/it's \$x here|sp" '(.hosts | keys) == ["h1", "h2", "h3", "h4", "lap", "lap2", "local"]
@@ -3655,11 +3774,17 @@ wait_log 1 'update skipped: monitor\.sh does not parse'; next_pass
 cp "$HOME/monitor.good" "$PC/monitor/monitor.sh"; wait_log 3 'restart: monitor\.sh changed$'; next_pass
 [ "$(mpid)" = "$rp" ] || { echo "FAIL: the valid monitor.sh after a broken one restarts the monitor, same process"; exit 1; }
 # The lock file replaced under the running monitor (removed, then a new empty one, as a second --ensure would make, which
-# then wins the lock): it leaves at its next tick, logged, and leaves state.json to that successor (its pid still there).
+# then wins the lock) while the first of two new findings is being posted: the check before the next post ends it,
+# logged, so lb is not sent, and la, sent, goes into state.json as posted (the file is empty: no successor has read
+# state.json yet), so the next monitor does not send it again. Its pid stays there, for the successor to replace.
 [ "$(<"$MB/lock")" = "$rp" ] || { echo "FAIL: the lock file must hold the monitor's pid: $(<"$MB/lock")"; exit 1; }
+mdoc lambda 0 r1:stale la:stale lb:stale > "$MON/local.out"; printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; echo 0.15 > "$HOME/curl.sleep"
+wait_for_file "$HOME/curl.slept"
 ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :; rm -f "$MB/lock"; : > "$MB/lock"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
-n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
-! running "$rp" && [ "$(mpid)" = "$rp" ] || { echo "FAIL: a monitor whose lock file was replaced must exit without writing state.json: $(tail -2 "$MB/monitor.log")"; exit 1; }
+n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
+! running "$rp" && [ "$(mpid)" = "$rp" ] && [ "$(posts | grep -c '\] l[ab] on')" = 1 ] &&
+  jq -e '.bots["local|/home/u/ws/p|la"].posted == "stale" and .bots["local|/home/u/ws/p|lb"].posted == null' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: a monitor whose lock file was replaced posts nothing more, records what it sent and leaves its pid: $(posts | grep '\] l[ab] on') $(jq -c '[.monitor.pid, (.bots | map_values(.posted))]' "$MB/state.json") $(tail -2 "$MB/monitor.log")"; exit 1; }
 mstop; touch "$PC/monitor/monitor.sh"; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep" "$HOME/monitor.good"
 echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd by the same process once it held still for a pass, lock kept, nothing posted again; a future mtime restarts it once, not every tick; one that does not parse is skipped, logged once; a lock file replaced under it ends it at the next tick"
 
