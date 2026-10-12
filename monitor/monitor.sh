@@ -290,8 +290,10 @@ run_host() {  # uses $host $remote, the envs array, and run_pass's step counter 
 #   - a project whose health crashed (an `error` entry) is blind for the bots
 #     it had, which are kept, never dropped; one with no bot known yet gets an
 #     entry of its own (key host|project|-, no `bot`), so it alerts too;
-#   - a bot that left its host's answer, or a host that left the ledger (with
-#     its bots), is dropped and logged, not announced.
+#   - a bot that left its host's answer is dropped and logged, not announced;
+#   - a host that left the ledger is kept for a day (left_s), frozen with its
+#     bots and their `posted`, so a brief removal posts nothing again; then it
+#     is dropped with its bots, logged, not announced.
 # Input, raw lines: the state JSON, then two lines per host, "<host> US <laptop> US <exit status>" and the host's
 # answer with its newlines made spaces (still valid JSON when it was).
 # Output lines: "S<state JSON>", "N<bot count>", "E<event>", "O<scope US key US kind US verdict US payload JSON>".
@@ -414,19 +416,23 @@ def host_step($r):
 # host_step raise: that host alone is blind, with the error (capped, it may quote the document); the rest still count.
 | reduce $res[] as $r ({state: $old, events: []};
     . as $acc | try host_step($r) catch ((tostring | .[:200]) as $e | $acc | host_step($r + {doc: null, bad: $e})))
-# A host that left the ledger takes its entry and its bots with it.
+# A host that left the ledger keeps its entry, its bots and what the channel was told for a day (left_s, frozen below):
+# back within it (a hand edit undone, a line lost for a pass) it posts nothing it already posted. Then it goes, with its bots.
 | ($res | map(.host)) as $ledger
-| ([.state.hosts | keys[] | select(. as $h | $ledger | index($h) == null)]) as $hgone
-| ([.state.bots | to_entries[] | select(.value.host as $h | $ledger | index($h) == null) | .key]) as $bgone
-| .events += ($hgone | map("drop \(.)|-")) + ($bgone | map("drop \(.)"))
+| ([.state.hosts | to_entries[] | select(.value.left_s == null and (.key as $h | $ledger | index($h)) == null) | .key]) as $hleft
+| .state.hosts |= with_entries(if (.key as $h | $ledger | index($h)) == null then .value.left_s = (.value.left_s // $now_s) else .value |= del(.left_s) end)
+| ([.state.hosts | to_entries[] | select(.value.left_s != null and $now_s - .value.left_s >= 86400) | .key]) as $hgone
 | .state.hosts |= with_entries(select(.key as $h | $hgone | index($h) == null))
+| .state.hosts as $hk
+| ([.state.bots | to_entries[] | select((.value.host // "") as $h | $hk[$h] == null) | .key]) as $bgone
+| .events += ($hleft | map("left \(.)|- (kept a day)")) + ($hgone | map("drop \(.)|-")) + ($bgone | map("drop \(.)"))
 | .state.bots |= with_entries(select(.key as $k | $bgone | index($k) == null))
 | .state.monitor += {last_pass: $now, next_pass: (($now_s + $every) | floor | todate), pass_s: $pass_s, holders: $holders, post_failed: false}
 | del(.state.monitor.error)
 | .state as $s | .events as $ev
-# Bots of a host that is not reachable as a whole are frozen: this pass says nothing about them.
-| [$s.hosts[] | select(.reach != "ok") | .host] as $frozen
-| ([$s.hosts | to_entries[] | {scope: "hosts", key: .key, e: .value}]
+# Bots of a host that is not reachable as a whole, or that left the ledger, are frozen: this pass says nothing about them.
+| [$s.hosts | to_entries[] | select(.value.reach != "ok" or .value.left_s != null) | .key] as $frozen
+| ([$s.hosts | to_entries[] | select(.value.left_s == null) | {scope: "hosts", key: .key, e: .value}]
    + [$s.bots | to_entries[] | select(.value.host as $h | $frozen | index($h) == null) | {scope: "bots", key: .key, e: .value}]) as $all
 | "S" + ($s | tojson), "N\([$s.bots[] | select(.bot)] | length)",
   ($ev[] | "E" + .),

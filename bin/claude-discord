@@ -515,7 +515,8 @@ write_hosts() {
       new="$new$line"$'\n'
     done
   fi
-  printf '%s\n' "${new%$'\n'}" > "$f"
+  # A temp file moved in: a running monitor reads the ledger every pass and must never see it half written.
+  printf '%s\n' "${new%$'\n'}" > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f" || rm -f "$f.tmp.$$"
 }
 
 # --scope and --method, anywhere and in the = form too, for setup and install;

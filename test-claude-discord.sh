@@ -3288,8 +3288,10 @@ grep -q 'h1: claude-discord 1.10.0' <<<"$out" && grep -q "skipping host '-oProxy
 grep -q 'down: could not tell' <<<"$out" && ! grep -q 'h1: could not tell' <<<"$out" || { echo "FAIL: setup must say it could not tell for a host that did not answer, and only for it: $out"; exit 1; }
 ! grep -q '^ATE' "$HOME/ssh.log" && [ "$(grep -c BatchMode=yes "$HOME/ssh.log")" = 3 ] || { echo "FAIL: one probe per host, with stdin closed: $(<"$HOME/ssh.log")"; exit 1; }
 printf '# mine\nlocal HTTPS_PROXY=http://127.0.0.1:8118\nh1 X=1\nlap laptop\n' > "$MR/mgr/hosts"
+li=$(stat -c %i "$MR/mgr/hosts")
 printf 'dev-manager\n\n\n' | bash "$S" setup mgr --mode >/dev/null 2>&1
 [ "$(sed 1d "$MR/mgr/hosts")" = "$(printf 'local HTTPS_PROXY=http://127.0.0.1:8118\nh1 X=1\nlap laptop')" ] || { echo "FAIL: an empty answer keeps the ledger and its hand edits: $(<"$MR/mgr/hosts")"; exit 1; }
+[ "$(stat -c %i "$MR/mgr/hosts")" != "$li" ] || { echo "FAIL: the ledger is written to a temp file and moved in, never truncated in place under a running monitor"; exit 1; }
 printf 'none\n' | bash "$S" setup mgr --mode >/dev/null 2>&1
 [ ! -e "$MR/mgr/hosts" ] || { echo "FAIL: a bot that is not a dev-manager keeps no ledger"; exit 1; }
 # This machine is marked laptop too when it is a Mac with a battery (uname and pmset stubbed for this one call).
@@ -3302,7 +3304,7 @@ printf 'dev-manager\n\n\n' | PATH="$HOME/lapbin:$PATH" bash "$S" setup mgr --mod
 printf 'dev-manager\n\n\n' | bash "$S" setup mgr --mode >/dev/null 2>&1
 [ "$(sed -n 2p "$MR/mgr/hosts")" = "local laptop" ] || { echo "FAIL: an existing laptop word on local is kept: $(<"$MR/mgr/hosts")"; exit 1; }
 rm -rf "$HOME/lapbin"; rm -f "$HOME/ssh.log" "$MON"/*
-echo "ok: setup writes the hosts ledger in dev-manager mode only (local always, each new host probed with stdin closed, a Darwin laptop marked, an unanswered host written plain and said so, a bad name skipped, an empty answer keeps hand edits, another mode removes it)"
+echo "ok: setup writes the hosts ledger in dev-manager mode only (local always, each new host probed with stdin closed, a Darwin laptop marked, an unanswered host written plain and said so, a bad name skipped, an empty answer keeps hand edits, written by temp file and mv, another mode removes it)"
 
 # The monitor runs fast here: a 0.01 s tick, a 0.03 s cap per host, 0.1 s for the lock (one retry), and a 60 s pass interval, so
 # each start runs exactly its first pass (these blocks need no second one). Thresholds are tested by seeding
@@ -3536,12 +3538,14 @@ echo "ok: monitor: every row of the failure table posts after its hold and not b
 # A failed POST stays pending: logged, shown (post_failed, an alert with status failed), retried next pass; a 429 under
 # 10 s is waited out in the pass, a longer one (the retry's answer here) is left for the next pass.
 # Restarted on a ledger of h1 alone: h1 keeps its patchfail (already posted: a restart repeats nothing, since
-# state.json's `posted` is what the channel was last told), the hosts left out go with their bots and its other bots
-# leave the answer (dropped and logged, not announced) and nf is new. With nothing queued the curl stub answers
+# state.json's `posted` is what the channel was last told), its other bots leave the answer (dropped and logged, not
+# announced) and nf is new. The hosts left out are kept a day, frozen with their bots and `posted` (h4's posted blind),
+# so a brief removal posts nothing again; h5 and h6, seeded as gone for a day, are dropped with their bots. With nothing queued the curl stub answers
 # nothing, a failure too. The first pass meets the manager's .env without its token (read at POST time): the post
 # fails before any curl, and the log says why. This block needs several passes: one every 0.02 s, so its checks wait
 # for log lines, never count passes between two of them.
 mstop
+mstate --argjson n "$(date +%s)" '.hosts.h5.left_s = $n - 86401 | .hosts.h6.left_s = $n - 86401'
 export CLAUDE_DISCORD_MONITOR_PASS=0.02
 printf '%s\n' '429 {"retry_after": 0.01}' '429 {"retry_after": 60}' > "$CURL_REPLIES"; : > "$CURL_LOG"
 mdoc h1 1 nf:stale > "$MON/h1.out"; printf 'h1\n' > "$MR/mgr/hosts"
@@ -3564,8 +3568,11 @@ wait_log 1 'post h1\|/home/u/ws/p\|nf stale 200$'; next_pass
 [ "$(jq -r '.bots["h1|/home/u/ws/p|nf"].posted' "$MB/state.json")" = stale ] && [ "$(jq -r .monitor.post_failed "$MB/state.json")" = false ] &&
   ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the pending post must be sent on a later pass, and nothing else posted: $(posts)"; exit 1; }
 [ "$(posts | tail -n 1 | jq -r .content)" = "$(printf "<@222> [stale] nf on h1 (~/ws/p)\nreason: why stale\nfix: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord refresh nf --force'")" ] || { echo "FAIL: ALERT_LANG=EN must give English labels: $(posts | tail -n 1)"; exit 1; }
-[ "$(jq -c '[(.hosts | keys), (.bots | keys)]' "$MB/state.json")" = '[["h1"],["h1|/home/u/ws/p|nf"]]' ] && grep -q ' drop h5|-$' "$MB/monitor.log" && grep -q ' drop h6|/home/u/ws/p|l1$' "$MB/monitor.log" ||
-  { echo "FAIL: hosts left out of the ledger (with their bots), and bots gone from an answer, are dropped from the state and logged: $(jq -c '[(.hosts | keys), (.bots | keys)]' "$MB/state.json")"; exit 1; }
+jq -e --arg sp "h2|/home/u/it's \$x here|sp" '(.hosts | keys) == ["h1", "h2", "h3", "h4", "lap", "lap2", "local"]
+  and (.bots | keys) == ["h1|/home/u/ws/p|nf", $sp, "h3|/home/u/ws/p|y", "h3|/home/u/ws/p|z", "local|/home/u/ws/p|r1"]
+  and (.hosts.h4 | .posted == "blind" and (.left_s | type) == "number") and (.hosts.h1 | has("left_s") | not)' "$MB/state.json" >/dev/null &&
+  grep -q ' drop h5|-$' "$MB/monitor.log" && grep -q ' drop h6|/home/u/ws/p|l1$' "$MB/monitor.log" && grep -q ' left h4|- (kept a day)$' "$MB/monitor.log" ||
+  { echo "FAIL: hosts out of the ledger are kept a day with their bots and posted, then dropped with them; bots gone from an answer are dropped; all logged: $(jq -c '[(.hosts | keys), (.bots | keys), .hosts.h4]' "$MB/state.json")"; exit 1; }
 # hostdown is a failure of ssh itself, so a local laptop past the cap (a hung health on a Mac manager) is blind, which
 # alerts. And the holder check between posts: the holder dies while the first of two posts waits out a 429, so the
 # second stays pending and the monitor leaves with the first recorded as sent. nf, sent above, is not sent again.
@@ -3578,7 +3585,7 @@ wait_log $(( ex + 1 )) 'exit reason=no-holders$'
 [ "$(posts | grep -c .)" = 2 ] && [ "$(posts | grep -c '\] x1 on')" = 2 ] &&
   jq -e '.bots["h1|/home/u/ws/p|x1"].posted == "stale" and .bots["h1|/home/u/ws/p|x2"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a holder gone between posts ends the posting (the rest stay pending), what was sent recorded, nf not sent again: $(posts) $(jq -c '.bots | map_values(.posted)' "$MB/state.json")"; exit 1; }
-jq -e '.hosts.local | .verdict == "blind" and (.detail | test("did not finish"))' "$MB/state.json" >/dev/null || { echo "FAIL: a local laptop past the cap is blind (it alerts), not hostdown: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
+jq -e '.hosts.local | .verdict == "blind" and (.detail | test("did not finish")) and (has("left_s") | not)' "$MB/state.json" >/dev/null || { echo "FAIL: a local laptop past the cap is blind (it alerts), not hostdown, and a host back in the ledger is no longer left: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
 # A TERM in the middle of a POST: bash runs the trap once curl is done, before the post is recorded in the pass, so finish
 # reads curl's own answer (post.out) and records a 2xx as sent. The next monitor does not send it again: one POST in all.
 rm -f "$MON/local.sleep" "$HOME/curl.slept"; printf 'h1\n' > "$MR/mgr/hosts"; mdoc h1 1 nf:stale tm:stale > "$MON/h1.out"
@@ -3597,7 +3604,7 @@ mstate '.hosts = "x"'; holder; (cd "$MP" && bash "$S" monitor --ensure mgr --hol
 n=0; while ! jq -e '.monitor.error | startswith("the reducer rejected its input at ")' "$MB/state.json" >/dev/null 2>&1 && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
 [ "$n" -lt 100 ] || { echo "FAIL: a failed reducer must write state.json with monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
 mstop
-echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; hosts and bots that left are dropped and logged; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting; a POST under way when a TERM comes is recorded once it went out; a stray holder file is dropped; a failed reducer is written to state.json"
+echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; bots that left are dropped and logged, hosts that left kept a day (frozen, posted kept) then dropped; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting; a POST under way when a TERM comes is recorded once it went out; a stray holder file is dropped; a failed reducer is written to state.json"
 
 # Cadence and self-update, counted, never timed. date and sleep are stubs for this monitor: date reads $HOME/clock,
 # which each local health run moves 1000 s on, and logs D for a pass's start stamp (the %s call); sleep logs its
