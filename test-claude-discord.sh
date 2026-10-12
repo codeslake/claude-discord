@@ -629,6 +629,18 @@ wait_for_file "$CURL_LOG"; nap 0.05
 grep -q 'channels/1/messages/10/reactions/%E2%9C%85/@me' "$CURL_LOG" && ! grep -q 'messages/11/' "$CURL_LOG" || { echo "FAIL: only the leading tag's message may get the checkmark: $(<"$CURL_LOG")"; exit 1; }
 echo "ok: a second tag in one prompt is body text: only the leading tag is recorded and reacted to"
 
+# delivered: on-prompt appends every message id the session is handed, newest last, the last 200 kept. health's stale
+# check reads it: a message listed there reached the session.
+rm -f "$DSD/delivered"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"sDel","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"7\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}' >/dev/null
+[ "$(<"$DSD/delivered")" = 7 ] || { echo "FAIL: on-prompt must create delivered with the first id: $(cat "$DSD/delivered" 2>&1)"; exit 1; }
+seq 1 250 > "$DSD/delivered"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"sDel","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"4242\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}' >/dev/null
+[ "$(wc -l < "$DSD/delivered" | tr -d ' ')" = 200 ] && [ "$(tail -n 1 "$DSD/delivered")" = 4242 ] && [ "$(head -n 1 "$DSD/delivered")" = 52 ] ||
+  { echo "FAIL: on-prompt must append the delivered id and keep the last 200: $(wc -l < "$DSD/delivered") lines, last $(tail -n 1 "$DSD/delivered")"; exit 1; }
+rm -rf "$DSD/turns/sDel" "$DSD/turns/sDel.pending" "$DSD/turns/sDel.primed" "$DSD/delivered"
+echo "ok: on-prompt appends each delivered message id to delivered, newest last, 200 kept"
+
 # The identity/rules context is injected once per session, not every turn.
 rm -f "$DSD/turns/sPrime.primed"; rm -rf "$DSD/turns/sPrime"
 PP='{"session_id":"sPrime","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}'
@@ -2924,6 +2936,24 @@ out=$(bash "$S" health --json 2>/dev/null) || :
 [ ! -s "$CURL_REPLIES" ] ||
   { echo "FAIL: only the thread holding something new may be read (31 has nothing new, 32 belongs to another channel): $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
 echo "ok: health reads a thread only when its last_message_id is newer than the hooks recorded, skips another channel's, and finds a mention inside one"
+
+# stale is a delivery check (<bot>/delivered, written by on-prompt). A message the session was handed is not stale
+# however long its answer takes (a mention that asks nothing gets no reply by rule); one never handed to it is stale
+# even while the bot answers in another thread, where last-message-id has already moved past it.
+# The delivered case is dong-dev-bot's (lmd79, 2026-10-09): message 1557522558478454878 reached session 4cde6d3a 0.35 s
+# after Discord's timestamp and was answered 88 min later; the old check called it stale at 62 min.
+DONG=1557522558478454878
+printf '%s\n%s\n' "$(( DONG - (1000 << 22) ))" "$DONG" > "$SD/delivered"; echo 0 > "$SD/last-message-id"
+queue "200 [{\"id\":\"$DONG\",\"author\":{\"id\":\"111\"},\"mentions\":[{\"id\":\"777\"}]}]" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: a delivered message left unanswered (dong-dev-bot's 62-min case) must read ok: $out"; exit 1; }
+ID_B=$(snowflake_for 20)   # answered in another thread after the stuck message arrived
+printf '%s\n%s\n' "$ID_SEEN" "$ID_B" > "$SD/delivered"; echo "$ID_B" > "$SD/last-message-id"
+queue "200 $NONE" "200 {\"threads\":[{\"id\":\"34\",\"parent_id\":\"900\",\"last_message_id\":\"$ID_STALE\"}]}" "200 $MENTION"
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = stale ] || { echo "FAIL: a message never delivered, in a thread older than the last one answered elsewhere, must be stale: $out"; exit 1; }
+rm -f "$SD/delivered"; echo "$ID_SEEN" > "$SD/last-message-id"
+echo "ok: stale needs a message never delivered to the session: delivered-and-unanswered is ok (dong-dev-bot's 62-min case too), undelivered in one thread while another is answered is stale"
 stop_servers
 cd "$HP"
 

@@ -95,6 +95,19 @@ if [ -n "$session_id" ] && { [ -d "$DISCORD_STATE_DIR/turns" ] || mkdir -p "$DIS
   : > "$DISCORD_STATE_DIR/turns/$session_id.pending" 2>/dev/null || :
   printf '%s %s%s\n' "$chat_id" "$message_id" "${user_id:+ $user_id}" >> "$DISCORD_STATE_DIR/turns/$session_id" 2>/dev/null || :
   printf '%s\n' "$message_id" > "$DISCORD_STATE_DIR/last-message-id" 2>/dev/null || :
+  # delivered: every message id this session was handed, newest last, the
+  # last 200 kept. health reads it: a message listed here reached the session,
+  # so it is not `stale` however long the answer takes (or if none is owed).
+  # No fork below 200 lines (an append); from there one mv per message, a
+  # rename so health never reads half a file.
+  dl=$DISCORD_STATE_DIR/delivered n=0 keep=""
+  while IFS= read -r l; do n=$((n + 1)); keep="$keep$l"$'\n'; done 2>/dev/null < "$dl"
+  if [ "$n" -lt 200 ]; then
+    printf '%s\n' "$message_id" >> "$dl" 2>/dev/null || :
+  else
+    while [ "$n" -gt 199 ]; do keep=${keep#*$'\n'}; n=$((n - 1)); done
+    printf '%s%s\n' "$keep" "$message_id" > "$dl.$$" 2>/dev/null && mv -f "$dl.$$" "$dl" 2>/dev/null || rm -f "$dl.$$" 2>/dev/null
+  fi
 fi
 
 # The identity/rules preamble is injected once per session, not on every

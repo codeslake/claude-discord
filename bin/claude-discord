@@ -687,9 +687,9 @@ takes_value() {
 # session alive and killed only the hooks, so every process check said
 # "fine". So the PRIMARY signal is behavioural:
 #
-#   a message that addressed this bot, newer than the last one its hooks
-#   recorded ($dir/last-message-id, written by turn/on-prompt), and older
-#   than $stale_min minutes
+#   a message that addressed this bot, never handed to its session (its id
+#   is not in $dir/delivered, written by turn/on-prompt; with no such file,
+#   newer than $dir/last-message-id), and older than $stale_min minutes
 #
 # which catches a dead process, dead hooks and a wedged turn alike. The
 # process count is then used only to NAME the cause (none = down, several =
@@ -930,9 +930,10 @@ if [ "${1:-}" = health ]; then
     [ "${#1}" -lt "${#2}" ] && return 1
     [[ $1 > $2 ]]
   }
-  addressed_ids() {  # $1 = messages JSON; ids newer than $last_seen, oldest first
+  addressed_ids() {  # $1 = messages JSON; ids newer than $floor and not in $delivered, oldest first
     printf '%s' "$1" | jq -r --arg me "$me" --argjson allow "$allow" \
-      --argjson mention "$mention" --arg seen "$last_seen" '
+      --argjson mention "$mention" --arg seen "$floor" --arg delivered "$delivered" '
+      ($delivered | split("\n")) as $dl |
       if type != "array" then empty else
         [ .[]
           | (.author.id? // "") as $aid
@@ -944,7 +945,8 @@ if [ "${1:-}" = health ]; then
           | .id
           | select(type == "string" and test("^[0-9]{17,20}$"))
           | select((. | length) > ($seen | length)
-                   or ((. | length) == ($seen | length) and . > $seen)) ]
+                   or ((. | length) == ($seen | length) and . > $seen))
+          | select(. as $i | ($dl | index($i)) == null) ]
         | sort | .[]
       end' 2>/dev/null || :
   }
@@ -1008,6 +1010,23 @@ if [ "${1:-}" = health ]; then
     turn=$(turn_age_min "$d")
     last_seen=$(cat "$d/last-message-id" 2>/dev/null) || last_seen=0
     is_id "$last_seen" || last_seen=0
+    # What "unanswered" is measured against. With a delivered log (on-prompt
+    # appends every message id the session was handed, 200 kept) a message is
+    # a candidate when it is newer than the OLDEST id in that log and is not
+    # in it: it never reached the session. last-message-id cannot be the
+    # bound there, since it moves past a message stuck in one thread as soon
+    # as the bot answers in another. Without the log (a bot whose hooks have
+    # not run since this release) the bound stays last-message-id, as before.
+    floor=$last_seen delivered=""
+    if [ -s "$d/delivered" ]; then
+      floor=""
+      while IFS= read -r id || [ -n "$id" ]; do
+        is_id "$id" || continue
+        delivered="$delivered$id"$'\n'
+        if [ -z "$floor" ] || id_newer "$floor" "$id"; then floor=$id; fi
+      done < "$d/delivered"
+      [ -n "$floor" ] || floor=$last_seen
+    fi
     refresh_tail=$(tail -1 "$d/refresh.log" 2>/dev/null) || refresh_tail=""
 
     # The channel is the single numeric group key in access.json (where a bot
@@ -1101,7 +1120,7 @@ if [ "${1:-}" = health ]; then
                   while IFS=$'\t' read -r tid tlast; do
                     is_id "$tid" || continue
                     case $tlast in (''|*[!0-9]*) tlast=0;; esac   # (: bash 3.2 ends $( ) at a bare )
-                    id_newer "$tlast" "$last_seen" && printf '%s\n' "$tid"
+                    id_newer "$tlast" "$floor" && printf '%s\n' "$tid"
                   done); do
               api "channels/$t/messages?limit=50"
               case $status in 2*) note_oldest "$resp";; *) continue;; esac
