@@ -1397,12 +1397,9 @@ fi
 # Every version dir in the cache, not just the active one: an auto-update adds
 # an unpatched dir while bots run on the old one, and the next start, respawn
 # or config-changing /reload-plugins uses the new one (measured, 2.1.296).
-# Six patches, each idempotent because its pattern is gone once applied (or,
-# for bot-meta, whose anchor stays, because its result is checked first):
+# Five patches, each idempotent because its pattern is gone once applied:
 #   bot-authors     let other bots reach access.json's allowFrom gate
 #   ignore-everyone @everyone/@here wake no bot
-#   bot-meta        bot="true" in the channel tag of a message a bot wrote, so
-#                   on-prompt does not hold the turn to a reply it is not owed
 #   chunk           fence-safe chunking, imported from the stable runtime copy
 #                   (an import of any other path is rewritten to it)
 #   proxy           bunfig preload pinning fetch and WebSocket to HTTPS_PROXY
@@ -1429,13 +1426,6 @@ patch_official() {
       perl -pi -e 's/msg\.mentions\.has\(client\.user\)\)/msg.mentions.has(client.user, { ignoreEveryone: true }))/' "$f"; mark "$f"
     elif ! grep -qF 'ignoreEveryone: true' "$f"; then
       echo "claude-discord: patch: $f: ignore-everyone no longer matches" >&2; rc=1
-    fi
-    # The added line sits right after user_id, so the tag reads user_id=".." bot="true".
-    if grep -qF '...(msg.author.bot ? { bot: "true" } : {}),' "$f"; then :
-    elif grep -qE '^[[:space:]]*user_id: msg\.author\.id,$' "$f"; then
-      perl -pi -e 's/^(\s*)user_id: msg\.author\.id,$/$1user_id: msg.author.id,\n$1...(msg.author.bot ? { bot: "true" } : {}),/' "$f"; mark "$f"
-    else
-      echo "claude-discord: patch: $f: bot-meta no longer matches" >&2; rc=1
     fi
     if grep -qE '^[[:space:]]*const chunks = chunk\(text, limit, mode\);?[[:space:]]*$' "$f"; then
       CHUNK_TS=$rt/discord-chunk.ts perl -pi -e 's/^(\s*)const chunks = chunk\(text, limit, mode\)(;?\s*)$/$1const chunks = (await import("$ENV{CHUNK_TS}")).chunk(text, limit, mode)$2/' "$f"; mark "$f"

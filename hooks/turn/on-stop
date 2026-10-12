@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
-# Stop hook: if this turn recorded any Discord messages and actually sent a
-# reply, reacts ✅ on each of them, then clears the per-turn files.
-#
-# A turn with a Discord message that no reply came after (.pending: on-prompt
-# sets it for a human's message, never a bot's; on-reply clears it after a
-# reply or a react, and the thread tool clears it) is sent back once
-# ("block"), so an answer written only in the terminal reaches the person who
-# asked on Discord; a terminal question in the same turn keeps its terminal
-# answer. Only once: on the second stop (stop_hook_active) it closes as
-# before, which is also how a turn that was mentioned with nothing asked of
-# it ends. Otherwise never blocks, and must never fail a turn.
+# Stop hook: if this turn recorded any Discord messages, reacts on each of
+# them, then clears the per-turn files: ✅ when the turn sent a reply (on-reply
+# or the thread tool set .replied), else ☑️ (read, no reply). A session
+# has read a message once it receives it, so a turn is never sent back for
+# want of a reply (owner, 2026-10-12). Prints nothing on stdout or stderr in
+# any path and always exits 0: it never blocks or fails a turn.
 [ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
@@ -19,22 +14,17 @@ plugin_gate || exit 0
 any=""; for f in "$DISCORD_STATE_DIR"/turns/*; do case $f in *.primed) ;; *) [ ! -e "$f" ] || any=1;; esac; done
 [ -n "$any" ] || exit 0
 input=$(cat 2>/dev/null) || exit 0
-read -r session_id active < <(printf '%s' "$input" | jq -r '"\(.session_id // "") \(.stop_hook_active // false)"' 2>/dev/null) || exit 0
+session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
 if [ -n "$session_id" ] && [ -n "$bot_name" ]; then
   turns="$DISCORD_STATE_DIR/turns/$session_id"
   replied="$turns.replied"
-  if [ -f "$turns.pending" ] \
-     && [ "$active" != true ]; then
-    jq -nc --arg r 'A Discord message in this turn got no reply: answer it with the discord reply tool, or react to it if no answer is owed (a terminal question keeps its terminal answer).' \
-      '{decision: "block", reason: $r}' 2>/dev/null
-    exit 0
-  fi
-  if [ -f "$turns" ] && [ -f "$replied" ]; then
+  if [ -f "$turns" ]; then
+    mark='%E2%98%91%EF%B8%8F'; [ -f "$replied" ] && mark='%E2%9C%85'
     while IFS=' ' read -r chat_id message_id _; do
       [ -n "$chat_id" ] && [ -n "$message_id" ] || continue
-      react "$chat_id" "$message_id" '%E2%9C%85'
+      react "$chat_id" "$message_id" "$mark"
     done < "$turns"
   fi
-  rm -f "$turns" "$replied" "$turns.pending" 2>/dev/null
+  rm -f "$turns" "$replied" 2>/dev/null
 fi
 exit 0

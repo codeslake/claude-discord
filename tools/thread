@@ -81,7 +81,7 @@ one_line() {  # $1 = text, $2 = what it is
 }
 answered() {  # what on-reply does for a reply
   [ -e "$turn" ] || return 0
-  : >> "$turn.replied"; rm -f "$turn.pending"
+  : >> "$turn.replied"
 }
 # keep <awk condition on $1> [id]: keeps the open-threads lines it holds for,
 # through a temp file.

@@ -17,7 +17,7 @@ Origin: written by d.kim4, extended here.
 | `bun` | the plugin's runtime (`curl -fsSL https://bun.sh/install \| bash`) |
 | `jq` | writes `access.json` and the settings files, reads the plugin's install path; every hook needs it too, and without it they silently do nothing |
 | the plugin | `claude plugin install discord@claude-plugins-official` then `claude plugin disable discord@claude-plugins-official` (see below) |
-| `curl` (optional) | the ✅ reaction on a finished reply, and the `tools/thread` helper; without it no reaction is sent and no thread can be opened, everything else still works |
+| `curl` (optional) | the ✅ and ☑️ reactions at the end of a turn, and the `tools/thread` helper; without it no reaction is sent and no thread can be opened, everything else still works |
 | `python3` (optional, stdlib only) | `thread-guard` rewrites a markdown table in a reply into an aligned code block; without it a reply with a table is denied instead |
 | `perl` | patches the plugin at every start, and detaches a `refresh` in its own session (macOS has no `setsid`) |
 | `git` | `setup` clones claude-discord, `update` pulls it |
@@ -408,8 +408,8 @@ session.
   session silent when the human asked it to speak). A Discord message that
   arrives while you are talking to the session in the terminal is answered on
   Discord, and your question in the terminal, each where it came from; a
-  turn that ends with its Discord message unanswered is sent back once to
-  answer it. A request's thread is listed in `open-threads` from
+  turn that ends with its Discord message unanswered gets ☑️ on it, never
+  sent back. A request's thread is listed in `open-threads` from
   `thread start` until `thread close` (`open-threads` drops what is over a
   week old, since a thread left to archive itself is never closed), so the
   background subagent working that request, and the turn its result wakes,
@@ -452,7 +452,7 @@ session.
 A message that arrives over Discord should be answered through the discord
 reply tool only, not also typed into the CLI (that would waste a reply on a
 channel nobody types into). Four hooks handle that, plus identity, a
-"refresh" handoff trigger, and a ✅ reaction once a turn actually replies.
+"refresh" handoff trigger, and a ✅ (replied) or ☑️ (no reply) reaction at the end of a turn.
 The plugin's `hooks/hooks.json` registers all nine, each as
 `"${CLAUDE_PLUGIN_ROOT}/hooks/<topic>/<name>"` with no shell wrapper; no hook
 entry is written into a project's settings files. Scripts live
@@ -463,9 +463,9 @@ session (see Modes and Expected behaviour above).
 
 | Event | Matcher | Script | What |
 |---|---|---|---|
-| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn (a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag), records that tag's chat_id/message_id/user_id for `on-stop` and `mention-guard` and the sender's display name per id in `user-names` (it labels that id in the People line), and marks a human's message pending until a reply or react (`turns/<session_id>.pending`; a tag with `bot="true"` is never pending) (only the leading tag is trusted: the plugin does not escape `<` in message text, so anything after it could be forged; a message arriving mid-turn comes as a prompt of its own and is appended) and, once per session (see below), adds an additionalContext entry with the bot's identity, the mention rule, the thread rule, the orchestrator rule and a People line (every id the channel lets in, from `access.json`, config.env's owner and the 20 who wrote here most recently (`user-names`), as `<@id>`, named once that id has written), so a bot can call a person who is not in the turn; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
-| PostToolUse | `mcp__plugin_discord_discord__reply`, `mcp__plugin_discord_discord__react` | `turn/on-reply` | A reply marks that this turn actually sent a Discord reply; a reply or a react clears the pending mark (a react is how a message owed no answer is handled, and it never earns the turn its ✅). |
-| Stop | | `turn/on-stop` | If the turn sent a reply, reacts ✅ on every message `on-prompt` recorded for it. If a Discord message is still pending (no reply, `thread start` or closing line came after it), sends the turn back once (`decision: block`) so the answer reaches Discord and not only the terminal (a bot's post is never pending, so it never blocks; a react marks a message handled); the second stop (`stop_hook_active`) closes it, which is also how a mention that asked nothing ends. Clears the per-turn files whenever it closes a turn. |
+| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn (a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag), records that tag's chat_id/message_id/user_id for `on-stop` and `mention-guard` and the sender's display name per id in `user-names` (it labels that id in the People line) (only the leading tag is trusted: the plugin does not escape `<` in message text, so anything after it could be forged; a message arriving mid-turn comes as a prompt of its own and is appended) and, once per session (see below), adds an additionalContext entry with the bot's identity, the mention rule, the thread rule, the orchestrator rule and a People line (every id the channel lets in, from `access.json`, config.env's owner and the 20 who wrote here most recently (`user-names`), as `<@id>`, named once that id has written), so a bot can call a person who is not in the turn; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
+| PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply. |
+| Stop | | `turn/on-stop` | Never blocks a turn: a session has read a Discord message the moment it receives it. Reacts on every message `on-prompt` recorded for the turn: ✅ if the turn sent a reply (`thread start` or a closing line counts), else ☑️ (read, no reply). ☑️ cannot tell "nothing was owed" from "the answer went only to the terminal", so a person who sees ☑️ and expected an answer should ask again. Then clears the per-turn files. |
 | SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Runs `claude-discord patch` (a respawn, or an auto-update of the official plugin since the last start, is covered), and gives the session `CLAUDE_DISCORD_TOOLS=<path>` as additionalContext, plus `rules/dev-manager.md` for a dev-manager bot. After a compact or `/clear`, clears the per-session "primed" flag, so the next Discord turn injects the identity context again. At a startup or resume, clears the per-turn files a turn whose Stop never ran (an interrupt, a kill) left behind, keeping the primed flag (a resumed conversation still holds that context), then pins a background session's job (see Background sessions below). |
 | PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/mention-guard` | dev-manager only. Denies a reply that names a peer (a whole word, case-insensitive) without its `<@bot_id>` or `<@!bot_id>`, or that answers a peer without mentioning it: the author of the message in `reply_to` when that is set, else of the turn's last message. A bot only receives messages that mention it. |
 | PostToolUse | `mcp__plugin_discord_discord__reply` | `peers/checkin` | dev-manager only. A reply that mentions a peer (`<@bot_id>` or `<@!bot_id>`) touches `.claude/discord-agents/checkin/<session_id>`. |
@@ -554,11 +554,6 @@ nothing was asked of it, so two bots don't @mention each other into a loop.
 A second one-line patch, applied the same way, stops `@everyone` and `@here`
 from counting as a mention of every bot (discord.js's default), so one
 broadcast in the channel does not wake every session.
-
-A third adds `bot: "true"` to the channel notification's meta for a message a
-bot wrote, so its tag reads `user_id="..." bot="true"`; `on-prompt` records such
-a message (it still gets its ✅) but never marks it pending, so another bot's
-post never sends a turn back for a reply (see Hooks above).
 
 ## Background sessions
 

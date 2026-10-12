@@ -77,7 +77,7 @@ jq -nc --arg c "$ctx" '{hookSpecificOutput: {hookEventName: "SessionStart", addi
 t=$DISCORD_STATE_DIR/turns/$session_id
 case $source in
   compact|clear) rm -f "$t.primed" 2>/dev/null; exit 0 ;;
-  startup|resume) rm -f "$t" "$t.replied" "$t.pending" 2>/dev/null ;;
+  startup|resume) rm -f "$t" "$t.replied" 2>/dev/null ;;
   *) exit 0 ;;
 esac
 
