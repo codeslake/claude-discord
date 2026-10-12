@@ -3866,7 +3866,8 @@ kill "$LP" 2>/dev/null || :; wait "$LP" 2>/dev/null || :
 [ "$rc" = 1 ] && grep -q 'held by a monitor this side cannot see; run --keep where the bots run' <<<"$out" && [ -z "$(ls "$MB/holders")" ] ||
   { echo "FAIL: --keep must refuse a lock held by a monitor it cannot see (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
 want=$(( $(starts) + 1 ))
-(cd "$MP" && exec bash "$S" monitor --keep mgr) > "$HOME/keep.out" 2>&1 & KP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $KP"
+# Its stderr a socket (systemd's journal): the --ensure must still run, so the monitor starts.
+(cd "$MP" && exec perl -MSocket -e 'socketpair(A, B, AF_UNIX, SOCK_STREAM, 0) and open(STDERR, ">&", \*B) or die; exec @ARGV' bash "$S" monitor --keep mgr) > "$HOME/keep.out" & KP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $KP"
 wait_for_file "$MB/holders/keeper-$KP"; wait_log "$want" 'Z start$'; rec=$(<"$MB/holders/keeper-$KP")
 [[ $rec == "$KP "?*" keeper" ]] || { echo "FAIL: --keep registers a keeper holder with its start time: '$rec' $(ls "$MB/holders")"; exit 1; }
 mp=$(mpid); want=$(( $(starts) + 1 )); kill -9 "$mp"; wait_log "$want" 'Z start$'

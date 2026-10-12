@@ -186,7 +186,6 @@ if [ -n "$keep" ]; then
       exec @ARGV;' 0 "$msg" "$M/keeper.lock" bash "$0" "$self" --keep "$bot" --kept
   fi
   iv=${CLAUDE_DISCORD_KEEP_INTERVAL:-60}   # read here only; the suite shortens it
-  ef=/dev/stderr; [ -z "$detach" ] || ef=$M/monitor.log   # where the --ensure's output goes (the log is opened per call)
   sp="" ksig=$(sig) kseen=""
   trap '[ -z "$sp" ] || kill "$sp" 2>/dev/null; rm -f "$M/holders/keeper-$$"; exit 0' TERM INT HUP
   tell "$(date -u +%Y-%m-%dT%H:%M:%SZ) keeper $$ start (every ${iv}s)"
@@ -195,7 +194,10 @@ if [ -n "$keep" ]; then
     # Stopped meanwhile (a start that passed its check while --stop ran): this keeper goes too.
     [ ! -e "$M/stopped" ] || { rm -f "$M/holders/keeper-$$"; tell "$stopped_msg"; exit 0; }
     # Registered again each time: a monitor taken down by a signal removes every holder record but a keeper's.
-    bash "$0" "$self" --ensure "$bot" --holder keeper "$$" </dev/null >>"$ef" 2>&1 8>&-
+    # Detached: the log is opened per call (it follows a rotation). Foreground: stdio as it is; /dev/stderr cannot be
+    # reopened when fd 2 is a socket (systemd's journal) or closed, which skips the command.
+    if [ -n "$detach" ]; then bash "$0" "$self" --ensure "$bot" --holder keeper "$$" </dev/null >>"$M/monitor.log" 2>&1 8>&-
+    else bash "$0" "$self" --ensure "$bot" --holder keeper "$$" </dev/null 8>&-; fi
     # claude-discord update changed this file: go on as the new one (same pid, so the record stays), once its signature
     # held for an interval and it parses, as the monitor does at a pass.
     cur=$(sig)
