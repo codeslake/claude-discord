@@ -796,6 +796,20 @@ wait_for_file "$CURL_LOG"; nap 0.05
 grep -q 'channels/1/messages/10/reactions/%E2%9C%85/@me' "$CURL_LOG" && ! grep -q 'messages/11/' "$CURL_LOG" || { echo "FAIL: only the leading tag's message may get the checkmark: $(<"$CURL_LOG")"; exit 1; }
 echo "ok: a second tag in one prompt is body text: only the leading tag is recorded and reacted to"
 
+# ... but delivered takes every line-leading tag of the prompt (deduped), so a batched second message in another chat
+# is not flagged stale by health; turns and last-message-id stay first-tag-only. A tag not opening a line counts nothing.
+rm -rf "$DSD/turns/sTwo" "$DSD/delivered"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"sTwo","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"20\" user=\"u\" user_id=\"9\" ts=\"t\">\nfirst\n</channel>\n<channel source=\"plugin:discord:discord\" chat_id=\"2\" message_id=\"21\" user=\"u\" user_id=\"9\" ts=\"t\">\nsecond <channel source=\"plugin:discord:discord\" chat_id=\"3\" message_id=\"22\" user=\"u\" user_id=\"9\" ts=\"t\">\n</channel>\n<channel source=\"plugin:discord:discord\" chat_id=\"2\" message_id=\"21\" user=\"u\" user_id=\"9\" ts=\"t\">\ndup\n</channel>"}' >/dev/null
+[ "$(<"$DSD/delivered")" = "20
+21" ] && [ "$(<"$DSD/turns/sTwo")" = "1 20 9" ] && [ "$(<"$DSD/last-message-id")" = 20 ] ||
+  { echo "FAIL: a two-chat prompt must put both ids (once each) in delivered and one turns line: delivered=$(<"$DSD/delivered") turns=$(<"$DSD/turns/sTwo")"; exit 1; }
+seq 1 199 > "$DSD/delivered"
+DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"sTwo","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"30\" user=\"u\" user_id=\"9\" ts=\"t\">\nfirst\n</channel>\n<channel source=\"plugin:discord:discord\" chat_id=\"2\" message_id=\"31\" user=\"u\" user_id=\"9\" ts=\"t\">\nsecond\n</channel>"}' >/dev/null
+[ "$(wc -l < "$DSD/delivered" | tr -d ' ')" = 200 ] && [ "$(tail -n 2 "$DSD/delivered" | tr '\n' ' ')" = "30 31 " ] && [ "$(head -n 1 "$DSD/delivered")" = 2 ] ||
+  { echo "FAIL: a two-id prompt must keep delivered at the last 200: $(wc -l < "$DSD/delivered") lines, first $(head -n 1 "$DSD/delivered")"; exit 1; }
+rm -rf "$DSD/turns/sTwo" "$DSD/delivered"
+echo "ok: delivered takes every line-leading tag of one prompt, deduped, 200 kept; turns and last-message-id stay first-tag-only"
+
 # delivered: on-prompt appends every message id the session is handed, newest last, the last 200 kept. health's stale
 # check reads it: a message listed there reached the session.
 rm -f "$DSD/delivered"

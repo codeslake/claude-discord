@@ -98,15 +98,25 @@ if [ -n "$session_id" ] && { [ -d "$DISCORD_STATE_DIR/turns" ] || mkdir -p "$DIS
   # delivered: every message id this session was handed, newest last, the
   # last 200 kept. health reads it: a message listed here reached the session,
   # so it is not `stale` however long the answer takes (or if none is owed).
-  # No fork below 200 lines (an append); from there one mv per message, a
+  # No fork below 200 lines (an append); from there one mv per prompt, a
   # rename so health never reads half a file.
+  # Every line-leading tag counts here (not only the first, which alone drives turns and the rest): a prompt that
+  # batched two messages must not leave the second `stale`. No loop and no fork for the usual single-tag prompt.
+  ids=$message_id k=1
+  if [[ $trimmed == *$'\n<channel source="plugin:discord:discord" chat_id="'* ]]; then
+    while IFS= read -r l; do
+      if [[ $l =~ $tag ]]; then
+        case $'\n'$ids$'\n' in *$'\n'${BASH_REMATCH[2]}$'\n'*) ;; *) ids=$ids$'\n'${BASH_REMATCH[2]}; k=$((k + 1)) ;; esac
+      fi
+    done <<<"$trimmed"
+  fi
   dl=$DISCORD_STATE_DIR/delivered n=0 keep=""
   while IFS= read -r l; do n=$((n + 1)); keep="$keep$l"$'\n'; done 2>/dev/null < "$dl"
-  if [ "$n" -lt 200 ]; then
-    printf '%s\n' "$message_id" >> "$dl" 2>/dev/null || :
+  if [ "$((n + k))" -le 200 ]; then
+    printf '%s\n' "$ids" >> "$dl" 2>/dev/null || :
   else
-    while [ "$n" -gt 199 ]; do keep=${keep#*$'\n'}; n=$((n - 1)); done
-    printf '%s%s\n' "$keep" "$message_id" > "$dl.$$" 2>/dev/null && mv -f "$dl.$$" "$dl" 2>/dev/null || rm -f "$dl.$$" 2>/dev/null
+    while [ "$n" -gt "$((200 - k))" ]; do keep=${keep#*$'\n'}; n=$((n - 1)); done
+    printf '%s%s\n' "$keep" "$ids" > "$dl.$$" 2>/dev/null && mv -f "$dl.$$" "$dl" 2>/dev/null || rm -f "$dl.$$" 2>/dev/null
   fi
 fi
 
