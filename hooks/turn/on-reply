@@ -11,7 +11,8 @@ set -u
 plugin_gate || exit 0
 
 [ -n "$bot_name" ] || exit 0
-read -r session_id tool < <(jq -r '"\(.session_id // "") \(.tool_name // "")"' 2>/dev/null) || exit 0
+# One value per line: read with IFS splitting would shift tool_name into an empty session_id.
+{ IFS= read -r session_id; IFS= read -r tool; } < <(jq -r '(.session_id // ""), (.tool_name // "")' 2>/dev/null) || exit 0
 [ -n "$session_id" ] && [ -n "$bot_name" ] || exit 0
 # A react is not a reply: ✅ still follows only a turn that answered in words.
 case $tool in

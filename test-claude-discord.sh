@@ -410,7 +410,7 @@ H="$R/hooks/turn"
 rm -rf "$DSD/turns" "$DSD/last-message-id"; : > "$CURL_LOG"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"111\" message_id=\"222\" user=\"u\" user_id=\"9\" ts=\"t\">\nhello\n</channel>"}')
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
-[ "$ctx" = 'Discord turn. You are alpha, the Claude Code session behind the Discord bot alpha in channel 999. Answer a Discord message with the discord reply tool; a question typed in the terminal in the same turn is answered in the terminal. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically. One request, one thread: '"$TT"' start "[<area>] <short title>" posts its channel line and prints the thread id (in a message write a channel or thread as <#id>, a user or bot you only name as plain @name, one who must answer or decide as <@id>, which is how you reach them; a bare id is denied, an id in backticks shows the number), thread close <id> "<closing line>" posts the line it lands with inside the thread and ends it; the channel holds only the title line. Unless your mode'"'"'s rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id.
+[ "$ctx" = 'Discord turn. You are alpha, the Claude Code session behind the Discord bot alpha in channel 999. Answer a Discord message with the discord reply tool; a question typed in the terminal in the same turn is answered in the terminal. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀 and ✅ reactions are added automatically; a message that needs no answer gets one react instead of a reply. One request, one thread: '"$TT"' start "[<area>] <short title>" posts its channel line and prints the thread id (in a message write a channel or thread as <#id>, a user or bot you only name as plain @name, one who must answer or decide as <@id>, which is how you reach them; a bare id is denied, an id in backticks shows the number), thread close <id> "<closing line>" posts the line it lands with inside the thread and ends it; the channel holds only the title line. Unless your mode'"'"'s rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id.
 People in this channel (mention one as <@id> to reach them): <@111>, u <@9>' ] || { echo "FAIL: on-prompt context text wrong: $ctx"; exit 1; }
 [ "$(<"$DSD/turns/s1")" = "111 222 9" ] || { echo "FAIL: turns file wrong (chat_id message_id user_id)"; exit 1; }
 [ "$(<"$DSD/last-message-id")" = "222" ] || { echo "FAIL: last-message-id wrong"; exit 1; }
@@ -725,6 +725,8 @@ printf '111 222\n' > "$DSD/turns/s5"
 : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
 DISCORD_STATE_DIR="$DSD" bash "$H/on-reply" <<<'{"session_id":"s5"}'
 [ -f "$DSD/turns/s5.replied" ] || { echo "FAIL: on-reply must set the .replied flag"; exit 1; }
+DISCORD_STATE_DIR="$DSD" bash "$H/on-reply" <<<'{"tool_name":"mcp__plugin_discord_discord__reply"}'
+[ ! -e "$DSD/turns/mcp__plugin_discord_discord__reply.replied" ] || { echo "FAIL: on-reply with no session_id must not take the tool name as the session"; exit 1; }
 DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s5"}'
 wait_for_file "$CURL_LOG"
 wait_for_file "$CURL_STDIN_LOG"
