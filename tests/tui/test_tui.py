@@ -10,6 +10,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -21,7 +22,7 @@ spec.loader.exec_module(tui)
 
 NOW = "2026-10-11T12:00:00Z"
 BASE = {"version": 1, "manager": "mgr",
-        "monitor": {"pid": 123, "started": NOW, "last_pass": NOW, "next_pass": NOW, "pass_s": 2,
+        "monitor": {"pid": os.getpid(), "started": NOW, "last_pass": NOW, "next_pass": NOW, "pass_s": 2,
                     "holders": [{"kind": "tui", "pid": 456}], "post_failed": False},
         "hosts": {"local": {"host": "local", "name": "lambda", "reach": "ok", "patch": "ok", "version": "1.10.0 (abc)",
                             "verdict": "ok", "checked": NOW, "laptop": False},
@@ -90,7 +91,7 @@ def cells(table, key):
 
 
 async def all_ok(app, pilot):
-    assert "monitor pid 123" in text(app, "#head"), text(app, "#head")
+    assert f"monitor pid {os.getpid()}" in text(app, "#head"), text(app, "#head")
     assert app.query_one("#bar").has_class("hidden")
     hosts = app.query_one("#hosts")
     assert hosts.row_count == 2
@@ -159,7 +160,7 @@ async def markup(app, pilot):
 async def missing_wrapper(app, pilot):
     assert not app.query_one("#bar").has_class("hidden")
     assert "/nonexistent/claude-discord" in text(app, "#bar"), text(app, "#bar")
-    assert "monitor pid 123" in text(app, "#head")   # the rest of the screen still came up
+    assert f"monitor pid {os.getpid()}" in text(app, "#head")   # the rest of the screen still came up
 
 
 async def refused(app, pilot):
@@ -205,6 +206,27 @@ async def main():
             await pilot.press("q")
         assert not app.holder.exists(), "quit must remove the holder record"
     print("ok: quit removes its holder record")
+    # A monitor gone without its trap (kill -9, OOM): its pid stays in state.json and the mtime does not move. The bar
+    # says so and --ensure runs again, once per 30 s at most.
+    with tempfile.TemporaryDirectory() as d:
+        mon = subprocess.Popen(["sleep", "30"])
+        s = variant("all_ok")
+        s["monitor"]["pid"] = mon.pid
+        (Path(d) / "holders").mkdir()
+        (Path(d) / "state.json").write_text(json.dumps(s))
+        app = tui.MonitorTUI(Path(d), "mgr", stub(d, 'echo "$*" >> "$(dirname "$0")/args"'))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.query_one("#bar").has_class("hidden"), text(app, "#bar")
+            mon.kill()
+            mon.wait()
+            app.ensured -= 31   # the 30 s since the mount's call, without waiting them
+            app.refresh_state()
+            assert f"monitor pid {mon.pid} is gone" in text(app, "#bar"), text(app, "#bar")
+            app.refresh_state()   # within 30 s of the last call: none
+            calls = (Path(d) / "args").read_text().splitlines()
+            assert calls == [f"monitor --ensure mgr --holder tui {os.getpid()}"] * 2, calls
+    print("ok: a vanished monitor is shown and ensured again")
 
 
 asyncio.run(main())

@@ -54,6 +54,17 @@ def short(project: str, home: str) -> str:
     return "~" + project[len(home):] if home and project.startswith(home + "/") else project
 
 
+def alive(pid: int) -> bool:
+    """kill -0; a pid another user owns (EPERM) is alive too."""
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except (OSError, OverflowError, TypeError):
+        return False
+    return True
+
+
 def header_lines(state: dict, note: str = "") -> tuple[str, str | None]:
     """The header text and the red bar's text (None when there is nothing to warn about). `note` is why
     `monitor --ensure` failed, when it did: the one place a refusal is visible."""
@@ -67,6 +78,8 @@ def header_lines(state: dict, note: str = "") -> tuple[str, str | None]:
         bar = "no state yet: the monitor has not written state.json"
     elif not pid:
         bar = f"monitor stopped at {m.get('stopped_at') or '?'}"
+    elif not alive(pid):   # killed without its trap (kill -9, OOM): its pid stays in state.json
+        bar = f"monitor pid {pid} is gone"
     elif m.get("post_failed"):
         bar = "the last POST to #bot-health-check failed; it is retried next pass"
     if note:
@@ -147,6 +160,7 @@ class MonitorTUI(App):
         self.state: dict = {}
         self.note = ""   # why `monitor --ensure` failed, shown in the red bar
         self.mtime: float | None = None
+        self.ensured = float("-inf")   # when `monitor --ensure` last ran (time.monotonic())
         self.holder = state_dir / "holders" / f"tui-{os.getpid()}"
 
     def compose(self) -> ComposeResult:
@@ -160,17 +174,21 @@ class MonitorTUI(App):
         yield bots
         yield Footer()
 
+    def ensure(self) -> None:
+        """The holder record and the monitor: one wrapper call, which returns at once."""
+        self.ensured = time.monotonic()
+        # Its refusals (no ledger, no .env) go to stderr, not monitor.log; the monitor child writes to the log.
+        try:
+            r = subprocess.run([self.wrapper, "monitor", "--ensure", self.bot, "--holder", "tui", str(os.getpid())],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                               text=True, errors="replace", check=False)
+            self.note = (" ".join(r.stderr.split()) or f"monitor --ensure exited {r.returncode}") if r.returncode else ""
+        except OSError as e:   # a missing or non-executable wrapper: say so instead of crashing the mount
+            self.note = f"cannot run {self.wrapper}: {e.strerror or e}"
+
     def on_mount(self) -> None:
-        if self.wrapper:   # the holder record and the monitor: one wrapper call, which returns at once
-            # Its refusals (no ledger, no .env) go to stderr, not monitor.log; the monitor child writes to the log.
-            try:
-                r = subprocess.run([self.wrapper, "monitor", "--ensure", self.bot, "--holder", "tui", str(os.getpid())],
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                   text=True, errors="replace", check=False)
-                if r.returncode:
-                    self.note = " ".join(r.stderr.split()) or f"monitor --ensure exited {r.returncode}"
-            except OSError as e:   # a missing or non-executable wrapper: say so instead of crashing the mount
-                self.note = f"cannot run {self.wrapper}: {e.strerror or e}"
+        if self.wrapper:
+            self.ensure()
         self.refresh_state()
         self.set_interval(2, self.refresh_state)
 
@@ -180,15 +198,21 @@ class MonitorTUI(App):
             mtime = path.stat().st_mtime
         except OSError:
             mtime = None
-        if mtime is not None and mtime == self.mtime:
-            return
-        self.mtime = mtime
-        self.state = load(path)
+        changed = mtime is None or mtime != self.mtime
+        if changed:
+            self.mtime = mtime
+            self.state = load(path)
+        # Checked on every refresh, not only on a new state.json: a monitor that died without its trap writes none.
+        pid = (self.state.get("monitor") or {}).get("pid")
+        if self.wrapper and not (pid and alive(pid)) and time.monotonic() - self.ensured >= 30:
+            self.ensure()
         text, bar = header_lines(self.state, self.note)
         self.query_one("#head", Static).update(text)
         b = self.query_one("#bar", Static)
         b.update(bar or "")
         b.set_class(bar is None, "hidden")
+        if not changed:
+            return
         for table_id, rows in (("#hosts", host_rows(self.state)), ("#bots", bot_rows(self.state))):
             t = self.query_one(table_id, DataTable)
             # clear() resets the cursor to row 0: put it back on the same row key (once per pass otherwise).

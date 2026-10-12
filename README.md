@@ -862,6 +862,16 @@ command without ssh), so every ledger host needs the shim and claude-discord
 1.10.0 or later, and one `claude-discord health` run in each bot project to
 enter it in `~/.claude-discord/records/projects`. The same call keeps the
 official plugin patched on that host. It restarts and stops nothing.
+Passes start 5 minutes apart however long the hosts take (a longer pass is
+followed at once by the next). After `claude-discord update` a running
+monitor goes on as the new version within 30 s, as the same process, and
+posts nothing it already posted.
+
+A host and a container that share `$HOME` share `~/.claude-discord` but not
+their process ids: run the TUI and the manager session on the same side, and
+list that machine once in the ledger. Otherwise each side reads the other's
+holder as dead (the monitor may exit under an open TUI), and a second ledger
+entry for the other side reports every bot twice, one side as `down`.
 
 Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 
@@ -900,10 +910,11 @@ translated.
 
 **TUI.** `claude-discord tui` shows the monitor's state: hosts, bots
 (findings first), `Enter` for a row's detail and recovery command, `a` for
-the last 50 posts, `q` to quit. A red bar says when the monitor is stopped or
-the last post failed. A project whose `health` crashed before any of its bots
-was known is one row with bot `-` (it alerts as `blind`); it is not counted
-in its host's `bots ok`. The TUI changes nothing and never reads a token.
+the last 50 posts, `q` to quit. A red bar says when the monitor is stopped,
+its pid is gone (killed without cleaning up; the TUI starts it again, once
+per 30 s at most) or the last post failed. A project whose `health` crashed
+before any of its bots was known is one row with bot `-` (it alerts as
+`blind`); it is not counted in its host's `bots ok`. The TUI changes nothing and never reads a token.
 
 **Expected.** With the TUI open, stopping a bot by hand gives one `[down]`
 message within 10 minutes and one `[recovered]` line after it is started
