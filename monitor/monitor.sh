@@ -97,6 +97,8 @@ fi
 # is started with 9>&-: a child that survived a crash would otherwise keep the
 # lock and no new monitor could start.
 # CLAUDE_DISCORD_MONITOR_LOCK_WAIT (above; 5) is the fourth interval the suite shortens.
+sig() { perl -MTime::HiRes=stat -e '@s = stat $ARGV[0] and print "$s[9] $s[7] $s[1]"' "$0" 2>/dev/null; }
+sig0=$(sig)   # this file as this process started
 tick=${CLAUDE_DISCORD_MONITOR_TICK:-30}        # holder check, seconds
 pass=${CLAUDE_DISCORD_MONITOR_PASS:-300}       # a pass at most this often; health's unknown_cap=6 assumes 300
 cap=${CLAUDE_DISCORD_MONITOR_HOST_CAP:-90}     # per host, enforced here (no timeout(1) on macOS)
@@ -502,6 +504,13 @@ while :; do
   # Passes start PASS apart, not PASS after the last one ended: the ticks its hosts took count, and the first sleep
   # after it is the rest of the tick they ended in.
   if [ "$n" -ge "$pass_n" ]; then
+    # claude-discord update changed this file: go on as the new one, within a pass. Same pid, and fd 9 (no close-on-exec)
+    # keeps the lock across exec; it re-reads state.json, whose `posted` keeps it from posting again. The file is compared
+    # with itself as this process started it (mtime to the sub-second, size, inode), not with state.json by -nt: a
+    # future mtime (a clock stepped back, a copied file) would restart every tick, and bash 3.2's -nt counts whole seconds.
+    # An empty signature (replaced right now) is no change: never exec a missing file.
+    cur=$(sig)
+    [ -z "$cur" ] || [ "$cur" = "$sig0" ] || { log "restart: monitor.sh changed"; exec bash "$0" "$self" --locked "$bot"; }
     run_pass; n=$((used / tick_n)) part=""
     [ $((used % tick_n)) = 0 ] || part=$(awk -v s="$step" -v m=$((tick_n - used % tick_n)) 'BEGIN { print s * m }')
     continue
@@ -509,10 +518,4 @@ while :; do
   # Waited on, not run in the foreground: a trapped TERM then runs at once, not after up to a tick (finish kills the sleep).
   sleep "${part:-$tick}" 9>&- & tp=$!; wait "$tp"; tp="" part=""
   n=$((n + 1))
-  # claude-discord update changed this file since the last state write: go on as the new one. Same pid, and fd 9 (no
-  # close-on-exec) keeps the lock across exec; it re-reads state.json, whose `posted` keeps it from posting again.
-  # "Not older" rather than "newer": bash 3.2's -nt counts whole seconds, and a change in the second of a state
-  # write would be missed for good (the cost: one restart more). No state.json (unwritable) is no reason: that
-  # restart would come every tick and post everything again.
-  [ ! -f "$M/state.json" ] || [ "$M/state.json" -nt "$0" ] || { log "restart: monitor.sh changed"; exec bash "$0" "$self" --locked "$bot"; }
 done

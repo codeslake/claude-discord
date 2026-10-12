@@ -3564,7 +3564,9 @@ echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 u
 # monitor's units: PASS (0.05) exactly, with the hosts' steps inside it, not PASS plus them (two intervals: steps
 # that end mid-tick in at least one of them). A finding first seen in a
 # pass carries that pass's start (the clock before health moved it). Then monitor.sh changes under the running
-# monitor: within a tick it execs the new file, same pid, the lock still on fd 9, and posts nothing again.
+# monitor: within a pass it execs the new file, same pid, the lock still on fd 9, and posts nothing again. A
+# monitor.sh with an mtime in the future (a clock stepped back, a copied file) is no change: it is compared with
+# itself as the process started it, so it does not restart, tick after tick.
 CK="$HOME/clockbin"; mkdir -p "$CK"; echo 2000000000 > "$HOME/clock"; : > "$HOME/clk.log"
 printf '#!/bin/bash\ncase $* in *%%s*) echo D >> "$HOME/clk.log";; esac\nexec %s -d "@$(<"$HOME/clock")" "$@"\n' "$(command -v date)" > "$CK/date"
 printf '#!/bin/sh\necho "$1" >> "$HOME/clk.log"\nexec %s "$1"\n' "$(command -v sleep)" > "$CK/sleep"; chmod +x "$CK/date" "$CK/sleep"
@@ -3579,16 +3581,18 @@ wait_log $(( np + 3 )) ' pass hosts='
 iv=$(awk '/^D$/ { if (d == 1 || d == 2) printf "%s ", ((s > 0.0499 && s < 0.0501) || (s > 0.05 && only) ? "ok" : "bad:" s); d++; s = 0; only = 1; next }
   { s += $1; if ($1 != "0.002") only = 0 }' "$HOME/clk.log")
 [ "$iv" = "ok ok " ] || { echo "FAIL: pass starts must be PASS (0.05) apart in the monitor's own sleeps, the hosts' steps inside it, not after them: $iv"; exit 1; }
-# Touched again until it lands between passes: one that lands mid-pass is older than that pass's state write.
-rp=$(mpid); n=0
-until command grep -q 'restart: monitor' "$MB/monitor.log" || [ "$n" -ge 30 ]; do touch "$PC/monitor/monitor.sh"; nap 0.03; n=$((n + 1)); done
+rp=$(mpid); touch "$PC/monitor/monitor.sh"
 wait_log 1 'restart: monitor\.sh changed$'; wait_log "$want" 'Z start$'; next_pass
 [ "$(mpid)" = "$rp" ] && [ "$(readlink "/proc/$rp/fd/9")" = "$MB/lock" ] ||
   { echo "FAIL: a changed monitor.sh is run by the same process, still holding the lock (pid $rp, now $(mpid), fd 9 $(readlink "/proc/$rp/fd/9"))"; exit 1; }
 [ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 1 ] && [ "$(posts | grep -c .)" = 1 ] ||
   { echo "FAIL: one restart, and the stale already posted is not posted again: $(posts)"; exit 1; }
-mstop; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep"
-echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd within a tick by the same process, lock kept, nothing posted again"
+# An mtime an hour ahead is one change (a restart), then the new process knows it: no more restarts over passes.
+touch -d '+1 hour' "$PC/monitor/monitor.sh"; wait_log 2 'restart: monitor\.sh changed$'; np=$(passes); wait_log $(( np + 4 )) ' pass hosts='
+[ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 2 ] && [ "$(mpid)" = "$rp" ] ||
+  { echo "FAIL: a monitor.sh with a future mtime must not restart the monitor again and again: $(command grep -c 'restart: monitor' "$MB/monitor.log") restarts"; exit 1; }
+mstop; touch "$PC/monitor/monitor.sh"; rm -rf "$CK" "$HOME/clock" "$HOME/clk.log" "$MON/local.sleep"
+echo "ok: monitor: pass starts are PASS apart whatever the hosts take, stamped at the start; a changed monitor.sh is exec'd within a pass by the same process, lock kept, nothing posted again; a future mtime restarts it once, not every tick"
 
 # The session a SessionStart hook belongs to: the nearest ancestor, two levels at most, whose argv[0] is .../claude or
 # under .../claude/versions/ and whose argv[1] is not daemon. Process chains are built with perl's $0 (what ps shows),

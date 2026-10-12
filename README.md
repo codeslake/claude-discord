@@ -864,7 +864,7 @@ enter it in `~/.claude-discord/records/projects`. The same call keeps the
 official plugin patched on that host. It restarts and stops nothing.
 Passes start 5 minutes apart however long the hosts take (a longer pass is
 followed at once by the next). After `claude-discord update` a running
-monitor goes on as the new version within 30 s, as the same process, and
+monitor goes on as the new version before its next pass, as the same process, and
 posts nothing it already posted.
 
 A host and a container that share `$HOME` share `~/.claude-discord` but not
