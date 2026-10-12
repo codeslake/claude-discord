@@ -48,8 +48,8 @@ enables it per session with `--settings`.
   switch.
 - **backend**: a manager bot's keeper and the monitor it keeps up. It runs
   on its own, with no session and no TUI, until `claude-discord monitor --stop`.
-- **holder**: a process the monitor lives for: its keeper, or an open TUI.
-  The monitor exits within 30 s of the last one.
+- **holder**: a process recorded next to the monitor: its keeper, or an open
+  TUI. The record is for display; the monitor does not exit for want of one.
 - **keeper**: `claude-discord monitor --keep <manager>`: it keeps the monitor
   up with nothing else open. setup, the TUI and a manager session start one.
 - **finding**: a verdict that needs a human (`down`, `stale`, `duplicate`,
@@ -906,7 +906,9 @@ monitor goes on as the new version once the new file has held still for a
 pass, as the same process, and posts nothing it already posted; the keeper
 does the same within two minutes. A monitor killed without cleaning up
 (`kill -9`, out of memory) is started again by its keeper within a minute; a
-killed keeper by the manager session's next prompt or the next TUI.
+killed keeper by the monitor within a minute (30 s tick, at most one start a
+minute), or by any bot's next prompt or the next TUI. The monitor itself ends
+only on `monitor --stop`, a deleted ledger or a signal.
 
 **Keeper.** `claude-discord monitor --keep <manager>` runs in the
 foreground, registers itself as a holder of kind `keeper` and runs
@@ -936,8 +938,8 @@ A host and a container that share `$HOME` share `~/.claude-discord` but not
 their process ids: run the TUI, the keeper and the manager session on the
 side where the bots run (set `CLAUDE_DISCORD_NO_AUTOSTART=1` on the other),
 and list that machine once in the ledger. Otherwise
-each side reads the other's holder as dead (the monitor may exit under an open
-TUI), and a second ledger entry for the other side reports every bot twice,
+each side reads the other's holder as dead (a monitor there starts a keeper of
+its own), and a second ledger entry for the other side reports every bot twice,
 one side as `down`. A keeper on the wrong side would keep a monitor there that
 reads every bot as down and posts false alerts, so `--keep` (and the TUI's
 keeper) refuses, exit 1, when the lock is held and the pid the lock file names
@@ -1086,7 +1088,7 @@ rest of Claude Code.
 | `[patchfail] <host>` | the official plugin changed and a patch no longer matches; `claude-discord update` there, and if it still fails the patch needs a claude-discord fix |
 | The TUI says `auto-start refused here: another side holds the monitor lock` | an automatic start on this side met a monitor lock held by a monitor it cannot see (a home shared with a container or host): the hooks start nothing here. Set `CLAUDE_DISCORD_NO_AUTOSTART=1` on the side that must not run a backend, and run `claude-discord monitor --start <manager>` on the side where the bots run (the marker is per pid namespace, so it does not stop the other side; a start that gets through clears it) |
 | The TUI says `stopped by you` | `claude-discord monitor --stop` was run; `claude-discord monitor --start <manager>` starts the backend again |
-| The TUI says `monitor stopped` or `no state yet` | no holder is alive; opening the TUI starts it. A reason after it in the red bar is `monitor --ensure` refusing, which `monitor.log` never sees: `no hosts ledger` means `<manager>/hosts` **or** `<manager>/.env` is missing (the message names the ledger for both). With no reason and a monitor that stops again at once, `monitor.log` says why |
+| The TUI says `monitor stopped` or `no state yet` | no monitor runs (it was killed with its keeper, or never started); opening the TUI starts it. A reason after it in the red bar is `monitor --ensure` refusing, which `monitor.log` never sees: `no hosts ledger` means `<manager>/hosts` **or** `<manager>/.env` is missing (the message names the ledger for both). With no reason and a monitor that stops again at once, `monitor.log` says why |
 | No alert for a bot on a ledger host | its project is not in that host's `~/.claude-discord/records/projects` (run `claude-discord health` there once), or the host is `noreach`/`hostdown`/`blind` (the TUI shows it) |
 | `claude-discord: tui needs uv` | install uv (https://docs.astral.sh/uv/); only the TUI needs it |
 | `claude-discord health: <bot> nostate` | `claude agents` has not answered for six runs, so whether a turn is running cannot be told, and the unanswered message is no longer being held. The daemon is probably unwell: run `claude agents` by hand |

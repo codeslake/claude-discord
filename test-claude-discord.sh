@@ -3512,11 +3512,12 @@ next_pass() { wait_log $(( $(passes) + 1 )) ' pass hosts='; }
 holder() { sleep 30 & HPID=$!; KILL_AT_EXIT="$KILL_AT_EXIT $HPID"; }
 # A monitor is detached (setsid), so its exit may leave a zombie until something reaps it: a zombie counts as gone.
 running() { local st=""; { read -r st < "/proc/$1/stat"; } 2>/dev/null || return 1; st=${st##*) }; [ "${st%% *}" != Z ]; }
-mstop() {  # kill the holder; the monitor must be gone within a few ticks
+mstop() {  # the holder goes and the monitor is TERMed (it does not end for want of a holder); gone at once
   local p n=0; p=$(mpid)
   kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
+  [ -z "$p" ] || kill "$p" 2>/dev/null || :
   while [ -n "$p" ] && running "$p" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
-  [ -z "$p" ] || ! running "$p" || { echo "FAIL: the monitor must exit within a tick of its last holder: $(tail -3 "$MB/monitor.log")"; exit 1; }
+  [ -z "$p" ] || ! running "$p" || { echo "FAIL: the monitor must exit on a TERM: $(tail -3 "$MB/monitor.log")"; exit 1; }
 }
 mstart() {  # a holder, then --ensure; returns after the first pass of this start
   local want=$(( $(passes) + 1 ))
@@ -3564,10 +3565,16 @@ printf '%s %s tui\n' "$$" "Thu Jan  1 00:00:00 1970" > "$MB/holders/tui-$$"
 n=0; while pgrep -f "Fcntl=:flock.*$MB/lock" >/dev/null && [ "$n" -lt 100 ]; do nap 0.02; n=$((n + 1)); done
 nap 0.05
 [ "$(starts)" = 1 ] && [ "$n" -lt 100 ] || { echo "FAIL: two --ensure calls must leave one monitor, the loser gone after its wait: $(<"$MB/monitor.log")"; exit 1; }
+# The last holder gone does not end the monitor (its record goes, within a tick): only --stop, a removed ledger or a
+# signal does. 20 ticks later it still runs.
+mp=$(mpid); kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
+n=0; while [ -e "$MB/holders/tui-$HPID" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; nap 0.2
+[ ! -e "$MB/holders/tui-$HPID" ] && running "$mp" && ! grep -q 'exit reason=' "$MB/monitor.log" ||
+  { echo "FAIL: a monitor with no holder left must drop the record and go on: $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
 mstop
 [ -z "$(ls -A "$MB/holders")" ] && jq -e '.monitor.pid == null and (.monitor.stopped_at | length > 0)' "$MB/state.json" >/dev/null ||
   { echo "FAIL: an exit leaves no holder record and a state that reads as stopped: $(jq -c .monitor "$MB/state.json")"; exit 1; }
-grep -q 'exit reason=no-holders$' "$MB/monitor.log" || { echo "FAIL: the exit must be logged"; exit 1; }
+grep -q 'exit reason=signal$' "$MB/monitor.log" || { echo "FAIL: the exit must be logged"; exit 1; }
 [ "$(cd "$MB" && find . | sort | tr '\n' ' ')" = ". ./holders ./lock ./monitor.log ./monitor.log.1 ./state.json " ] || { echo "FAIL: only the fixed files may stay: $(cd "$MB" && find . | sort)"; exit 1; }
 [ "$(wc -c < "$MB/monitor.log.1")" -ge 262144 ] && [ "$(wc -c < "$MB/monitor.log")" -lt 4096 ] || { echo "FAIL: a log past 256 KiB must become monitor.log.1"; exit 1; }
 grep -q 'state unreadable, starting empty$' "$MB/monitor.log" || { echo "FAIL: a state.json that is not valid must be said and replaced: $(<"$MB/monitor.log")"; exit 1; }
@@ -3607,26 +3614,29 @@ nap 0.03; want=$(( $(starts) + 1 )); wantp=$(( $(passes) + 1 )); holder
 wait "$LP"; wait_log "$want" 'Z start$'; wait_log "$wantp" ' pass hosts='
 jq -e '.bots["h1|/home/u/ws/q|e1"] | .verdict == "blind" and .detail == "health exited 3 with no document" and .owner_id == "222"' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a project entry with error is blind for that project's bots, never dropped: $(jq -c .bots "$MB/state.json")"; exit 1; }
-kill -TERM "$(mpid)"; wait_log 1 'exit reason=signal$'
+ex=$(command grep -c 'exit reason=signal$' "$MB/monitor.log") || :; kill -TERM "$(mpid)"; wait_log $(( ex + 1 )) 'exit reason=signal$'
 [ -z "$(ls -A "$MB/holders")" ] && [ "$(jq -r '.monitor.pid' "$MB/state.json")" = null ] || { echo "FAIL: a signalled monitor must leave no holder record and a stopped state: $(ls "$MB/holders")"; exit 1; }
 kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
 echo "ok: monitor: a crashed monitor's orphaned ssh holds no lock, an --ensure meeting an exiting monitor waits and takes over, a crashed project's bots read blind (kept, not dropped), and a signal stops it cleanly"
 
-# The 30 s exit bound in a long pass: the holder check counts steps across the whole pass, not per host. A tick of
+# The 30 s bound of a --stop in a long pass: the tick's checks count steps across the whole pass, not per host. A tick of
 # 5 steps (0.05 s) and a cap of 2 (0.02 s), so every host is killed at its 3rd step, before a per-host count reaches
-# a check. 10 hung hosts (6 would do; more widen the window for the kill below under load, and cost nothing when the
-# monitor exits early): the holder dies after the first cap kill, so the monitor must leave mid-pass. Each cap kill
+# a check. 10 hung hosts (6 would do; more widen the window for the marker below under load, and cost nothing when the
+# monitor exits early): the `stopped` marker appears after the first cap kill (a --stop from the other side of a shared
+# home, which cannot signal this monitor), so the monitor must leave mid-pass, saying whose stop it was. Each cap kill
 # and the exit take the host's whole process group: the stub's sleep must not outlive either.
 printf 's%s\n' 1 2 3 4 5 6 7 8 9 10 > "$MR/mgr/hosts"
 for i in 1 2 3 4 5 6 7 8 9 10; do echo 4.37 > "$MON/s$i.sleep"; done
-na=$(command grep -c 'no answer' "$MB/monitor.log") || :; ex=$(command grep -c 'exit reason=no-holders$' "$MB/monitor.log") || :; np=$(passes); holder
+na=$(command grep -c 'no answer' "$MB/monitor.log") || :; ex=$(command grep -c 'exit reason=stopped$' "$MB/monitor.log") || :; np=$(passes); holder
 (cd "$MP" && CLAUDE_DISCORD_MONITOR_TICK=0.05 CLAUDE_DISCORD_MONITOR_HOST_CAP=0.02 bash "$S" monitor --ensure mgr --holder tui "$HPID")
-wait_log $(( na + 1 )) 'no answer'; kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
-wait_log $(( ex + 1 )) 'exit reason=no-holders$'
-[ "$(passes)" = "$np" ] && [ $(( $(command grep -c 'no answer' "$MB/monitor.log") - na )) -lt 10 ] ||
-  { echo "FAIL: a holder gone mid-pass must end the monitor at the pass's next tick, whatever host runs: $(tail -4 "$MB/monitor.log")"; exit 1; }
+wait_log $(( na + 1 )) 'no answer'; : > "$MB/stopped"
+wait_log $(( ex + 1 )) 'exit reason=stopped$'
+[ "$(passes)" = "$np" ] && [ $(( $(command grep -c 'no answer' "$MB/monitor.log") - na )) -lt 10 ] &&
+  jq -e '.monitor.pid == null and .monitor.stopped_by_user == true' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: a stopped marker met mid-pass must end the monitor at the pass's next tick, whatever host runs, the state saying so: $(tail -4 "$MB/monitor.log") $(jq -c .monitor "$MB/state.json")"; exit 1; }
+rm -f "$MB/stopped"; kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
 ! pgrep -f '^/bin/sleep 4\.37$' >/dev/null || { echo "FAIL: a pass child's subtree must die with it, at the cap and at exit: $(pgrep -af '^/bin/sleep 4\.37$')"; exit 1; }
-echo "ok: monitor: the holder check counts across the whole pass (a holder gone mid-pass ends it within a tick), and a killed host takes its whole process group"
+echo "ok: monitor: the tick's checks count across the whole pass (a stopped marker met mid-pass ends it within a tick), and a killed host takes its whole process group"
 
 # Every row of the failure table in one pass. Seeded: since times old enough (or not) for each hold, and what the
 # channel was last told. Expected posts, 16:
@@ -3778,17 +3788,18 @@ jq -e --arg sp "h2|/home/u/it's \$x here|s p'q" '(.hosts | keys) == ["h1", "h2",
   grep -q ' drop h5|-$' "$MB/monitor.log" && grep -q ' drop h6|/home/u/ws/p|l1$' "$MB/monitor.log" && grep -q ' left h4|- (kept a day)$' "$MB/monitor.log" ||
   { echo "FAIL: hosts out of the ledger are kept a day with their bots and posted, then dropped with them; bots gone from an answer are dropped; all logged: $(jq -c '[(.hosts | keys), (.bots | keys), .hosts.h4]' "$MB/state.json")"; exit 1; }
 # hostdown is a failure of ssh itself, so a local laptop past the cap (a hung health on a Mac manager) is blind, which
-# alerts. And the holder check between posts: the holder dies while the first of two posts waits out a 429, so the
-# second stays pending and the monitor leaves with the first recorded as sent. nf, sent above, is not sent again.
+# alerts. And the stop looked for between posts: the stopped marker appears while the first of two posts waits out a
+# 429, so the second stays pending and the monitor leaves with the first recorded as sent. nf, sent above, is not sent again.
 rm -f "$MON/local.rc"; echo 1 > "$MON/local.sleep"
 mdoc h1 1 nf:stale x1:stale x2:stale > "$MON/h1.out"; printf '%s\n' '429 {"retry_after": 0.15}' '200 {}' '200 {}' > "$CURL_REPLIES"; : > "$CURL_LOG"
-ex=$(command grep -c 'exit reason=no-holders$' "$MB/monitor.log") || :; printf 'h1\nlocal laptop\n' > "$MR/mgr/hosts"
+ex=$(command grep -c 'exit reason=stopped$' "$MB/monitor.log") || :; printf 'h1\nlocal laptop\n' > "$MR/mgr/hosts"
 n=0; while ! command grep -q '] x1 on' "$CURL_LOG" && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); done
-kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
-wait_log $(( ex + 1 )) 'exit reason=no-holders$'
+: > "$MB/stopped"
+wait_log $(( ex + 1 )) 'exit reason=stopped$'
+rm -f "$MB/stopped"; kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
 [ "$(posts | grep -c .)" = 2 ] && [ "$(posts | grep -c '\] x1 on')" = 2 ] &&
   jq -e '.bots["h1|/home/u/ws/p|x1"].posted == "stale" and .bots["h1|/home/u/ws/p|x2"].posted == null' "$MB/state.json" >/dev/null ||
-  { echo "FAIL: a holder gone between posts ends the posting (the rest stay pending), what was sent recorded, nf not sent again: $(posts) $(jq -c '.bots | map_values(.posted)' "$MB/state.json")"; exit 1; }
+  { echo "FAIL: a stopped marker met between posts ends the posting (the rest stay pending), what was sent recorded, nf not sent again: $(posts) $(jq -c '.bots | map_values(.posted)' "$MB/state.json")"; exit 1; }
 jq -e '.hosts.local | .verdict == "blind" and (.detail | test("did not finish")) and (has("left_s") | not)' "$MB/state.json" >/dev/null || { echo "FAIL: a local laptop past the cap is blind (it alerts), not hostdown, and a host back in the ledger is no longer left: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
 echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; bots that left are dropped and logged, hosts that left kept a day (frozen, posted kept) then dropped; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting; a POST under way when a TERM comes is recorded once it went out; a stray holder file is dropped"
 
@@ -3911,9 +3922,10 @@ rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?
   { echo "FAIL: a second --keep exits 0 saying one runs, and registers nothing (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
 n=0; mp=""; while { [ -z "$mp" ] || [ "$(<"$MB/lock")" != "$mp" ] || ! running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); mp=$(mpid); done
 kill -STOP "$mp"; kill -TERM "$KP"; rc=0; wait "$KP" || rc=$?; rec=$(ls "$MB/holders"); kill -CONT "$mp"
-n=0; while running "$mp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
-[ "$rc" = 0 ] && [ -z "$rec" ] && ! running "$mp" ||
-  { echo "FAIL: a TERM ends the keeper (rc 0) and removes its record, and the monitor ends with its last holder (rc=$rc): '$rec'"; exit 1; }
+nap 0.2   # 20 ticks: the monitor does not leave with its last holder (and starts no keeper here: the suite's NO_AUTOSTART)
+[ "$rc" = 0 ] && [ -z "$rec" ] && running "$mp" && [ "$(mpid)" = "$mp" ] && [ -z "$(ls "$MB/holders")" ] ||
+  { echo "FAIL: a TERM ends the keeper (rc 0) and removes its record, and the monitor goes on without it (rc=$rc): '$rec' $(tail -2 "$MB/monitor.log")"; exit 1; }
+kill "$mp"; n=0; while running "$mp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
 # --stop with a TUI holder too, so the monitor does not leave on its own once the keeper is gone: --stop ends it.
 want=$(( $(starts) + 1 ))
 (cd "$MP" && exec bash "$S" monitor --keep mgr) >> "$HOME/keep.out" 2>&1 & KP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $KP"
@@ -4124,6 +4136,47 @@ rm -rf "$DUP" "$HOME/fx2.rec"
 rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json" "$HOME/up.json" "$MB/holders/keeper-$SP"
 printf '%s\n' "$PFB" > "$HOME/.claude-discord/records/projects"
 echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while the keeper's start is still running; a start that keeps failing is tried once a minute, not on every prompt"
+
+# The monitor keeps its keeper up, as the keeper keeps it (1.10.4): a backend started as its owner starts it, so without
+# the suite's NO_AUTOSTART. kp: the keeper record's pid (one at most); wait_backend: a keeper record other than $1 and a
+# running monitor that holds the lock.
+kp() { local f; for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || { echo "${f##*-}"; return 0; }; done; }
+wait_keeper() { local n=0; K=$(kp); while { [ -z "$K" ] || [ "$K" = "${1:-}" ] || ! running "$K"; } && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); K=$(kp); done; [ -n "$K" ] && [ "$K" != "${1:-}" ] && running "$K"; }
+wait_monitor() { local n=0; Mp=$(mpid); while { [ -z "$Mp" ] || [ "$Mp" = "${1:-}" ] || [ "$(cat "$MB/lock" 2>/dev/null)" != "$Mp" ] || ! running "$Mp"; } && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); Mp=$(mpid); done; [ -n "$Mp" ] && [ "$Mp" != "${1:-}" ] && running "$Mp"; }
+(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null 2>&1; env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_DISCORD_KEEP_INTERVAL=0.05 bash "$S" monitor --start mgr >/dev/null 2>&1)
+wait_keeper && wait_monitor || { echo "FAIL: monitor --start must bring up a keeper and a monitor: $(ls "$MB/holders") $(tail -3 "$MB/monitor.log")"; exit 1; }
+k1=$K m1=$Mp
+# A keeper killed without its trap: the monitor goes on (it used to leave at its next holder check) and starts one again
+# within a tick, saying so; the record of the dead one is gone.
+echo 0 > "$LS"; kill -9 "$k1"
+wait_keeper "$k1" && running "$m1" && [ "$(mpid)" = "$m1" ] && [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] && grep -q ' no keeper runs: starting one$' "$MB/monitor.log" && [ "$(<"$LS")" != 0 ] ||
+  { echo "FAIL: a monitor whose keeper was killed must go on and start one again within a tick, on the last-start clock: $(ls "$MB/holders") $(tail -3 "$MB/monitor.log")"; exit 1; }
+k2=$K
+# That keeper holds no lock of the monitor's (fd 9 closed for it): the monitor killed, the keeper starts the next one,
+# which a lock still held would keep out.
+nap 0.1; kill -9 "$m1"   # after the keeper's first --ensure is over: the next round is what brings it back
+wait_monitor "$m1" && running "$k2" || { echo "FAIL: a keeper the monitor started must not hold the monitor's lock: a killed monitor comes back: $(tail -3 "$MB/monitor.log")"; exit 1; }
+m2=$Mp
+# Once a minute at most: the start just now is on the clock, so a keeper killed again is not started again (0.1 s is 10
+# ticks); with that time a minute old it is. Nor while this side's refused marker stands, whatever the clock says.
+kill -9 "$k2"; nap 0.1
+[ -z "$(kp)" ] && running "$m2" || { echo "FAIL: the monitor must not start a keeper twice within 60 s: $(ls "$MB/holders")"; exit 1; }
+: > "$MB/$rf"; echo 0 > "$LS"; nap 0.1
+[ -z "$(kp)" ] && running "$m2" && [ "$(<"$LS")" = 0 ] || { echo "FAIL: the monitor must start no keeper while this side's refused marker stands: $(ls "$MB" "$MB/holders")"; exit 1; }
+rm -f "$MB/$rf"
+wait_keeper "$k2" && running "$m2" || { echo "FAIL: with the marker gone and the last start a minute old the monitor must start a keeper: $(tail -3 "$MB/monitor.log")"; exit 1; }
+k3=$K
+# A live keeper whose record was removed: keeper.lock decides, not the record. The start the monitor tries finds the lock
+# held and leaves; the same keeper registers again at its next round.
+c=$(command grep -c 'a keeper already runs for mgr$' "$MB/monitor.log") || :; echo 0 > "$LS"; rm -f "$MB/holders/keeper-$k3"
+wait_log $(( c + 1 )) 'a keeper already runs for mgr$'; wait_for_file "$MB/holders/keeper-$k3"
+running "$k3" && [ "$(kp)" = "$k3" ] && [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] || { echo "FAIL: a live keeper with no record must stay the only one: $(ls "$MB/holders") $(tail -3 "$MB/monitor.log")"; exit 1; }
+# --stop ends both, and nothing comes back: the monitor leaves on the marker (or the TERM), and neither starts the other.
+out=$(cd "$MP" && bash "$S" monitor --stop mgr 2>&1); echo 0 > "$LS"; nap 0.1
+! running "$k3" && ! running "$m2" && [ -z "$(ls "$MB/holders")" ] && grep -q "stopped keeper $k3$" <<<"$out" && grep -q "stopped monitor $m2$" <<<"$out" && [ "$(mpid)" != "$m2" ] ||
+  { echo "FAIL: --stop must end the keeper and the monitor for good: $out $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
+rm -f "$MB/stopped" "$MB"/last-start*
+echo "ok: monitor: it outlives its holders and starts a killed keeper again within a tick (once a minute, never past a refused marker, no lock of its own handed on, keeper.lock deciding for a lost record); --stop ends both for good"
 
 # claude-discord tui: the project's one dev-manager bot with a ledger unless named; it hands the bot, the monitor's
 # state dir and the wrapper to the TUI script through `uv run --script`. uv is needed for this verb only and its

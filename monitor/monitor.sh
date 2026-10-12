@@ -10,11 +10,14 @@
 # `claude-discord monitor --stop <bot>`, whoever started it.
 #   claude-discord monitor [--ensure] <bot> [--holder tui|keeper <pid>]
 # registers the holder (when given), then starts the monitor detached unless
-# one already holds the lock. The monitor lives while a holder lives (a keeper,
-# an open TUI) and exits within one tick (30 s) of the last one.
+# one already holds the lock. The monitor ends on `--stop` (the `stopped`
+# marker), a removed ledger or a signal, never for want of a holder: the
+# records say who watches (a keeper, an open TUI) and are what the TUI shows.
+# Every tick it starts the keeper again when none runs, as the keeper starts it.
 #   claude-discord monitor --keep <bot> [--detach]
 # the keeper: a holder of its own that runs the same --ensure every 60 s, so a
-# dead monitor comes back with nothing else open. Foreground (tmux, a container
+# dead monitor comes back with nothing else open (and the monitor brings a dead keeper back: a watch with neither left
+# needs both gone inside one tick). Foreground (tmux, a container
 # entrypoint, systemd); --detach (setup, the TUI, a manager session that finds
 # none) checks, then runs it in its own session and returns. One per bot: it holds keeper.lock for its life. It
 # runs the new monitor.sh once `claude-discord update` changed it. No OS scheduler, ever.
@@ -33,7 +36,8 @@
 #                              `--start` or a start that gets through. <id> is the pid namespace (the digits of
 #                              `readlink /proc/self/ns/pid`), so the other side of a shared home is not stopped by it;
 #                              plain `refused` where /proc has none (a Mac)
-#   last-start.<id>            the hooks' last automatic start (epoch seconds, same <id>): none again within 60 s
+#   last-start.<id>            the last automatic start of the keeper, by a hook or by the monitor (epoch seconds,
+#                              same <id>): none again within 60 s
 #   pass.out                   one host's answer, only during a pass
 #   post.out                   one POST's answer and status, only during a pass
 # Nothing in /tmp: no mktemp and no here-document or here-string anywhere in
@@ -106,7 +110,9 @@ live_rec() {
 
 if [ -n "$stop" ]; then
   # The marker first, so nothing automatic starts a keeper meanwhile; then the keepers (one would start the monitor
-  # again), then the monitor the lock file names, if it runs here.
+  # again), then the monitor the lock file names, if it runs here. The monitor is looked up before the marker: it
+  # leaves on the marker by itself at its next tick, which may come before the TERM below, and is reported either way.
+  l0=""; { read -r l0 < "$M/lock"; } 2>/dev/null; a_monitor "$l0" || l0=""
   : > "$M/stopped"
   said=""
   for f in "$M"/holders/keeper-*; do
@@ -123,6 +129,8 @@ if [ -n "$stop" ]; then
   if a_monitor "$l"; then
     kill -TERM "$l" 2>/dev/null; echo "claude-discord: monitor: stopped monitor $l"; said=1
     n=0; while a_monitor "$l" && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+  elif [ -n "$l0" ]; then
+    echo "claude-discord: monitor: stopped monitor $l0"; said=1
   fi
   # Said in state.json too, for the TUI (the monitor wrote its own stop above; this is the one writer now).
   [ ! -s "$M/state.json" ] || { jq -c '.monitor.stopped_by_user = true' "$M/state.json" > "$M/state.json.tmp" && mv -f "$M/state.json.tmp" "$M/state.json"; } 2>/dev/null
@@ -133,7 +141,7 @@ fi
 # This side's refused marker (see the header): named by the pid namespace, so the other side of a shared home neither
 # writes nor reads it.
 rf=refused
-if [ -n "$start$keep" ] && [ -L /proc/self/ns/pid ]; then ns=$(readlink /proc/self/ns/pid); ns=${ns//[!0-9]/}; [ -z "$ns" ] || rf=refused.$ns; fi
+if { [ -n "$start$keep" ] || [ "$locked" = yes ]; } && [ -L /proc/self/ns/pid ]; then ns=$(readlink /proc/self/ns/pid); ns=${ns//[!0-9]/}; [ -z "$ns" ] || rf=refused.$ns; fi
 [ -z "$start" ] || rm -f "$M/stopped" "$M/$rf"
 # What an automatic start meets after --stop: nothing is started until --start.
 stopped_msg="claude-discord: monitor: $bot was stopped by you (monitor --stop); start it again with: claude-discord monitor --start $bot"
@@ -247,9 +255,9 @@ if [ "$locked" = no ]; then
   # waits. The child (setsid, stdin closed, output appended to monitor.log,
   # the only trace a crash leaves) keeps trying for up to 5 s:
   # winning makes it the monitor, losing means one is running. The wait is the
-  # exit race's cover: a holder that registers just as the old monitor leaves
-  # (it saw no holder a moment earlier) gets the lock when that one is gone and
-  # starts the next. The lock is dup'd to fd 9 (no close-on-exec), so it lives
+  # exit race's cover: an --ensure that meets a monitor on its way out (a
+  # signal, its restart) gets the lock when that one is gone and starts the
+  # next. The lock is dup'd to fd 9 (no close-on-exec), so it lives
   # exactly as long as the monitor process; the kernel drops it on any death.
   : >> "$M/lock"
   perl -MPOSIX -MFcntl=:flock -e '
@@ -318,7 +326,8 @@ read_cfg() {
 # is_holder <path>: a record's name is tui-, keeper- or (written before 1.10.3) session-<digits>. Anything else there (a
 # stray file) is no holder: as a pid it would make holders_json invalid JSON and fail every pass.
 is_holder() { case ${1##*/} in tui-*|session-*|keeper-*) case ${1##*-} in ''|*[!0-9]*) return 1;; esac;; *) return 1;; esac; }
-# holders_alive: removes the records of dead holders (and stray files); 0 when one still lives.
+# holders_alive: removes the records of dead holders (and stray files); 0 when one still lives. Only for what the TUI
+# shows and for keep_keeper below: the monitor does not end when none is left.
 holders_alive() {
   local f p rest alive=1
   for f in "$M"/holders/*; do
@@ -331,8 +340,33 @@ holders_alive() {
   done
   return $alive
 }
-# Read twice before giving up: a holder may have registered just now.
-no_holders() { holders_alive && return 1; holders_alive && return 1; return 0; }
+# keep_keeper, every tick: the keeper is started again when none runs, as it starts the monitor, so the watch ends only
+# when both are gone inside one tick (a killed keeper used to take the monitor with it at its next holder check, and
+# nothing watched until some bot's next prompt: lmd42, 2026-10-12). No fork while a keeper record stands: holders_alive
+# has just dropped the dead ones, so a record left is a live keeper's. With none (killed, or its record removed), the
+# --keep front decides: it starts nothing while keeper.lock is held, after --stop, or where CLAUDE_DISCORD_NO_AUTOSTART is
+# set. Not while this side's refused marker stands (as the hooks: only --start clears it), and once a minute at most, on
+# the hooks' own last-start clock. fd 9 is closed for it: a keeper holding the monitor's lock would keep every later
+# monitor out once this one died.
+keep_keeper() {
+  local f now last=""
+  [ -z "${CLAUDE_DISCORD_NO_AUTOSTART:-}" ] && [ ! -e "$M/$rf" ] || return 0
+  for f in "$M"/holders/keeper-*; do [ ! -f "$f" ] || return 0; done
+  now=${EPOCHSECONDS:-$(date +%s)}
+  { read -r last < "$M/last-start${rf#refused}"; } 2>/dev/null
+  case $last in ''|*[!0-9]*) ;; *) [ $((now - last)) -ge 60 ] || return 0;; esac
+  printf '%s\n' "$now" > "$M/last-start${rf#refused}" 2>/dev/null
+  log "no keeper runs: starting one"
+  bash "$0" "$self" --keep "$bot" --detach </dev/null >/dev/null 2>&1 9>&- || :
+}
+# tick_check, every tick (between passes and inside one): the lock is still this monitor's, the owner did not stop it,
+# the holder records are current and a keeper runs.
+tick_check() {
+  lock_check
+  [ ! -e "$M/stopped" ] || finish stopped
+  holders_alive || :
+  keep_keeper
+}
 holders_json() {  # sets hj: the holder records as a JSON array, with no fork
   local f b
   hj=""
@@ -369,20 +403,20 @@ record_posts() {
   fi
   [ -z "${posts:-}" ] || state=$(printf '%s' "$state" | jq -c --arg results "$posts" --arg now "${ts:-$(now)}" "$apply" 2>/dev/null || printf '%s' "$state")
 }
-finish() {  # $1 = reason: kill the pass child, leave a state that reads as stopped, drop the holder records
+finish() {  # $1 = reason (signal, stopped, no-ledger): kill the pass child, leave a state that reads as stopped, drop the holder records
   # The group; the pid alone when the signal came before the child's setpgrp.
   [ -z "$child" ] || kill -- -"$child" 2>/dev/null || kill "$child" 2>/dev/null
   [ -z "$tp" ] || kill "$tp" 2>/dev/null
   # The posts already sent are recorded, or a restart would send them again.
   record_posts
   rm -f "$M/pass.out" "$M/post.out"
-  state=$(printf '%s' "$state" | jq -c --arg now "$(now)" '.monitor.pid = null | .monitor.holders = [] | .monitor.stopped_at = $now' 2>/dev/null) && write_state
-  # On no-holders every record left was dead and is already gone; a record
-  # that appears now belongs to a holder whose --ensure is waiting for this
-  # lock, so it stays for the monitor that ensure starts (a stale one is pruned
-  # by the next start's first holder check). On a signal the monitor is being taken down, and no
-  # record may outlive it, but a keeper's: the keeper lives on to start the next one (--stop TERMs it first).
-  [ "$1" = no-holders ] || for f in "$M"/holders/*; do case ${f##*/} in keeper-*) ;; *) rm -f "$f";; esac; done
+  # stopped: the marker was met here (a --stop from the other side of a shared home cannot signal this monitor), so the
+  # state says whose stop it was, as --stop writes it.
+  state=$(printf '%s' "$state" | jq -c --arg now "$(now)" --arg why "$1" '.monitor.pid = null | .monitor.holders = [] | .monitor.stopped_at = $now
+    | if $why == "stopped" then .monitor.stopped_by_user = true else . end' 2>/dev/null) && write_state
+  # The monitor is being taken down, and no record may outlive it but a keeper's: the keeper lives on to start the next
+  # one (--stop TERMs it first).
+  for f in "$M"/holders/*; do case ${f##*/} in keeper-*) ;; *) rm -f "$f";; esac; done
   log "exit reason=$1"
   exit 0
 }
@@ -449,8 +483,8 @@ run_host() {  # uses $host $remote, the envs array, and run_pass's step counter 
         return 0
       fi
       # One counter for the whole pass, not per host: however many hosts are
-      # slow, the holder check comes every tick.
-      [ $((k % tick_n)) != 0 ] || { lock_check; ! no_holders || finish no-holders; }
+      # slow, the tick's checks (the lock, a --stop, the keeper) come every tick.
+      [ $((k % tick_n)) != 0 ] || tick_check
       sleep "$step" 9>&-
     done
     wait "$child" 2>/dev/null; h_rc=$?; child=""
@@ -716,9 +750,9 @@ run_pass() {
       E*) log "$rest";;
       O*) set -f; IFS=$'\x1f'; set -- $rest; IFS=$' \t\n'; set +f   # split with no fork: tojson escapes any US in the payload
           scope=$1 key=$2 knd=$3 verdict=$4 payload=$5
-          # The holder check between posts (a POST may take 10 s and more): once none is left the rest stay
+          # A --stop is looked for between posts (a POST may take 10 s and more): from then on the rest stay
           # pending, and finish records what was sent before the monitor leaves. The lock likewise (lock_check).
-          lock_check; ! no_holders || finish no-holders
+          lock_check; [ ! -e "$M/stopped" ] || finish stopped
           [ "$knd" != finding ] || findings=$((findings + 1))
           lk=$key; [ "$scope" != hosts ] || lk="$key|-"   # the log's key, as the TUI and the spec name a host
           lk=${lk//$'\x1e'/,}   # a grouped post's keys
@@ -763,9 +797,8 @@ log start
 n=$pass_n   # the first pass right after start
 while :; do
   [ -f "$dir/hosts" ] || finish no-ledger
-  lock_check
-  ! no_holders || finish no-holders
-  # Straight back to the holder check after a pass: the last in-pass check may be most of a tick old.
+  tick_check
+  # Straight back to the tick's checks after a pass: the last in-pass one may be most of a tick old.
   # Passes start PASS apart, not PASS after the last one ended: the ticks its hosts took count, and the first sleep
   # after it is the rest of the tick they ended in.
   if [ "$n" -ge "$pass_n" ]; then
