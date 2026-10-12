@@ -50,7 +50,9 @@
 #   claude-discord monitor --keep <name> keeps the manager's monitor up with no
 #                                        TUI or session (foreground: tmux, a
 #                                        container entrypoint, systemd)
-#   claude-discord monitor --stop <name> stops the keeper and the monitor
+#   claude-discord monitor --stop <name> stops the keeper and the monitor; nothing
+#                                        starts them again until:
+#   claude-discord monitor --start <name> starts the backend again, detached
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
