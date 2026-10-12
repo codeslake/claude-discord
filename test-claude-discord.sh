@@ -3554,6 +3554,10 @@ next_pass
 ! grep -q 'retry_after=0.01' "$MB/monitor.log" || { echo "FAIL: a 429 with retry_after under 10 s must be waited out and retried in the same pass: $(grep ' post ' "$MB/monitor.log")"; exit 1; }
 [ "$(jq -r '.bots["h1|/home/u/ws/p|nf"].posted // "none"' "$MB/state.json")" = none ] && jq -e '.monitor.post_failed and (.alerts[-1].status == "failed")' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a failed POST leaves the finding unposted and shows the failure: $(jq -c .monitor "$MB/state.json")"; exit 1; }
+# A stray file in holders/ named other than <kind>-<digits> (here a copy of the live record): removed, never read as a
+# pid, which would break the holders' JSON and with it every pass.
+cp "$MB/holders/tui-$HPID" "$MB/holders/tui-${HPID}x"; np=$(passes); wait_log $(( np + 2 )) ' pass hosts='
+[ ! -e "$MB/holders/tui-${HPID}x" ] && ! grep -q 'pass failed' "$MB/monitor.log" || { echo "FAIL: a holder record whose name is not <kind>-<digits> must be dropped, never fail a pass: $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
 printf '200 {}\n' > "$CURL_REPLIES"
 wait_log 1 'post h1\|/home/u/ws/p\|nf stale 200$'; next_pass
 [ "$(jq -r '.bots["h1|/home/u/ws/p|nf"].posted' "$MB/state.json")" = stale ] && [ "$(jq -r .monitor.post_failed "$MB/state.json")" = false ] &&
@@ -3575,7 +3579,13 @@ wait_log $(( ex + 1 )) 'exit reason=no-holders$'
   { echo "FAIL: a holder gone between posts ends the posting (the rest stay pending), what was sent recorded, nf not sent again: $(posts) $(jq -c '.bots | map_values(.posted)' "$MB/state.json")"; exit 1; }
 jq -e '.hosts.local | .verdict == "blind" and (.detail | test("did not finish"))' "$MB/state.json" >/dev/null || { echo "FAIL: a local laptop past the cap is blind (it alerts), not hostdown: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
 mstop
-echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; hosts and bots that left are dropped and logged; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting"
+# A reducer that fails (here on a state whose hosts is no object) is said in state.json, for the TUI's red bar, not only
+# in monitor.log; the next block's first pass clears it.
+mstate '.hosts = "x"'; holder; (cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID"); wait_log 1 'pass failed: the reducer'
+n=0; while ! jq -e '.monitor.error | startswith("the reducer rejected its input at ")' "$MB/state.json" >/dev/null 2>&1 && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+[ "$n" -lt 100 ] || { echo "FAIL: a failed reducer must write state.json with monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
+mstop
+echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; hosts and bots that left are dropped and logged; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting; a stray holder file is dropped; a failed reducer is written to state.json"
 
 # Cadence and self-update, counted, never timed. date and sleep are stubs for this monitor: date reads $HOME/clock,
 # which each local health run moves 1000 s on, and logs D for a pass's start stamp (the %s call); sleep logs its
@@ -3590,10 +3600,11 @@ CK="$HOME/clockbin"; mkdir -p "$CK"; echo 2000000000 > "$HOME/clock"; : > "$HOME
 printf '#!/bin/bash\ncase $* in *%%s*) echo D >> "$HOME/clk.log";; esac\nexec %s -d "@$(<"$HOME/clock")" "$@"\n' "$(command -v date)" > "$CK/date"
 printf '#!/bin/sh\necho "$1" >> "$HOME/clk.log"\nexec /bin/sleep "$1"\n' > "$CK/sleep"; chmod +x "$CK/date" "$CK/sleep"   # /bin/sleep: steps and ticks, none a duration the sleep stub remaps
 printf 'local\n' > "$MR/mgr/hosts"; mdoc lambda 0 r1:stale > "$MON/local.out"; echo 0.02 > "$MON/local.sleep"
-rm -f "$MB/state.json"; printf '200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"
+mstate '.hosts = {} | .bots = {}'; printf '200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"
 want=$(( $(starts) + 2 )); np=$(passes); holder
 (cd "$MP" && PATH="$CK:$PATH" CLAUDE_DISCORD_MONITOR_PASS=0.05 CLAUDE_DISCORD_MONITOR_HOST_CAP=5 bash "$S" monitor --ensure mgr --holder tui "$HPID")
 wait_log $(( np + 3 )) ' pass hosts='
+jq -e '.monitor | has("error") | not' "$MB/state.json" >/dev/null || { echo "FAIL: a pass that goes through clears monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
 [ "$(jq -r '.bots["local|/home/u/ws/p|r1"].since_s' "$MB/state.json")" = 2000000000 ] ||
   { echo "FAIL: a pass is stamped at its start, not after its hosts: $(jq -c '.bots["local|/home/u/ws/p|r1"]' "$MB/state.json")"; exit 1; }
 # Per interval: PASS, or (hosts slower than PASS on a loaded box) their steps alone, with no sleep after them.

@@ -80,6 +80,8 @@ def header_lines(state: dict, note: str = "") -> tuple[str, str | None]:
         bar = f"monitor stopped at {m.get('stopped_at') or '?'}"
     elif not alive(pid):   # killed without its trap (kill -9, OOM): its pid stays in state.json
         bar = f"monitor pid {pid} is gone"
+    elif m.get("error"):   # the last pass could not be folded into the state: nothing in it is current
+        bar = f"the last pass failed: {m['error']}"
     elif m.get("post_failed"):
         bar = "the last POST to #bot-health-check failed; it is retried next pass"
     if note:
@@ -108,6 +110,8 @@ def host_rows(state: dict) -> list[tuple[str, tuple]]:
         label = h.get("name") or key
         if h.get("laptop"):
             label += " (laptop)"
+        if h.get("left_s") is not None:   # out of the ledger, kept for a day so a brief removal does not post again
+            label += " (left the ledger)"
         rows.append((key, (label, h.get("reach", ""), h.get("patch", ""), h.get("version", ""),
                            f"{ok}/{len(mine)}", h.get("checked", ""))))
     return rows

@@ -142,11 +142,15 @@ read_cfg() {
   done 2>/dev/null < "$dir/../config.env"   # 2> first: a missing file's error must not reach monitor.log
 }
 
-# holders_alive: removes the records of dead holders; 0 when one still lives.
+# is_holder <path>: a record's name is tui-<digits> or session-<digits>, as --holder writes it. Anything else there (a
+# stray file) is no holder: as a pid it would make holders_json invalid JSON and fail every pass.
+is_holder() { case ${1##*/} in tui-*|session-*) case ${1##*-} in ''|*[!0-9]*) return 1;; esac;; *) return 1;; esac; }
+# holders_alive: removes the records of dead holders (and stray files); 0 when one still lives.
 holders_alive() {
   local f p rest alive=1
   for f in "$M"/holders/*; do
     [ -f "$f" ] || continue
+    is_holder "$f" || { rm -f "$f"; continue; }
     p="" rest=""
     read -r p rest < "$f" 2>/dev/null || :
     case $p in ''|*[!0-9]*) rm -f "$f"; continue;; esac
@@ -160,7 +164,7 @@ holders_json() {  # sets hj: the holder records as a JSON array, with no fork
   local f b
   hj=""
   for f in "$M"/holders/*; do
-    [ -f "$f" ] || continue
+    [ -f "$f" ] && is_holder "$f" || continue
     b=${f##*/}; hj="$hj${hj:+,}{\"kind\":\"${b%%-*}\",\"pid\":${b##*-}}"
   done
   hj="[$hj]"
@@ -409,6 +413,7 @@ def host_step($r):
 | .state.hosts |= with_entries(select(.key as $h | $hgone | index($h) == null))
 | .state.bots |= with_entries(select(.key as $k | $bgone | index($k) == null))
 | .state.monitor += {last_pass: $now, next_pass: (($now_s + $every) | floor | todate), pass_s: $pass_s, holders: $holders, post_failed: false}
+| del(.state.monitor.error)
 | .state as $s | .events as $ev
 # Bots of a host that is not reachable as a whole are frozen: this pass says nothing about them.
 | [$s.hosts[] | select(.reach != "ok") | .host] as $frozen
@@ -465,7 +470,10 @@ run_pass() {
   ts=$(now)
   out=$(printf '%s\n%s' "$state" "$results" | jq -nrR --arg now "$start" --argjson now_s "$now_s" --arg lang "$lang" --arg mowner "$mowner" \
     --argjson every "$pass" --argjson pass_s "$(( SECONDS - t0 ))" --argjson holders "$hj" "$reduce" 2>/dev/null) ||
-    { log "pass failed: the reducer rejected its input"; return 0; }
+    { log "pass failed: the reducer rejected its input"
+      # Said in state.json too (the TUI's red bar), or a monitor failing every pass would show its last good pass as current.
+      out=$(printf '%s' "$state" | jq -c --arg e "the reducer rejected its input at $ts (monitor.log)" '.monitor.error = $e' 2>/dev/null) && state=$out
+      write_state; return 0; }
   while IFS= read -r l; do
     rest=${l#?}
     case $l in

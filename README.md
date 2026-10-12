@@ -915,7 +915,9 @@ translated.
 (findings first), `Enter` for a row's detail and recovery command, `a` for
 the last 50 posts, `q` to quit. A red bar says when the monitor is stopped,
 its pid is gone (killed without cleaning up; the TUI starts it again, once
-per 30 s at most) or the last post failed. A project whose `health` crashed
+per 30 s at most), the last pass failed (the state could not be updated;
+`monitor.log` has the line) or the last post failed. A host taken out of
+the ledger is shown as `(left the ledger)` for a day, then dropped. A project whose `health` crashed
 before any of its bots was known is one row with bot `-` (it alerts as
 `blind`); it is not counted in its host's `bots ok`. The TUI changes nothing and never reads a token.
 

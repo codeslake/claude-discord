@@ -60,6 +60,9 @@ def variant(name):
         s["monitor"].update(pid=None, stopped_at=NOW, holders=[])
     elif name == "post_failed":
         s["monitor"]["post_failed"] = True
+    elif name == "pass_failed":
+        s["monitor"]["error"] = "the reducer rejected its input at 2026-10-11T12:05:00Z (monitor.log)"
+        s["hosts"]["wmac"]["left_s"] = 1760184000
     return s
 
 
@@ -138,6 +141,11 @@ async def post_failed(app, pilot):
     assert "POST" in text(app, "#bar")
 
 
+async def pass_failed(app, pilot):
+    assert "the last pass failed: the reducer rejected its input" in text(app, "#bar"), text(app, "#bar")
+    assert cells(app.query_one("#hosts"), "wmac")[0] == "wmac (laptop) (left the ledger)", cells(app.query_one("#hosts"), "wmac")
+
+
 async def markup(app, pilot):
     assert "mgr [bold]" in text(app, "#head"), text(app, "#head")
     assert "[down]x" in text(app, "#bar"), text(app, "#bar")
@@ -191,6 +199,7 @@ async def main():
     await case("crashed_project", crashed_project)
     await case("stopped", stopped)
     await case("post_failed", post_failed)
+    await case("pass_failed", pass_failed)
     await case("markup", markup)
     await case("cursor", cursor)
     await case("missing_wrapper", missing_wrapper, wrapper=lambda d: "/nonexistent/claude-discord", state="all_ok")
