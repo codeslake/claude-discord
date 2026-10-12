@@ -236,10 +236,12 @@ chmod +x "$HOME/bin/curl"
 # (CLAUDE.md) without dropping an assertion; any other duration is real:
 #   0.5  refresh's wait for the old session to exit (20 rounds): 0.01 s.
 #   3    refresh's pause for the old gateway to let go: not slept.
+#   0.05 on-session-start's wait for a held pins.json.lock (4 rounds): 0.01 s.
+# sh, not bash: the monitor sleeps a step at a time through it, and dash starts in a third of bash's time.
 cat > "$HOME/bin/sleep" <<'EOF'
-#!/bin/bash
+#!/bin/sh
 case $* in
-  0.5) exec /bin/sleep 0.01 ;;
+  0.5|0.05) exec /bin/sleep 0.01 ;;
   3) exit 0 ;;
   *) exec /bin/sleep "$@" ;;
 esac
@@ -248,32 +250,41 @@ chmod +x "$HOME/bin/sleep"
 # `jq`, memoized. jq 1.6 compiles its builtins at every start (10.7 ms here, 2026-10-11), and the wrapper, the hooks and
 # this suite start it ~1600 times, ~1000 of them with a call already made in this run: half the suite's wall time. jq is a
 # pure function of its arguments, the files it names and its stdin, so the first answer to each distinct call is kept and
-# replayed (~2 ms). Whatever the stub does not fully understand runs the real jq untouched: an option outside the plain
+# replayed (~2 ms). A file is keyed by its contents, not its path (the same document read from another project's copy
+# is a hit): jq's output names no input file except through input_filename (an `input` builtin, run by real jq) and its
+# stderr (never kept). Whatever the stub does not fully understand runs the real jq untouched: an option outside the plain
 # set, a filter that names the clock, the environment, `input` or a module, a file argument that is not a readable
-# regular file. An answer that came with stderr, or a failure other than -e's 1 or 4, is never kept.
+# regular file. An answer that came with stderr, or a failure other than -e's 1 or 4, is never kept. One answer is known
+# without jq: a lone input file that does not exist in a searchable directory reads no input, so jq runs no filter and
+# prints only its open error (rc 2); the wrapper probes absent files that way ~45 times a run.
 # An entry is "<rc>\n<key><stdout>\004" in a file named by the lengths of the key's parts, created with noclobber (hooks
 # run in parallel); a reader takes it only when it holds its own key and ends in \004, so a half-written one is a miss.
 # Inputs and entries are read line by line (c ends up byte for byte the content): bash reads a file in blocks that way,
 # and a byte per syscall with any other delimiter.
 mkdir -p "$HOME/jq.cache"; JQR=$(command -v jq)
 { printf '#!/bin/bash\nJQ_REAL=%q; JQ_CACHE=%q\n' "$JQR" "$HOME/jq.cache"; cat <<'EOF'
-args=("$@"); filter=""; have=0; null=0; inputs=0; files=()
+args=("$@"); filter=""; have=0; null=0; sl=0; inputs=0; files=(); key=""   # key: the arguments, a file as \003
 real() { exec "$JQ_REAL" "${args[@]}"; }
 slurp() { local l; c=""; while IFS= read -r l; do c+=$l$'\n'; done; c+=$l; }   # shortcut: drops a NUL, so a\0b and ab share a key and jq -R sees ab; no caller sends one (JSON has none), and spotting one costs a byte-wise read
 while [ $# -gt 0 ]; do
   a=$1; shift
   case $a in
-    --arg|--argjson) [ $# -ge 2 ] || real; shift 2;;
-    --slurpfile|--rawfile) [ $# -ge 2 ] || real; files+=("$2"); shift 2;;
-    -[a-zA-Z]*) case ${a#-} in *[!nrcesSjaRMC]*) real;; *n*) null=1;; esac;;
+    --arg|--argjson) [ $# -ge 2 ] || real; key+=$a$'\001'$1$'\001'$2$'\001'; shift 2;;
+    --slurpfile|--rawfile) [ $# -ge 2 ] || real; files+=("$2"); key+=$a$'\001'$1$'\001\003\001'; shift 2;;
+    -[a-zA-Z]*) case ${a#-} in *[!nrcesSjaRMC]*) real;; esac; case $a in *n*) null=1;; esac; case $a in *s*) sl=1;; esac; key+=$a$'\001';;
     -*) real;;
-    *) if [ $have = 0 ]; then filter=$a; have=1; else files+=("$a"); inputs=1; fi;;
+    *) if [ $have = 0 ]; then filter=$a; have=1; key+=$a$'\001'; else files+=("$a"); inputs=1; key+=$'\003\001'; fi;;
   esac
 done
 [ $have = 1 ] || real
 re='(^|[^.A-Za-z0-9_])(now|env|ENV|input[a-z_]*|[a-z]*local[a-z]*|debug|stderr|halt[a-z_]*|import|include|modulemeta|get_[a-z_]*|strptime|strftime|mktime|gmtime|todate[a-z0-9]*|fromdate[a-z0-9]*|date[a-z0-9]*)([^A-Za-z0-9_]|$)'
 [[ ! $filter =~ $re ]] || real
-key=""; for a in "${args[@]}"; do key+=$a$'\001'; done
+if [ ${#files[@]} = 1 ] && [ $inputs = 1 ] && [ $null = 0 ] && [ $sl = 0 ]; then   # -n opens nothing, -s still prints []
+  f=${files[0]}; d=${f%/*}
+  if [ "$d" != "$f" ] && [ ! -e "$f" ] && [ ! -L "$f" ] && [ -d "${d:-/}" ] && [ -x "${d:-/}" ]; then
+    printf 'jq: error: Could not open file %s: No such file or directory\n' "$f" >&2; exit 2
+  fi
+fi
 name=${#key}; fk=""
 for f in "${files[@]}"; do
   { [ -f "$f" ] && [ -r "$f" ]; } || real
@@ -307,7 +318,8 @@ printf '#!/bin/bash\nmv -f %q %q 2>/dev/null; exec %q "$@"\n' "$JT/new" "$JT/f" 
 sed "2s|.*|JQ_REAL=$JT/real; JQ_CACHE=$JT/c|" "$HOME/bin/jq" > "$JT/jq"
 [ "$(bash "$JT/jq" -r .v "$JT/f")" = new ] && ! compgen -G "$JT/c/[0-9]*" >/dev/null && printf '{"v":"old"}' > "$JT/f" && [ "$(bash "$JT/jq" -r .v "$JT/f")" = old ] \
   && rm "$JT"/c/[0-9]* && bash "$JT/jq" -n '0 | todate' >/dev/null && ! compgen -G "$JT/c/[0-9]*" >/dev/null \
-  || { echo "FAIL: a file replaced while real jq ran must not be cached under its old contents, nor a time-zone builtin: $(ls "$JT/c")"; exit 1; }
+  && [ "$(bash "$JT/jq" -e .x "$JT/none" 2>&1; echo "rc=$?")" = "$("$JQR" -e .x "$JT/none" 2>&1; echo "rc=$?")" ] \
+  || { echo "FAIL: a file replaced while real jq ran must not be cached under its old contents, nor a time-zone builtin; a missing file answers as real jq: $(ls "$JT/c")"; exit 1; }
 rm -rf "$JT"
 echo "ok: the jq stub stores no answer for a file replaced while real jq ran or a time-zone builtin"
 # Stands in for a session's claude process: runs each argument through
@@ -3569,7 +3581,7 @@ echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 u
 # itself as the process started it, so it does not restart, tick after tick.
 CK="$HOME/clockbin"; mkdir -p "$CK"; echo 2000000000 > "$HOME/clock"; : > "$HOME/clk.log"
 printf '#!/bin/bash\ncase $* in *%%s*) echo D >> "$HOME/clk.log";; esac\nexec %s -d "@$(<"$HOME/clock")" "$@"\n' "$(command -v date)" > "$CK/date"
-printf '#!/bin/sh\necho "$1" >> "$HOME/clk.log"\nexec %s "$1"\n' "$(command -v sleep)" > "$CK/sleep"; chmod +x "$CK/date" "$CK/sleep"
+printf '#!/bin/sh\necho "$1" >> "$HOME/clk.log"\nexec /bin/sleep "$1"\n' > "$CK/sleep"; chmod +x "$CK/date" "$CK/sleep"   # /bin/sleep: steps and ticks, none a duration the sleep stub remaps
 printf 'local\n' > "$MR/mgr/hosts"; mdoc lambda 0 r1:stale > "$MON/local.out"; echo 0.02 > "$MON/local.sleep"
 rm -f "$MB/state.json"; printf '200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"
 want=$(( $(starts) + 2 )); np=$(passes); holder
@@ -3588,7 +3600,7 @@ wait_log 1 'restart: monitor\.sh changed$'; wait_log "$want" 'Z start$'; next_pa
 [ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 1 ] && [ "$(posts | grep -c .)" = 1 ] ||
   { echo "FAIL: one restart, and the stale already posted is not posted again: $(posts)"; exit 1; }
 # An mtime an hour ahead is one change (a restart), then the new process knows it: no more restarts over passes.
-touch -d '+1 hour' "$PC/monitor/monitor.sh"; wait_log 2 'restart: monitor\.sh changed$'; np=$(passes); wait_log $(( np + 4 )) ' pass hosts='
+touch -d '+1 hour' "$PC/monitor/monitor.sh"; wait_log 2 'restart: monitor\.sh changed$'; np=$(passes); wait_log $(( np + 2 )) ' pass hosts='
 [ "$(command grep -c 'restart: monitor' "$MB/monitor.log")" = 2 ] && [ "$(mpid)" = "$rp" ] ||
   { echo "FAIL: a monitor.sh with a future mtime must not restart the monitor again and again: $(command grep -c 'restart: monitor' "$MB/monitor.log") restarts"; exit 1; }
 # A monitor.sh that does not parse (a git pull caught mid-write) is not exec'd: one log line, the monitor keeps passing;
