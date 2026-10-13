@@ -170,7 +170,8 @@ def pure():
     assert long.startswith(f"▸ {NAME16}  autoresear… ") and cell_len(long) <= 110, long
     short = [l.plain for k, ls in tui.bots_items({"bots": {"k": dict(b[MGRBOT], mode="autoresearchclaw")}}, NAMES, 110, set(), T) if k for l in ls][0]
     assert short.startswith("▸ mgr  autoresearchclaw ") and cell_len(short) <= 110, short
-    assert all("dev-manager" not in l.plain for k, ls in tui.bots_items(moded(mode="dev-manager"), NAMES, 109, {"k"}, T) for l in ls), "no mode below 110 columns"
+    # A short name: after a 16-cell one the mode would be cut off at this width whether or not the row leaves it out.
+    assert all("dev-manager" not in l.plain for k, ls in tui.bots_items({"bots": {"k": dict(b[MGRBOT], mode="dev-manager")}}, NAMES, 109, {"k"}, T) for l in ls), "no mode below 110 columns"
     assert tui.columns(109, 29) == tui.columns(109) and dict(tui.columns(110))["bot"] == 16
     for v in (None, "", "none", 7, ["dev-manager"], {"a": 1}):   # an older host, the default, a value of another type: the 1.11.0 table
         assert [l.plain for _, ls in tui.bots_items(moded(mode=v), NAMES, 110, {"k"}, T) for l in ls] == \

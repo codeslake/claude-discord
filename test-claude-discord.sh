@@ -3193,11 +3193,14 @@ out=$(bash "$S" health --json 2>/dev/null) || :
   [ "$(sort "$SD/channel-names")" = $'900 봇-dev\n901 side-"room\\-x' ] &&
   jq -e '.[0] | .verdict == "ok" and .channel_name == "renamed" and .mode == "none" and ([.access.groups[].name] == ["봇-dev", "side-\"room\\-x", ""])' <<<"$out" >/dev/null ||
   { echo "FAIL: a guild list that is no array falls back to channels/<id> for the main name (two calls) and keeps the names already cached; an empty mode file is none: $(<"$CURL_LOG") / $(cat "$SD/channel-guild" "$SD/channel-names" 2>&1) / $out"; exit 1; }
-# A day and a second old, and the read fails (HTTP 500): the line stays as it is, its name is still shown, the bot is ok.
+# A day and a second old, and both reads fail (HTTP 500): the line keeps its guild and name, the name is still shown, the
+# bot is ok, and the line's age becomes an hour short of a day: the next run the same hour asks for neither again.
 printf '900 5 kept-name %s\n' "$(( SEED_S - 86401 ))" > "$SD/channel-guild"
 queue "200 $NONE" '500 {}' '500 {}' '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
-[ "$(verdict_of sbot "$out")" = ok ] && [ "$(field_of sbot channel_name "$out")" = kept-name ] && [ "$(<"$SD/channel-guild")" = "900 5 kept-name $(( SEED_S - 86401 ))" ] && [ ! -s "$CURL_REPLIES" ] ||
+read -r _ _ _ at < "$SD/channel-guild"
+[ "$(verdict_of sbot "$out")" = ok ] && [ "$(field_of sbot channel_name "$out")" = kept-name ] && [[ $(<"$SD/channel-guild") == "900 5 kept-name "* ]] && [ ! -s "$CURL_REPLIES" ] &&
+  [ "$at" -gt "$(( SEED_S - 86401 ))" ] && [ "$(( $(date +%s) - at ))" -ge 82800 ] && [ "$(( $(date +%s) - at ))" -lt 82860 ] ||
   { echo "FAIL: a channel-guild line a day old is read again (the guild's list, then the channel when that fails); a failed read keeps the line and its name and fails nothing: $out / $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
 # A read time with a leading zero (a damaged or hand-edited line: nothing writes one). bash takes 08 for an octal number
 # that is none, and that error ends the whole health block, not the one test: the script then ran on into the launcher

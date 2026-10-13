@@ -1536,6 +1536,11 @@ if [ "${1:-}" = health ]; then
               gid=$ngid cname=$nname
               printf '%s %s %s %s\n' "$ch" "$gid" "$cname" "$now_s" > "$d/channel-guild" 2>/dev/null || :
               [ "$cname" != - ] || cname=""
+            elif is_id "$had"; then
+              # Both reads failed (Discord answers for messages but not for these): the line is kept, guild and name,
+              # and only its age is set to an hour short of a day, so the next try is in an hour, not at every run
+              # (two calls per bot every 5 minutes for as long as it lasts).
+              printf '%s %s %s %s\n' "$ch" "$gid" "${cname:--}" "$((now_s - 82800))" > "$d/channel-guild" 2>/dev/null || :
             fi
             is_id "$had" || ! is_id "$gid" || guild_names || :
           fi
