@@ -194,6 +194,31 @@ def pure():
     print("ok: the cursor's row is highlighted to the edge; the title's right side is live / check overdue / stopped by you / not running; "
           "the tab row underlines the active tab and counts the open alerts; one footer per tab")
 
+    # ---- alerts ----
+    r = tui.rule("Open", 1, "posted and not recovered yet", 80)
+    assert r.plain.startswith("Open 1 ─") and r.plain.endswith("─ posted and not recovered yet") and r.cell_len == 80
+    items = tui.alerts_items(s, 137, T)
+    plain = [l.plain for _, lines in items for l in lines]
+    assert plain[0].startswith("Open 1 ─") and plain[0].endswith("posted and not recovered yet"), plain[0]
+    assert [k for k, _ in items if k] == ["open " + PHOTO, "hist 7", "hist 6", "hist 5", "hist 4", "hist 2", "hist 1", "hist 0"], "a failed POST is no history row"
+    rows = {k: lines[0].plain for k, lines in items if k}
+    assert rows["open " + PHOTO].split() == "17:37 · 11m ✕ DOWN photobot lmd79 no plugin server for this bot ✓ sent".split(), rows["open " + PHOTO]
+    assert rows["hist 7"].split()[:5] == ["17:48", "·", "now", "▲", "check"] and rows["hist 7"].rstrip().endswith("— not posted"), rows["hist 7"]
+    assert rows["hist 5"].split() == "15:50 · 1h ✓ recovered - wmac back after 5m ✓ sent".split(), rows["hist 5"]
+    assert rows["hist 4"].split() == "15:48 · 2h ✓ recovered mgr lmd79 - ✓ sent".split(), "a record of a 1.10.x monitor has no detail: " + rows["hist 4"]
+    assert rows["hist 1"].split()[:10] == "13:48 · 4h ○ host - wmac ssh to wmac".split() and rows["hist 1"].rstrip().endswith("… — not posted"), rows["hist 1"]
+    assert rows["hist 0"].split() == "09:28 · 8h ✕ down oldbot old Discord refused this bot's token (HTTP 401) ✓ sent on retry".split(), rows["hist 0"]
+    assert any(l.startswith("History 7 ─") for l in plain)
+    aged = dict(tui.alerts_items(dict(s, alerts=[dict(s["alerts"][0], ts=iso(T - 86400))] + s["alerts"][1:]), 137, T))
+    assert "hist 0" not in aged and "hist 1" in aged, "a record 24 h old is out of History"
+    assert len({cell_len(l) for l in rows.values()}) == 1
+    narrow = {k: lines[0].plain for k, lines in tui.alerts_items(s, 100, T) if k}
+    assert "lmd79" not in narrow["open " + PHOTO] and all(cell_len(l) <= 100 for l in narrow.values())
+    assert tui.posted_text(s["alerts"][6]).startswith("<@111> [down] photobot") and tui.posted_text(tui.open_alerts(s)[0]).endswith("fix: " + FIX)
+    assert tui.posted_text(s["alerts"][7]).startswith("(not posted") and tui.posted_text(s["alerts"][4]).startswith("(the text was not recorded")
+    print("ok: the Alerts tab: Open is what was posted and has not recovered, History the last 24 h newest first; kind, what and post per record; "
+          "the host column folds below 110; the posted text, or why there is none")
+
 
 FAKES = tempfile.TemporaryDirectory()
 
@@ -369,6 +394,25 @@ async def markup(app, pilot):
     assert "error [/] near" in text(app, "#body")
     assert str(app.screen.query_one("#fix").render()) == "echo patch output [down] here"
     await pilot.press("escape")
+    await pilot.press("right")
+    assert "find[/]ing" in text(app, "#body")
+    await pilot.press("enter")
+    await pilot.pause()
+    assert str(app.screen.query_one("#body-detail").render()) == "[bold]posted[/]"
+
+
+async def alerts(app, pilot):
+    await pilot.press("right")
+    assert body(app)[0].startswith("Open 1 ─") and any(l.startswith("History 7 ─") for l in body(app))
+    assert app.cursor["alerts"] == "open " + PHOTO
+    await pilot.press("enter")
+    await pilot.pause()
+    assert str(app.screen.query_one("#body-detail").render()).endswith("fix: " + FIX) and not app.screen.query("#fix")
+    await pilot.press("escape", "down", "enter")
+    await pilot.pause()
+    assert str(app.screen.query_one("#body-detail").render()).startswith("(not posted")
+    await pilot.press("escape", "space", "c")
+    assert app.opened == set() and app.clipboard == "", "space and c are the Bots tab's"
 
 
 async def stopped(app, pilot):
@@ -426,6 +470,7 @@ async def main():
     await case("narrow", narrow, state="many", size=(100, 20))
     await case("crashed_project", crashed_project)
     await case("markup", markup)
+    await case("alerts", alerts, state="all_ok")
     await case("stopped", stopped)
     await case("stopped_by_user", stopped_by_user)
     await case("overdue", overdue)

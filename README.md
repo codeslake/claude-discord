@@ -1062,6 +1062,13 @@ channel, receives and last. A project whose `health` crashed before any of
 its bots was known is one row with bot `-` (it alerts as `blind`) and is not
 counted as a bot.
 
+*Alerts tab.* `Open`: what the channel was told and has not seen recover.
+`History`: the records of the last 24 hours, newest first: when, kind
+(`✕ down`, `▲ check`, `○ host`, `✓ recovered`), bot, host, the reason, and
+the post (`✓ sent`, `✓ sent on retry`, `— not posted`). `Enter` shows the
+posted text. A record written by a monitor older than 1.11.0 has no reason
+and no text.
+
 **Expected.** With the backend running (no TUI or session needed), stopping a
 bot by hand gives one `[down]` message within 10 minutes and one
 `[recovered]` line after it is started again. A pass that sees nothing new

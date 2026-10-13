@@ -425,6 +425,61 @@ class Detail(Screen):
         yield Footer()
 
 
+def key_parts(key: str) -> tuple[str, str]:
+    """(host, bot) of an alerts key: `host|-` is the host itself, `host|project|-` a project with no bot known."""
+    parts = key.split("|")
+    return parts[0], (parts[-1] if len(parts) > 2 else DASH)
+
+
+def kind(a: dict) -> tuple[str, str]:
+    if a.get("kind") == "recovery":
+        return "✓ recovered", OK
+    if a.get("key", "").count("|") == 1:
+        return "○ host", DIM
+    return ("✕ down", ALERT) if rank(a.get("verdict", "")) == 0 else ("▲ check", WARN)
+
+
+def posted_text(a: dict) -> str:
+    """The text of an alerts record's post, or why there is none."""
+    if a.get("status") == "not_posted":
+        return "(not posted: a warning only, or still inside its hold time)"
+    return a.get("text") or "(the text was not recorded: posted by a monitor older than 1.11.0)"
+
+
+def rule(name: str, count: int | None, note: str, width: int) -> Text:
+    """A rule heading: the name in brand, a dim count, a rule to the edge, a dim note on the right."""
+    left = Text.assemble((name, f"bold {BRAND}"), (f" {count}" if count is not None else "", DIM), " ")
+    right = Text.assemble(" ", (note, DIM)) if note else Text()
+    return Text.assemble(left, ("─" * max(0, width - left.cell_len - right.cell_len), TAB), right)
+
+
+def alerts_items(state: dict, width: int, now: float) -> list[tuple]:
+    """The Alerts tab: Open (posted, not recovered) and History (the alerts records of the last 24 h, newest first)."""
+    wide = width >= WIDE
+    cols = [("when", 13), ("", 13), ("bot", 22 if wide else 14)] + ([("host", 10)] if wide else []) + [("what", 0), ("post", 16)]
+    cols[-2] = ("what", max(10, width - 2 - sum(w for _, w in cols) - len(cols) + 1))
+
+    def row(a: dict, bold: bool) -> list[Text]:
+        t, (host, bot) = epoch(a.get("ts")), key_parts(a.get("key", ""))
+        word, style = kind(a)
+        post = ("✓ sent on retry", WARN) if a.get("retried") else ("✓ sent", OK) if a.get("status") == "sent" else ("— not posted", DIM)
+        cell = {"when": [(f"{hhmm(t)} · {ago(a.get('ts'), now) or DASH}", "" if bold else DIM)],
+                "": [(f" {word.upper()} " if bold else word, f"bold #000000 on {ALERT}" if bold and style == ALERT else style)],
+                "bot": [(bot, "bold" if bold else "")], "host": [(host_label(state, host), DIM)], "what": [(a.get("detail") or DASH, "")], "post": [post]}
+        return row_lines([(cell[n], w) for n, w in cols])
+
+    head = (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))
+    opened = open_alerts(state)
+    # A failed POST is retried next pass (the red bar says so); only what went out, or was never due to, is history.
+    hist = [(i, a) for i, a in reversed(list(enumerate(state.get("alerts") or []))) if isinstance(a, dict) and a.get("status") != "failed"
+            and now - (epoch(a.get("ts")) or 0) < 86400]
+    items: list[tuple] = [(None, [rule("Open", len(opened), "posted and not recovered yet", width), Text()]), head]
+    items += [(f"open {a['key']}", row(a, True)) for a in opened]
+    items += [(None, [Text(), rule("History", len(hist), "last 24 h · newest first · #bot-health-check", width), Text()]), head]
+    items += [(f"hist {i}", row(a, False)) for i, a in hist]
+    return items
+
+
 class Confirm(ModalScreen[bool]):
     """A yes/no question, No by default (focused, and Enter, n and Escape answer it)."""
     CSS = "Confirm { align: center middle; } #confirm { width: 70; height: auto; border: thick $error; padding: 1 2; }"
@@ -562,7 +617,7 @@ class MonitorTUI(App):
         w = self.width
         if self.tab == "bots":
             return bots_items(self.state, self.names, w, self.opened, now)
-        return []
+        return alerts_items(self.state, w, now) if self.tab == "alerts" else []
 
     def show(self, wid: str, text: Text) -> bool:
         """Updates a widget only when its text changed: a repaint every 2 s would drop a mouse selection each time."""
@@ -617,6 +672,11 @@ class MonitorTUI(App):
     def action_open(self) -> None:
         key, alerts = self.cursor[self.tab], self.state.get("alerts") or []
         if key is None:
+            return
+        if self.tab == "alerts":
+            which, _, k = key.partition(" ")
+            a = next((x for x in open_alerts(self.state) if x["key"] == k), {}) if which == "open" else alerts[int(k)] if int(k) < len(alerts) else {}
+            self.push_screen(Detail(posted_text(a)))
             return
         scope = "bots" if self.tab == "bots" else "hosts"
         entry = (self.state.get(scope) or {}).get(key) or {}
