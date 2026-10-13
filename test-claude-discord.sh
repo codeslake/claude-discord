@@ -3576,7 +3576,7 @@ nap 0.05
 # The last holder gone does not end the monitor (its record goes, within a tick): only --stop, a removed ledger or a
 # signal does. A tick later it still checks its holders.
 mp=$(mpid); kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
-n=0; while [ -e "$MB/holders/tui-$HPID" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; wait_tick
+n=0; while [ -e "$MB/holders/tui-$HPID" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; wait_tick; wait_tick
 [ ! -e "$MB/holders/tui-$HPID" ] && running "$mp" && ! grep -q 'exit reason=' "$MB/monitor.log" ||
   { echo "FAIL: a monitor with no holder left must drop the record and go on: $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
 mstop

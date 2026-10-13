@@ -111,23 +111,27 @@ live_rec() {
 
 if [ -n "$stop" ]; then
   # The marker first, so nothing automatic starts a keeper meanwhile; then the keepers (one would start the monitor
-  # again), then the monitor the lock file names, if it runs here. The monitor is looked up before the marker: it
-  # leaves on the marker by itself at its next tick, which may come before the TERM below, and is reported either way.
+  # again), then the monitor the lock file names, if it runs here. Both are looked up before the marker: each leaves on
+  # the marker by itself (the monitor at its next tick, a keeper at its next round), which may come before the TERM
+  # below, and is reported either way.
   # A keeper whose start passed its stopped check just before the marker has no record yet and is not named here: it
   # leaves by itself within one interval (its --ensure is refused, its next round meets the marker) and starts nothing.
   l0=""; { read -r l0 < "$M/lock"; } 2>/dev/null; a_monitor "$l0" || l0=""
-  : > "$M/stopped"
-  said=""
+  ks=""
   for f in "$M"/holders/keeper-*; do
     [ -f "$f" ] || continue
     # Its command line too: a pid reused on the other side of a shared home is never signalled.
-    if live_rec "$f" && a_keeper "$rp"; then
-      kill -TERM "$rp" 2>/dev/null; echo "claude-discord: monitor: stopped keeper $rp"; said=1
-      # Gone (its record with it) before the monitor goes: a monitor its last --ensure starts then finds no holder.
-      n=0; while [ -n "$(lstart "$rp")" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
-    fi
-    rm -f "$f"
+    ! { live_rec "$f" && a_keeper "$rp"; } || ks="$ks $rp"
   done
+  : > "$M/stopped"
+  said=""
+  for rp in $ks; do
+    ! a_keeper "$rp" || kill -TERM "$rp" 2>/dev/null
+    echo "claude-discord: monitor: stopped keeper $rp"; said=1
+    # Gone (its record with it) before the monitor goes: a monitor its last --ensure starts then finds no holder.
+    n=0; while a_keeper "$rp" && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+  done
+  rm -f "$M"/holders/keeper-*
   l=""; { read -r l < "$M/lock"; } 2>/dev/null
   if a_monitor "$l"; then
     kill -TERM "$l" 2>/dev/null; echo "claude-discord: monitor: stopped monitor $l"; said=1
