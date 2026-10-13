@@ -62,7 +62,7 @@ def base(n=None):
                      MGRBOT: bot("local", "/home/u/cd", "mgr", "busy", detail="a turn has been in flight 3m; holding the finding",
                                  channel="900", channel_name="dev-bots", access=ACCESS, last_message_at=iso(n - 5)),
                      HBOT: bot("local", "/home/u/cd", HANGUL, "throttled", detail="Discord is rate-limiting this bot (HTTP 429); nothing can be said about it this run",
-                               channel="902", channel_name="한글-채널-이름이-아주-길다", last_message_at=iso(n - 560),
+                               channel="902", channel_name="한글-채널-이름이-아주-길다", last_message_at=iso(n - 560), fix="cd ~/cd && claude-discord health",
                                access={"dm": "pairing", "dm_allow": [], "groups": [{"id": "902", "mention": False, "allow": []}]}),
                      OLDBOT: bot("old", "/home/u/p", "oldbot", "ok"),
                      NOTOK: bot("local", "/home/u", "notok", "unknown", detail="no token or channel in /home/u/.claude/discord-agents/notok",
@@ -112,6 +112,9 @@ def pure():
 
     s = base(T)
     assert [k for k, _ in tui.sorted_bots(s)] == [PHOTO, HBOT, MGRBOT, OLDBOT, NOTOK], [k for k, _ in tui.sorted_bots(s)]
+    # Within a group by bot name, then host: the key (host|project path|bot) reads as random by name.
+    named = {k: dict(s["bots"][OLDBOT], host=k.split("|")[0], bot=k.split("|")[2]) for k in ("b|/p|alpha", "a|/p|beta", "a|/p|alpha")}
+    assert [k for k, _ in tui.sorted_bots({"bots": named})] == ["a|/p|alpha", "b|/p|alpha", "a|/p|beta"], tui.sorted_bots({"bots": named})
     assert [tui.rank(v) for v in ("down", "stale", "duplicate", "unreachable", "throttled", "apierror", "nostate", "blind", "noreach", "newverdict",
                                   "busy", "ok", "unknown")] == [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 3]
     k = tui.kpi(s)
@@ -164,6 +167,9 @@ def pure():
                     ("newverdict", "not posted (warning only)"), ("nostate", "not posted yet"), ("blind", "not posted yet"), ("stale", "not posted yet")):
         quiet = dict(s, alerts=[], bots={HBOT: dict(s["bots"][HBOT], verdict=v)})
         assert want in "".join(l.plain for k, lines in tui.bots_items(quiet, NAMES, 137, {HBOT}, T) if k for l in lines), (v, want)
+    posted = lambda **kw: [l.plain.strip() for k, ls in tui.bots_items({"bots": {"k": dict({"bot": "b", "verdict": "down", "posted": "down"}, **kw)}}, {}, 137, {"k"}, T)
+                           if k for l in ls][-1]
+    assert (posted(posted_at=iso(T - 5)), posted(posted_at=iso(T - 120)), posted()) == ("posted just now", "posted 2m ago", "posted"), "no `posted now ago`, no `posted  ago`"
     fresh = dict(s, bots={PHOTO: dict(s["bots"][PHOTO], posted=None)})   # a problem inside its hold time: the channel will be told
     assert "not posted yet" in "".join(l.plain for _, lines in tui.bots_items(fresh, NAMES, 137, {PHOTO}, T) for l in lines)
     print("ok: the Bots table: one width for every line at 137 and 100 columns, project and receives folded below 110, a row grows "
@@ -223,6 +229,9 @@ def pure():
     row, under = tui.tabs_lines("alerts", 2, 60).plain.split("\n")
     assert row.rstrip() == " Bots   Alerts 2   Configuration" and under == "─" * 7 + "━" * 10 + "─" * 43, (row, under)
     assert tui.foot_line("bots").plain.split() == "↑↓ select space expand enter all fields c copy fix ←→ tabs q quit".split()
+    # Below 110 columns the Bots footer keeps every key and shortens two labels: all of it, `q quit` too, inside 80 columns.
+    assert tui.foot_line("bots", 109).plain.split() == "↑↓ select space expand enter fields c copy ←→ tabs q quit".split()
+    assert all(tui.foot_line(t, 80).plain.split()[-2:] == ["q", "quit"] and cell_len(tui.foot_line(t, 80).plain.rstrip()) <= 80 for t in tui.TABS)
     assert tui.foot_line("alerts").plain.split() == "↑↓ select enter the post's text ←→ tabs q quit".split()
     assert tui.foot_line("config").plain.split() == "←→ tabs ↑↓ select enter all fields q quit".split()
     assert tui.bar_text({}) == "no state yet: the monitor has not written state.json"
@@ -246,6 +255,17 @@ def pure():
     assert rows["hist 1"].split()[:10] == "13:48 · 4h ○ host - wmac ssh to wmac".split() and rows["hist 1"].rstrip().endswith("… — not posted"), rows["hist 1"]
     assert rows["hist 0"].split() == "09:28 · 8h ✕ down oldbot old Discord refused this bot's token (HTTP 401) ✓ sent on retry".split(), rows["hist 0"]
     assert any(l.startswith("History 7 ─") for l in plain)
+    # A host alert that is open (posted, not recovered) is drawn in the alert colour like a bot problem; in History it is dim.
+    hot = lambda st, key: [str(sp.style) for k, lines in tui.alerts_items(st, 137, T) if k == key for sp in lines[0].spans if tui.ALERT in str(sp.style)]
+    down = dict(s, hosts=dict(s["hosts"], wmac=dict(s["hosts"]["wmac"], posted="hostdown", posted_at=iso(T - 100))),
+                bots=dict(s["bots"], **{"wmac|/Users/u/q|wb": dict(s["bots"][PHOTO], host="wmac", bot="wb")}))
+    assert [a["key"] for a in tui.open_alerts(down)] == ["wmac|-", PHOTO, "wmac|/Users/u/q|wb"], [a["key"] for a in tui.open_alerts(down)]
+    assert hot(down, "open wmac|-") == [f"bold #000000 on {tui.ALERT}"] and hot(down, "open " + PHOTO) and not hot(down, "hist 1"), hot(down, "open wmac|-")
+    assert " ○ HOST " in dict(tui.alerts_items(down, 137, T))["open wmac|-"][0].plain
+    # A host that left the ledger is kept a day with its bots and what the channel was told (so a line lost for a pass
+    # posts nothing again): neither it nor its bots are open alerts meanwhile.
+    left = dict(down, hosts=dict(down["hosts"], wmac=dict(down["hosts"]["wmac"], left_s=1)))
+    assert [a["key"] for a in tui.open_alerts(left)] == [PHOTO], [a["key"] for a in tui.open_alerts(left)]
     aged = dict(tui.alerts_items(dict(s, alerts=[dict(s["alerts"][0], ts=iso(T - 86400))] + s["alerts"][1:]), 137, T))
     assert "hist 0" not in aged and "hist 1" in aged, "a record 24 h old is out of History"
     assert len({cell_len(l) for l in rows.values()}) == 1
@@ -269,6 +289,12 @@ def pure():
     for want in ("alert language    en   ALERT_LANG in config.env", "mention on alert  @dongyong22   DISCORD_USER_ID in config.env", "check every       5 min   fixed",
                  "alert channel     #bot-health-check   fixed", "kept running by   keeper   stop: claude-discord monitor --stop mgr"):
         assert want in plain, (want, plain)
+    more = dict(s, hosts=dict(s["hosts"], abc=dict(s["hosts"]["old"], host="abc", name="abc")))
+    assert [k for k, _ in tui.config_items(more, NAMES, 137) if k] == ["local", "abc", "old", "wmac"], "this machine first, then by ledger name"
+    # The monitor mentions an owner id only when it is all digits: anything else mentions nobody, and is not shown as one.
+    for owner, want in (("abc", "-"), ("1>@everyone", "-"), ("", "nobody"), ("999", "@999")):
+        plain = [l.plain for _, lines in tui.config_items(dict(s, monitor=dict(s["monitor"], owner_id=owner)), NAMES, 137) for l in lines]
+        assert f"mention on alert  {want}   DISCORD_USER_ID in config.env" in plain, (owner, plain[-4])
     older = dict(s, monitor={"pid": 1, "holders": []})
     plain = [l.plain for _, lines in tui.config_items(older, NAMES, 137) for l in lines]
     assert "alert language    -   ALERT_LANG in config.env" in plain and "mention on alert  -   DISCORD_USER_ID in config.env" in plain, plain
@@ -386,6 +412,15 @@ async def shell(app, pilot):
     assert app.tab == "config"
 
 
+async def small(app, pilot):
+    foot = text(app, "#foot")
+    assert foot.split() == "↑↓ select space expand enter fields c copy ←→ tabs q quit".split() and cell_len(foot.rstrip()) <= app.size.width == 80, foot
+    assert [app.query_one(w).size.height for w in ("#title", "#tabs", "#foot", "#pane")] == [1, 2, 1, 20]
+    for tab in ("alerts", "config"):
+        await pilot.press("right")
+        assert app.tab == tab and text(app, "#foot").split()[-2:] == ["q", "quit"] and cell_len(text(app, "#foot").rstrip()) <= 80
+
+
 async def bots(app, pilot):
     assert [l[:2] for l in body(app) if l[:2] in ("▸ ", "▾ ")] == ["▸ "] * 5
     assert app.cursor["bots"] == PHOTO and row_of(app, "photobot").startswith("▸ photobot") and "fix  " + FIX in text(app, "#body")
@@ -393,10 +428,11 @@ async def bots(app, pilot):
     assert row_of(app, "photobot").startswith("▾ photobot") and "posted 11m ago" in text(app, "#body") and "from dongyong22, gpuvillain," in text(app, "#body")
     await pilot.press("down", "space")   # several rows may be open
     assert app.opened == {PHOTO, HBOT} and "not posted (warning only)" in text(app, "#body") and "DMs pairing" in text(app, "#body")
-    await pilot.press("c")
-    assert app.clipboard == "", "a row with no fix copies nothing"
+    await pilot.press("c")   # a rate-limited row has a `fix` in the state (every finding has) and shows no fix line
+    assert app.clipboard == "" and not list(app._notifications), "a row with no fix line copies nothing"
     await pilot.press("up", "c")
-    assert app.clipboard == FIX, app.clipboard
+    # OSC 52 gets no answer: whether the terminal took it cannot be known (macOS Terminal.app does not).
+    assert app.clipboard == FIX and [n.message for n in app._notifications] == ["fix copied (if your terminal allows it)"], app.clipboard
     await pilot.press("space")
     assert app.opened == {HBOT}
     await pilot.press("enter")
@@ -448,7 +484,7 @@ async def crashed_project(app, pilot):
     row = line_of(app, "▲ blind")
     assert row.split()[:5] == ["▸", "-", "▲", "blind", "wmac"] and row.rstrip().endswith("q"), f"a project row, among what needs a look: {row}"
     assert "of 5 bots" in "\n".join(body(app)[:3]), "a project row is not a bot"
-    await pilot.press("down", "down", "enter")
+    await pilot.press("down", "enter")   # the first of what needs a look: it has no name
     await pilot.pause()
     assert isinstance(app.screen, tui.Detail) and "claude-discord health" in str(app.screen.query_one("#fix").render())
     assert CRASHED in str(app.screen.query_one("#body-detail").render())
@@ -581,6 +617,7 @@ async def main():
     await case("shell", shell, state="all_ok")
     await case("bots", bots, state="all_ok")
     await case("narrow", narrow, state="many", size=(100, 20))
+    await case("small", small, state="all_ok", size=(80, 24))
     await case("crashed_project", crashed_project)
     await case("markup", markup)
     await case("escapes", escapes)
@@ -605,6 +642,9 @@ async def main():
         names.parent.mkdir(parents=True)
         names.write_text("111 dong yong\nnot-an-id x\n222\n333 한글이름\n444 es\x1b]52;c;eA==\x07c\u202eape\t!\n555 \x1b\n")
         assert tui.load_names(s) == {"111": "dong yong", "333": "한글이름", "444": "es]52;c;eA==cape !"}, tui.load_names(s)
+        # A remote bot's project path is a path on ITS machine: never opened here, even when such a path exists here too.
+        s["bots"][PHOTO]["host"] = "old"
+        assert tui.load_names(s) == {}, tui.load_names(s)
     print("ok: names are read from the local bots' user-names files (<id> <name>), other lines skipped, control characters dropped")
     # q removes the holder record
     with tempfile.TemporaryDirectory() as d:

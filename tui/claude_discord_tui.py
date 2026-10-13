@@ -91,6 +91,12 @@ def ago(iso: str | None, now: float) -> str:
     return "now" if s < 60 else f"{s // 60}m" if s < 3600 else f"{s // 3600}h" if s < 172800 else f"{s // 86400}d"
 
 
+def since(iso: str | None, now: float) -> str:
+    """What follows `posted` and `last seen`: ' 12m ago', ' just now' under a minute, '' when the time is unknown."""
+    a = ago(iso, now)
+    return " just now" if a == "now" else f" {a} ago" if a else ""
+
+
 def hhmm(t: float | None) -> str:
     return time.strftime("%H:%M", time.localtime(t)) if t is not None else DASH
 
@@ -167,10 +173,11 @@ def group(state: dict, b: dict) -> float:
 
 def sorted_bots(state: dict) -> list[tuple[str, dict]]:
     """(key, entry) for the Bots tab: problems, then what needs a look, then the bots of a host that cannot be reached,
-    then healthy, then no token; by key within each.
-    A host|project|- entry (a project whose health crashed before any bot of it was known) has no `bot`: a row with bot '-'."""
+    then healthy, then no token; by bot name, then host, within each (the key is host|project path|bot: random by name).
+    A host|project|- entry (a project whose health crashed before any bot of it was known) has no `bot`: a row with bot
+    '-', the first of its group."""
     return sorted(((k, b) for k, b in (state.get("bots") or {}).items() if isinstance(b, dict)),
-                  key=lambda kv: (group(state, kv[1]), kv[0]))
+                  key=lambda kv: (group(state, kv[1]), kv[1].get("bot") or "", kv[1].get("host") or "", kv[0]))
 
 
 def kpi(state: dict) -> dict:
@@ -271,6 +278,12 @@ def row_lines(cells: list[tuple[list, int]], lead: str = "  ") -> list[Text]:
     return out
 
 
+def fix_of(state: dict, b: dict) -> str:
+    """The recovery command drawn under a row, which is what `c` copies: a problem's. Not a warning's (its `fix` is only
+    `health` again) and not on a host that cannot be reached (the command would go through it)."""
+    return b.get("fix") or "" if rank(b.get("verdict", "")) == 0 and not cut_off(state, b) else ""
+
+
 def bots_items(state: dict, names: dict, width: int, opened: set, now: float) -> list[tuple]:
     """The Bots tab as (row key or None, [Text, ...]) items: a key makes its lines one row the cursor can sit on."""
     cols = columns(width)
@@ -281,15 +294,14 @@ def bots_items(state: dict, names: dict, width: int, opened: set, now: float) ->
         word, style = ("○ host unreachable", DIM) if cut else mark(v)
         status = [(f" {word} {ago(b.get('since'), now)} " if r == 0 and not cut else word, style)]
         if o and cut:   # not its reason, which is as old as the verdict: when the host stopped answering (its `since`)
-            seen = ago(((state.get("hosts") or {}).get(b.get("host")) or {}).get("since"), now)
-            status += [(s, "") for s in wrap(f"last seen {WORD.get(v, v or '?')} {seen} ago" if seen else f"last seen {WORD.get(v, v or '?')}",
-                                             dict(cols)["status"], 2)]
+            seen = since(((state.get("hosts") or {}).get(b.get("host")) or {}).get("since"), now)
+            status += [(s, "") for s in wrap(f"last seen {WORD.get(v, v or '?')}{seen}", dict(cols)["status"], 2)]
             if b.get("posted"):
-                status.append((f"posted {ago(b.get('posted_at'), now)} ago", DIM))
+                status.append((f"posted{since(b.get('posted_at'), now)}", DIM))
         elif o:
             status += [(s, "") for s in wrap(b.get("detail") or "", dict(cols)["status"], 3)]
             if r < 2:   # from the verdict, not from its not_posted record in `alerts`: only the last 100 records are kept
-                status.append((f"posted {ago(b.get('posted_at'), now)} ago" if b.get("posted") else
+                status.append((f"posted{since(b.get('posted_at'), now)}" if b.get("posted") else
                                "not posted yet" if v in LOUD else "not posted (warning only)", DIM))
         project = b.get("project") or ""
         cell = {"bot": [(b.get("bot") or DASH, "bold")], "status": status, "host": [(host_label(state, b.get("host", "")), DIM)],
@@ -299,10 +311,8 @@ def bots_items(state: dict, names: dict, width: int, opened: set, now: float) ->
                 "last": [((ago(b.get("last_message_at"), now) or DASH).rjust(5), DIM)],
                 "project": [("~" if project and project == b.get("home") else project.rstrip("/").rsplit("/", 1)[-1] or DASH, DIM)]}
         items.append((key, row_lines([(cell[n], w) for n, w in cols], "▾ " if o else "▸ ")))
-        # One full-width line, never wrapped into a column, so it selects and copies whole. None for a host that cannot be
-        # reached: the command would go through it.
-        if r == 0 and not cut and b.get("fix"):
-            items.append((None, [Text.assemble(("     fix  ", DIM), (b["fix"], BRAND), ("   c copies it", DIM))]))
+        if fix_of(state, b):   # one full-width line, never wrapped into a column, so it selects and copies whole
+            items.append((None, [Text.assemble(("     fix  ", DIM), (fix_of(state, b), BRAND), ("   c copies it", DIM))]))
     return items
 
 
@@ -324,11 +334,12 @@ def alive(pid: int, bot: str) -> bool:
 
 def open_alerts(state: dict) -> list[dict]:
     """What the channel was told and has not seen recover: every entry with `posted`, as an alerts record (with the text
-    of the last finding sent for its key, when that record is still kept), newest first."""
-    out, alerts = [], state.get("alerts") or []
+    of the last finding sent for its key, when that record is still kept), newest first. Not a host that left the ledger
+    (`left_s`: kept a day, frozen) nor its bots: nothing checks them, so nothing of theirs can recover."""
+    out, alerts, hosts = [], state.get("alerts") or [], state.get("hosts") or {}
     for scope in ("hosts", "bots"):
         for k, e in (state.get(scope) or {}).items():
-            if e.get("posted") and e.get("left_s") is None:
+            if e.get("posted") and (hosts.get(k if scope == "hosts" else e.get("host")) or {}).get("left_s") is None:
                 key = k + "|-" if scope == "hosts" else k
                 out.append({"ts": e.get("posted_at"), "key": key, "kind": "finding", "verdict": e["posted"], "status": "sent", "detail": e.get("detail", ""),
                             "text": next((x.get("text") for x in reversed(alerts) if x.get("key") == key and x.get("kind") == "finding"
@@ -389,8 +400,10 @@ def tabs_lines(tab: str, n_open: int, width: int) -> Text:
     return Text("\n").join([row, under])
 
 
-def foot_line(tab: str) -> Text:
-    keys = {"bots": (("↑↓", "select"), ("space", "expand"), ("enter", "all fields"), ("c", "copy fix"), ("←→", "tabs"), ("q", "quit")),
+def foot_line(tab: str, width: int = WIDE) -> Text:
+    """The keys of a tab. The Bots tab's are 85 cells: below WIDE two labels are shorter, so all six keys fit in 80."""
+    fields, copy = ("all fields", "copy fix") if width >= WIDE else ("fields", "copy")
+    keys = {"bots": (("↑↓", "select"), ("space", "expand"), ("enter", fields), ("c", copy), ("←→", "tabs"), ("q", "quit")),
             "alerts": (("↑↓", "select"), ("enter", "the post's text"), ("←→", "tabs"), ("q", "quit")),
             "config": (("←→", "tabs"), ("↑↓", "select"), ("enter", "all fields"), ("q", "quit"))}[tab]
     out = Text(" ")
@@ -478,11 +491,13 @@ def key_parts(key: str) -> tuple[str, str]:
     return parts[0], (parts[-1] if len(parts) > 2 else DASH)
 
 
-def kind(a: dict) -> tuple[str, str]:
+def kind(a: dict, opened: bool = False) -> tuple[str, str]:
+    """An alerts record's kind as symbol + word, and its colour. A host's is dim in History; open (posted and not
+    recovered: a server down, a blind host) it is a problem like a bot's."""
     if a.get("kind") == "recovery":
         return "✓ recovered", OK
     if a.get("key", "").count("|") == 1:
-        return "○ host", DIM
+        return "○ host", ALERT if opened else DIM
     return ("✕ down", ALERT) if rank(a.get("verdict", "")) == 0 else ("▲ check", WARN)
 
 
@@ -508,7 +523,7 @@ def alerts_items(state: dict, width: int, now: float) -> list[tuple]:
 
     def row(a: dict, bold: bool) -> list[Text]:
         t, (host, bot) = epoch(a.get("ts")), key_parts(a.get("key", ""))
-        word, style = kind(a)
+        word, style = kind(a, bold)
         post = ("✓ sent on retry", WARN) if a.get("retried") else ("✓ sent", OK) if a.get("status") == "sent" else ("— not posted", DIM)
         cell = {"when": [(f"{hhmm(t)} · {ago(a.get('ts'), now) or DASH}", "" if bold else DIM)],
                 "": [(f" {word.upper()} " if bold else word, f"bold #000000 on {ALERT}" if bold and style == ALERT else style)],
@@ -534,7 +549,7 @@ def config_items(state: dict, names: dict, width: int) -> list[tuple]:
             + ([("claude-discord", 15)] if wide else []) + [("bots", 4)])
     cols[1] = ("ssh target", max(10, width - 2 - sum(w for _, w in cols) - len(cols) + 1))
     bots, m, mgr = state.get("bots") or {}, state.get("monitor") or {}, state.get("manager", "?")
-    hosts = sorted((state.get("hosts") or {}).items())
+    hosts = sorted((state.get("hosts") or {}).items(), key=lambda kh: (kh[0] != "local", kh[0]))   # this machine first
     items: list[tuple] = [(None, [rule("Hosts", len(hosts), "", width), Text()]), (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))]
     for key, h in hosts:
         v = h.get("verdict", "")
@@ -552,10 +567,12 @@ def config_items(state: dict, names: dict, width: int) -> list[tuple]:
                 "claude-discord": [(((h.get("version") or "").split(" ")[0] if up else "") or DASH, "")],
                 "bots": [(str(sum(1 for b in bots.values() if b.get("host") == key and b.get("bot"))) if up else DASH, "")]}
         items.append((key, row_lines([(cell[n], w) for n, w in cols])))
-    owner = str(m.get("owner_id") or "")
+    # The monitor mentions an owner id only when it is all digits (its `owner`): any other value mentions nobody.
+    owner = m.get("owner_id")
+    who = "nobody" if owner == "" else "@" + names.get(owner, owner) if isinstance(owner, str) and owner.isascii() and owner.isdigit() else DASH
     keeper = any(h.get("kind") == "keeper" for h in m.get("holders") or [])
     rows = [("alert language", m.get("lang") or DASH, [("ALERT_LANG in config.env", DIM)]),
-            ("mention on alert", ("@" + names.get(owner, owner)) if owner else "nobody" if "owner_id" in m else DASH, [("DISCORD_USER_ID in config.env", DIM)]),
+            ("mention on alert", who, [("DISCORD_USER_ID in config.env", DIM)]),
             ("check every", "5 min", [("fixed", DIM)]), ("alert channel", "#bot-health-check", [("fixed", DIM)]),
             ("kept running by", "keeper" if keeper else "nothing", [("stop: ", DIM), (f"claude-discord monitor --stop {mgr}", BRAND)])]
     items.append((None, [Text(), rule("Monitor", None, "config.env values change with setup; fixed ones do not", width), Text()]
@@ -726,7 +743,7 @@ class MonitorTUI(App):
         text, y, h = render(items, self.cursor[self.tab], w)
         if self.show("#body", text):
             self.query_one("#pane", Pane).scroll_to_region(Region(0, y, 1, h), animate=False, force=True)
-        self.show("#foot", foot_line(self.tab))
+        self.show("#foot", foot_line(self.tab, w))
 
     def on_resize(self, event: Resize) -> None:
         self.width = event.size.width
@@ -767,10 +784,10 @@ class MonitorTUI(App):
         self.push_screen(Detail(entry_text(key, key + "|-" if scope == "hosts" else key, entry, alerts), entry.get("fix") or ""))
 
     def action_copy(self) -> None:
-        fix = ((self.state.get("bots") or {}).get(self.cursor["bots"] or "") or {}).get("fix") if self.tab == "bots" else None
-        if fix:
+        fix = fix_of(self.state, (self.state.get("bots") or {}).get(self.cursor["bots"] or "") or {}) if self.tab == "bots" else ""
+        if fix:   # only what the row shows as its fix line
             self.copy_to_clipboard(fix)   # OSC 52: the terminal's clipboard, over ssh too
-            self.notify("fix copied")
+            self.notify("fix copied (if your terminal allows it)")   # OSC 52 has no answer, and not every terminal takes it
 
     def action_quit_stop(self) -> None:
         if not self.wrapper:

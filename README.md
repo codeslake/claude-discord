@@ -1057,9 +1057,10 @@ project. Problems come first (`down`, `stale` shown as `STUCK`, `duplicate`,
 not reach (`○ host unreachable`, dim, whatever they were last seen as: the
 monitor keeps their last verdict, which is not a current one, so they are in
 none of the counts; opened, the row says `last seen <status> <N> ago`), then
-`working` and `ok`, then `no token`.
+`working` and `ok`, then `no token`; by bot name, then host, within each.
 A problem row has its recovery command on a line of its own under it, and `c`
-copies it (OSC 52, so over ssh too). `space` opens a row, and several may be
+copies it (OSC 52, so over ssh too, in a terminal that allows it; no other
+row has one to copy). `space` opens a row, and several may be
 open: the status column gains the reason and `posted Nm ago`, `not posted
 yet` or `not posted (warning only)`; the channel column every channel of the
 bot's `access.json` (ids but for the main one; the manager's own row adds
@@ -1075,20 +1076,23 @@ counted as a bot.
 
 *Alerts tab.* `Open`: what the channel was told and has not seen recover.
 `History`: the records of the last 24 hours, newest first: when, kind
-(`✕ down`, `▲ check`, `○ host`, `✓ recovered`), bot, host, the reason, and
+(`✕ down`, `▲ check`, `○ host`, `✓ recovered`; an open host alert in the
+alert colour, like a bot's), bot, host, the reason, and
 the post (`✓ sent`, `✓ sent on retry`, `— not posted`). `Enter` shows the
 posted text, or `(the posted text is no longer kept)` for an open alert whose
 record is out of the 100. A record written by a monitor older than 1.11.0
 has no reason and no text.
 
-*Configuration tab* (read-only). `Hosts`: one row per ledger host: its
+*Configuration tab* (read-only). `Hosts`: one row per ledger host, this
+machine first: its
 display name, the ssh name with the machine's own hostname (`this machine`
 for `local`), server or laptop, the key names of its env words (never a
 value), whether the last pass reached it, its claude-discord version and its
 bot count; `Enter` shows its raw fields and recovery command. A host taken
 out of the ledger is marked `(left the ledger)` for a day, then dropped.
 `Monitor`: the alert language (`ALERT_LANG`) and who is mentioned
-(`DISCORD_USER_ID`), both from the manager project's `config.env`, and the
+(`DISCORD_USER_ID`; `-` when it is not an id, which mentions nobody), both
+from the manager project's `config.env`, and the
 fixed parts: a check every 5 minutes, `#bot-health-check`, the keeper and
 the stop command.
 
