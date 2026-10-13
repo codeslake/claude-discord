@@ -1407,17 +1407,33 @@ if [ "${1:-}" = health ]; then
     # unaddressed -- a wedged bot in such a channel was undetectable. Third
     # place that operator bit here; false is a meaningful value in all of
     # them, so `//` is never right for one.
+    # The fourth field is the whole access policy, for the TUI (1.11.0), from this same jq: every numeric group with
+    # its requireMention and allowFrom, dmPolicy and the DM allowFrom. An id is kept only when it is all digits and the
+    # policy only when it is all letters, so that JSON holds no backslash and no tab and survives @tsv and `read` as it is.
+    # No channel is written "-": a tab is IFS whitespace, so an empty first field would shift the others left.
     cfg=$(jq -r --arg fb "${DISCORD_CHANNEL_ID:-}" '
+      def ids: [arrays[] | tostring | select(test("^[0-9]+$"))] | unique;
       (.groups | objects | keys) as $k
       | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) as $ch
-      | [ $ch,
+      | [ (if $ch == "" then "-" else $ch end),
           (.groups[$ch].requireMention | if . == null then true else . end | tostring),
-          ((.groups[$ch].allowFrom // []) | map(tostring) | unique | @json) ]
+          ((.groups[$ch].allowFrom // []) | map(tostring) | unique | @json),
+          ({dm: (.dmPolicy | if type == "string" and test("^[A-Za-z]+$") then . else null end), dm_allow: (.allowFrom | ids),
+            groups: [.groups | to_entries[] | select((.key | test("^[0-9]+$")) and (.value | type) == "object")
+                     | {id: .key, mention: (.value.requireMention != false), allow: (.value.allowFrom | ids)}]} | tojson) ]
       | @tsv' "$d/access.json" 2>/dev/null) || cfg=""
-    IFS=$'\t' read -r ch mention allow <<<"$cfg"
+    access=""
+    IFS=$'\t' read -r ch mention allow access <<<"$cfg"
     case ${ch:-} in ''|*[!0-9]*) ch=${DISCORD_CHANNEL_ID:-};; esac
     case ${mention:-} in true|false) ;; *) mention=true;; esac
     case ${allow:-} in '['*) ;; *) allow='[]';; esac
+    # The guild and the name of the channel, cached as "<channel> <guild> <name> <read at, epoch s>" (see below). Read
+    # here, before any verdict, so the name is known whatever Discord answers this run. A line for another channel is
+    # not used; one an older version wrote (two fields) has no name and no age.
+    gid="" cname="" cat_s="" cached=$(cat "$d/channel-guild" 2>/dev/null) || cached=""
+    case $cached in "$ch "*) read -r cch gid cname cat_s <<<"$cached";; esac
+    case $cat_s in ''|*[!0-9]*) cat_s=0;; esac
+    [ "$cname" != - ] || cname=""
 
     verdict=ok detail="" oldest="" age=0 me="" status=000 resp=""
     if [ "$net" = down ]; then
@@ -1471,12 +1487,22 @@ if [ "${1:-}" = health ]; then
           # on nothing would then answer for the old channel. A cached line
           # is used only when its channel is still this one and the guild
           # still looks like an id; anything else re-fetches and rewrites it.
-          gid="" cached=$(cat "$d/channel-guild" 2>/dev/null) || cached=""
-          case $cached in "$ch "*) gid=${cached#* };; esac
-          if ! is_id "$gid"; then
+          # Since 1.11.0 the NAME of the channel is kept there too (the TUI's channel column), and a name can change,
+          # so the line is read again once it is a day old (its fourth field is when it was read): one call a day per
+          # bot, and the jq that read the guild reads both. A line with no age (an older version's) is read once.
+          # A read that fails keeps the line as it is: the guild in it is still right. Two steps, since bash 3.2
+          # misreads a quoted jq program inside "$( )" inside double quotes. "-" stands for a missing guild or name,
+          # so no field is empty (a tab is IFS whitespace) and the line always has four words.
+          if ! is_id "$gid" || [ $((now_s - cat_s)) -ge 86400 ]; then
             api "channels/$ch"
-            gid=$(printf '%s' "$resp" | jq -r '.guild_id // empty' 2>/dev/null) || gid=""
-            ! is_id "$gid" || printf '%s %s\n' "$ch" "$gid" > "$d/channel-guild" 2>/dev/null || :
+            cg=$(printf '%s' "$resp" | jq -r '[(.guild_id // "-" | tostring), (.name // "" | tostring | gsub("[[:space:][:cntrl:]]+"; "-") | if . == "" then "-" else . end)] | @tsv' 2>/dev/null) || cg=""
+            ngid="" nname=""
+            IFS=$'\t' read -r ngid nname <<<"$cg" || :
+            if is_id "$ngid"; then
+              gid=$ngid cname=$nname
+              printf '%s %s %s %s\n' "$ch" "$gid" "$cname" "$now_s" > "$d/channel-guild" 2>/dev/null || :
+              [ "$cname" != - ] || cname=""
+            fi
           fi
           if is_id "$gid"; then
             api "guilds/$gid/threads/active"
@@ -1560,6 +1586,13 @@ if [ "${1:-}" = health ]; then
 
     rows=$rows$bot$'\x1f'$verdict$'\x1f'$detail$'\x1f'$servers$'\x1f'${turn:-}$'\x1f'
     rows=$rows${oldest:-}$'\x1f'$last_seen$'\x1f'${age:-0}$'\x1f'$refresh_tail$'\x1f'$trusted$'\x1f'
+    # 1.11.0, for the TUI: the channel and its cached name, the second the last message handed to the session was made
+    # (the snowflake of last-message-id, as snowflake_s reads one, with no fork; empty when there is none) and the
+    # access policy. The monitor carries them into state.json.
+    lm=""
+    [ "$last_seen" = 0 ] || { lm=${last_seen#"${last_seen%%[!0]*}"}; lm=$(( ((${lm:-0} >> 22) + 1420070400000) / 1000 )); }
+    is_id "$ch" || ch=""
+    rows=$rows$ch$'\x1f'$cname$'\x1f'$lm$'\x1f'$access$'\x1f'
 
 
     line="claude-discord health: $bot $verdict${detail:+ -- $detail}"
@@ -1574,7 +1607,7 @@ if [ "${1:-}" = health ]; then
     [ "$as_json" = yes ] || echo "$line"
   done
   # One jq for the whole run: it reads the NUL-separated fields, groups them
-  # ten at a time into objects, prints them when asked, and reports through
+  # fourteen at a time into objects, prints them when asked, and reports through
   # its exit status whether anything needs a human -- so a caller can tell
   # without parsing anything. `busy` is not a
   # finding. No bots at all is an empty list, which is "nothing wrong".
@@ -1585,11 +1618,14 @@ if [ "${1:-}" = health ]; then
   # (-r prints only a string raw), so printing it needs no second jq.
   rows=$(printf '%s' "$rows" | jq -rRs --argjson show "$([ "$as_json" = yes ] && echo true || echo false)" --arg owner "${DISCORD_USER_ID:-}" '
     [ splits("\u001f") ] | .[:-1]
-    | [ range(0; length; 10) as $i
+    | [ range(0; length; 14) as $i
         | { bot: .[$i], verdict: .[$i+1], detail: .[$i+2], servers: .[$i+3],
             turn_min: .[$i+4], oldest_unanswered: .[$i+5], last_seen: .[$i+6],
             unanswered_min: (.[$i+7] | tonumber? // 0), refresh_tail: .[$i+8],
-            trusted: .[$i+9], owner_id: $owner } ]
+            trusted: .[$i+9], owner_id: $owner,
+            channel: .[$i+10], channel_name: .[$i+11],
+            last_message_at: ((.[$i+12] | tonumber? // null) | if . == null then null else todate end),
+            access: (.[$i+13] | try fromjson catch null) } ]
     | (if $show then . else empty end),
       (if all(.[]; .verdict == "ok" or .verdict == "busy") then "ok" else "finding" end)
     ' 2>/dev/null) || rows=finding

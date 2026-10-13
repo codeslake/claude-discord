@@ -2873,7 +2873,10 @@ seed_id() { printf '777\n' > "$1/bot-id"; }
 # asking. 900 is the channel every bot in these fixtures is set up with; a
 # cache written for a DIFFERENT channel must be ignored, which has its own
 # case below.
-seed_guild() { printf '900 5\n' > "$1/channel-guild"; }
+# Since 1.11.0 the line is "<channel> <guild> <name> <read at, epoch s>" and is read again once it is a day old: seeded
+# fresh, so no run re-reads it. guild_of prints the first three fields of a bot's line.
+SEED_S=$(date +%s); seed_guild() { printf '900 5 general %s\n' "$SEED_S" > "$1/channel-guild"; }
+guild_of() { local c="" g="" n="" t=""; { read -r c g n t < "$1/channel-guild"; } 2>/dev/null || :; printf '%s' "$c $g $n"; }
 
 # The bots. Names are chosen so the glob order health walks them in is the
 # order their answers are queued below. allowFrom is 111 and 222 (from
@@ -3107,19 +3110,19 @@ start_server "$SD"
 # The two caches are independent files read in a fixed order (bot id, messages, guild, threads), so each run below
 # exercises both: A neither cached, B both cached, C both stale (one run for each of the id's and the guild's cases).
 rm -f "$SD/bot-id" "$SD/channel-guild"
-queue "200 $me_json" "200 $NONE" '200 {"guild_id":"5"}' '200 {"threads":[]}'
+queue "200 $me_json" "200 $NONE" '200 {"guild_id":"5","name":"general"}' '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: the first run must ask for the bot id and the guild and carry on: $out"; exit 1; }
 [ "$(<"$SD/bot-id")" = 777 ] || { echo "FAIL: the bot id must be kept: $(cat "$SD/bot-id" 2>&1)"; exit 1; }
-[ "$(<"$SD/channel-guild")" = "900 5" ] || { echo "FAIL: the guild must be kept with its channel: $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
+[ "$(guild_of "$SD")" = "900 5 general" ] || { echo "FAIL: the guild must be kept with its channel: $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
 queue "200 $NONE" '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: a later run must use the cached id and guild and make no users/@me and no channels/<id> call: $out"; exit 1; }
 [ ! -s "$CURL_REPLIES" ] || { echo "FAIL: a cached id and guild must cost no extra call: $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
 printf 'not-an-id\n' > "$SD/bot-id"; printf '901 5\n' > "$SD/channel-guild"   # an id that is not one; a guild cached for another channel
-queue "200 $me_json" "200 $NONE" '200 {"guild_id":"5"}' '200 {"threads":[]}'
+queue "200 $me_json" "200 $NONE" '200 {"guild_id":"5","name":"general"}' '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
-[ "$(verdict_of sbot "$out")" = ok ] && [ "$(<"$SD/bot-id")" = 777 ] && [ "$(<"$SD/channel-guild")" = "900 5" ] ||
+[ "$(verdict_of sbot "$out")" = ok ] && [ "$(<"$SD/bot-id")" = 777 ] && [ "$(guild_of "$SD")" = "900 5 general" ] ||
   { echo "FAIL: a cached id that is not an id, and a guild cached for another channel, must be re-fetched and replaced: $out / $(cat "$SD/bot-id" "$SD/channel-guild" 2>&1)"; exit 1; }
 [ ! -s "$CURL_REPLIES" ] || { echo "FAIL: the two stale caches must cost exactly the two re-fetches: $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
 echo "ok: health asks for a bot's own id once, keeps it, reuses it without another call, and re-fetches a cached value that is not an id"
@@ -3134,12 +3137,46 @@ echo "ok: health asks for a bot's own id once, keeps it, reuses it without anoth
 # The guild's first fetch, its reuse and the cache written for another channel ran above, in the same three runs as the
 # bot id's. Left here: a cached guild that is not an id must be re-fetched rather than used.
 printf '900 not-an-id\n' > "$SD/channel-guild"
-queue "200 $NONE" '200 {"guild_id":"5"}' '200 {"threads":[]}'
+queue "200 $NONE" '200 {"guild_id":"5","name":"general"}' '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
-[ "$(verdict_of sbot "$out")" = ok ] && [ "$(<"$SD/channel-guild")" = "900 5" ] ||
+[ "$(verdict_of sbot "$out")" = ok ] && [ "$(guild_of "$SD")" = "900 5 general" ] ||
   { echo "FAIL: a cache reading '900 not-an-id' must be re-fetched and replaced: $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
 [ ! -s "$CURL_REPLIES" ] || { echo "FAIL: '900 not-an-id' must cost exactly the one re-fetch: $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
 echo "ok: health asks for a channel's guild once, keeps it with the channel it was learned for, reuses it without another call, and re-fetches it for another channel or a value that is not an id"
+
+# 1.11.0: what the TUI shows travels in the same --json: the channel and its name, every access group, the DM policy
+# and when the session was last handed a message. The name is cached in channel-guild as a third field and the time it
+# was read as a fourth ("<channel> <guild> <name> <epoch s>"); the line is read again once it is a day old, and a line
+# of an older version (two fields) once. No extra jq: the same three calls a run already made carry it all.
+cp "$SD/access.json" "$SD/access.json.keep"
+# Two numeric groups (the channel then comes from config.env, 900), a key that is no channel id, a DM policy, and an
+# allowFrom entry that is not an id (a hand edit): only ids reach the document.
+jq '.dmPolicy = "pairing" | .allowFrom = ["111", "1>@everyone"] | .groups["901"] = {requireMention: false, allowFrom: []} | .groups["not-an-id"] = {allowFrom: ["5"]}' "$SD/access.json.keep" > "$SD/access.json"
+printf '900 5\n' > "$SD/channel-guild"   # as 1.10 wrote it: no name, no age
+queue "200 $NONE" '200 {"guild_id":"5","name":"봇 dev"}' '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+read -r c g n t < "$SD/channel-guild"
+[ "$c $g $n" = "900 5 봇-dev" ] && [ "$t" -ge "$SEED_S" ] && [ ! -s "$CURL_REPLIES" ] ||
+  { echo "FAIL: a channel-guild line with no name must be read again once, and kept as <channel> <guild> <name> <read at>, a space in the name made '-': $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
+jq -e --arg at "$(date -u -d "@$(( ((ID_SEEN >> 22) + 1420070400000) / 1000 ))" +%Y-%m-%dT%H:%M:%SZ)" '.[0] | .verdict == "ok" and .channel == "900" and .channel_name == "봇-dev"
+  and .last_message_at == $at
+  and .access == {dm: "pairing", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: ["111", "222"]}, {id: "901", mention: false, allow: []}]}' <<<"$out" >/dev/null ||
+  { echo "FAIL: --json must carry channel, channel_name, last_message_at (from the last-message-id snowflake) and access (every numeric group, dmPolicy and its allowFrom, ids only): $out"; exit 1; }
+# A day and a second old, and the read fails (HTTP 500): the line stays as it is, its name is still shown, the bot is ok.
+printf '900 5 kept-name %s\n' "$(( SEED_S - 86401 ))" > "$SD/channel-guild"
+queue "200 $NONE" '500 {}' '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = ok ] && [ "$(field_of sbot channel_name "$out")" = kept-name ] && [ "$(<"$SD/channel-guild")" = "900 5 kept-name $(( SEED_S - 86401 ))" ] && [ ! -s "$CURL_REPLIES" ] ||
+  { echo "FAIL: a channel-guild line a day old is read again (one call); a failed read keeps the line and its name and fails nothing: $out / $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
+mv "$SD/access.json.keep" "$SD/access.json"; seed_guild "$SD"
+# A bot with no token and no channel (a .env with nothing in it, no access.json, no config.env): the new fields are
+# empty or null, never an error. Only the unauthenticated /gateway is asked.
+NP="$HOME/none-project"; mkdir -p "$NP/.claude/discord-agents/nobot"; : > "$NP/.claude/discord-agents/nobot/.env"
+queue
+out=$(cd "$NP" && bash "$S" health --json 2>/dev/null) || :
+jq -e '.[0] | .bot == "nobot" and .verdict == "unknown" and .channel == "" and .channel_name == "" and .last_message_at == null and .access == null' <<<"$out" >/dev/null && [ ! -s "$CURL_REPLIES" ] ||
+  { echo "FAIL: a bot with no token and no channel has empty channel fields, a null time and a null access, and costs no call: $out"; exit 1; }
+echo "ok: health --json carries channel, channel_name (cached in channel-guild with the time it was read; read again after a day or for a line with no name; a failed read keeps it), last_message_at from the snowflake and the access policy (ids only), and empty or null ones for a bot with no token and no channel"
 
 # The age is measured from the OLDEST unanswered message, not the newest:
 # with the newest, every fresh message resets the clock, and a wedged bot is

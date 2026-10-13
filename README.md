@@ -814,6 +814,15 @@ two fewer HTTP calls and two fewer `jq` per bot per run. A cached value that doe
 re-fetched, so a truncated file heals itself instead of poisoning every later
 run.
 
+`health --json` also carries, per bot, what the TUI shows (1.11.0):
+`channel` and `channel_name`, `last_message_at` (the time inside the
+`last-message-id` snowflake: when the session was last handed a message) and
+`access` (`dm`, `dm_allow` and, per channel of `access.json`, `groups[].id`,
+`mention` and `allow`: ids only, never a name or a token). The channel's name
+is kept in `channel-guild` as a third field, with the second it was read as a
+fourth, and is read again once that is a day old (one call a day per bot); a
+read that fails keeps the line. No `jq` start was added for any of it.
+
 **It never restarts and never stops anything.** A misjudged restart is what
 puts two sessions on one token, and a health check is the thing most likely to
 misjudge. It posts nothing to Discord either: it prints, and a human decides.
