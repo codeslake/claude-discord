@@ -1130,6 +1130,7 @@ one the suite builds a faster jq stub, without it a bash stub runs (about 1.5 s
 slower, same checks). With jq 1.6 the suite runs some 8 s longer than with 1.7 or
 newer: it starts jq about 2,400 times.
 
-`uv run --script tests/tui/test_tui.py` drives the TUI over fixture state
+`uv run --script tests/tui/test_tui.py` checks the TUI's pure functions (what
+each column shows, at which width) and then drives it over fixture state
 files (Textual's pilot). It needs uv and the Textual wheel, so it sits
 outside the stub suite and its 40 s budget.

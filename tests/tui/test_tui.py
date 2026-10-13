@@ -13,12 +13,158 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
+os.environ["TZ"] = "UTC"   # HH:MM in the title and the Alerts tab is local time: fixed here
+time.tzset()
+from rich.cells import cell_len
+
+sys.dont_write_bytecode = True   # loading the TUI by path would leave tui/__pycache__ in the repo
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("tui", ROOT / "tui" / "claude_discord_tui.py")
 tui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tui)
+
+
+def iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+HANGUL = "한글봇이름이아주길어요"   # 11 characters, 22 cells
+ACCESS = {"dm": "allowlist", "dm_allow": ["111"],
+          "groups": [{"id": "900", "mention": True, "allow": ["111", "222", "333", "444", "555"]}, {"id": "901", "mention": False, "allow": []}]}
+NAMES = {"111": "dongyong22", "222": "gpuvillain", "333": "junyong-dev-bot"}
+PHOTO, MGRBOT, HBOT, OLDBOT, NOTOK = ("local|/home/u/rcps|photobot", "local|/home/u/cd|mgr", "local|/home/u/cd|" + HANGUL,
+                                      "old|/home/u/p|oldbot", "local|/home/u|notok")
+FIX = "cd ~/rcps && claude-discord --bg --name photobot"
+
+
+def base(n=None):
+    """A state as 1.11.0's monitor writes it, built from the clock (the offsets sit 20 s inside their minute): a down bot
+    (posted), the manager bot working, a rate-limited bot with a Hangul name and channel, a bot on a host whose
+    claude-discord is older (none of the 1.11.0 fields), and a bot with no token and no channel."""
+    n = time.time() if n is None else n
+    bot = lambda host, project, name, verdict, **kw: dict(
+        {"host": host, "project": project, "home": "/home/u", "bot": name, "verdict": verdict, "since": iso(n - 20), "detail": "", "servers": "1"}, **kw)
+    return {"version": 1, "manager": "mgr",
+            "monitor": {"pid": MON.pid, "started": iso(n - 4000), "last_pass": iso(n - 80), "next_pass": iso(n + 220), "pass_s": 2,
+                        "holders": [{"kind": "keeper", "pid": 789}, {"kind": "tui", "pid": 456}], "post_failed": False, "lang": "en", "owner_id": "111"},
+            "hosts": {"local": {"host": "local", "name": "SECA2033001362", "hostname": "SECA2033001362", "display": "lmd79", "env": ["HTTPS_PROXY"],
+                                "reach": "ok", "patch": "ok", "version": "1.11.0 (abc)", "verdict": "ok", "detail": "", "fix": "", "checked": iso(n - 80), "laptop": False},
+                      "wmac": {"host": "wmac", "name": "wmac", "hostname": "SECA2033002083", "display": "", "env": [], "reach": "hostdown", "verdict": "hostdown",
+                               "detail": "ssh to wmac failed (exit 255), also with ControlPath=none", "since": iso(n - 14420),
+                               "fix": "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ControlPath=none wmac 'echo up'", "checked": iso(n - 80), "laptop": True},
+                      # a state entry written before 1.11.0: no display, env or hostname
+                      "old": {"host": "old", "name": "old", "reach": "ok", "patch": "ok", "version": "1.10.5 (x)", "verdict": "ok", "checked": iso(n - 80), "laptop": False}},
+            "bots": {PHOTO: bot("local", "/home/u/rcps", "photobot", "down", since=iso(n - 740), detail="no plugin server for this bot", servers="0", fix=FIX,
+                                posted="down", posted_at=iso(n - 680), channel="900", channel_name="photo", access=ACCESS, last_message_at=iso(n - 740)),
+                     MGRBOT: bot("local", "/home/u/cd", "mgr", "busy", detail="a turn has been in flight 3m; holding the finding",
+                                 channel="900", channel_name="dev-bots", access=ACCESS, last_message_at=iso(n - 5)),
+                     HBOT: bot("local", "/home/u/cd", HANGUL, "throttled", detail="Discord is rate-limiting this bot (HTTP 429); nothing can be said about it this run",
+                               channel="902", channel_name="한글-채널-이름이-아주-길다", last_message_at=iso(n - 560),
+                               access={"dm": "pairing", "dm_allow": [], "groups": [{"id": "902", "mention": False, "allow": []}]}),
+                     OLDBOT: bot("old", "/home/u/p", "oldbot", "ok"),
+                     NOTOK: bot("local", "/home/u", "notok", "unknown", detail="no token or channel in /home/u/.claude/discord-agents/notok",
+                                channel="", channel_name="", access=None, last_message_at=None)},
+            "alerts": [{"ts": iso(n - 30020), "key": OLDBOT, "kind": "finding", "verdict": "unreachable", "status": "sent", "retried": True,
+                        "detail": "Discord refused this bot's token (HTTP 401)", "text": "[unreachable] oldbot on old (~/p)"},
+                       {"ts": iso(n - 14420), "key": "wmac|-", "kind": "finding", "verdict": "hostdown", "status": "not_posted",
+                        "detail": "ssh to wmac failed (exit 255), also with ControlPath=none"},
+                       {"ts": iso(n - 7520), "key": MGRBOT, "kind": "finding", "verdict": "down", "status": "sent", "detail": "no plugin server for this bot",
+                        "text": "<@111> [down] mgr on lmd79 (~/cd)"},
+                       {"ts": iso(n - 7400), "key": MGRBOT, "kind": "finding", "verdict": "down", "status": "failed", "detail": "no plugin server for this bot"},
+                       # as 1.10.x wrote it: no detail, no text
+                       {"ts": iso(n - 7220), "key": MGRBOT, "kind": "recovery", "verdict": "down", "status": "sent"},
+                       {"ts": iso(n - 7100), "key": "wmac|-", "kind": "recovery", "verdict": "blind", "status": "sent", "detail": "back after 5m",
+                        "text": "[recovered] wmac: answering again after 5m (was blind)"},
+                       {"ts": iso(n - 680), "key": PHOTO, "kind": "finding", "verdict": "down", "status": "sent", "detail": "no plugin server for this bot",
+                        "text": "<@111> [down] photobot on lmd79 (~/rcps)\nreason: no plugin server for this bot\nfix: " + FIX},
+                       {"ts": iso(n - 20), "key": HBOT, "kind": "finding", "verdict": "throttled", "status": "not_posted",
+                        "detail": "Discord is rate-limiting this bot (HTTP 429); nothing can be said about it this run"}]}
+
+
+# ---- pure functions --------------------------------------------------------
+def pure():
+    T = tui.epoch("2026-10-13T17:49:00Z")
+    assert [tui.ago(iso(T - s), T) for s in (0, 59, 60, 3599, 3600, 172799, 172800)] == ["now", "now", "1m", "59m", "1h", "47h", "2d"]
+    assert tui.ago(None, T) == "" and tui.ago("yesterday", T) == "" and tui.hhmm(T - 720) == "17:37" and tui.hhmm(None) == "-"
+    print("ok: ago is now/m/h/d, empty for a time that is missing or not one; HH:MM is local time")
+
+    # Width: a Hangul or CJK character is two cells, and every cell of the table must come out exactly its column wide.
+    assert cell_len(HANGUL) == 22
+    for s in ("photobot", HANGUL, "日本語のチャンネル名です", "a" * 40, ""):
+        assert cell_len(tui.fit(s, 16)) == 16, (s, tui.fit(s, 16))
+    assert tui.fit(HANGUL, 16).endswith("…") and tui.fit("photobot", 16) == "photobot" + " " * 8 and tui.fit("abc", 0) == ""
+    assert tui.wrap("no plugin server for this bot", 18, 3) == ["no plugin server", "for this bot"]
+    assert tui.wrap("a b c d e f", 3, 2) == ["a b", "c d e f"], "what does not fit in n lines stays on the last (fit cuts it)"
+    print("ok: fit gives exactly the column's cells for ASCII, Hangul and CJK, with an ellipsis when cut; wrap breaks at spaces")
+
+    # An allowFrom list longer than its column: names fold over three lines, the rest is counted.
+    assert tui.fold_names("from", ["dongyong22", "gpuvillain", "junyong-dev-bot", "d", "e"], 22) == ["from dongyong22,", "gpuvillain,", "junyong-dev-bot, d, e"]
+    many = ["dongyong22", "gpuvillain", "junyong-dev-bot", "another-long-name", "x5", "x6"]
+    got = tui.fold_names("from", many, 22)
+    assert got == ["from dongyong22,", "gpuvillain,", "junyong-dev-bot +3"], got
+    assert all(cell_len(l) <= 22 for l in got)
+    assert tui.fold_names("from", ["한" * 20, "b"], 22)[0] == "from" and all(cell_len(l) <= 22 for l in tui.fold_names("from", ["한" * 20, "b"], 22))
+    assert tui.fold_names("DMs", ["dongyong22"], 22) == ["DMs dongyong22"]
+    print("ok: names fold over at most three lines of the column and the rest is counted (+N); a name wider than the column is cut")
+
+    s = base(T)
+    assert [k for k, _ in tui.sorted_bots(s)] == [PHOTO, HBOT, MGRBOT, OLDBOT, NOTOK], [k for k, _ in tui.sorted_bots(s)]
+    assert [tui.rank(v) for v in ("down", "stale", "duplicate", "unreachable", "throttled", "apierror", "nostate", "blind", "noreach", "newverdict",
+                                  "busy", "ok", "unknown")] == [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 3]
+    k = tui.kpi(s)
+    assert (k["problems"], k["look"], k["healthy"], k["notoken"], k["bots"], k["hosts_ok"], k["hosts"]) == (1, 1, 2, 1, 5, 2, 3), k
+    assert (k["first_problem"], k["problem_word"], k["first_look"], k["first_unreachable"]) == ("photobot", "down", HANGUL, "wmac"), k
+    assert [l.plain for l in tui.kpi_lines(s, 109)] == ["✕ 1  ▲ 1  ● 2  ○ 1 of 5 bots   hosts 2/3"]
+    wide = [l.plain for l in tui.kpi_lines(s, 137)]
+    assert len(wide) == 3 and len({cell_len(l) for l in wide}) == 1 and cell_len(wide[0]) <= 137, wide
+    assert "✕ Problems 1  photobot down" in wide[1] and "● Healthy 2 of 5 bots" in wide[1] and "Hosts 2 / 3  wmac unreachable" in wide[1], wide[1]
+    print("ok: problems first, then what needs a look, then healthy, then no token; the KPI band counts every bot, a no-token bot apart; one line below 110")
+
+    assert [n for n, _ in tui.columns(110)] == ["bot", "status", "host", "channel", "receives", "last", "project"]
+    assert [n for n, _ in tui.columns(109)] == ["bot", "status", "host", "channel", "last"]
+    for w in (80, 109, 110, 137, 200):
+        assert 2 + sum(c for _, c in tui.columns(w)) + len(tui.columns(w)) - 1 <= w, w
+    b = s["bots"]
+    assert tui.receives(b[PHOTO], NAMES, 22, False) == ["@mention · 5 users"] and tui.receives(b[HBOT], NAMES, 22, False) == ["any message · anyone"]
+    assert tui.receives(b[PHOTO], NAMES, 22, True) == ["@mention required", "from dongyong22,", "gpuvillain,", "junyong-dev-bot +2", "DMs dongyong22"]
+    assert tui.receives(b[HBOT], NAMES, 22, True) == ["any message", "from anyone", "DMs pairing"]
+    assert tui.receives(b[PHOTO], {}, 22, True)[1:3] == ["from 111, 222, 333,", "444, 555"], "ids when the names are unknown"
+    assert tui.channels(b[PHOTO], "mgr", 22, False) == ["#photo"] and tui.channels(b[PHOTO], "mgr", 22, True) == ["#photo (main)", "#901"]
+    assert tui.channels(b[MGRBOT], "mgr", 22, True) == ["#dev-bots (main)", "#901", "#bot-health-check", "  (write-only)"]
+    assert tui.channels(b[MGRBOT], "mgr", 40, True)[-1] == "#bot-health-check (write-only)"
+    # An older claude-discord on the host (no such fields at all), and a bot with no token and no channel: a dash, no error.
+    for key in (OLDBOT, NOTOK):
+        for o in (False, True):
+            assert tui.receives(b[key], NAMES, 22, o) == ["-"] and tui.channels(b[key], "mgr", 22, o) == ["-"], (key, o)
+    print("ok: receives and channel columns closed and open; ids without names; a dash for an older host's bot and for a bot with no token and no channel")
+
+    for width in (137, 100):
+        items = tui.bots_items(s, NAMES, width, {PHOTO, HBOT, MGRBOT, OLDBOT, NOTOK}, T)
+        rows = {k: [l.plain for l in lines] for k, lines in items if k}
+        assert list(rows) == [PHOTO, HBOT, MGRBOT, OLDBOT, NOTOK]
+        widths = {cell_len(l) for lines in rows.values() for l in lines}
+        assert len(widths) == 1 and widths.pop() <= width, "every table line is the same number of cells wide, Hangul or not"
+        at = lambda key, word: cell_len(rows[key][0][:rows[key][0].index(word)])
+        assert at(HBOT, "▲ rate-limited") == at(MGRBOT, "◐ working") == at(OLDBOT, "● ok"), "the status column starts at the same cell on every row"
+        assert at(HBOT, "lmd79") == at(MGRBOT, "lmd79"), "and so does the host column, after a Hangul name and channel"
+        assert rows[OLDBOT][0].split() == ["▾", "oldbot", "●", "ok", "old", "-"] + (["-", "-", "p"] if width >= 110 else ["-"]), rows[OLDBOT]
+        fixes = [lines[0].plain for k, lines in items if k is None and lines and lines[0].plain.lstrip().startswith("fix  ")]
+        assert fixes == [f"     fix  {FIX}   c copies it"], fixes
+    closed = {k: [l.plain for l in lines] for k, lines in tui.bots_items(s, NAMES, 137, set(), T) if k}
+    assert all(len(v) == 1 for v in closed.values()) and closed[PHOTO][0].startswith("▸ photobot") and "✕ DOWN 12m" in closed[PHOTO][0]
+    assert "12m" in closed[PHOTO][0].split("@mention · 5 users")[1] and closed[PHOTO][0].rstrip().endswith("rcps") and closed[NOTOK][0].rstrip().endswith("~")
+    opened = [l.plain for k, lines in tui.bots_items(s, NAMES, 110, {PHOTO}, T) if k == PHOTO for l in lines]
+    assert opened[0].startswith("▾ photobot") and "no plugin server for this" in opened[1] and "posted 11m ago" in opened[3], opened
+    assert "from dongyong22," in opened[1] and "gpuvillain," in opened[2] and "junyong-dev-bot +2" in opened[3] and "DMs dongyong22" in opened[4], opened
+    assert "not posted (warning only)" in "".join(l.plain for k, lines in tui.bots_items(s, NAMES, 137, {HBOT}, T) if k == HBOT for l in lines)
+    fresh = dict(s, bots={PHOTO: dict(s["bots"][PHOTO], posted=None)})   # a problem inside its hold time: the channel will be told
+    assert "not posted yet" in "".join(l.plain for _, lines in tui.bots_items(fresh, NAMES, 137, {PHOTO}, T) for l in lines)
+    print("ok: the Bots table: one width for every line at 137 and 100 columns, project and receives folded below 110, a row grows "
+          "downward in its own columns, one full-width fix line under a problem row")
+
 
 NOW = "2026-10-11T12:00:00Z"
 FAKES = tempfile.TemporaryDirectory()
@@ -236,6 +382,7 @@ async def cursor(app, pilot):
 
 
 async def main():
+    pure()
     await case("all_ok", all_ok)
     await case("findings", findings)
     await case("crashed_project", crashed_project)
