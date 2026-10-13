@@ -3531,7 +3531,7 @@ printf '%s\n' "$*" >> "$HOME/ssh.log"
 IFS= read -r -t 0.05 l && printf 'ATE %s\n' "$l" >> "$HOME/ssh.log"
 host="" none=""
 for a in "$@"; do [ "$a" != ControlPath=none ] || none=1; done
-while [ $# -gt 0 ]; do case $1 in -o) shift 2;; *) host=$1; break;; esac; done
+while [ $# -gt 0 ]; do case $1 in -o) shift 2;; --) shift;; *) host=$1; break;; esac; done
 d=$HOME/mon
 if [ -f "$d/$host.sleep" ]; then echo $$ > "$d/$host.pid"; /bin/sleep "$(<"$d/$host.sleep")"; fi
 rc=0; [ ! -f "$d/$host.rc" ] || rc=$(<"$d/$host.rc")
@@ -3711,6 +3711,82 @@ done
 hc rm --no-probe lap; hc rm --no-probe h2
 [ "$HRC" = 0 ] && ledger_is "$HEAD$LOCAL-oProxyCommand=x" || { echo "FAIL: removing the last other host leaves the ledger in place with local: rc=$HRC $(<"$MR/mgr/hosts")"; exit 1; }
 echo "ok: hosts set replaces, adds or removes a KEY=VALUE or name= word on every line of the alias (values on stdin with --stdin, all changes in one write, none when a line is bad), laptop on|off sets the second word, rm removes the alias's lines; other lines and words keep their bytes, a change already so writes nothing, an alias not listed is exit 3, rm local is refused"
+
+# ~/.claude-discord/host-id: 32 hex digits, made once. Eight first calls at once agree on one id and leave no temp
+# file; a file that is no id is replaced; a plain --version makes none.
+HID="$HOME/.claude-discord/host-id"; rm -f "$HID"
+bash "$S" --version > "$HOME/hid.0"
+[ ! -e "$HID" ] && [ "$(wc -l < "$HOME/hid.0")" = 1 ] || { echo "FAIL: a plain --version prints its one line and makes no host-id: $(<"$HOME/hid.0")"; exit 1; }
+for i in 1 2 3 4 5 6 7 8; do bash "$S" --version --host-id > "$HOME/hid.$i" 2>&1 & done; wait
+L=$(cat "$HID" 2>/dev/null) || L=""
+[[ $L =~ ^[0-9a-f]{32}$ ]] && [ "$(wc -l < "$HID")" = 1 ] && [ "$(stat -c %a "$HID")" = 600 ] && [ "$(ls -A "$HOME/.claude-discord" | grep -c host-id)" = 1 ] ||
+  { echo "FAIL: host-id is one line of 32 hex digits, mode 600, and no temp file stays: $(ls -lA "$HOME/.claude-discord") $(cat "$HID" 2>&1)"; exit 1; }
+for i in 1 2 3 4 5 6 7 8; do
+  [ "$(sed 1d "$HOME/hid.$i")" = "host-id $L" ] && [ "$(sed -n 1p "$HOME/hid.$i")" = "$(<"$HOME/hid.0")" ] || { echo "FAIL: eight first --version --host-id calls at once must all print the one id that was kept ($L): $(cat "$HOME/hid.$i")"; exit 1; }
+done
+for bad in '' "${L}0"; do
+  printf '%s\n' "$bad" > "$HID"
+  A=$(bash "$S" --version --host-id | sed -n 2p)
+  [[ ${A#host-id } =~ ^[0-9a-f]{32}$ ]] && [ "${A#host-id }" = "$(<"$HID")" ] || { echo "FAIL: a host-id file that holds no id ('$bad') is replaced: $A / $(<"$HID")"; exit 1; }
+done
+printf '%s\n' "$L" > "$HID"; rm -f "$HOME"/hid.*
+# ans <host> <version> [<host-id>]: what that host's `claude-discord --version --host-id` prints.
+ans() { printf 'claude-discord %s (abc1234)\n' "$2" > "$MON/$1.out"; [ -z "${3:-}" ] || printf 'host-id %s\n' "$3" >> "$MON/$1.out"; }
+ID_B=$(printf 'b%.0s' {1..32})
+LEDGER=$(<"$MR/mgr/hosts"); rm -f "$HOME/ssh.log"
+# The probe's command: --dry-run prints it and runs nothing; the real add then runs exactly that (ssh's argument list
+# is the printed line without its quoting), with stdin closed, and adds the host.
+ans h5 1.12.0 "$ID_B"
+hc add --dry-run h5; SHOWN=$HO
+[ "$HRC" = 0 ] && [ "$SHOWN" = "ssh -o BatchMode=yes -o ConnectTimeout=8 -- h5 '~/.local/bin/claude-discord --version --host-id'" ] && [ ! -e "$HOME/ssh.log" ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] ||
+  { echo "FAIL: add --dry-run prints the probe's command and runs nothing: rc=$HRC $HO / $HE"; exit 1; }
+HRC=0; HO=$(printf 'left on stdin\n' | bash "$S" hosts add h5 laptop X=1 2>"$HOME/hosts.err") || HRC=$?
+SHOWN=${SHOWN#ssh }; SHOWN=${SHOWN//\'/}
+[ "$HRC" = 0 ] && [ ! -s "$HOME/hosts.err" ] && [ "$(sed -n 1p "$HOME/ssh.log")" = "$SHOWN" ] && [ "$(command grep -c -- '--host-id$' "$HOME/ssh.log")" = 1 ] && ! grep -q '^ATE' "$HOME/ssh.log" && [ "$(tail -n 1 "$MR/mgr/hosts")" = "h5 laptop X=1" ] ||
+  { echo "FAIL: add runs the command --dry-run printed, once, eats no stdin, and adds the host that answered with another home's id: rc=$HRC $HO / $(<"$HOME/hosts.err") / $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
+LEDGER=$(<"$MR/mgr/hosts"); rm -f "$HOME/ssh.log"
+# refused <host> <exit status> <stderr regex> <what>: `hosts add <host>` exits so, says so, and writes nothing.
+refused() {
+  hc add "$1"
+  [ "$HRC" = "$2" ] && command grep -qE -- "$3" <<<"$HE" && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [[ $HE != *$'\033'* ]] && [ "${#HE}" -lt 700 ] ||
+    { echo "FAIL: $4: want exit $2 and /$3/, nothing written: rc=$HRC $HE / $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
+}
+# Already listed, and local: no ssh at all.
+refused h5 3 'h5 is already in ' "an alias already listed is refused before any ssh"
+refused local 3 'local is already in ' "local is never asked over ssh"
+hc add --dry-run local; hc add --no-probe np1
+[ ! -e "$HOME/ssh.log" ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = np1 ] || { echo "FAIL: an alias already listed, local and --no-probe run no ssh: $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
+LEDGER=$(<"$MR/mgr/hosts")
+# The same home (the answer carries this home's id): refused.
+ans same 1.12.0 "$L"
+refused same 4 '^claude-discord: hosts: same is the same home as local' "a host that answers with this home's host-id is the same home"
+# ssh itself fails (255), also on the ControlPath=none retry: not added, with ssh's own last line, cleaned.
+printf 'banner \033[2J\nssh: connect to host dead port 22: Connection timed out\033]0;x\007\n' > "$MON/dead.out"; echo 255 > "$MON/dead.rc"; : > "$MON/dead.both"
+refused dead 5 'dead did not answer \(ssh exit 255, also with ControlPath=none\): ssh: connect to host dead port 22: Connection timed out\]0;x\. Not added; .*hosts add --no-probe dead' "an unreachable host is not added"
+[ "$(command grep -c ' -- dead ' "$HOME/ssh.log")" = 2 ] && [ "$(command grep -c 'ControlPath=none -- dead ' "$HOME/ssh.log")" = 1 ] || { echo "FAIL: an ssh exit 255 is tried once more with ControlPath=none: $(<"$HOME/ssh.log")"; exit 1; }
+# 255 on the first try only (a stale master): the retry's answer counts.
+ans stale 1.12.0 "$ID_B"; echo 255 > "$MON/stale.rc"; echo 0 > "$MON/stale.rc2"
+hc add stale
+[ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = stale ] || { echo "FAIL: a host that answers on the ControlPath=none retry is added: rc=$HRC $HE"; exit 1; }
+LEDGER=$(<"$MR/mgr/hosts")
+# A host that connects and never answers: the cap (0.1 s here) ends it, the whole ssh process group with it.
+ans hang 1.12.0 "$ID_B"; echo 5 > "$MON/hang.sleep"
+t0=$(date +%s%N); CLAUDE_DISCORD_PROBE_CAP=0.1 refused hang 5 'hang gave no answer within 0.1s\. Not added' "a probe that hangs is ended by the cap"
+[ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 2000 ] && ! kill -0 "$(<"$MON/hang.pid")" 2>/dev/null || { echo "FAIL: a hung probe must end at its cap, its ssh killed: $(( ($(date +%s%N) - t0) / 1000000 )) ms"; exit 1; }
+# A host that prints megabytes: cut off at 4096 bytes. Whatever follows them is not waded through, were it a version line.
+{ head -c 2000000 /dev/zero | tr '\0' 'x' | fold -w 100; printf '\nclaude-discord 1.12.0 (abc1234)\nhost-id %s\n' "$ID_B"; } > "$MON/big.out"
+refused big 5 'big answered, but not as claude-discord \(exit [0-9]+\)' "an answer is read up to 4096 bytes and no further"
+# No claude-discord there (the remote shell's exit 127).
+echo 'bash: line 1: /home/u/.local/bin/claude-discord: No such file or directory' > "$MON/bare.out"; echo 127 > "$MON/bare.rc"; : > "$MON/bare.both"
+refused bare 5 'bare answered, but not as claude-discord \(exit 127\): bash: line 1: /home/u/.local/bin/claude-discord: No such file or directory\. Install it there first' "a host with no claude-discord is not added"
+# An older claude-discord (a version line, no host-id), behind a banner with an escape sequence and a host-id line that
+# is no id: added, with a warning, and nothing of the banner reaches stderr.
+printf 'motd \033[2J\033]52;c;eA==\007 banner\nclaude-discord 1.11.1 (abc1234)\nhost-id %s\nhost-id nope\n' "$(printf 'Z%.0s' {1..32})" > "$MON/old.out"
+hc add old
+[ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = old ] && grep -q '^claude-discord: hosts: warning: claude-discord 1.11.1 on old is older than 1.12.0 and has no host-id' <<<"$HE" && [[ $HE != *$'\033'* ]] && [[ $HE != *motd* ]] ||
+  { echo "FAIL: a host whose claude-discord is older than 1.12.0 is added with a warning (a host-id line that is no id is none): rc=$HRC $HE"; exit 1; }
+printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -f "$HOME/ssh.log" "$MON"/*
+echo "ok: host-id is made once (eight first calls agree, a damaged file is replaced); hosts add asks the host with the command --dry-run prints (stdin closed, ConnectTimeout, -- before the alias, a 255 retried with ControlPath=none), refuses the same home (exit 4) and a host that did not answer, hung past the cap, printed megabytes or has no claude-discord (exit 5, its last line cleaned), and adds an older claude-discord with a warning; --no-probe, local and a listed alias run no ssh"
 
 # The monitor runs fast here: a 0.01 s tick, a 0.03 s cap per host, 0.1 s for the lock (one retry), and a 60 s pass interval, so
 # each start runs exactly its first pass (these blocks need no second one). Thresholds are tested by seeding

@@ -57,9 +57,10 @@
 #                                        a manager bot's hosts ledger: one line per
 #                                        host (alias, kind, display name, env key
 #                                        names; never a value)
-#   claude-discord hosts [--bot <name>] add [--no-probe] <alias> [laptop] [KEY=VALUE...]
-#                                        adds a host line (--no-probe: without
-#                                        asking the host who it is)
+#   claude-discord hosts [--bot <name>] add [--no-probe|--dry-run] <alias> [laptop] [KEY=VALUE...]
+#                                        adds a host line, after asking the host
+#                                        over ssh who it is (--dry-run prints that
+#                                        command; --no-probe adds without asking)
 #   claude-discord hosts [--bot <name>] set <alias> name=<display>|KEY=VALUE|KEY=...
 #                                        sets or (KEY=) removes words of a host's
 #                                        line; `set <alias> --stdin` reads them from
@@ -1889,9 +1890,40 @@ if [ "${1:-}" = patch ]; then
   patch_official || crc=1; exit "$crc"
 fi
 
+# host_id: prints this HOME's id, ~/.claude-discord/host-id (one line: 32 lower-case hex digits, random), making it when
+# it is missing. It names a home, not a machine: what a monitor pass reads on a host is that home's records/projects,
+# so two ledger lines that reach one home (a container and its host sharing $HOME, two ssh aliases of one account)
+# would report every bot of it twice. `hosts add` compares it. Made once: the id is written to a temp file and
+# hard-linked in, and ln fails when the name is there, so of two first calls at once one wins and both print the
+# winner's. A file that is there but holds no id (cut off, hand-edited) is replaced.
+hid_re='^[0-9a-f]{32}$'   # what a host-id is
+host_id() {
+  local f=$helpers/host-id id=""
+  { read -r id < "$f"; } 2>/dev/null || :
+  if ! [[ $id =~ $hid_re ]]; then
+    mkdir -p "$helpers" || return 1
+    (umask 077; id=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') && printf '%s\n' "$id" > "$f.tmp.$$") || { rm -f "$f.tmp.$$"; return 1; }
+    if ! ln "$f.tmp.$$" "$f" 2>/dev/null; then
+      # The name is taken: by another first call's id (kept: read below), or by a file that is no id (replaced).
+      id=""; { read -r id < "$f"; } 2>/dev/null || :
+      [[ $id =~ $hid_re ]] || mv -f "$f.tmp.$$" "$f" || :
+    fi
+    rm -f "$f.tmp.$$"
+    id=""; { read -r id < "$f"; } 2>/dev/null || :
+    [[ $id =~ $hid_re ]] || return 1
+  fi
+  printf '%s\n' "$id"
+}
+
 # self_root is already the real clone (a link resolved through readlink and pwd -P).
 if [ "${1:-}" = --version ]; then
   echo "claude-discord $(plugin_version "$self_root") ($(git -C "$self_root" rev-parse --short HEAD 2>/dev/null || echo nogit))"
+  # What `hosts add` asks another machine over ssh (1.12.0). It rides on --version because a claude-discord before
+  # 1.12.0 prints the line above and exits whatever follows, while any new verb would be read there as a bot name
+  # and reach the launcher.
+  case ${2:-} in
+    --host-id) id=$(host_id) || exit 1; echo "host-id $id";;
+  esac
   exit 0
 fi
 
@@ -1949,17 +1981,19 @@ fi
 # (a proxy URL may hold a password): key names only.
 # Exit status: 0 done (a warning goes to stderr), 1 it could not (no manager bot with a ledger, a failed write, the
 # ledger locked by another writer for 5 s), 2 usage or a word that is not allowed, 3 the alias is already in the
-# ledger (add) or is not in it (set, laptop, rm).
+# ledger (add) or is not in it (set, laptop, rm), 4 add refused: the host is the same home as one already checked,
+# 5 not added: the host did not answer or has no claude-discord (--no-probe adds it unchecked).
 if [ "${1:-}" = hosts ]; then
   shift
-  h_usage="usage: claude-discord hosts [--bot <manager>] list [--json] | add [--no-probe] <alias> [laptop] [KEY=VALUE...] | set <alias> name=<display>|KEY=VALUE|KEY=... | set <alias> --stdin | laptop <alias> on|off | rm [--no-probe] <alias>"
-  hb="" h_json="" h_probe=yes h_stdin="" hw=()
+  h_usage="usage: claude-discord hosts [--bot <manager>] list [--json] | add [--no-probe|--dry-run] <alias> [laptop] [KEY=VALUE...] | set <alias> name=<display>|KEY=VALUE|KEY=... | set <alias> --stdin | laptop <alias> on|off | rm [--no-probe] <alias>"
+  hb="" h_json="" h_probe=yes h_stdin="" h_dry="" hw=()
   while [ $# -gt 0 ]; do
     case $1 in
       --bot) [ $# -ge 2 ] || { echo "$h_usage" >&2; exit 2; }; hb=$2; shift;;
       --json) h_json=1;;
       --no-probe) h_probe="";;
       --stdin) h_stdin=1;;
+      --dry-run) h_dry=1;;
       -*) echo "$h_usage" >&2; exit 2;;   # an ssh alias never starts with "-": ssh would read it as an option
       *) hw+=("$1");;
     esac
@@ -2077,6 +2111,58 @@ if [ "${1:-}" = hosts ]; then
     exec 7>&-
     h_changed=$changed
   }
+  # h_has <alias>: the ledger has a line for it. Read without the lock: a hint before a slow probe; h_edit decides.
+  h_has() {
+    local line; local -a x
+    while IFS= read -r line || [ -n "$line" ]; do
+      set -f; x=(${line%$'\r'}); set +f
+      [ "${x[0]:-}" != "$1" ] || return 0
+    done < "$hf"
+    return 1
+  }
+  # h_ssh <alias> <remote command>: one ssh call as the monitor's pass makes it (BatchMode, ConnectTimeout=8, and after
+  # an exit 255 once more with ControlPath=none: a stale master refuses falsely), so a host is unreachable here when a
+  # pass would say so. "--" ends ssh's options: the alias can never be read as one. ConnectTimeout bounds the
+  # connection only, so the whole call is capped too (h_cap seconds; no timeout(1) on macOS): ssh runs in its own
+  # process group under a perl parent that kills the group at the cap (exit 142). Sets h_rc and h_out: the first
+  # 4096 bytes of what came back (a host that prints megabytes is cut off there), its NUL bytes dropped.
+  h_cap=${CLAUDE_DISCORD_PROBE_CAP:-20}
+  case $h_cap in ''|*[!0-9.]*) h_cap=20;; esac
+  h_capped='my $cap = shift; my $pid = fork(); defined $pid or exit 127;
+    if (!$pid) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127 }
+    setpgrp($pid, $pid);
+    $SIG{ALRM} = $SIG{INT} = $SIG{TERM} = sub { kill "KILL", -$pid; exit 142 };
+    alarm $cap; waitpid($pid, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)'
+  h_ssh() {
+    local t; local -a o
+    for t in first retry; do
+      o=(); [ "$t" = first ] || o=(-o ControlPath=none)
+      h_rc=0
+      h_out=$(perl -MTime::HiRes=alarm -e "$h_capped" "$h_cap" ssh -o BatchMode=yes -o ConnectTimeout=8 ${o[@]+"${o[@]}"} -- "$1" "$2" </dev/null 2>&1 | head -c 4096 | tr -d '\000') || h_rc=$?
+      [ "$h_rc" = 255 ] && [ "$t" = first ] || return 0
+    done
+  }
+  # h_ask <alias>: asks the host who it is. Sets h_ver (its claude-discord version; empty when it printed no version
+  # line), h_id (its home's host-id; empty from a claude-discord before 1.12.0) and h_last (the last line of the answer:
+  # ssh's own error when it failed). The answer comes from another machine and from whatever its shell prints first, so
+  # no byte of it is trusted: each line loses its control characters and is cut at 200 characters, then is only read
+  # into variables and matched: a version is N.N.N, an id 32 hex digits. Nothing of it is run or becomes a command's word.
+  h_who='~/.local/bin/claude-discord --version --host-id'
+  h_ask() {
+    local l a b rest re_v='^[0-9]+\.[0-9]+\.[0-9]+$'
+    h_ssh "$1" "$h_who"
+    h_ver="" h_id="" h_last=""
+    while IFS= read -r l; do
+      l=${l//[[:cntrl:]]/}; l=${l:0:200}
+      [ -n "$l" ] || continue
+      h_last=$l a="" b=""
+      read -r a b rest <<<"$l" || :
+      case $a in
+        claude-discord) if [ -z "$h_ver" ] && [[ $b =~ $re_v ]]; then h_ver=$b; fi;;
+        host-id) if [[ $b =~ $hid_re ]]; then h_id=$b; fi;;
+      esac
+    done <<<"$h_out"
+  }
   case ${hw[0]:-} in
     list)
       [ "${#hw[@]}" = 1 ] || { echo "$h_usage" >&2; exit 2; }
@@ -2114,6 +2200,30 @@ if [ "${1:-}" = hosts ]; then
         h_word "$w"
         case $w in *=) echo "claude-discord: hosts: ${w%=}: add takes KEY=VALUE, a value that is not empty" >&2; exit 2;; esac
       done
+      ! h_has "$a" || { echo "claude-discord: hosts: $a is already in $hf" >&2; exit 3; }
+      if [ -n "$h_dry" ]; then
+        # The line `add` is about to run, for a person or the TUI to read first. local is this machine: nobody is asked.
+        [ -z "$h_probe" ] || [ "$a" = local ] || echo "ssh -o BatchMode=yes -o ConnectTimeout=8 -- $a '$h_who'"
+        exit 0
+      fi
+      h_id=""
+      if [ -n "$h_probe" ] && [ "$a" != local ]; then
+        h_ask "$a"
+        unchecked="Not added; to add it unchecked: claude-discord hosts add --no-probe $a"
+        if [ "$h_rc" = 255 ]; then
+          echo "claude-discord: hosts: $a did not answer (ssh exit 255, also with ControlPath=none): ${h_last:-no output}. $unchecked" >&2; exit 5
+        elif [ "$h_rc" = 142 ]; then
+          echo "claude-discord: hosts: $a gave no answer within ${h_cap}s. $unchecked" >&2; exit 5
+        elif [ -z "$h_ver" ]; then
+          echo "claude-discord: hosts: $a answered, but not as claude-discord (exit $h_rc): ${h_last:-no output}. Install it there first (README, Install): a host without it is reported blind. $unchecked" >&2; exit 5
+        elif [ -z "$h_id" ]; then
+          echo "claude-discord: hosts: warning: claude-discord $h_ver on $a is older than 1.12.0 and has no host-id: it could not be checked for being this same home" >&2
+        else
+          mine=$(host_id) || { echo "claude-discord: hosts: could not make $helpers/host-id" >&2; exit 1; }
+          # One home behind two ledger lines: every bot of it would be reported twice, one side as down.
+          [ "$h_id" != "$mine" ] || { echo "claude-discord: hosts: $a is the same home as local (it answered with this home's host-id): not added. Its bots are already checked through local" >&2; exit 4; }
+        fi
+      fi
       h_edit "$a" add "${hw[@]:2}"
       echo "claude-discord: hosts: added $a to $hf";;
     set|laptop)
