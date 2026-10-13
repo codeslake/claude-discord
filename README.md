@@ -1019,18 +1019,40 @@ default; `ALERT_LANG='en'` in the manager project's `config.env` makes them
 English (any other value is Korean). The reason and the command are never
 translated.
 
-**TUI.** `claude-discord tui` shows the monitor's state (outside a project it picks among the manager bots of the projects `claude-discord` has recorded: the one, or a numbered list at a terminal, else exit 2 naming them; `tui <bot>` picks the project that has it): hosts, bots
-(findings first), `Enter` for a row's detail and recovery command, `a` for
-the last 50 posts, `q` to quit (the backend keeps running), `Q` to quit and
-stop the backend (after a yes; the same as `monitor --stop`). Opened after
-`--stop`, it asks whether to start the backend again (No by default: then it
-only shows the state, with `stopped by you` in the red bar). A red bar says when the monitor is stopped (`stopped by you`, or `auto-start refused here: another side holds the monitor lock`),
-its pid is gone (killed without cleaning up; the TUI starts it again, once
-per 30 s at most), the last pass failed (the state could not be updated;
-`monitor.log` has the line) or the last post failed. A host taken out of
-the ledger is shown as `(left the ledger)` for a day, then dropped. A project whose `health` crashed
-before any of its bots was known is one row with bot `-` (it alerts as
-`blind`); it is not counted in its host's `bots ok`. The TUI changes nothing and never reads a token.
+**TUI.** `claude-discord tui` shows the monitor's state (outside a project it
+picks among the manager bots of the projects `claude-discord` has recorded:
+the one, or a numbered list at a terminal, else exit 2 naming them;
+`tui <bot>` picks the project that has it). The title line names the manager
+and, on the right, the backend: `● live  keeper · checked 1m ago · next 4m`;
+`▲ check overdue  due HH:MM · now HH:MM` once a pass is more than 30 s late;
+`○ stopped by you  start: claude-discord monitor --start <manager>` after
+`--stop`; `○ not running` otherwise. Under it three tabs, changed with `←`
+`→`: Bots, Alerts N (N findings posted and not recovered) and Configuration.
+`↑` `↓` move the row cursor, `q` quits (the backend keeps running), `Q` quits
+and stops the backend (after a yes; the same as `monitor --stop`). Opened
+after `--stop`, it asks whether to start the backend again (No by default:
+then it only shows the state). A red bar under the tabs says what the title
+cannot: `no state yet`, `monitor stopped at <time>`, `auto-start refused
+here: another side holds the monitor lock`, `monitor pid <pid> is gone`
+(killed without cleaning up; the TUI starts it again, once per 30 s at
+most), the last pass failed (the state could not be updated; `monitor.log`
+has the line) or the last post failed. The TUI changes nothing, never reads
+a `.env` and never shows a token.
+
+*Bots tab.* A band of counts first (`✕ Problems`, `▲ Needs a look`,
+`● Healthy N of M bots`, `Hosts R / H`; one line below 110 columns). M is
+every bot; a bot with no token is counted apart, never as a problem. Then one
+row per bot: bot, status, host (the ledger's `name=`, else the hostname),
+channel, receives, last (since its session was last handed a message),
+project. Problems come first (`down`, `stale` shown as `STUCK`, `duplicate`,
+`unreachable`), then what needs a look (`throttled` shown as `rate-limited`,
+`apierror`, `nostate`, `blind`), then `working` and `ok`, then `no token`.
+A problem row has its recovery command on a line of its own under it. Below
+110 columns project and receives fold away.
+A bot on a host whose claude-discord is older than 1.11.0 shows `-` for
+channel, receives and last. A project whose `health` crashed before any of
+its bots was known is one row with bot `-` (it alerts as `blind`) and is not
+counted as a bot.
 
 **Expected.** With the backend running (no TUI or session needed), stopping a
 bot by hand gives one `[down]` message within 10 minutes and one

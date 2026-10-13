@@ -7,8 +7,9 @@
 Started by `claude-discord tui [<bot>]` through `uv run --script`. It registers
 itself as a holder of the monitor (which starts the monitor if none runs),
 re-reads state.json when its mtime changes (checked every 2 s) and removes its
-holder record on quit. It changes nothing else: no restart, no post, no patch,
-and it never reads a .env, so it cannot show a token.
+holder record on quit. Three tabs (Bots, Alerts, Configuration) over that one
+file. It changes nothing else: no restart, no post, no patch, and it never
+reads a .env, so it cannot show a token.
 """
 from __future__ import annotations
 
@@ -25,8 +26,10 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Footer, Static
+from textual.events import Resize
+from textual.geometry import Region
+from textual.screen import ModalScreen
+from textual.widgets import Button, Static
 
 # The slack4agents pane's palette: nothing saturated but an alert.
 BRAND, WARN, OK, ALERT, BAR, TAB, CURSOR = "#5fd7ff", "#ffaf00", "#87d787", "#ff5f87", "#3a3a3a", "#585858", "#4e4e4e"
@@ -67,10 +70,6 @@ def ago(iso: str | None, now: float) -> str:
 
 def hhmm(t: float | None) -> str:
     return time.strftime("%H:%M", time.localtime(t)) if t is not None else DASH
-
-
-def short(project: str, home: str) -> str:
-    return "~" + project[len(home):] if home and project.startswith(home + "/") else project
 
 
 def fit(s: str, w: int) -> str:
@@ -279,24 +278,93 @@ def alive(pid: int, bot: str) -> bool:
     return "monitor/monitor.sh" in cmd and cmd.endswith(f" --locked {bot}")
 
 
-def header_lines(state: dict, note: str = "", stopped: str | None = None, refused: bool = False) -> tuple[str, str | None]:
-    """The header text and the red bar's text (None when there is nothing to warn about). `note` is why
-    `monitor --ensure` failed, when it did: the one place a refusal is visible. `stopped`: when the `stopped` marker
-    (monitor --stop) was left, if it stands. `refused`: this side's `refused.<pid namespace id>` marker (a detached start met a monitor lock this
-    side cannot see; a start that gets through clears it) stands."""
+def open_alerts(state: dict) -> list[dict]:
+    """What the channel was told and has not seen recover: every entry with `posted`, as an alerts record (with the text
+    of the last finding sent for its key, when that record is still kept), newest first."""
+    out, alerts = [], state.get("alerts") or []
+    for scope in ("hosts", "bots"):
+        for k, e in (state.get(scope) or {}).items():
+            if e.get("posted") and e.get("left_s") is None:
+                key = k + "|-" if scope == "hosts" else k
+                out.append({"ts": e.get("posted_at"), "key": key, "kind": "finding", "verdict": e["posted"], "status": "sent", "detail": e.get("detail", ""),
+                            "text": next((x.get("text") for x in reversed(alerts) if x.get("key") == key and x.get("kind") == "finding"
+                                          and x.get("status") == "sent"), None)})
+    return sorted(out, key=lambda a: a.get("ts") or "", reverse=True)
+
+
+def render(items: list[tuple], cursor: str | None, width: int) -> tuple[Text, int, int]:
+    """The pane's text, and the first line and height of the cursor's row (highlighted to the edge)."""
+    out, at = [], (0, 1)
+    for key, lines in items:
+        if key is not None and key == cursor:
+            at = (len(out), len(lines))
+            lines = [l.copy() for l in lines]
+            for l in lines:
+                l.pad_right(max(0, width - l.cell_len))
+                l.stylize(f"on {CURSOR}")
+        out += lines
+    return Text("\n").join(out), at[0], at[1]
+
+
+def title_line(state: dict, width: int, now: float, live: bool, stopped: bool) -> Text:
+    """`◆ claude-discord  <manager>` and, on the right, the backend's status: symbol + word + colour."""
+    m, mgr = state.get("monitor") or {}, state.get("manager", "?")
+    left = Text.assemble(("◆ claude-discord", f"bold {BRAND}"), ("  " + mgr, DIM))
+    due = epoch(m.get("next_pass"))
+    if stopped or m.get("stopped_by_user"):   # monitor --stop: nothing starts it until monitor --start
+        right = Text.assemble(("○ stopped by you", "bold"), ("  start: ", DIM), (f"claude-discord monitor --start {mgr}", BRAND))
+    elif not live:
+        right = Text("○ not running", DIM)
+    elif due is not None and now - due > 30:   # more than one tick (30 s) past the pass that was due
+        right = Text.assemble(("▲ check overdue", f"bold {WARN}"), (f"  due {hhmm(due)} · now {hhmm(now)}", DIM))
+    else:
+        checked = ago(m.get("last_pass"), now)
+        nxt = max(0, int(due - now) + 59) // 60 if due is not None else None
+        right = Text.assemble(("● live", f"bold {OK}"), ("  " + " · ".join(
+            (["keeper"] if any(h.get("kind") == "keeper" for h in m.get("holders") or []) else [])
+            + ([f"checked {checked} ago" if checked != "now" else "checked just now"] if checked else ["not checked yet"])
+            + ([f"next {nxt}m"] if nxt is not None else [])), DIM))
+    if left.cell_len + 2 + right.cell_len > width:   # a narrow terminal: the status alone, cut at the edge
+        right.truncate(width, overflow="ellipsis")
+        return right
+    return Text.assemble(left, " " * (width - left.cell_len - right.cell_len), right)
+
+
+def tabs_lines(tab: str, n_open: int, width: int) -> Text:
+    """The tab row: the active tab filled, and underlined `━` in brand on the rule below it."""
+    row, under = Text(), Text()
+    for t, label in zip(TABS, ("Bots", f"Alerts {n_open}", "Configuration")):
+        row.append(f" {label} ", f"bold on {TAB}" if t == tab else DIM)
+        row.append(" ")
+        under.append("━" * (len(label) + 2) if t == tab else "─" * (len(label) + 2), BRAND if t == tab else TAB)
+        under.append("─", TAB)
+    under.append("─" * max(0, width - under.cell_len), TAB)
+    return Text("\n").join([row, under])
+
+
+def foot_line(tab: str) -> Text:
+    keys = {"bots": (("↑↓", "select"), ("space", "expand"), ("enter", "all fields"), ("c", "copy fix"), ("←→", "tabs"), ("q", "quit")),
+            "alerts": (("↑↓", "select"), ("enter", "the post's text"), ("←→", "tabs"), ("q", "quit")),
+            "config": (("←→", "tabs"), ("↑↓", "select"), ("enter", "all fields"), ("q", "quit"))}[tab]
+    out = Text(" ")
+    for k, what in keys:
+        out.append(f" {k} ", f"bold on {TAB}")
+        out.append(f" {what}  ", DIM)
+    return out
+
+
+def bar_text(state: dict, note: str = "", stopped: bool = False, refused: bool = False) -> str | None:
+    """The red bar's text (None when there is nothing to warn about): what the title's one status cannot say. `note` is
+    why `monitor --ensure` failed, when it did: the one place a refusal is visible. `stopped`: the `stopped` marker
+    (monitor --stop) stands; the title says so. `refused`: this side's `refused.<pid namespace id>` marker (a detached
+    start met a monitor lock this side cannot see; a start that gets through clears it) stands."""
     m = state.get("monitor") or {}
-    holders = ", ".join(f"{h.get('kind')} {h.get('pid')}" for h in m.get("holders") or []) or "none"
     pid = m.get("pid")
-    text = (f"manager {state.get('manager', '?')}   monitor pid {pid if pid else '-'}   holders {holders}\n"
-            f"last pass {m.get('last_pass') or '-'}   next pass {m.get('next_pass') or '-'}   pass took {m.get('pass_s', '-')}s")
-    if any(h.get("kind") == "keeper" for h in m.get("holders") or []):   # why quitting leaves the monitor running
-        text += f"\nthe backend runs on after q; Q quits and stops it (claude-discord monitor --stop {state.get('manager', '?')})"
     bar = None
     if not state:
         bar = "no state yet: the monitor has not written state.json"
-    elif stopped is not None or m.get("stopped_by_user"):   # monitor --stop: nothing starts it until monitor --start
-        bar = (f"stopped by you{' at ' + stopped if stopped else ''} (monitor --stop); "
-               f"start it again: claude-discord monitor --start {state.get('manager', '?')}")
+    elif stopped or m.get("stopped_by_user"):
+        pass
     elif refused:   # held until a start gets through (monitor --start), like the stopped marker
         bar = (f"auto-start refused here: another side holds the monitor lock (shared home?). "
                f"Start here with: claude-discord monitor --start {state.get('manager', '?')}")
@@ -310,71 +378,7 @@ def header_lines(state: dict, note: str = "", stopped: str | None = None, refuse
         bar = "the last POST to #bot-health-check failed; it is retried next pass"
     if note:
         bar = f"{bar}; {note}" if bar else note
-    return text, bar
-
-
-def bot_rows(state: dict) -> list[tuple[str, tuple]]:
-    """(key, row) for the bots table, findings first, then by key. A host|project|- entry (a project whose
-    health crashed before any bot of it was known) has no `bot`: it is a project row, shown with bot '-'."""
-    bots = state.get("bots") or {}
-    rows = []
-    for key, b in sorted(bots.items(), key=lambda kv: (kv[1].get("verdict") in GOOD, kv[0])):
-        rows.append((key, (b.get("name") or b.get("host", ""), short(b.get("project", ""), b.get("home", "")),
-                           b.get("bot") or "-", b.get("verdict", ""), ago(b.get("since"), time.time()),
-                           b.get("servers", ""), b.get("detail", ""))))
-    return rows
-
-
-def host_rows(state: dict) -> list[tuple[str, tuple]]:
-    bots = state.get("bots") or {}
-    rows = []
-    for key, h in sorted((state.get("hosts") or {}).items()):
-        mine = [b for b in bots.values() if b.get("host") == key and b.get("bot")]   # project rows are not bots
-        ok = sum(1 for b in mine if b.get("verdict") in GOOD)
-        label = h.get("name") or key
-        if h.get("laptop"):
-            label += " (laptop)"
-        if h.get("left_s") is not None:   # out of the ledger, kept for a day so a brief removal does not post again
-            label += " (left the ledger)"
-        rows.append((key, (label, h.get("reach", ""), h.get("patch", ""), h.get("version", ""),
-                           f"{ok}/{len(mine)}", h.get("checked", ""))))
-    return rows
-
-
-class Detail(Screen):
-    BINDINGS = [Binding("escape", "app.pop_screen", "back")]
-
-    def __init__(self, key: str, alert_key: str, entry: dict, alerts: list) -> None:
-        super().__init__()
-        self.key, self.alert_key, self.entry, self.alerts = key, alert_key, entry, alerts
-
-    def compose(self) -> ComposeResult:
-        e = self.entry
-        lines = [f"{self.key}", "", f"verdict  {e.get('verdict', '')} (since {e.get('since', '?')})",
-                 f"detail   {e.get('detail', '')}", f"posted   {e.get('posted') or '-'}", "", "recovery command:"]
-        with VerticalScroll():
-            yield Static("\n".join(lines), markup=False)   # state-derived text: [..] in it is text, not markup
-            yield Static(e.get("fix") or "(none)", id="fix", markup=False)   # its own widget so the text can be selected and copied
-            mine = [a for a in self.alerts if a.get("key") == self.alert_key]
-            yield Static("\nposts for this key:\n" + ("\n".join(
-                f"{a.get('ts')}  {a.get('kind')}  {a.get('verdict')}  {a.get('status')}" for a in mine) or "(none)"), markup=False)
-        yield Footer()
-
-
-class Alerts(Screen):
-    BINDINGS = [Binding("escape", "app.pop_screen", "back"), Binding("a", "app.pop_screen", "back")]
-
-    def __init__(self, alerts: list) -> None:
-        super().__init__()
-        self.alerts = alerts
-
-    def compose(self) -> ComposeResult:
-        t = DataTable(id="alerts")
-        t.add_columns("time", "key", "kind", "verdict", "status")
-        for a in reversed(self.alerts):
-            t.add_row(*(Text(str(a.get(k, ""))) for k in ("ts", "key", "kind", "verdict", "status")))
-        yield t
-        yield Footer()
+    return bar
 
 
 class Confirm(ModalScreen[bool]):
@@ -403,10 +407,20 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(yes)
 
 
+class Pane(VerticalScroll, can_focus=False):
+    """The tab's body. Never focused: the arrow keys move the row cursor (the app's bindings), not the scroll position."""
+
+
 class MonitorTUI(App):
-    TITLE = "claude-discord monitor"
-    CSS = "#bar { background: darkred; color: white; } #bar.hidden { display: none; }"
-    BINDINGS = [Binding("q", "quit", "quit"), Binding("Q", "quit_stop", "quit + stop backend"), Binding("a", "alerts", "alerts")]
+    TITLE = "claude-discord"
+    CSS = f"""
+    #title, #foot {{ height: 1; text-wrap: nowrap; }} #tabs {{ height: 2; text-wrap: nowrap; }}
+    #bar {{ background: darkred; color: white; }} #bar.hidden {{ display: none; }}
+    #pane {{ height: 1fr; overflow-x: hidden; }} #body {{ width: auto; text-wrap: nowrap; }}
+    #foot {{ background: {BAR}; }}
+    """
+    BINDINGS = [Binding("q", "quit", "quit"), Binding("Q", "quit_stop", "quit + stop backend"),
+                Binding("up", "move(-1)"), Binding("down", "move(1)"), Binding("left", "tab(-1)"), Binding("right", "tab(1)")]
 
     def __init__(self, state_dir: Path, bot: str, wrapper: str | None) -> None:
         super().__init__()
@@ -416,17 +430,18 @@ class MonitorTUI(App):
         self.mtime: float | None = None
         self.ensured = float("-inf")   # when `monitor --ensure` last ran (time.monotonic())
         self.holder = state_dir / "holders" / f"tui-{os.getpid()}"
+        self.width = 0   # the terminal's: set at mount, then by each Resize (self.size still holds the old one while that event runs)
+        self.tab = "bots"
+        self.cursor: dict = {t: None for t in TABS}   # the selected row's key, per tab
+        self.shown: dict = {}                         # widget id -> the Text it shows: an update only when it changes
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="head", markup=False)
+        yield Static("", id="title")
+        yield Static("", id="tabs")
         yield Static("", id="bar", classes="hidden", markup=False)
-        hosts = DataTable(id="hosts", cursor_type="row")
-        hosts.add_columns("host", "reach", "patch", "claude-discord", "bots ok", "checked")
-        bots = DataTable(id="bots", cursor_type="row")
-        bots.add_columns("host", "project", "bot", "verdict", "for", "servers", "detail")
-        yield hosts
-        yield bots
-        yield Footer()
+        with Pane(id="pane"):
+            yield Static("", id="body")
+        yield Static("", id="foot")
 
     def ensure(self) -> None:
         """The holder record and the monitor: one wrapper call, which returns at once."""
@@ -468,9 +483,10 @@ class MonitorTUI(App):
         if yes:
             self.backend("--start")
             self.ensure()
-        self.refresh_state()   # No: read-only, the bar says stopped by you
+        self.refresh_state()   # No: read-only, the title says stopped by you
 
     def on_mount(self) -> None:
+        self.width = self.size.width
         stopped = self.stopped()
         if self.wrapper and stopped:
             self.push_screen(Confirm(f"The backend of {self.bot} was stopped by you at {stopped}. Start it again?"), self.started)
@@ -485,38 +501,65 @@ class MonitorTUI(App):
             mtime = path.stat().st_mtime
         except OSError:
             mtime = None
-        changed = mtime is None or mtime != self.mtime
-        if changed:
+        if mtime is None or mtime != self.mtime:
             self.mtime = mtime
             self.state = load(path)
         # Checked on every refresh, not only on a new state.json: a monitor that died without its trap writes none.
         pid = (self.state.get("monitor") or {}).get("pid")
-        stopped = self.stopped()
-        if self.wrapper and not stopped and not alive(pid, self.bot) and time.monotonic() - self.ensured >= 30:
+        if self.wrapper and not self.stopped() and not alive(pid, self.bot) and time.monotonic() - self.ensured >= 30:
             self.ensure()
-        text, bar = header_lines(self.state, self.note, stopped, self.refused())
-        self.query_one("#head", Static).update(text)
+        self.paint()
+
+    def items(self, now: float) -> list[tuple]:
+        w = self.width
+        if self.tab == "bots":
+            return bots_items(self.state, {}, w, set(), now)
+        return []
+
+    def show(self, wid: str, text: Text) -> bool:
+        """Updates a widget only when its text changed: a repaint every 2 s would drop a mouse selection each time."""
+        if self.shown.get(wid) == text:
+            return False
+        self.shown[wid] = text
+        self.query_one(wid, Static).update(text)
+        return True
+
+    def paint(self) -> None:
+        now, w, stopped = time.time(), self.width, self.stopped() is not None
+        live = alive((self.state.get("monitor") or {}).get("pid"), self.bot)
+        self.show("#title", title_line(self.state, w, now, live, stopped))
+        self.show("#tabs", tabs_lines(self.tab, len(open_alerts(self.state)), w))
+        bar = bar_text(self.state, self.note, stopped, self.refused())
         b = self.query_one("#bar", Static)
         b.update(bar or "")
         b.set_class(bar is None, "hidden")
-        if not changed:
-            return
-        for table_id, rows in (("#hosts", host_rows(self.state)), ("#bots", bot_rows(self.state))):
-            t = self.query_one(table_id, DataTable)
-            # clear() resets the cursor to row 0: put it back on the same row key (once per pass otherwise).
-            keep = t.ordered_rows[t.cursor_row].key if t.row_count else None
-            t.clear()
-            for key, row in rows:
-                t.add_row(*(Text(str(c)) for c in row), key=key)   # Text: [..] in a cell is not markup
-            if keep is not None and any(k == keep.value for k, _ in rows):
-                t.move_cursor(row=t.get_row_index(keep))
+        items = self.items(now)
+        keys = [k for k, _ in items if k is not None]
+        if self.cursor[self.tab] not in keys:   # the row left the state (or nothing was selected yet): the first one
+            self.cursor[self.tab] = keys[0] if keys else None
+        text, y, h = render(items, self.cursor[self.tab], w)
+        if self.show("#body", text):
+            self.query_one("#pane", Pane).scroll_to_region(Region(0, y, 1, h), animate=False, force=True)
+        self.show("#foot", foot_line(self.tab))
 
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        key = event.row_key.value
-        scope = "hosts" if event.data_table.id == "hosts" else "bots"
-        entry = (self.state.get(scope) or {}).get(key) or {}
-        # A host's posts are keyed host|- in `alerts`; a bot's and a project row's by their own key.
-        self.push_screen(Detail(key, key + "|-" if scope == "hosts" else key, entry, self.state.get("alerts") or []))
+    def on_resize(self, event: Resize) -> None:
+        self.width = event.size.width
+        self.paint()
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        # The row keys belong to the main view: under a Detail or a dialog they do nothing.
+        return len(self.screen_stack) == 1 or action not in ("move", "tab")
+
+    def action_tab(self, d: int) -> None:
+        self.tab = TABS[(TABS.index(self.tab) + d) % len(TABS)]
+        self.paint()
+
+    def action_move(self, d: int) -> None:
+        keys = [k for k, _ in self.items(time.time()) if k is not None]
+        if keys:
+            i = keys.index(self.cursor[self.tab]) if self.cursor[self.tab] in keys else 0
+            self.cursor[self.tab] = keys[max(0, min(len(keys) - 1, i + d))]
+            self.paint()
 
     def action_quit_stop(self) -> None:
         if not self.wrapper:
@@ -534,9 +577,6 @@ class MonitorTUI(App):
     def stop_and_quit(self) -> None:
         self.backend("--stop")
         self.call_from_thread(self.exit)
-
-    def action_alerts(self) -> None:
-        self.push_screen(Alerts(self.state.get("alerts") or []))
 
     def on_unmount(self) -> None:
         try:

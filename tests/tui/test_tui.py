@@ -2,7 +2,7 @@
 # requires-python = ">=3.9"
 # dependencies = ["textual>=8.2.8,<9"]
 # ///
-"""Pilot tests for tui/claude_discord_tui.py over fixture state files. Outside
+"""Tests for tui/claude_discord_tui.py: its pure functions, then pilot runs over fixture state files. Outside
 the 40 s stub suite (it needs uv and the Textual wheel):
     uv run --script tests/tui/test_tui.py
 Exit 0 and one "ok:" line per case, or the first failure."""
@@ -165,8 +165,36 @@ def pure():
     print("ok: the Bots table: one width for every line at 137 and 100 columns, project and receives folded below 110, a row grows "
           "downward in its own columns, one full-width fix line under a problem row")
 
+    # ---- the shell: the pane's renderer, title, tabs, footer, bar ----
+    txt, y, h = tui.render(tui.bots_items(s, NAMES, 137, {HBOT}, T), HBOT, 137)
+    lines = txt.plain.split("\n")
+    assert HANGUL[:6] in lines[y] and h == 5 and all(cell_len(l) == 137 for l in lines[y:y + h]), (y, h)
+    assert tui.render([], None, 80)[0].plain == "" and [a["key"] for a in tui.open_alerts(s)] == [PHOTO]
+    mon = lambda **kw: {"manager": "mgr", "monitor": dict({"pid": 1, "last_pass": iso(T - 80), "next_pass": iso(T + 220), "holders": [{"kind": "keeper", "pid": 9}]}, **kw)}
+    t = tui.title_line(mon(), 100, T, True, False).plain
+    assert t.startswith("◆ claude-discord  mgr ") and t.endswith("● live  keeper · checked 1m ago · next 4m") and cell_len(t) == 100, t
+    assert tui.title_line(mon(holders=[]), 100, T, True, False).plain.endswith("● live  checked 1m ago · next 4m")
+    assert tui.title_line(mon(), 100, T + 250, True, False).plain.endswith("● live  keeper · checked 5m ago · next 0m"), "one tick past due is not overdue yet"
+    assert tui.title_line(mon(), 100, T + 251, True, False).plain.endswith("▲ check overdue  due 17:52 · now 17:53")
+    for st in (mon(stopped_by_user=True), mon()):
+        t = tui.title_line(st, 100, T, False, st["monitor"].get("stopped_by_user") is None).plain
+        assert t.endswith("○ stopped by you  start: claude-discord monitor --start mgr"), t
+    assert tui.title_line(mon(), 100, T, False, False).plain.endswith("○ not running")
+    assert tui.title_line(mon(), 50, T, True, False).plain == "● live  keeper · checked 1m ago · next 4m", "too narrow for both: the status alone"
+    cut = tui.title_line(mon(stopped_by_user=True), 40, T, False, False).plain
+    assert cut.startswith("○ stopped by you  start: claude-discord") and cut.endswith("…") and cell_len(cut) == 40, cut
+    row, under = tui.tabs_lines("alerts", 2, 60).plain.split("\n")
+    assert row.rstrip() == " Bots   Alerts 2   Configuration" and under == "─" * 7 + "━" * 10 + "─" * 43, (row, under)
+    assert tui.foot_line("bots").plain.split() == "↑↓ select space expand enter all fields c copy fix ←→ tabs q quit".split()
+    assert tui.foot_line("alerts").plain.split() == "↑↓ select enter the post's text ←→ tabs q quit".split()
+    assert tui.foot_line("config").plain.split() == "←→ tabs ↑↓ select enter all fields q quit".split()
+    assert tui.bar_text({}) == "no state yet: the monitor has not written state.json"
+    assert tui.bar_text(mon(stopped_by_user=True)) is None and tui.bar_text(mon(), stopped=True) is None, "the title says stopped by you"
+    assert tui.bar_text(mon(), note="no ledger", stopped=True) == "no ledger"
+    print("ok: the cursor's row is highlighted to the edge; the title's right side is live / check overdue / stopped by you / not running; "
+          "the tab row underlines the active tab and counts the open alerts; one footer per tab")
 
-NOW = "2026-10-11T12:00:00Z"
+
 FAKES = tempfile.TemporaryDirectory()
 
 
@@ -174,52 +202,35 @@ def fake_monitor(bot):
     """A live process whose command line is a monitor's: `bash <root>/monitor/monitor.sh <wrapper> --locked <bot>`."""
     script = Path(FAKES.name) / "monitor" / "monitor.sh"
     script.parent.mkdir(exist_ok=True)
-    script.write_text("sleep 30\n")
+    script.write_text("sleep 60\n")
     return subprocess.Popen(["bash", str(script), "/x/bin/claude-discord", "--locked", bot])
 
 
 MON = fake_monitor("mgr")
-BASE = {"version": 1, "manager": "mgr",
-        "monitor": {"pid": MON.pid, "started": NOW, "last_pass": NOW, "next_pass": NOW, "pass_s": 2,
-                    "holders": [{"kind": "tui", "pid": 456}], "post_failed": False},
-        "hosts": {"local": {"host": "local", "name": "lambda", "reach": "ok", "patch": "ok", "version": "1.10.0 (abc)",
-                            "verdict": "ok", "checked": NOW, "laptop": False},
-                  "wmac": {"host": "wmac", "name": "wmac", "reach": "ok", "patch": "ok", "version": "1.10.0 (abc)",
-                           "verdict": "ok", "checked": NOW, "laptop": True}},
-        "bots": {"local|/home/u/p|RVP": {"host": "local", "name": "lambda", "project": "/home/u/p", "home": "/home/u",
-                                         "bot": "RVP", "verdict": "ok", "since": NOW, "detail": "", "servers": "1"},
-                 "wmac|/Users/u/p|MAC": {"host": "wmac", "name": "wmac", "project": "/Users/u/p", "home": "/Users/u",
-                                         "bot": "MAC", "verdict": "ok", "since": NOW, "detail": "", "servers": "1"}},
-        "alerts": []}
 CRASHED = "wmac|/Users/u/q|-"
 
 
 def variant(name):
-    s = json.loads(json.dumps(BASE))
-    if name == "findings":
-        s["bots"]["wmac|/Users/u/p|MAC"].update(verdict="down", detail="no plugin server for this bot", servers="0",
-                                                fix="ssh wmac 'cd ~/p && ~/.local/bin/claude-discord --bg --name MAC'")
-        s["alerts"] = [{"ts": NOW, "key": "wmac|/Users/u/p|MAC", "kind": "finding", "verdict": "down", "status": "sent"}]
-    elif name == "crashed_project":
+    s = base()
+    if name == "crashed_project":
         # What the monitor writes for a project whose health crashed before any bot of it was known: no `bot` field.
-        s["bots"][CRASHED] = {"host": "wmac", "name": "wmac", "project": "/Users/u/q", "home": "/Users/u",
-                              "owner_id": "111", "verdict": "blind", "since": NOW, "detail": "health exited 1 with no document",
-                              "fix": "ssh wmac 'cd ~/q && ~/.local/bin/claude-discord health'"}
+        s["bots"][CRASHED] = {"host": "wmac", "name": "wmac", "project": "/Users/u/q", "home": "/Users/u", "owner_id": "111", "verdict": "blind",
+                              "since": iso(time.time() - 20), "detail": "health exited 1 with no document", "fix": "ssh wmac 'cd ~/q && ~/.local/bin/claude-discord health'"}
     elif name == "markup":
         # state-derived text with Rich/Textual markup lookalikes: shown as typed, never parsed ([/] would raise)
         s["manager"] = "mgr [bold]"
         s["monitor"].update(pid=None, stopped_at="[down]x", holders=[])
-        s["bots"]["wmac|/Users/u/p|MAC"].update(verdict="down", detail="error [/] near", servers="[0]",
-                                                fix="echo patch output [down] here")
-        s["alerts"] = [{"ts": NOW, "key": "wmac|/Users/u/p|MAC", "kind": "find[/]ing", "verdict": "down", "status": "[red]sent"}]
-    elif name == "cursor":
-        s["bots"]["wmac|/Users/u/p|MAC"]["detail"] = "before"
+        s["bots"][PHOTO].update(bot="pho[/]to", detail="error [/] near", fix="echo patch output [down] here", channel_name="[red]x")
+        s["alerts"][6].update(detail="find[/]ing", text="[bold]posted[/]")
+    elif name == "many":   # more rows than a 20-line terminal shows
+        for i in range(20):
+            s["bots"][f"local|/home/u/m|m{i:02}"] = dict(s["bots"][OLDBOT], host="local", project="/home/u/m", bot=f"m{i:02}")
     elif name == "stopped":
-        s["monitor"].update(pid=None, stopped_at=NOW, holders=[])
-    elif name == "keeper":
-        s["monitor"]["holders"] = [{"kind": "keeper", "pid": 789}, {"kind": "tui", "pid": 456}]
+        s["monitor"].update(pid=None, stopped_at="2026-10-11T12:00:00Z", holders=[])
     elif name == "stopped_by_user":
-        s["monitor"].update(pid=None, stopped_at=NOW, holders=[], stopped_by_user=True)
+        s["monitor"].update(pid=None, stopped_at="2026-10-11T12:00:00Z", holders=[], stopped_by_user=True)
+    elif name == "overdue":
+        s["monitor"]["next_pass"] = iso(time.time() - 100)
     elif name == "post_failed":
         s["monitor"]["post_failed"] = True
     elif name == "pass_failed":
@@ -236,12 +247,12 @@ def stub(d, body):
     return str(p)
 
 
-async def case(name, check, wrapper=None, state=None):
+async def case(name, check, wrapper=None, state=None, size=(137, 40)):
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "holders").mkdir()
         (Path(d) / "state.json").write_text(json.dumps(variant(state or name)))
         app = tui.MonitorTUI(Path(d), "mgr", wrapper(d) if wrapper else None)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=size) as pilot:
             await pilot.pause()
             await check(app, pilot)
     print(f"ok: {name}")
@@ -251,57 +262,66 @@ def text(app, sel):
     return str(app.query_one(sel).render())
 
 
-def cells(table, key):
-    return [str(c) for c in table.get_row(key)]
+def body(app):
+    return text(app, "#body").split("\n")
 
 
-async def all_ok(app, pilot):
-    assert f"monitor pid {MON.pid}" in text(app, "#head"), text(app, "#head")
+def line_of(app, word):
+    return next(l for l in body(app) if word in l)
+
+
+# ---- pilot cases -----------------------------------------------------------
+async def shell(app, pilot):
+    assert text(app, "#title").endswith("● live  keeper · checked 1m ago · next 4m"), text(app, "#title")
     assert app.query_one("#bar").has_class("hidden")
-    assert "--stop" not in text(app, "#head"), "no keeper, no stop hint"
-    hosts = app.query_one("#hosts")
-    assert hosts.row_count == 2
-    assert cells(hosts, "wmac")[0] == "wmac (laptop)" and cells(hosts, "wmac")[4] == "1/1", cells(hosts, "wmac")
-    # the Mac row: its server count (macOS counts through ps -ax) is shown in its own cell
-    assert cells(app.query_one("#bots"), "wmac|/Users/u/p|MAC")[5] == "1", cells(app.query_one("#bots"), "wmac|/Users/u/p|MAC")
+    assert text(app, "#tabs").split("\n")[0].rstrip() == " Bots   Alerts 1   Configuration"
+    assert "space" in text(app, "#foot")
+    assert app.focused is None, "nothing is focused, so the arrow keys reach the app's bindings"
+    await pilot.press("right")
+    assert app.tab == "alerts" and "the post's text" in text(app, "#foot") and text(app, "#tabs").split("\n")[1].startswith("─" * 7 + "━")
+    await pilot.press("right", "right")
+    assert app.tab == "bots"
+    await pilot.press("left")
+    assert app.tab == "config"
 
 
-async def findings(app, pilot):
-    bots = app.query_one("#bots")
-    assert [str(c) for c in bots.get_row_at(0)][3] == "down", "findings first"
-    assert cells(app.query_one("#hosts"), "wmac")[4] == "0/1", cells(app.query_one("#hosts"), "wmac")
-    bots.focus()
-    bots.move_cursor(row=0)
-    await pilot.press("enter")
+async def narrow(app, pilot):
+    assert [app.query_one(w).size.height for w in ("#title", "#tabs", "#foot")] == [1, 2, 1], "one line each, however narrow"
+    assert app.width == 100 and body(app)[0] == "✕ 1  ▲ 1  ● 22  ○ 1 of 25 bots   hosts 2/3", body(app)[0]
+    head = line_of(app, "status")
+    assert head.split() == ["bot", "status", "host", "channel", "last"], head
+    pane = app.query_one("#pane")
+    assert pane.scroll_offset.y == 0 and pane.max_scroll_y > 0, "more rows than the terminal has lines"
+    await pilot.press(*["down"] * 30)   # past the last row: the cursor stops there
     await pilot.pause()
-    assert isinstance(app.screen, tui.Detail)
-    assert "claude-discord --bg --name MAC" in str(app.screen.query_one("#fix").render())
-    await pilot.press("escape")
-    await pilot.press("a")
+    assert app.cursor["bots"] == NOTOK
+    _, y, h = tui.render(app.items(time.time()), NOTOK, 100)
+    assert pane.scroll_offset.y <= y and y + h <= pane.scroll_offset.y + pane.size.height, (pane.scroll_offset, y, h, pane.size)
+    await pilot.press(*["up"] * 30)
     await pilot.pause()
-    assert isinstance(app.screen, tui.Alerts) and app.screen.query_one("#alerts").row_count == 1
+    assert app.cursor["bots"] == PHOTO and pane.scroll_offset.y <= tui.render(app.items(time.time()), PHOTO, 100)[1]
+    await pilot.resize_terminal(120, 30)
+    await pilot.pause()
+    assert "receives" in line_of(app, "status") and body(app)[0].startswith("╭"), "a wider terminal gets the columns and the KPI band back"
 
 
-async def crashed_project(app, pilot):
-    bots = app.query_one("#bots")
-    row = [str(c) for c in bots.get_row_at(0)]
-    assert row[1:4] == ["~/q", "-", "blind"], f"a project row, sorted with the findings: {row}"
-    assert cells(app.query_one("#hosts"), "wmac")[4] == "1/1", "a project row is not a bot: " + str(cells(app.query_one("#hosts"), "wmac"))
-    bots.focus()
-    bots.move_cursor(row=0)
-    await pilot.press("enter")
-    await pilot.pause()
-    assert isinstance(app.screen, tui.Detail) and app.screen.key == CRASHED
-    assert "claude-discord health" in str(app.screen.query_one("#fix").render())
+async def markup(app, pilot):
+    assert "mgr [bold]" in text(app, "#title"), text(app, "#title")
+    assert "[down]x" in text(app, "#bar"), text(app, "#bar")
+    assert "pho[/]to" in text(app, "#body") and "#[red]x" in text(app, "#body") and "fix  echo patch output [down] here" in text(app, "#body")
 
 
 async def stopped(app, pilot):
-    assert not app.query_one("#bar").has_class("hidden")
-    assert f"monitor stopped at {NOW}" in text(app, "#bar")
+    assert text(app, "#title").endswith("○ not running") and f"monitor stopped at 2026-10-11T12:00:00Z" in text(app, "#bar")
 
 
 async def stopped_by_user(app, pilot):
-    assert "stopped by you" in text(app, "#bar") and "claude-discord monitor --start mgr" in text(app, "#bar"), text(app, "#bar")
+    assert text(app, "#title").endswith("○ stopped by you  start: claude-discord monitor --start mgr"), text(app, "#title")
+    assert app.query_one("#bar").has_class("hidden")
+
+
+async def overdue(app, pilot):
+    assert "▲ check overdue  due " in text(app, "#title") and " · now " in text(app, "#title"), text(app, "#title")
 
 
 async def refused_marker(app, pilot):
@@ -319,44 +339,18 @@ def own_marker(d):
     return Path(d) / (f"refused.{ns}" if ns else "refused")
 
 
-async def keeper(app, pilot):
-    head = text(app, "#head")
-    assert "holders keeper 789, tui 456" in head and "claude-discord monitor --stop mgr" in head, head
-    assert app.query_one("#bar").has_class("hidden")   # a keeper is no warning
-
-
 async def post_failed(app, pilot):
     assert "POST" in text(app, "#bar")
 
 
 async def pass_failed(app, pilot):
     assert "the last pass failed: the reducer rejected its input" in text(app, "#bar"), text(app, "#bar")
-    assert cells(app.query_one("#hosts"), "wmac")[0] == "wmac (laptop) (left the ledger)", cells(app.query_one("#hosts"), "wmac")
-
-
-async def markup(app, pilot):
-    assert "mgr [bold]" in text(app, "#head"), text(app, "#head")
-    assert "[down]x" in text(app, "#bar"), text(app, "#bar")
-    bots = app.query_one("#bots")
-    row = [str(c) for c in bots.get_row_at(0)]
-    assert row[5:] == ["[0]", "error [/] near"], row
-    bots.focus()
-    bots.move_cursor(row=0)
-    await pilot.press("enter")
-    await pilot.pause()
-    assert isinstance(app.screen, tui.Detail)
-    assert str(app.screen.query_one("#fix").render()) == "echo patch output [down] here", str(app.screen.query_one("#fix").render())
-    await pilot.press("escape")
-    await pilot.press("a")
-    await pilot.pause()
-    assert isinstance(app.screen, tui.Alerts)
-    assert [str(c) for c in app.screen.query_one("#alerts").get_row_at(0)][2:] == ["find[/]ing", "down", "[red]sent"]
 
 
 async def missing_wrapper(app, pilot):
     assert not app.query_one("#bar").has_class("hidden")
     assert "/nonexistent/claude-discord" in text(app, "#bar"), text(app, "#bar")
-    assert f"monitor pid {MON.pid}" in text(app, "#head")   # the rest of the screen still came up
+    assert "photobot" in text(app, "#body")   # the rest of the screen still came up
 
 
 async def refused(app, pilot):
@@ -365,44 +359,26 @@ async def refused(app, pilot):
     assert args == f"monitor --ensure mgr --holder tui {os.getpid()}", args
 
 
-async def cursor(app, pilot):
-    bots = app.query_one("#bots")
-    key = "wmac|/Users/u/p|MAC"
-    bots.focus()
-    bots.move_cursor(row=1)
-    assert bots.ordered_rows[bots.cursor_row].key.value == key
-    state = json.loads((app.state_dir / "state.json").read_text())
-    state["bots"][key]["detail"] = "after"
-    state["bots"]["local|/home/u/p|RVP"]["detail"] = "also"
-    (app.state_dir / "state.json").write_text(json.dumps(state))
-    os.utime(app.state_dir / "state.json", (1, 1))   # a different mtime, whatever the clock's resolution
-    app.refresh_state()
-    assert [str(c) for c in bots.get_row(key)][6] == "after", "the pass was not re-read"
-    assert bots.ordered_rows[bots.cursor_row].key.value == key, "the selected row must stay selected across a refresh"
-
-
 async def main():
     pure()
-    await case("all_ok", all_ok)
-    await case("findings", findings)
-    await case("crashed_project", crashed_project)
+    await case("shell", shell, state="all_ok")
+    await case("narrow", narrow, state="many", size=(100, 20))
+    await case("markup", markup)
     await case("stopped", stopped)
-    await case("keeper", keeper)
+    await case("stopped_by_user", stopped_by_user)
+    await case("overdue", overdue)
     # the refused marker (a detached start met a monitor lock this side cannot see) is shown in the bar
     await case("refused_marker", refused_marker, state="all_ok", wrapper=lambda d: own_marker(d).write_text("") or None)
     await case("refused_other_side", refused_other_side, state="all_ok", wrapper=lambda d: (Path(d) / "refused.1").write_text("") or None)
-    await case("stopped_by_user", stopped_by_user)
     await case("post_failed", post_failed)
     await case("pass_failed", pass_failed)
-    await case("markup", markup)
-    await case("cursor", cursor)
     await case("missing_wrapper", missing_wrapper, wrapper=lambda d: "/nonexistent/claude-discord", state="all_ok")
     await case("refused", refused, state="all_ok",
                wrapper=lambda d: stub(d, 'echo "$*" > "$(dirname "$0")/args"; echo "claude-discord: monitor: no hosts ledger [x]" >&2; exit 1'))
     # q removes the holder record
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "holders").mkdir()
-        (Path(d) / "state.json").write_text(json.dumps(BASE))
+        (Path(d) / "state.json").write_text(json.dumps(base()))
         app = tui.MonitorTUI(Path(d), "mgr", None)
         app.holder.write_text("x")
         async with app.run_test() as pilot:
@@ -413,7 +389,7 @@ async def main():
     # says so and --ensure runs again, once per 30 s at most.
     with tempfile.TemporaryDirectory() as d:
         mon = fake_monitor("mgr")
-        s = variant("all_ok")
+        s = base()
         s["monitor"]["pid"] = mon.pid
         (Path(d) / "holders").mkdir()
         (Path(d) / "state.json").write_text(json.dumps(s))
@@ -425,7 +401,7 @@ async def main():
             mon.wait()
             app.ensured -= 31   # the 30 s since the mount's call, without waiting them
             app.refresh_state()
-            assert f"monitor pid {mon.pid} is gone" in text(app, "#bar"), text(app, "#bar")
+            assert f"monitor pid {mon.pid} is gone" in text(app, "#bar") and text(app, "#title").endswith("○ not running"), text(app, "#bar")
             app.refresh_state()   # within 30 s of the last call: none
             calls = (Path(d) / "args").read_text().splitlines()
             assert calls == [f"monitor --ensure mgr --holder tui {os.getpid()}"] * 2, calls
@@ -433,7 +409,7 @@ async def main():
     # A pid that lives but is no monitor of this bot (reused by another program; another bot's monitor) is as gone as a dead one.
     for what, other in (("a reused pid", subprocess.Popen(["sleep", "30"])), ("another bot's monitor", fake_monitor("other"))):
         with tempfile.TemporaryDirectory() as d:
-            s = variant("all_ok")
+            s = base()
             s["monitor"]["pid"] = other.pid
             (Path(d) / "holders").mkdir()
             (Path(d) / "state.json").write_text(json.dumps(s))
@@ -446,7 +422,7 @@ async def main():
         other.wait()
     print("ok: a live pid that is no monitor of this bot is shown gone and ensured")
     # Launched with the `stopped` marker (monitor --stop): a dialog asks, No by default. Yes runs monitor --start, then
-    # the usual --ensure; No (Enter) runs nothing and the bar says stopped by you, with the marker's time.
+    # the usual --ensure; No (Enter) runs nothing and the title says stopped by you.
     for answer in ("y", "enter"):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "holders").mkdir()
@@ -462,14 +438,14 @@ async def main():
                 if answer == "y":
                     assert args == ["monitor --start mgr", f"monitor --ensure mgr --holder tui {os.getpid()}"], args
                 else:
-                    assert args == [], args
-                    assert "stopped by you at " in text(app, "#bar"), text(app, "#bar")
+                    assert args == [] and not isinstance(app.screen, tui.Confirm), args
+                    assert "○ stopped by you  start: claude-discord monitor --start mgr" in text(app, "#title"), text(app, "#title")
     print("ok: launched after monitor --stop, a dialog asks: yes starts the backend, no (the default) stays read-only")
     # Q: quit and stop the backend, after a dialog, No by default. Yes runs monitor --stop and quits; No (Enter) stays.
     for answer in ("y", "enter"):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "holders").mkdir()
-            (Path(d) / "state.json").write_text(json.dumps(variant("keeper")))
+            (Path(d) / "state.json").write_text(json.dumps(base()))
             app = tui.MonitorTUI(Path(d), "mgr", stub(d, 'echo "$*" >> "$(dirname "$0")/args"; case "$*" in *--stop*) sleep 1;; esac'))
             async with app.run_test() as pilot:
                 await pilot.pause()
