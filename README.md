@@ -1048,7 +1048,11 @@ row per bot: bot, status, host (the ledger's `name=`, else the hostname),
 channel, receives, last (since its session was last handed a message),
 project. Problems come first (`down`, `stale` shown as `STUCK`, `duplicate`,
 `unreachable`), then what needs a look (`throttled` shown as `rate-limited`,
-`apierror`, `nostate`, `blind`), then `working` and `ok`, then `no token`.
+`apierror`, `nostate`, `blind`), then the bots of a host the last pass could
+not reach (`○ host unreachable`, dim, whatever they were last seen as: the
+monitor keeps their last verdict, which is not a current one, so they are in
+none of the counts; opened, the row says `last seen <status> <N> ago`), then
+`working` and `ok`, then `no token`.
 A problem row has its recovery command on a line of its own under it, and `c`
 copies it (OSC 52, so over ssh too). `space` opens a row, and several may be
 open: the status column gains the reason and `posted Nm ago`, `not posted

@@ -131,17 +131,31 @@ def host_label(state: dict, host: str) -> str:
     return h.get("display") or h.get("name") or host or DASH
 
 
+def cut_off(state: dict, b: dict) -> bool:
+    """The last pass could not ask this bot's host (its `reach` is hostdown, blind or noreach), so the monitor froze the
+    bot with the last verdict it saw: not a current one. A host the state does not list counts as reachable."""
+    h = (state.get("hosts") or {}).get(b.get("host"))
+    return h is not None and h.get("reach") != "ok"
+
+
+def group(state: dict, b: dict) -> float:
+    """rank, and 1.5 for a bot of a host that cannot be reached: after what needs a look, before the healthy."""
+    return 1.5 if cut_off(state, b) else rank(b.get("verdict", ""))
+
+
 def sorted_bots(state: dict) -> list[tuple[str, dict]]:
-    """(key, entry) for the Bots tab: problems, then what needs a look, then healthy, then no token; by key within each.
+    """(key, entry) for the Bots tab: problems, then what needs a look, then the bots of a host that cannot be reached,
+    then healthy, then no token; by key within each.
     A host|project|- entry (a project whose health crashed before any bot of it was known) has no `bot`: a row with bot '-'."""
     return sorted(((k, b) for k, b in (state.get("bots") or {}).items() if isinstance(b, dict)),
-                  key=lambda kv: (rank(kv[1].get("verdict", "")), kv[0]))
+                  key=lambda kv: (group(state, kv[1]), kv[0]))
 
 
 def kpi(state: dict) -> dict:
-    """The numbers of the KPI band. The denominator is every bot; a bot with no token is counted apart, not as a problem."""
+    """The numbers of the KPI band. The denominator is every bot; a bot with no token is counted apart, not as a problem,
+    and a bot of a host that cannot be reached in none of the counts: the Hosts box says that host is out."""
     rows = [b for _, b in sorted_bots(state)]
-    by = [[b for b in rows if rank(b.get("verdict", "")) == r] for r in range(4)]
+    by = [[b for b in rows if group(state, b) == r] for r in range(4)]
     hosts = [(k, h) for k, h in sorted((state.get("hosts") or {}).items()) if h.get("left_s") is None]
     bad = [k for k, h in hosts if h.get("reach") != "ok"]
     first = lambda bs: (bs[0].get("bot") or DASH) if bs else ""
@@ -241,10 +255,16 @@ def bots_items(state: dict, names: dict, width: int, opened: set, now: float) ->
     items: list[tuple] = [(None, kpi_lines(state, width) + [Text()]),
                          (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))]
     for key, b in sorted_bots(state):
-        o, v, r = key in opened, b.get("verdict", ""), rank(b.get("verdict", ""))
-        word, style = mark(v)
-        status = [(f" {word} {ago(b.get('since'), now)} " if r == 0 else word, style)]
-        if o:
+        o, v, r, cut = key in opened, b.get("verdict", ""), rank(b.get("verdict", "")), cut_off(state, b)
+        word, style = ("○ host unreachable", DIM) if cut else mark(v)
+        status = [(f" {word} {ago(b.get('since'), now)} " if r == 0 and not cut else word, style)]
+        if o and cut:   # not its reason, which is as old as the verdict: when the host stopped answering (its `since`)
+            seen = ago(((state.get("hosts") or {}).get(b.get("host")) or {}).get("since"), now)
+            status += [(s, "") for s in wrap(f"last seen {WORD.get(v, v or '?')} {seen} ago" if seen else f"last seen {WORD.get(v, v or '?')}",
+                                             dict(cols)["status"], 2)]
+            if b.get("posted"):
+                status.append((f"posted {ago(b.get('posted_at'), now)} ago", DIM))
+        elif o:
             status += [(s, "") for s in wrap(b.get("detail") or "", dict(cols)["status"], 3)]
             if r < 2:   # warning only: the monitor recorded this verdict in `alerts` as one it does not post when it appears
                 quiet = any(a.get("key") == key and a.get("status") == "not_posted" and a.get("verdict") == v for a in state.get("alerts") or [])
@@ -258,7 +278,9 @@ def bots_items(state: dict, names: dict, width: int, opened: set, now: float) ->
                 "last": [((ago(b.get("last_message_at"), now) or DASH).rjust(5), DIM)],
                 "project": [("~" if project and project == b.get("home") else project.rstrip("/").rsplit("/", 1)[-1] or DASH, DIM)]}
         items.append((key, row_lines([(cell[n], w) for n, w in cols], "▾ " if o else "▸ ")))
-        if r == 0 and b.get("fix"):   # one full-width line, never wrapped into a column, so it selects and copies whole
+        # One full-width line, never wrapped into a column, so it selects and copies whole. None for a host that cannot be
+        # reached: the command would go through it.
+        if r == 0 and not cut and b.get("fix"):
             items.append((None, [Text.assemble(("     fix  ", DIM), (b["fix"], BRAND), ("   c copies it", DIM))]))
     return items
 

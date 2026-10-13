@@ -165,6 +165,32 @@ def pure():
     print("ok: the Bots table: one width for every line at 137 and 100 columns, project and receives folded below 110, a row grows "
           "downward in its own columns, one full-width fix line under a problem row")
 
+    # Bots of a host the last pass could not ask (reach hostdown, blind or noreach): the monitor froze them with their
+    # last verdict, which is not a current one. Dim `○ host unreachable`, after what needs a look and before the healthy,
+    # in none of the three counts (the Hosts box says the host is out); open, when that verdict was last seen (the
+    # host's `since`). No fix line: the command would go through the host that does not answer. A host the state does
+    # not list counts as reachable.
+    WOK, WDN, GHOST = "wmac|/Users/u/q|wbot", "wmac|/Users/u/q|wdown", "ghost|/home/u/g|gbot"
+    wb = lambda name, verdict, **kw: dict({"host": "wmac", "project": "/Users/u/q", "home": "/Users/u", "bot": name, "verdict": verdict,
+                                          "since": iso(T - 90000), "detail": "the last detail seen", "servers": "1"}, **kw)
+    fz = dict(s, bots=dict(s["bots"], **{WOK: wb("wbot", "ok"), GHOST: dict(wb("gbot", "ok"), host="ghost"),
+                                         WDN: wb("wdown", "down", posted="down", posted_at=iso(T - 10800), fix="ssh wmac 'cd ~/q && x'")}))
+    assert [k for k, _ in tui.sorted_bots(fz)] == [PHOTO, HBOT, WOK, WDN, GHOST, MGRBOT, OLDBOT, NOTOK], [k for k, _ in tui.sorted_bots(fz)]
+    k = tui.kpi(fz)
+    assert (k["problems"], k["look"], k["healthy"], k["notoken"], k["bots"]) == (1, 1, 3, 1, 8), k
+    assert [l.plain for l in tui.kpi_lines(fz, 109)] == ["✕ 1  ▲ 1  ● 3  ○ 1 of 8 bots   hosts 2/3"], "the one-line band gets no new symbol"
+    for width in (137, 100):
+        items = tui.bots_items(fz, NAMES, width, {WOK, WDN}, T)
+        rows = {k: [l.plain for l in lines] for k, lines in items if k}
+        assert len({cell_len(l) for lines in rows.values() for l in lines}) == 1
+        assert rows[WOK][0].split()[:5] == ["▾", "wbot", "○", "host", "unreachable"] and "last seen ok 4h ago" in rows[WOK][1], rows[WOK]
+        assert rows[WDN][0].split()[:5] == ["▾", "wdown", "○", "host", "unreachable"] and "last seen DOWN 4h ago" in rows[WDN][1], rows[WDN]
+        assert "posted 3h ago" in rows[WDN][2] and len(rows[WOK]) == 2 and "the last detail" not in "".join(rows[WOK] + rows[WDN]), (rows[WOK], rows[WDN])
+        assert rows[GHOST][0].split()[:4] == ["▸", "gbot", "●", "ok"], rows[GHOST]
+        assert [lines[0].plain for k, lines in items if k is None and lines and lines[0].plain.lstrip().startswith("fix  ")] == [f"     fix  {FIX}   c copies it"]
+    print("ok: bots of a host that cannot be reached are dim `host unreachable` rows between what needs a look and the healthy, in no count, "
+          "with when their verdict was last seen and no fix line")
+
     # ---- the shell: the pane's renderer, title, tabs, footer, bar ----
     txt, y, h = tui.render(tui.bots_items(s, NAMES, 137, {HBOT}, T), HBOT, 137)
     lines = txt.plain.split("\n")
@@ -266,6 +292,7 @@ def variant(name):
     s = base()
     if name == "crashed_project":
         # What the monitor writes for a project whose health crashed before any bot of it was known: no `bot` field.
+        s["hosts"]["wmac"].update(reach="ok", verdict="ok", detail="")   # the host answered: one of its projects did not
         s["bots"][CRASHED] = {"host": "wmac", "name": "wmac", "project": "/Users/u/q", "home": "/Users/u", "owner_id": "111", "verdict": "blind",
                               "since": iso(time.time() - 20), "detail": "health exited 1 with no document", "fix": "ssh wmac 'cd ~/q && ~/.local/bin/claude-discord health'"}
     elif name == "markup":
