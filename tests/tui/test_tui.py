@@ -159,7 +159,11 @@ def pure():
     opened = [l.plain for k, lines in tui.bots_items(s, NAMES, 110, {PHOTO}, T) if k == PHOTO for l in lines]
     assert opened[0].startswith("▾ photobot") and "no plugin server for this" in opened[1] and "posted 11m ago" in opened[3], opened
     assert "from dongyong22," in opened[1] and "gpuvillain," in opened[2] and "junyong-dev-bot +2" in opened[3] and "DMs dongyong22" in opened[4], opened
-    assert "not posted (warning only)" in "".join(l.plain for k, lines in tui.bots_items(s, NAMES, 137, {HBOT}, T) if k == HBOT for l in lines)
+    # Warning only is what the verdict is (the monitor's warn_only), not a not_posted record that 100 newer ones push out.
+    for v, want in (("throttled", "not posted (warning only)"), ("apierror", "not posted (warning only)"), ("noreach", "not posted (warning only)"),
+                    ("newverdict", "not posted (warning only)"), ("nostate", "not posted yet"), ("blind", "not posted yet"), ("stale", "not posted yet")):
+        quiet = dict(s, alerts=[], bots={HBOT: dict(s["bots"][HBOT], verdict=v)})
+        assert want in "".join(l.plain for k, lines in tui.bots_items(quiet, NAMES, 137, {HBOT}, T) if k for l in lines), (v, want)
     fresh = dict(s, bots={PHOTO: dict(s["bots"][PHOTO], posted=None)})   # a problem inside its hold time: the channel will be told
     assert "not posted yet" in "".join(l.plain for _, lines in tui.bots_items(fresh, NAMES, 137, {PHOTO}, T) for l in lines)
     print("ok: the Bots table: one width for every line at 137 and 100 columns, project and receives folded below 110, a row grows "
@@ -248,7 +252,8 @@ def pure():
     narrow = {k: lines[0].plain for k, lines in tui.alerts_items(s, 100, T) if k}
     assert "lmd79" not in narrow["open " + PHOTO] and all(cell_len(l) <= 100 for l in narrow.values())
     assert tui.posted_text(s["alerts"][6]).startswith("<@111> [down] photobot") and tui.posted_text(tui.open_alerts(s)[0]).endswith("fix: " + FIX)
-    assert tui.posted_text(s["alerts"][7]).startswith("(not posted") and tui.posted_text(s["alerts"][4]).startswith("(the text was not recorded")
+    assert tui.posted_text(s["alerts"][7]).startswith("(not posted") and tui.posted_text(s["alerts"][4]) == "(the posted text is no longer kept)"
+    assert tui.posted_text(tui.open_alerts(dict(s, alerts=[]))[0]) == "(the posted text is no longer kept)", "an open alert whose record is gone"
     print("ok: the Alerts tab: Open is what was posted and has not recovered, History the last 24 h newest first; kind, what and post per record; "
           "the host column folds below 110; the posted text, or why there is none")
 

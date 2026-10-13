@@ -689,8 +689,14 @@ def host_step($r):
 | [$s.hosts | to_entries[] | select(.value.reach != "ok" or .value.left_s != null) | .key] as $frozen
 | ([$s.hosts | to_entries[] | select(.value.left_s == null) | {scope: "hosts", key: .key, e: .value}]
    + [$s.bots | to_entries[] | select(.value.host as $h | $frozen | index($h) == null) | {scope: "bots", key: .key, e: .value}]) as $all
+# One not_posted record per key and verdict a day, not one per appearance: these verdicts come and go by nature, and a
+# bot going between throttled and ok every other pass would fill the 100 records in 17 hours and push every real post
+# out. So none when the last record of that key is already a not_posted of the same verdict under a day old.
+| ($s.alerts // []) as $kept
 | ([$all[] | select(.e.since_s == $now_s and (.e.verdict | good | not) and (.e | warn_only) and (.e | due) != "finding")
-    | {ts: $now, key: (if .scope == "hosts" then .key + "|-" else .key end), kind: "finding", verdict: .e.verdict, status: "not_posted", detail: (.e.detail // "")}]) as $quiet
+    | {ts: $now, key: (if .scope == "hosts" then .key + "|-" else .key end), kind: "finding", verdict: .e.verdict, status: "not_posted", detail: (.e.detail // "")}
+    | select(. as $q | ([$kept[] | select(type == "object" and .key == $q.key)] | last) as $p
+        | ($p.status == "not_posted" and $p.verdict == $q.verdict and $now_s - ($p.ts | try fromdate catch 0) < 86400) | not)]) as $quiet
 | "S" + ($s | .alerts = (((.alerts // []) + $quiet) | .[-100:]) | tojson), "N\([$s.bots[] | select(.bot)] | length)",
   ($ev[] | "E" + .),
   ($all[] | select((.e | due) == "finding" and (.e.owner_id // "" | tostring) != "" and (.e | owner) == "")

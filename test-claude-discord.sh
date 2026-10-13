@@ -3890,6 +3890,29 @@ rm -f "$MB/stopped"; kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || 
 jq -e '.hosts.local | .verdict == "blind" and (.detail | test("did not finish")) and (has("left_s") | not)' "$MB/state.json" >/dev/null || { echo "FAIL: a local laptop past the cap is blind (it alerts), not hostdown, and a host back in the ledger is no longer left: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
 echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; bots that left are dropped and logged, hosts that left kept a day (frozen, posted kept) then dropped; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting; a POST under way when a TERM comes is recorded once it went out; a stray holder file is dropped; a POST that keeps failing is one alerts record and the one that goes out is marked retried; alerts keeps 100 records"
 
+# The reducer and apply by themselves, one jq a pass and no monitor around them: the rules that take several passes of
+# one bot, a day apart, to show. A bot that comes and goes as throttled (a warning the channel is not told when it
+# appears) is ONE not_posted record however often it flaps, not one per appearance, which would fill the 100 records in
+# 17 hours and push every real post out: a new one only for another verdict, or once the last is a day old. Six passes
+# of h1: throttled (a record), ok, throttled (none), apierror (a record), ok a day later, apierror (a record: the last
+# is 86400 s old). The state starts with 120 old records: the reducer keeps the last 100 (apply trims too, so only a
+# pass with nothing posted shows it).
+eval "$(sed -n "/^reduce='\$/,/^'\$/p; /^apply='\$/,/^'\$/p" "$D/monitor/monitor.sh")"
+rpass() {  # $1 = the pass's start (epoch s), the rest = bot:verdict of h1; RS = the state, read and written
+  local ns=$1 now; shift; TZ=UTC printf -v now '%(%Y-%m-%dT%H:%M:%SZ)T' "$ns"
+  RS=$(printf '%s\nh1\x1ffalse\x1f0\x1f\x1f\n%s' "$RS" "$(mdoc h1 0 "$@")" | jq -nrR --arg now "$now" --argjson now_s "$ns" --arg lang en --arg mowner 111 \
+    --argjson every 300 --argjson pass_s 1 --argjson holders '[]' "$reduce") || { echo "FAIL: the reducer rejected a pass ($*)"; exit 1; }
+  RS=${RS#S}; RS=${RS%%$'\n'*}
+}
+RS='{"version":1,"manager":"m","monitor":{},"hosts":{},"bots":{},"alerts":['$(printf '{"ts":"2026-01-01T00:00:00Z","key":"pad|-","kind":"finding","verdict":"blind","status":"sent"},%.0s' {1..119})'{"ts":"2026-01-01T00:00:00Z","key":"pad|-"}]}'
+RT=1790000000; rpass $RT fl:throttled; rpass $((RT + 300)) fl:ok; rpass $((RT + 600)) fl:throttled
+rpass $((RT + 900)) fl:apierror; rpass $((RT + 87000)) fl:ok; rpass $((RT + 87300)) fl:apierror
+[ "$(jq -r '[(.alerts | length), ([.alerts[] | select(.key == "h1|/home/u/ws/p|fl") | "\(.verdict) \(.status) \(.ts)"] | join(","))] | join(" / ")' <<<"$RS")" \
+  = "100 / throttled not_posted 2026-09-21T14:13:20Z,apierror not_posted 2026-09-21T14:28:20Z,apierror not_posted 2026-09-22T14:28:20Z" ] ||
+  { echo "FAIL: a flapping warning is one not_posted record per verdict a day, and the reducer keeps 100 records: $(jq -c '[(.alerts | length), [.alerts[] | select(.key != "pad|-")]]' <<<"$RS")"; exit 1; }
+unset RS reduce apply
+echo "ok: monitor: a finding the channel is not told when it appears is one not_posted record per key and verdict a day however often it comes and goes; the reducer keeps the last 100 records"
+
 # Cadence and self-update, counted, never timed. date and sleep are stubs for this monitor: date reads $HOME/clock,
 # which each local health run moves 1000 s on, and logs D for a pass's start stamp (the %s call); sleep logs its
 # argument. Every sleep between two D lines is the monitor's own, in order, so their sum is the pass interval in the

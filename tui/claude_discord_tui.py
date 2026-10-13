@@ -39,6 +39,9 @@ DASH = "-"     # a value the state does not have: an older claude-discord on tha
 WIDE = 110     # below it the KPI band is one line and the table's project, receives and env columns fold away
 TABS = ("bots", "alerts", "config")
 PROBLEM = ("down", "stale", "duplicate", "unreachable")
+# The findings the channel is told within 5 minutes of their appearing. Any other is a warning only (the reducer's
+# warn_only): told after half an hour (throttled, apierror, hostdown) or never (noreach, a verdict this version does not know).
+LOUD = PROBLEM + ("nostate", "patchfail", "blind")
 GOOD = ("busy", "ok")
 WORD = {"down": "DOWN", "stale": "STUCK", "duplicate": "DUPLICATE", "unreachable": "UNREACHABLE", "throttled": "rate-limited",
         "apierror": "api error", "nostate": "no state", "blind": "blind", "noreach": "no network", "busy": "working", "ok": "ok",
@@ -285,10 +288,9 @@ def bots_items(state: dict, names: dict, width: int, opened: set, now: float) ->
                 status.append((f"posted {ago(b.get('posted_at'), now)} ago", DIM))
         elif o:
             status += [(s, "") for s in wrap(b.get("detail") or "", dict(cols)["status"], 3)]
-            if r < 2:   # warning only: the monitor recorded this verdict in `alerts` as one it does not post when it appears
-                quiet = any(a.get("key") == key and a.get("status") == "not_posted" and a.get("verdict") == v for a in state.get("alerts") or [])
+            if r < 2:   # from the verdict, not from its not_posted record in `alerts`: only the last 100 records are kept
                 status.append((f"posted {ago(b.get('posted_at'), now)} ago" if b.get("posted") else
-                               "not posted (warning only)" if quiet else "not posted yet", DIM))
+                               "not posted yet" if v in LOUD else "not posted (warning only)", DIM))
         project = b.get("project") or ""
         cell = {"bot": [(b.get("bot") or DASH, "bold")], "status": status, "host": [(host_label(state, b.get("host", "")), DIM)],
                 "channel": [(s, "") for s in channels(b, state.get("manager", ""), dict(cols)["channel"], o)],
@@ -488,7 +490,7 @@ def posted_text(a: dict) -> str:
     """The text of an alerts record's post, or why there is none."""
     if a.get("status") == "not_posted":
         return "(not posted: a warning only, or still inside its hold time)"
-    return a.get("text") or "(the text was not recorded: posted by a monitor older than 1.11.0)"
+    return a.get("text") or "(the posted text is no longer kept)"   # out of the 100 records, or a monitor older than 1.11.0 posted it
 
 
 def rule(name: str, count: int | None, note: str, width: int) -> Text:

@@ -1009,8 +1009,10 @@ message there wakes no session.
 A finding the channel is not told when it appears (`noreach`, a laptop's
 `hostdown`, and `throttled`, `apierror` and `hostdown` until their 30 minutes
 are up) is recorded all the same, as `not_posted`: the TUI's Alerts tab shows
-it. A post that keeps failing is one record, and the one that finally goes
-out is marked as sent on a retry.
+it. One such record per bot (or host) and verdict a day: a bot that goes
+between `throttled` and `ok` every few minutes does not push the real posts
+out of the 100 records. A post that keeps failing is one record, and the one
+that finally goes out is marked as sent on a retry.
 
 While a host is `noreach`, `hostdown` or `blind`, nothing is said about its
 bots. A bot's owner is `DISCORD_USER_ID` of its project's `config.env`; a
@@ -1075,8 +1077,9 @@ counted as a bot.
 `History`: the records of the last 24 hours, newest first: when, kind
 (`✕ down`, `▲ check`, `○ host`, `✓ recovered`), bot, host, the reason, and
 the post (`✓ sent`, `✓ sent on retry`, `— not posted`). `Enter` shows the
-posted text. A record written by a monitor older than 1.11.0 has no reason
-and no text.
+posted text, or `(the posted text is no longer kept)` for an open alert whose
+record is out of the 100. A record written by a monitor older than 1.11.0
+has no reason and no text.
 
 *Configuration tab* (read-only). `Hosts`: one row per ledger host: its
 display name, the ssh name with the machine's own hostname (`this machine`
