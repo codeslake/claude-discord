@@ -339,7 +339,7 @@ def pure():
     assert tui.foot_line("bots", 109).plain.split() == "↑↓ select space expand enter fields c copy ←→ tabs q quit".split()
     assert all(tui.foot_line(t, 80).plain.split()[-2:] == ["q", "quit"] and cell_len(tui.foot_line(t, 80).plain.rstrip()) <= 80 for t in tui.TABS)
     assert tui.foot_line("alerts").plain.split() == "↑↓ select enter the post's text ←→ tabs q quit".split()
-    assert tui.foot_line("config").plain.split() == "←→ tabs ↑↓ select enter all fields q quit".split()
+    assert tui.foot_line("config").plain.split() == "←→ tabs ↑↓ select enter all fields a add host q quit".split()
     assert tui.bar_text({}) == "no state yet: the monitor has not written state.json"
     assert tui.bar_text(mon(stopped_by_user=True)) is None and tui.bar_text(mon(), stopped=True) is None, "the title says stopped by you"
     assert tui.bar_text(mon(), note="no ledger", stopped=True) == "no ledger"
@@ -483,6 +483,22 @@ def pure():
     print("ok: the picker's search: an alias that starts with the query, then one that holds it, then one that holds its characters in order, "
           "then a target that holds it; all in file order for no query")
 
+    # run_capped: what the TUI runs (the hosts CLI, `ssh -G`) ends at its cap with every process it started, hands a
+    # value over on stdin, and gives back text that can be drawn.
+    t0 = time.time()
+    rc, out, err = tui.run_capped(["sh", "-c", "echo started; sleep 30 & sleep 30"], 0.3)
+    assert (rc, out) == (124, "started") and err == "no answer within 0.3 s" and time.time() - t0 < 2, (rc, out, err, time.time() - t0)
+    assert tui.run_capped(["/nonexistent/claude-discord", "hosts"], 1)[::2] == (127, "cannot run /nonexistent/claude-discord: No such file or directory")
+    assert tui.run_capped(["sh", "-c", "cat; printf 'e\\033[2Jrr\\n' >&2; exit 3"], 5, "KEY=secret\n") == (3, "KEY=secret", "e[2Jrr")
+    assert len(tui.run_capped(["sh", "-c", "head -c 200000 /dev/zero | tr '\\0' x"], 5)[1]) == 65536
+    with tempfile.TemporaryDirectory() as d:
+        g = stub(d, 'echo "$*" > "$(dirname "$0")/g.args"; printf "user dykim\\nhostname h.example\\nidentityfile ~/.ssh/id\\nproxycommand ssh -W %%h:%%p \\033]0;T\\007gw\\n"')
+        assert tui.ssh_effective(g, "lmd_dkim") == ["user dykim", "hostname h.example", "proxycommand ssh -W %h:%p ]0;Tgw"], tui.ssh_effective(g, "lmd_dkim")
+        assert (Path(d) / "g.args").read_text() == "-G -- lmd_dkim\n", "`--` before the alias: it is never an option"
+        assert tui.ssh_effective(stub(d, 'echo "ssh: Could not resolve hostname" >&2; exit 255'), "x") == ["nothing (exit 255: ssh: Could not resolve hostname)"]
+    print("ok: a command the TUI runs is killed with its children at its cap, takes a value on stdin, and its output is cut and cleaned; "
+          "ssh -G is asked with -- before the alias and gives the lines that say where a connection goes")
+
 
 def fuzz():
     """Every value of a small state replaced, one at a time, by a value of each other type: a host of another version
@@ -625,6 +641,14 @@ async def case(name, check, wrapper=None, state=None, size=(137, 40)):
 
 def text(app, sel):
     return str(app.query_one(sel).render())
+
+
+async def settle(app, pilot):
+    """Until the worker threads are done (a hosts CLI call) and what they handed back is drawn. Twice: what a worker
+    hands back may start another (a dialog's result, then the call that follows it)."""
+    for _ in range(2):
+        await app.workers.wait_for_complete()
+        await pilot.pause()
 
 
 def body(app):
@@ -824,6 +848,125 @@ async def config(app, pilot):
     assert raw.startswith("wmac\n") and "hostname         SECA2033002083" in raw and "finding  hostdown  not_posted" in raw, raw
 
 
+SSH_CONFIG = ("Host lmd_dkim\n  HostName lmd-dkim.example\nHost lmd79-host lmd-a100\nHost lmd-gpu-01\n  ProxyJump bastion\n"
+              "Host wmac\n  HostName wmac.example\nHost *\n  User dykim\nMatch exec \"touch /tmp/claude-discord-tui-test-pwned\"\n")
+# The hosts CLI as the picker meets it: a host that answers (slowly, with a warning that looks like markup), one that is
+# already listed, one that does not answer (exit 5, then added unchecked), and one that is this same home (exit 4).
+HOSTS_CLI = r'''d=$(dirname "$0"); echo "$*" >> "$d/args"
+case "$*" in
+  *"add --dry-run wmac") echo "claude-discord: hosts: wmac is already in /p/hosts" >&2; exit 3;;
+  *"add --dry-run "*) for a; do :; done; echo "ssh -o BatchMode=yes -o ConnectTimeout=8 -- $a '~/.local/bin/claude-discord --version --host-id'";;
+  *"add lmd_dkim") sleep 0.2; echo "claude-discord: hosts: added lmd_dkim to /p/hosts"; echo "claude-discord: hosts: warning: lmd_dkim is already watched by [bold]other" >&2;;
+  *"add lmd-a100") printf 'claude-discord: hosts: lmd-a100 did not answer (ssh exit 255): \033[2Jtimed out. Not added\n' >&2; exit 5;;
+  *"add --no-probe lmd-a100") echo "claude-discord: hosts: added lmd-a100 to /p/hosts";;
+  *"add newbox") echo "claude-discord: hosts: newbox is the same home as local" >&2; exit 4;;
+esac'''
+
+
+def ssh_home(app, config=SSH_CONFIG):
+    """Gives the app a home with that ~/.ssh/config (none for None) and an `ssh` that logs its arguments and answers -G."""
+    d = Path(app.state_dir)
+    (d / "home" / ".ssh").mkdir(parents=True)
+    if config is not None:
+        (d / "home" / ".ssh" / "config").write_text(config)
+    ssh = d / "ssh-stub"
+    ssh.write_text('#!/bin/sh\necho "$*" >> "$(dirname "$0")/ssh.args"\nprintf "user dykim\\nhostname lmd-dkim.example\\nport 22\\nproxycommand ssh -W %%h:%%p \\033]0;T\\007gw\\n"\n')
+    ssh.chmod(0o755)
+    app.home, app.ssh = d / "home", str(ssh)
+    app.said_all = []
+    # What a dialog leaves to say, instead of a toast; said as markup it would not be the text it is.
+    app.notify = lambda m, **k: app.said_all.append(m if k.get("markup") is False else ("markup", m))
+
+
+def cli_calls(app):
+    """The wrapper stub's `hosts` calls (the mount's `monitor --ensure` is in the file too)."""
+    return [l for l in (Path(app.state_dir) / "args").read_text().splitlines() if l.startswith("hosts ")]
+
+
+async def add_host(app, pilot):
+    ssh_home(app)
+    cands = lambda: str(app.screen.query_one("#cands").render()).split("\n")
+    info = lambda: str(app.screen.query_one("#info").render())
+    await pilot.press("a")
+    assert len(app.screen_stack) == 1, "a is the Configuration tab's key"
+    await pilot.press("left")
+    assert "+ Add host" in body(app)[2] and text(app, "#foot").split()[-4:] == ["a", "add", "host", "q", "quit"][-4:]
+    await pilot.press("a")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.AddHost) and isinstance(app.focused, tui.Input)
+    assert cands()[0] == "5 matches" and cands()[1].split() == ["▸", "lmd_dkim", "dykim@lmd-dkim.example:22"], cands()
+    assert cands()[5].split() == ["wmac", "dykim@wmac.example:22", "already", "checked"], cands()[5]
+    await pilot.press("l", "m", "d", "q")   # a letter that is a key of the main view (q quits) is text here
+    assert app.return_code is None and cands() == ["0 matches", "▸ lmdq      as typed: not in ~/.ssh/config"], cands()
+    await pilot.press("backspace")
+    assert cands() == ["4 matches", "▸ lmd_dkim    dykim@lmd-dkim.example:22", "  lmd79-host  dykim@lmd79-host:22", "  lmd-a100    dykim@lmd-a100:22",
+                       "  lmd-gpu-01  dykim@lmd-gpu-01:22 · via bastion", "  lmd         as typed: not in ~/.ssh/config"], cands()
+    await pilot.press("down", "down", "down", "down", "down", "up", "up")   # past the last row, then back two
+    assert cands()[3].startswith("▸ lmd-a100") and app.tab == "config", "the arrows move the candidate, not the row or the tab under the dialog"
+    await pilot.press("up", "up", "enter")
+    await settle(app, pilot)
+    # First Enter: nothing is added. The exact command the CLI will run, and what ssh -G says of this one alias, cleaned.
+    assert info().split("\n")[:2] == ["enter checks it first:  ssh -o BatchMode=yes -o ConnectTimeout=8 -- lmd_dkim '~/.local/bin/claude-discord --version --host-id'",
+                                      "ssh -G lmd_dkim says:  user dykim · hostname lmd-dkim.example · port 22 · proxycommand ssh -W %h:%p ]0;Tgw"], info()
+    assert cli_calls(app) == ["hosts --bot mgr add --dry-run lmd_dkim"] and (Path(app.state_dir) / "ssh.args").read_text() == "-G -- lmd_dkim\n"
+    # Second Enter: the add, in a worker. Meanwhile the screen says so and a third Enter does nothing.
+    await pilot.press("enter")
+    assert info() == "checking lmd_dkim ..." and app.screen.query_one("#q").disabled, info()
+    await pilot.press("enter")
+    await settle(app, pilot)
+    assert len(app.screen_stack) == 1 and cli_calls(app)[1:] == ["hosts --bot mgr add lmd_dkim"], cli_calls(app)
+    assert app.said_all == ["claude-discord: hosts: added lmd_dkim to /p/hosts\nclaude-discord: hosts: warning: lmd_dkim is already watched by [bold]other"], app.said_all
+    # A host that does not answer (exit 5): said, cleaned, and a third Enter adds it unchecked.
+    await pilot.press("a")
+    app.screen.query_one("#q").value = "a100"
+    await pilot.press("enter")
+    await settle(app, pilot)
+    await pilot.press("enter")
+    await settle(app, pilot)
+    assert isinstance(app.screen, tui.AddHost) and info() == ("claude-discord: hosts: lmd-a100 did not answer (ssh exit 255): [2Jtimed out. Not added\n"
+                                                             "enter adds it unchecked (hosts add --no-probe) · esc cancel"), info()
+    await pilot.press("enter")
+    await settle(app, pilot)
+    assert len(app.screen_stack) == 1 and cli_calls(app)[-1] == "hosts --bot mgr add --no-probe lmd-a100" and app.said_all[-1] == "claude-discord: hosts: added lmd-a100 to /p/hosts"
+    # An alias the configuration does not name can be typed; the same home (exit 4) is said and nothing is added.
+    await pilot.press("a")
+    app.screen.query_one("#q").value = "newbox"
+    await pilot.pause()
+    assert cands() == ["0 matches", "▸ newbox    as typed: not in ~/.ssh/config"], cands()
+    await pilot.press("enter")
+    await settle(app, pilot)
+    await pilot.press("enter")
+    await settle(app, pilot)
+    assert isinstance(app.screen, tui.AddHost) and info() == "claude-discord: hosts: newbox is the same home as local" and app.screen.step == "search", info()
+    # What is no alias is no candidate, and Enter on it runs nothing.
+    n = len(cli_calls(app))
+    for bad in ("-oProxyCommand=x", "x y;$(id)"):
+        app.screen.query_one("#q").value = bad
+        await pilot.pause()
+        assert cands() == ["0 matches"], (bad, cands())
+        await pilot.press("enter")
+        await settle(app, pilot)
+    assert len(cli_calls(app)) == n and all("-G -- -" not in l for l in (Path(app.state_dir) / "ssh.args").read_text().splitlines())
+    # An alias the last pass already checked: the CLI's refusal (exit 3) is shown.
+    app.screen.query_one("#q").value = "wmac"
+    await pilot.pause()
+    await pilot.press("enter")
+    await settle(app, pilot)
+    assert info() == "claude-discord: hosts: wmac is already in /p/hosts" and "\x1b" not in info()
+    await pilot.press("escape")
+    assert len(app.screen_stack) == 1 and len(app.said_all) == 2 and not Path("/tmp/claude-discord-tui-test-pwned").exists()
+
+
+async def add_host_bare(app, pilot):
+    ssh_home(app, None)   # no ~/.ssh/config at all, and no wrapper: the dialog still opens, and says why nothing can be added
+    await pilot.press("left", "a")
+    await pilot.pause()
+    assert str(app.screen.query_one("#cands").render()) == "0 matches" and "type the ssh alias" in str(app.screen.query_one("#info").render())
+    await pilot.press("b", "enter")
+    await settle(app, pilot)
+    assert str(app.screen.query_one("#info").render()).startswith("started without the wrapper"), str(app.screen.query_one("#info").render())
+
+
 async def stopped(app, pilot):
     assert text(app, "#title").endswith("○ not running") and f"monitor stopped at 2026-10-11T12:00:00Z" in text(app, "#bar")
 
@@ -889,6 +1032,8 @@ async def main():
     await case("wrong_types", wrong_types)
     await case("alerts", alerts, state="all_ok")
     await case("config", config, state="all_ok")
+    await case("add_host", add_host, state="all_ok", wrapper=lambda d: stub(d, HOSTS_CLI))
+    await case("add_host_bare", add_host_bare, state="all_ok")
     await case("stopped", stopped)
     await case("stopped_by_user", stopped_by_user)
     await case("overdue", overdue)

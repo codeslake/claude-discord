@@ -19,6 +19,7 @@ import glob
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -33,7 +34,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Resize
 from textual.geometry import Region
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Static
+from textual.widgets import Button, Footer, Input, Static
 
 # The slack4agents pane's palette: nothing saturated but an alert.
 BRAND, WARN, OK, ALERT, BAR, TAB, CURSOR = "#5fd7ff", "#ffaf00", "#87d787", "#ff5f87", "#3a3a3a", "#585858", "#4e4e4e"
@@ -471,7 +472,7 @@ def foot_line(tab: str, width: int = WIDE) -> Text:
     fields, copy = ("all fields", "copy fix") if width >= WIDE else ("fields", "copy")
     keys = {"bots": (("↑↓", "select"), ("space", "expand"), ("enter", fields), ("c", copy), ("←→", "tabs"), ("q", "quit")),
             "alerts": (("↑↓", "select"), ("enter", "the post's text"), ("←→", "tabs"), ("q", "quit")),
-            "config": (("←→", "tabs"), ("↑↓", "select"), ("enter", "all fields"), ("q", "quit"))}[tab]
+            "config": (("←→", "tabs"), ("↑↓", "select"), ("enter", "all fields"), ("a", "add host"), ("q", "quit"))}[tab]
     out = Text(" ")
     for k, what in keys:
         out.append(f" {k} ", f"bold on {TAB}")
@@ -619,7 +620,8 @@ def config_items(state: dict, names: dict, width: int) -> list[tuple]:
     cols[1] = ("ssh target", max(10, width - 2 - sum(w for _, w in cols) - len(cols) + 1))
     bots, m, mgr = obj(state.get("bots")), obj(state.get("monitor")), txt(state.get("manager")) or "?"
     hosts = sorted(obj(state.get("hosts")).items(), key=lambda kh: (kh[0] != "local", kh[0]))   # this machine first
-    items: list[tuple] = [(None, [rule("Hosts", len(hosts), "", width), Text()]), (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))]
+    add = Text.assemble((" + Add host ", f"bold #000000 on {BRAND}"), ("    a · from ~/.ssh/config and its Includes, or an ssh alias typed in", DIM))
+    items: list[tuple] = [(None, [rule("Hosts", len(hosts), "", width), Text(), add, Text()]), (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))]
     for key, h in hosts:
         h = obj(h)
         v, name, env = txt(h.get("verdict")), txt(h.get("hostname")), ids(h.get("env"))
@@ -746,6 +748,143 @@ def fuzzy(query: str, hosts: list[dict]) -> list[dict]:
     return [h for s, h in sorted(((score(h), h) for h in hosts), key=lambda sh: 9 if sh[0] is None else sh[0]) if s is not None]
 
 
+def run_capped(argv: list, cap: float, stdin: str | None = None) -> tuple[int, str, str]:
+    """A command run to its end, or to `cap` seconds, when its whole process group is killed (a child of it that hangs
+    would otherwise keep the pipes open and this call with them): (exit status, stdout, stderr). 124 for the cap, 127
+    when it cannot be started. Each stream is cut at 64 KiB and cleaned of what must not be drawn; its line breaks
+    stay. `stdin` is how a value travels to the command: never in its argument list."""
+    try:
+        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, start_new_session=True)
+    except OSError as e:
+        return 127, "", f"cannot run {argv[0]}: {e.strerror or e}"
+    try:
+        out, err = p.communicate(None if stdin is None else stdin.encode(), timeout=cap)
+        rc = p.returncode
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        out, err = p.communicate()
+        rc, err = 124, err + f"\nno answer within {cap:g} s".encode()
+    return (rc, *(clean(b[:65536].decode("utf-8", "replace"), UNSAFE_NL).strip() for b in (out, err)))
+
+
+def ssh_effective(ssh: str, alias: str) -> list[str]:
+    """`ssh -G -- <alias>`: what ssh itself will use for the ONE alias the user chose, the lines that say where a
+    connection goes and through what. Never run for a candidate while searching: evaluating the configuration can run
+    a `Match exec` command, which is also why it gets 5 s and no more."""
+    rc, out, err = run_capped([ssh, "-G", "--", alias], 5)
+    lines = [l for l in out.splitlines() if l.split(" ", 1)[0] in ("hostname", "user", "port", "proxyjump", "proxycommand")]
+    return lines or [f"nothing (exit {rc}" + (f": {err.splitlines()[-1]})" if err else ")")]
+
+
+class AddHost(ModalScreen):
+    """`a` on the Configuration tab: a search over the Host aliases of ~/.ssh/config (ssh_hosts), or an alias typed in.
+    Enter on a candidate shows the check `hosts add` runs first (the line its --dry-run prints) and what `ssh -G` says
+    of that one alias; a second Enter runs `hosts add`; after a host that did not answer (exit 5) a third adds it
+    unchecked. Every call runs in a worker thread, so a probe that takes its whole cap leaves the screen alive.
+    Dismissed with what there is to say, or None."""
+    CSS = f"""AddHost {{ align: center middle; }}
+    #add {{ width: 104; max-width: 96%; height: auto; border: round {BRAND}; padding: 1 2; }}
+    #cands {{ height: auto; margin: 1 0; }} #info {{ height: auto; }}"""
+    BINDINGS = [Binding("escape", "cancel", "cancel"), Binding("up", "move(-1)"), Binding("down", "move(1)")]
+    ROWS = 8   # candidates drawn at once
+
+    def __init__(self, hosts: list[dict], listed: set) -> None:
+        super().__init__()
+        self.hosts, self.listed = hosts, listed   # the candidates of ~/.ssh/config; the aliases the last pass checked
+        self.found: list[dict] = []
+        self.at = 0
+        self.step, self.alias = "search", ""      # search -> shown -> (running) -> failed; the alias the last Enter chose
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="add"):
+            yield Static(Text.assemble(("Add a host", f"bold {BRAND}"), ("    from ~/.ssh/config and its Includes", DIM)))
+            yield Input(placeholder="search, or type an ssh alias", id="q")
+            yield Static("", id="cands")
+            yield Static("", id="info", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#q", Input).focus()
+        self.search("")
+
+    def say(self, text: str, style: str = DIM) -> None:
+        self.query_one("#info", Static).update(Text(text, style))
+
+    def search(self, query: str) -> None:
+        self.step, self.at = "search", 0
+        self.found = fuzzy(query, self.hosts)
+        if ALIAS.fullmatch(query) and all(h["alias"] != query for h in self.found):   # an alias the configuration does not name
+            self.found.append({"alias": query, "typed": True})
+        self.say("enter shows the check that runs first · esc cancel" if self.found else
+                 "no Host alias here: type the ssh alias to add (letters, digits and . _ @ - only, not starting with -)")
+        self.paint()
+
+    def paint(self) -> None:
+        n = sum(1 for h in self.found if not h.get("typed"))   # the alias as typed is the last row, and no match
+        top = max(0, min(self.at - self.ROWS // 2, len(self.found) - self.ROWS))
+        w = min(28, max([8] + [cell_len(h["alias"]) for h in self.found]))
+        lines = [Text(f"{n} match{'' if n == 1 else 'es'}", DIM)]
+        for i, h in list(enumerate(self.found))[top:top + self.ROWS]:
+            note = "as typed: not in ~/.ssh/config" if h.get("typed") else ssh_target(h)
+            line = Text.assemble("▸ " if i == self.at else "  ", (fit(h["alias"], w), "bold"), "  ",
+                                 (note + ("   already checked" if h["alias"] in self.listed else ""), DIM))
+            if i == self.at:
+                line.stylize(f"on {CURSOR}")
+            lines.append(line)
+        self.query_one("#cands", Static).update(Text("\n").join(lines))
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self.search(event.value.strip())
+
+    def action_move(self, d: int) -> None:
+        if self.step == "search" and self.found:
+            self.at = max(0, min(len(self.found) - 1, self.at + d))
+            self.paint()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        cli, ssh, alias = self.app.hosts_cli, self.app.ssh, self.alias
+        if self.step == "search" and self.found:
+            alias = self.alias = self.found[self.at]["alias"]
+            self.run("shown", f"asking what would run for {alias} ...", lambda: (cli("add", "--dry-run", alias), ssh_effective(ssh, alias)))
+        elif self.step == "shown":
+            self.run("added", f"checking {alias} ...", lambda: (cli("add", alias), None))
+        elif self.step == "failed":
+            self.run("added", f"adding {alias} unchecked ...", lambda: (cli("add", "--no-probe", alias), None))
+
+    def run(self, then: str, saying: str, call) -> None:
+        """`call` in a worker thread, its result to `ran` on the event loop; no key but escape does anything meanwhile."""
+        self.step = "running"
+        self.say(saying)
+        self.query_one("#q", Input).disabled = True
+        self.run_worker(lambda: self.app.call_from_thread(self.ran, then, *call()), thread=True)
+
+    def ran(self, then: str, answer: tuple, effective: list | None) -> None:
+        if not self.is_attached:   # escape meanwhile
+            return
+        rc, out, err = answer
+        q = self.query_one("#q", Input)
+        q.disabled = False
+        q.focus()
+        if then == "shown" and rc == 0:
+            self.step = "shown"
+            self.say(f"enter checks it first:  {out}\nssh -G {self.alias} says:  {' · '.join(effective or [])}\n"
+                     "refused if it is the same home as a listed host; warns if another manager watches it.   esc cancel", "")
+        elif then == "added" and rc == 0:
+            self.dismiss("\n".join(x for x in (out, err) if x))
+        elif then == "added" and rc == 5:   # it did not answer, or has no claude-discord: the CLI named --no-probe
+            self.step = "failed"
+            self.say(f"{err}\nenter adds it unchecked (hosts add --no-probe) · esc cancel", WARN)
+        else:
+            self.step = "search"
+            self.say(err or f"claude-discord hosts exited {rc}", ALERT)
+
+
 class Confirm(ModalScreen[bool]):
     """A yes/no question, No by default (focused, and Enter, n and Escape answer it)."""
     CSS = "Confirm { align: center middle; } #confirm { width: 70; height: auto; border: thick $error; padding: 1 2; }"
@@ -786,11 +925,12 @@ class MonitorTUI(App):
     """
     BINDINGS = [Binding("q", "quit", "quit"), Binding("Q", "quit_stop", "quit + stop backend"),
                 Binding("up", "move(-1)"), Binding("down", "move(1)"), Binding("left", "tab(-1)"), Binding("right", "tab(1)"),
-                Binding("space", "toggle"), Binding("enter", "open"), Binding("c", "copy")]
+                Binding("space", "toggle"), Binding("enter", "open"), Binding("c", "copy"), Binding("a", "add")]
 
     def __init__(self, state_dir: Path, bot: str, wrapper: str | None) -> None:
         super().__init__()
         self.state_dir, self.bot, self.wrapper = state_dir, bot, wrapper
+        self.home, self.ssh = Path.home(), "ssh"   # where ~/.ssh/config is, and the ssh that `ssh -G` runs (the tests set both)
         self.state: dict = {}
         self.names: dict = {}
         self.note = ""   # why `monitor --ensure` failed, shown in the red bar
@@ -917,7 +1057,7 @@ class MonitorTUI(App):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         # The row keys belong to the main view: under a Detail or a dialog they do nothing.
-        return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy")
+        return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy", "add")
 
     def action_tab(self, d: int) -> None:
         self.tab = TABS[(TABS.index(self.tab) + d) % len(TABS)]
@@ -955,6 +1095,23 @@ class MonitorTUI(App):
         if fix:   # only what the row shows as its fix line
             self.copy_to_clipboard(fix)   # OSC 52: the terminal's clipboard, over ssh too
             self.notify("fix copied (if your terminal allows it)")   # OSC 52 has no answer, and not every terminal takes it
+
+    def hosts_cli(self, *args: str, stdin: str | None = None) -> tuple[int, str, str]:
+        """`claude-discord hosts --bot <bot> <args>` from the manager's project (the TUI's own cwd): the one way this
+        program reads or changes the ledger. 90 s at most: the CLI caps each of its ssh calls at 20 s itself."""
+        if not self.wrapper:
+            return 127, "", "started without the wrapper (--claude-discord): the ledger cannot be changed from here"
+        return run_capped([self.wrapper, "hosts", "--bot", self.bot, *args], 90, stdin)
+
+    def said(self, text: str | None) -> None:
+        """What a dialog was dismissed with: the CLI's own words, shown as they are (never as markup)."""
+        if text:
+            self.notify(text, timeout=10, markup=False)
+
+    def action_add(self) -> None:
+        if self.tab == "config":
+            listed = {k for k, h in obj(self.state.get("hosts")).items() if obj(h).get("left_s") is None}
+            self.push_screen(AddHost(ssh_hosts(self.home), listed), self.said)
 
     def action_quit_stop(self) -> None:
         if not self.wrapper:
