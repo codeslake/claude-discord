@@ -2,15 +2,19 @@
 # requires-python = ">=3.9"
 # dependencies = ["textual>=8.2.8,<9"]
 # ///
-"""claude-discord tui: a read-only view of a manager bot's backend monitor.
+"""claude-discord tui: a view of a manager bot's backend monitor, and where its hosts are added, set and removed.
 
 Started by `claude-discord tui [<bot>]` through `uv run --script`. It registers
 itself as a holder of the monitor (which starts the monitor if none runs),
 re-reads state.json when its mtime changes (checked every 2 s) and removes its
 holder record on quit. Three tabs (Bots, Alerts, Configuration) over that one
 file, plus the display names the bots of this machine keep in `user-names`.
-It changes nothing else: no restart, no post, no patch, and it never reads a
-.env, so it cannot show a token.
+Since 1.12.0 the Configuration tab changes the manager's hosts ledger, always
+through `claude-discord hosts` (it never writes the ledger itself, and never
+reads it: the CLI gives it key names, no value), and asks the monitor for a
+pass with `claude-discord monitor --check`. It reads `~/.ssh/config` as text
+and runs `ssh -G` for the one alias the user chose. Nothing else: no restart,
+no post, no patch, and it never reads a .env, so it cannot show a token.
 """
 from __future__ import annotations
 

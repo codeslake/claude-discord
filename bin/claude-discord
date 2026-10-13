@@ -42,10 +42,11 @@
 #                                        remove the systemd --user timer an
 #                                        older version installed; no OS
 #                                        scheduler is installed any more
-#   claude-discord tui [<name>]          a read-only view of a manager bot's
-#                                        backend monitor (needs uv); starts the
-#                                        monitor and its keeper if none runs (both
-#                                        outlive the TUI); outside a project
+#   claude-discord tui [<name>]          a view of a manager bot's backend monitor
+#                                        (needs uv), where its hosts are added,
+#                                        set and removed (through `hosts`); starts
+#                                        the monitor and its keeper if none runs
+#                                        (both outlive the TUI); outside a project
 #                                        it picks among the recorded projects
 #   claude-discord monitor --keep <name> keeps the manager's monitor up with no
 #                                        TUI or session (foreground: tmux, a
@@ -2345,7 +2346,7 @@ if [ "${1:-}" = monitor ]; then
   exec bash "$self_root/monitor/monitor.sh" "$self_path" "$@"
 fi
 
-# tui: a read-only view of the monitor's state.json (tui/claude_discord_tui.py,
+# tui: a view of the monitor's state.json, and the hosts ledger's editor through `hosts` (tui/claude_discord_tui.py,
 # Python + Textual through `uv run --script`; uv is needed for this verb only).
 # The bot is the project's one dev-manager bot with a hosts ledger unless named. Outside any project: the recorded
 # projects' manager bots (records/projects), and the cwd becomes the chosen project's root.

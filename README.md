@@ -859,10 +859,12 @@ installed in the OS: no launchd, systemd or cron.
 
 ```
 claude-discord setup <manager> --mode    # dev-manager, then: ssh hosts to check
-claude-discord tui [<manager>]           # a read-only view; starts the backend if none runs; works outside a project
+claude-discord tui [<manager>]           # the view, and where hosts are added and set; starts the backend if none runs; works outside a project
+claude-discord hosts list                # the ledger: add, set, laptop, rm change it (below)
 claude-discord monitor --stop <manager>  # stop the backend; nothing starts it again but:
 claude-discord monitor --start <manager> # start it again (detached)
 claude-discord monitor --keep <manager>  # the keeper in the foreground (tmux, a container entrypoint, systemd)
+claude-discord monitor --check <manager> # ask the running monitor for a pass now, not in up to 5 minutes
 ```
 
 **The backend.** A manager bot's backend is a keeper and the monitor it
@@ -912,10 +914,98 @@ pmac  laptop
 
 A `laptop` host is checked like any other, but its own unreachability is
 never posted (a closed lid is not an outage). Setup marks a host `laptop`
-when it answers `Darwin` and has a battery; edit the word by hand to change
-it. Deleting the file turns the monitor off. Two managers must not list the
-same host, or its bots are reported twice; nothing enforces that across
-owners.
+when it answers `Darwin` and has a battery; `claude-discord hosts laptop
+<alias> on|off` changes it. Deleting the file turns the monitor off. Two
+managers should not list the same host, or its bots are reported twice;
+`hosts add` warns when another manager already watches a host, and refuses
+a second line for a home it already checks.
+
+**Changing the ledger: `claude-discord hosts`.** The ledger can still be
+edited by hand; this verb and the TUI's Configuration tab (which only ever
+runs this verb) do it checked, under a lock, and by rename, so a running
+monitor never reads half a file.
+
+```
+claude-discord hosts [--bot <manager>] list [--json]
+claude-discord hosts [--bot <manager>] add [--no-probe|--dry-run] <alias> [laptop] [KEY=VALUE...]
+claude-discord hosts [--bot <manager>] set <alias> name=<display>|KEY=VALUE|KEY=...
+claude-discord hosts [--bot <manager>] set <alias> --stdin
+claude-discord hosts [--bot <manager>] laptop <alias> on|off
+claude-discord hosts [--bot <manager>] rm [--no-probe] <alias>
+```
+
+The manager is the one dev-manager bot with a ledger in the project above
+the current directory, else in a recorded project (as `tui` finds it);
+`--bot` names it when there are several (else exit 2 naming them). So from
+another bot's project on a machine with one manager, it changes that
+manager's ledger: each change prints the ledger's path. A change takes
+effect at the monitor's next pass (5 minutes at most; `claude-discord
+monitor --check <manager>` asks for one now, and the TUI does that itself
+after each change it makes).
+
+- `list` prints a line per host line as the monitor reads it: alias, kind,
+  display name and the KEY NAMES of its env words. `--json` gives the same
+  as `{manager, ledger, ignored, hosts: [{alias, laptop, name, env, skipped}]}`
+  (`ignored`: lines whose first word is no host name; `skipped`: words the
+  monitor skips). Neither ever prints a value.
+- `add` appends a line. An alias is letters, digits and `. _ @ -`, not
+  starting with `-` (ssh would read that as an option), 255 at most: what
+  the monitor accepts as a host. A value holds no space, control character
+  or quote (the ledger has no quoting: write `HTTPS_PROXY=http://h:8118`,
+  not `"http://…"`); `#`, `$` and `\` are fine.
+- `set` replaces a `KEY=` word where it stands or adds it last, `KEY=`
+  removes it, `name=<display>` (no spaces) is what the TUI calls the host.
+  `set <alias> --stdin` reads the same words from stdin, one a line, and
+  `laptop on` / `laptop off` among them: every change in one write, and a
+  value in no argument list. On a command line the value is in your shell's
+  history and, while the command runs, in `ps`; for a proxy URL with a
+  password use `--stdin`.
+- `laptop <alias> on|off` sets or removes the `laptop` word.
+- `rm` removes the host's line(s). The monitor keeps the host a day as
+  "left the ledger", then drops it; nothing is posted. `local` cannot be
+  removed.
+- Lines that are not changed keep their bytes (comments, blank lines,
+  spacing, CRLF, words the monitor skips). An alias with two lines is one
+  host: `set`, `laptop` and `rm` act on both.
+
+| exit | means |
+|---|---|
+| 0 | done; a warning, if any, is on stderr |
+| 1 | it could not: no manager bot with a ledger here, a failed write, or the ledger locked by another `hosts` for 5 s |
+| 2 | usage, or a word that is not allowed (the word itself is never echoed: it may be a secret in the wrong place) |
+| 3 | the alias is already in the ledger (`add`) or is not in it (`set`, `laptop`, `rm`) |
+| 4 | `add` refused: the host is the same home as one already checked |
+| 5 | not added: the host did not answer or has no claude-discord (`--no-probe` adds it unchecked) |
+
+**What `add` asks first.** `hosts add <alias>` runs `ssh -o BatchMode=yes -o
+ConnectTimeout=8 -- <alias> '~/.local/bin/claude-discord --version
+--host-id'` (`--dry-run` prints that line and runs nothing; an exit 255 is
+tried once more with `-o ControlPath=none`, as a monitor pass does; the
+whole call is ended after 20 s). The answer is another machine's output: at
+most 4096 bytes of it are read, each line is stripped of control characters,
+and it is only matched, never run. Then:
+
+- **the same home: refused (exit 4).** Each home has an id,
+  `~/.claude-discord/host-id` (32 hex digits, made once). A host that
+  answers with this home's id, or that this manager already checks under
+  another alias still in the ledger, is `the same home as <host>`: a second
+  line for it would report every bot twice. The id names a home, not a
+  machine: a container and its host that share `$HOME` (below) have one id,
+  which is exactly the pair that must not both be listed.
+- **watched by another manager: a warning.** A host keeps
+  `~/.claude-discord/watchers/<manager>` (`<host-id of that manager's home>
+  <its alias for this host> <time>`), written by that manager's `hosts add`
+  and removed by its `hosts rm`. `add` says `already watched by <manager>`
+  and adds the host all the same. A record can be stale (an `rm` while the
+  host was unreachable says so and how to remove it later); it only warns.
+  A line written by `setup` or by hand leaves no record, so neither check
+  sees it.
+- **no answer, or no claude-discord there: not added (exit 5).** A host
+  without claude-discord would be reported `blind` five minutes later.
+  `--no-probe` adds any alias unchecked: a laptop that is asleep, a host
+  still being set up.
+- **an older claude-discord (before 1.12.0): added, with a warning** that
+  the same-home check could not be made.
 
 **Monitor.** One process per manager bot, started by its keeper (or an open
 TUI), and alive only while one of them is: it exits within 30 s of the last. Every 5 minutes it runs, per host,
@@ -967,7 +1057,8 @@ A systemd unit you write yourself works the same (`ExecStart=` the command,
 A host and a container that share `$HOME` share `~/.claude-discord` but not
 their process ids: run the TUI, the keeper and the manager session on the
 side where the bots run (set `CLAUDE_DISCORD_NO_AUTOSTART=1` on the other),
-and list that machine once in the ledger. Otherwise
+and list that machine once in the ledger (`hosts add` refuses the other
+side: one home, one `host-id`). Otherwise
 each side reads the other's holder as dead (a monitor there starts a keeper of
 its own), and a second ledger entry for the other side reports every bot twice,
 one side as `down`. A keeper on the wrong side would keep a monitor there that
@@ -992,11 +1083,17 @@ Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 | `monitor.log`, `monitor.log.1` | one line per event, 256 KiB each at most |
 | `holders/<kind>-<pid>` | one record per keeper (`keeper`) or open TUI (`tui`): `<pid> <start time> <kind>` (a `session` record from 1.10.2 is read until its session ends) |
 | `stopped` | `monitor --stop` was run: nothing starts the backend until `monitor --start` |
+| `pass-now` | `monitor --check` was run: the monitor removes it at its next tick and runs a pass at once |
 | `keeper.lock` | the keeper's `flock` target, held on fd 8 for its whole life: the one-keeper rule |
 | `refused.<id>` | a detached start met a monitor this side cannot see: this side's hooks start nothing until `monitor --start` or a start that gets through (`<id>` is the digits of `readlink /proc/self/ns/pid`, so the other side of a shared home is not stopped by it; plain `refused` where there is no `/proc`, a Mac). The TUI says `auto-start refused here` |
 | `last-start.<id>` | the epoch second of this side's last automatic start (a hook, not `monitor --start` or the TUI): a prompt within 60 s of it starts nothing, so a keeper that dies at once is not forked again on every prompt of every bot (`<id>` as for `refused.<id>`) |
 | `pass.out` | one host's answer, only during a pass |
 | `post.out` | one post's answer and status, only during a pass |
+
+Outside that directory: `<manager>/hosts.lock` beside the ledger (the
+`flock` target of `claude-discord hosts`, empty), `~/.claude-discord/host-id`
+(this home's id) and, on a host a manager added with `hosts add`,
+`~/.claude-discord/watchers/<manager>`.
 
 **Alerts.** One message per change, posted with the manager bot's token to
 channel `1558283274487341137`, and one `[recovered]` line when the bot is
@@ -1053,11 +1150,14 @@ cannot: `no state yet`, `monitor stopped at <time>`, `auto-start refused
 here: another side holds the monitor lock`, `monitor pid <pid> is gone`
 (killed without cleaning up; the TUI starts it again, once per 30 s at
 most), the last pass failed (the state could not be updated; `monitor.log`
-has the line) or the last post failed. The TUI changes nothing, never reads
-a `.env` and never shows a token. Text that came from another machine or
-from Discord (names, reasons, commands, posted texts) is drawn and copied
-without its control, bidi and zero-width characters, a tab or line break as
-one space: an escape sequence in it never reaches the terminal.
+has the line) or the last post failed. The TUI changes one thing, the
+manager's hosts ledger (Configuration tab), and only by running
+`claude-discord hosts`; it never reads a `.env`, never shows a token, and
+never shows or reads the value of a ledger env word. Text that came from
+another machine, from Discord or from `~/.ssh/config` (names, reasons,
+commands, posted texts, what `ssh -G` and the hosts CLI print) is drawn and
+copied without its control, bidi and zero-width characters, a tab or line
+break as one space: an escape sequence in it never reaches the terminal.
 
 *Bots tab.* A band of counts first (`✕ Problems`, `▲ Needs a look`,
 `● Healthy N of M bots`, `Hosts R / H`; one line below 110 columns). M is
@@ -1065,8 +1165,12 @@ every bot; a bot with no token is counted apart, never as a problem. Then one
 row per bot: bot, status, host (the ledger's `name=`, else the hostname),
 channel, receives, last (since its session was last handed a message),
 project. A mode other than `none` follows the bot's name, dim (`DY-DevBot
-dev-manager`), at 110 columns and more; the bot column grows for it, by up
-to 13 cells taken from channel, receives and project. Problems come first (`down`, `stale` shown as `STUCK`, `duplicate`,
+dev-manager`), at 110 columns and more. There the status column is as wide
+as the widest status a closed row shows (15 to 25 cells: `● ok` needs
+little) and the bot column takes what that leaves, up to 45 cells, so a
+name and its mode are whole (`StreamForQuestion  autoresearchclaw` at 118
+columns); beyond that it takes up to 13 cells from channel, receives and
+project. An opened row's reason wraps inside the status column. Problems come first (`down`, `stale` shown as `STUCK`, `duplicate`,
 `unreachable`), then what needs a look (`throttled` shown as `rate-limited`,
 `apierror`, `nostate`, `blind`), then the bots of a host the last pass could
 not reach (`○ host unreachable`, dim, whatever they were last seen as: the
@@ -1101,13 +1205,43 @@ posted text, or `(the posted text is no longer kept)` for an open alert whose
 record is out of the 100. A record written by a monitor older than 1.11.0
 has no reason and no text.
 
-*Configuration tab* (read-only). `Hosts`: one row per ledger host, this
-machine first: its
+*Configuration tab.* `Hosts`: one row per ledger host as the last pass saw
+it, this machine first: its
 display name, the ssh name with the machine's own hostname (`this machine`
 for `local`), server or laptop, the key names of its env words (never a
 value), whether the last pass reached it, its claude-discord version and its
-bot count; `Enter` shows its raw fields and recovery command. A host taken
-out of the ledger is marked `(left the ledger)` for a day, then dropped.
+bot count. A host taken
+out of the ledger is marked `(left the ledger)` for a day, then dropped
+(`Enter` on it shows its raw fields). Every change below is one
+`claude-discord hosts` call, and after each the TUI asks the monitor for a
+pass (`monitor --check`), so the table follows within a tick and a pass; it
+says so, or that no monitor runs.
+
+`a` (`+ Add host`) opens a search over the `Host` aliases of `~/.ssh/config`
+and the files it Includes, read as text: patterns (`*`, `?`, `!`) are no
+candidates, `Match` blocks are never evaluated (`Match exec` runs commands),
+and `user@host:port` come from the `HostName`, `User`, `Port` and
+`ProxyJump` lines that apply. An alias the configuration does not name can
+be typed. `Enter` on a candidate adds nothing yet: it shows the exact ssh
+command that checks the host first (`hosts add --dry-run`) and what `ssh -G`
+says of that one alias (where the connection goes, and through which
+ProxyJump or ProxyCommand). A second `Enter` runs `hosts add`: refused for
+the same home, a warning when another manager watches it. For a host that
+does not answer, a third `Enter` adds it unchecked. A host is added as a
+server.
+
+`Enter` on a host row opens its settings: the alias and target (not
+editable), the display name, the kind (`( ) server   (●) laptop`; space
+flips it), the env words, and the last check with its reason and recovery
+command. An env word is always drawn `KEY ••••`: the TUI does not know the
+value and has no key to show one. To add or change one, type `KEY` and a new
+value (masked while typed) and press `Enter`; `KEY` with no value removes
+it. `Save` writes every change in one `hosts set <alias> --stdin` call (a
+value travels on stdin, never in an argument list); unsaved changes are said
+in the title, and `esc` asks before dropping them. `Check now` asks the
+running monitor for a pass (it probes nothing itself and starts nothing).
+`Stop monitoring this host` asks, then runs `hosts rm`. On a row, `x` does
+the same and `l` flips server/laptop.
 `Monitor`: the alert language (`ALERT_LANG`) and who is mentioned
 (`DISCORD_USER_ID`; `-` when it is not an id, which mentions nobody), both
 from the manager project's `config.env`, and the
@@ -1213,6 +1347,9 @@ slower, same checks). With jq 1.6 the suite runs some 8 s longer than with 1.7 o
 newer: it starts jq about 2,400 times.
 
 `uv run --script tests/tui/test_tui.py` checks the TUI's pure functions (what
-each column shows, at which width) and then drives it over fixture state
-files (Textual's pilot). It needs uv and the Textual wheel, so it sits
-outside the stub suite and its 40 s budget.
+each column shows, at which width; how `~/.ssh/config` is read) and then
+drives it over fixture state files with a stub in place of the wrapper and
+of ssh (Textual's pilot). It needs uv and the Textual wheel, so it sits
+outside the stub suite and its 40 s budget; it takes about 23 s. Send its
+output to a file, not into a pipe: the stand-in monitors it starts keep a
+pipe open for a minute after it ends.
