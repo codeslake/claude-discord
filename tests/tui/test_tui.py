@@ -595,7 +595,7 @@ async def escapes(app, pilot):
     await pilot.press("right", "enter")
     await pilot.pause()
     raw = str(app.screen.query_one("#body-detail").render())
-    assert raw == "[down][2J photobot reason: x]0;T", repr(raw)
+    assert raw == "[down][2J photobot\nreason: x]0;T", repr(raw)   # the post keeps its own line breaks, and nothing else
     drawn()
 
 
