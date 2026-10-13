@@ -1070,7 +1070,9 @@ otherwise, `+N` past three lines) and the DM policy. `Enter` shows every raw
 field of the row and the posts for it. Below 110 columns project and
 receives fold away.
 A bot on a host whose claude-discord is older than 1.11.0 shows `-` for
-channel, receives and last. A project whose `health` crashed before any of
+channel, receives and last, and so does any field a host sends in a shape
+this version does not expect (a number for a name, an object for a list):
+it is never an error. A project whose `health` crashed before any of
 its bots was known is one row with bot `-` (it alerts as `blind`) and is not
 counted as a bot.
 

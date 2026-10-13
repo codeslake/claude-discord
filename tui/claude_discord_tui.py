@@ -75,6 +75,22 @@ def load(path: Path) -> dict:
         return {}
 
 
+# A value of the state is read through one of these three wherever its type matters. The monitor's reducer copies the
+# fields of each host's health document as they are, so a host of another version (or a hand edit) can put any JSON
+# anywhere: a number for a name, an object for a list. The wrong type reads as missing, which every caller already
+# draws as "-"; nothing raises, since one bad field would otherwise take the whole screen down on every machine watching.
+def txt(v) -> str:
+    return v if isinstance(v, str) else ""
+
+
+def obj(v) -> dict:
+    return v if isinstance(v, dict) else {}
+
+
+def seq(v) -> list:
+    return v if isinstance(v, list) else []
+
+
 def epoch(iso: str | None) -> float | None:
     try:
         return datetime.strptime(iso or "", "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
@@ -102,7 +118,10 @@ def hhmm(t: float | None) -> str:
 
 
 def fit(s: str, w: int) -> str:
-    """`s` in exactly `w` terminal cells (a Hangul or CJK character takes two): padded, or cut with an ellipsis."""
+    """`s` in exactly `w` terminal cells (a Hangul or CJK character takes two): padded, or cut with an ellipsis. A cell
+    that is no text (a state value of another type) is a dash."""
+    if not isinstance(s, str):
+        s = DASH
     if cell_len(s) <= w:
         return set_cell_size(s, w)
     return set_cell_size(s, w - 1) + "…" if w > 0 else ""
@@ -155,20 +174,20 @@ def mark(verdict: str) -> tuple[str, str]:
 
 def host_label(state: dict, host: str) -> str:
     """The ledger's display name (`name=`), else the machine's own hostname (local), else the ssh alias."""
-    h = (state.get("hosts") or {}).get(host) or {}
-    return h.get("display") or h.get("name") or host or DASH
+    h = obj(obj(state.get("hosts")).get(txt(host)))
+    return txt(h.get("display")) or txt(h.get("name")) or txt(host) or DASH
 
 
 def cut_off(state: dict, b: dict) -> bool:
     """The last pass could not ask this bot's host (its `reach` is hostdown, blind or noreach), so the monitor froze the
     bot with the last verdict it saw: not a current one. A host the state does not list counts as reachable."""
-    h = (state.get("hosts") or {}).get(b.get("host"))
-    return h is not None and h.get("reach") != "ok"
+    h = obj(state.get("hosts")).get(txt(b.get("host")))
+    return h is not None and obj(h).get("reach") != "ok"
 
 
 def group(state: dict, b: dict) -> float:
     """rank, and 1.5 for a bot of a host that cannot be reached: after what needs a look, before the healthy."""
-    return 1.5 if cut_off(state, b) else rank(b.get("verdict", ""))
+    return 1.5 if cut_off(state, b) else rank(b.get("verdict"))
 
 
 def sorted_bots(state: dict) -> list[tuple[str, dict]]:
@@ -176,8 +195,8 @@ def sorted_bots(state: dict) -> list[tuple[str, dict]]:
     then healthy, then no token; by bot name, then host, within each (the key is host|project path|bot: random by name).
     A host|project|- entry (a project whose health crashed before any bot of it was known) has no `bot`: a row with bot
     '-', the first of its group."""
-    return sorted(((k, b) for k, b in (state.get("bots") or {}).items() if isinstance(b, dict)),
-                  key=lambda kv: (group(state, kv[1]), kv[1].get("bot") or "", kv[1].get("host") or "", kv[0]))
+    return sorted(((k, b) for k, b in obj(state.get("bots")).items() if isinstance(b, dict)),
+                  key=lambda kv: (group(state, kv[1]), txt(kv[1].get("bot")), txt(kv[1].get("host")), kv[0]))
 
 
 def kpi(state: dict) -> dict:
@@ -185,12 +204,12 @@ def kpi(state: dict) -> dict:
     and a bot of a host that cannot be reached in none of the counts: the Hosts box says that host is out."""
     rows = [b for _, b in sorted_bots(state)]
     by = [[b for b in rows if group(state, b) == r] for r in range(4)]
-    hosts = [(k, h) for k, h in sorted((state.get("hosts") or {}).items()) if h.get("left_s") is None]
+    hosts = [(k, obj(h)) for k, h in sorted(obj(state.get("hosts")).items()) if obj(h).get("left_s") is None]
     bad = [k for k, h in hosts if h.get("reach") != "ok"]
-    first = lambda bs: (bs[0].get("bot") or DASH) if bs else ""
-    return {"problems": len(by[0]), "look": len(by[1]), "healthy": sum(1 for b in by[2] if b.get("bot")), "notoken": len(by[3]),
-            "bots": sum(1 for b in rows if b.get("bot")), "first_problem": first(by[0]),
-            "problem_word": WORD.get(by[0][0].get("verdict", ""), "").lower() if by[0] else "", "first_look": first(by[1]),
+    first = lambda bs: (txt(bs[0].get("bot")) or DASH) if bs else ""
+    return {"problems": len(by[0]), "look": len(by[1]), "healthy": sum(1 for b in by[2] if txt(b.get("bot"))), "notoken": len(by[3]),
+            "bots": sum(1 for b in rows if txt(b.get("bot"))), "first_problem": first(by[0]),
+            "problem_word": WORD.get(txt(by[0][0].get("verdict")), "").lower() if by[0] else "", "first_look": first(by[1]),
             "hosts": len(hosts), "hosts_ok": len(hosts) - len(bad), "first_unreachable": host_label(state, bad[0]) if bad else ""}
 
 
@@ -229,17 +248,25 @@ def columns(width: int) -> list[tuple[str, int]]:
     return [("bot", 16), ("status", 25), ("host", 9), ("channel", max(8, width - 62)), ("last", 5)]
 
 
+def groups(acc: dict) -> list[dict]:
+    """The access groups as health 1.11.0 sends them: objects with a string `id`. Anything else there is no group."""
+    return [g for g in seq(acc.get("groups")) if isinstance(g, dict) and isinstance(g.get("id"), str)]
+
+
+def ids(v) -> list[str]:
+    return [i for i in seq(v) if isinstance(i, str)]
+
+
 def channels(b: dict, manager: str, w: int, opened: bool) -> list[str]:
     """The channel column: the bot's channel; open, every channel of its access groups (a name is known for the main one
     only) and, for the manager bot, the alert channel it only writes to."""
-    ch = b.get("channel")
+    ch = txt(b.get("channel"))
     if not ch:
         return [DASH]
-    main = "#" + (b.get("channel_name") or ch)
+    main = "#" + (txt(b.get("channel_name")) or ch)
     if not opened:
         return [main]
-    acc = b.get("access") if isinstance(b.get("access"), dict) else {}
-    others = ["#" + str(g.get("id")) for g in acc.get("groups") or [] if g.get("id") != ch]
+    others = ["#" + g["id"] for g in groups(obj(b.get("access"))) if g["id"] != ch]
     wo = ["#bot-health-check (write-only)"] if b.get("bot") == manager and b.get("host") == "local" else []
     out = []
     for line in [main + (" (main)" if others or wo else "")] + others + wo:   # a note that does not fit goes under its channel
@@ -250,16 +277,16 @@ def channels(b: dict, manager: str, w: int, opened: bool) -> list[str]:
 def receives(b: dict, names: dict, w: int, opened: bool) -> list[str]:
     """The receives column, from the access group of the bot's channel: one line; open, the mention rule, who may write
     (names from user-names, ids when unknown, `+N` past the room) and the DM policy."""
-    acc = b.get("access") if isinstance(b.get("access"), dict) else {}
-    grp = next((g for g in acc.get("groups") or [] if g.get("id") == b.get("channel")), None)
+    acc = obj(b.get("access"))
+    grp = next((g for g in groups(acc) if g["id"] == b.get("channel")), None)
     if not grp:
         return [DASH]
-    allow = [names.get(i, i) for i in grp.get("allow") or []]
+    allow = [names.get(i, i) for i in ids(grp.get("allow"))]
     rule = "@mention" if grp.get("mention", True) else "any message"
     if not opened:
         return [f"{rule} · {'anyone' if not allow else '1 user' if len(allow) == 1 else f'{len(allow)} users'}"]
-    dms = [names.get(i, i) for i in acc.get("dm_allow") or []]
-    dm = acc.get("dm")
+    dms = [names.get(i, i) for i in ids(acc.get("dm_allow"))]
+    dm = txt(acc.get("dm"))
     return ([rule + (" required" if grp.get("mention", True) else "")] + (fold_names("from", allow, w) if allow else ["from anyone"])
             + (fold_names("DMs", dms, w) if dm == "allowlist" and dms else [f"DMs {'nobody' if dm == 'allowlist' else dm or DASH}"]))
 
@@ -281,7 +308,7 @@ def row_lines(cells: list[tuple[list, int]], lead: str = "  ") -> list[Text]:
 def fix_of(state: dict, b: dict) -> str:
     """The recovery command drawn under a row, which is what `c` copies: a problem's. Not a warning's (its `fix` is only
     `health` again) and not on a host that cannot be reached (the command would go through it)."""
-    return b.get("fix") or "" if rank(b.get("verdict", "")) == 0 and not cut_off(state, b) else ""
+    return txt(b.get("fix")) if rank(b.get("verdict")) == 0 and not cut_off(state, b) else ""
 
 
 def bots_items(state: dict, names: dict, width: int, opened: set, now: float) -> list[tuple]:
@@ -290,22 +317,22 @@ def bots_items(state: dict, names: dict, width: int, opened: set, now: float) ->
     items: list[tuple] = [(None, kpi_lines(state, width) + [Text()]),
                          (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))]
     for key, b in sorted_bots(state):
-        o, v, r, cut = key in opened, b.get("verdict", ""), rank(b.get("verdict", "")), cut_off(state, b)
+        o, v, r, cut = key in opened, txt(b.get("verdict")), rank(b.get("verdict")), cut_off(state, b)
         word, style = ("○ host unreachable", DIM) if cut else mark(v)
         status = [(f" {word} {ago(b.get('since'), now)} " if r == 0 and not cut else word, style)]
         if o and cut:   # not its reason, which is as old as the verdict: when the host stopped answering (its `since`)
-            seen = since(((state.get("hosts") or {}).get(b.get("host")) or {}).get("since"), now)
+            seen = since(obj(obj(state.get("hosts")).get(txt(b.get("host")))).get("since"), now)
             status += [(s, "") for s in wrap(f"last seen {WORD.get(v, v or '?')}{seen}", dict(cols)["status"], 2)]
             if b.get("posted"):
                 status.append((f"posted{since(b.get('posted_at'), now)}", DIM))
         elif o:
-            status += [(s, "") for s in wrap(b.get("detail") or "", dict(cols)["status"], 3)]
+            status += [(s, "") for s in wrap(txt(b.get("detail")), dict(cols)["status"], 3)]
             if r < 2:   # from the verdict, not from its not_posted record in `alerts`: only the last 100 records are kept
                 status.append((f"posted{since(b.get('posted_at'), now)}" if b.get("posted") else
                                "not posted yet" if v in LOUD else "not posted (warning only)", DIM))
-        project = b.get("project") or ""
-        cell = {"bot": [(b.get("bot") or DASH, "bold")], "status": status, "host": [(host_label(state, b.get("host", "")), DIM)],
-                "channel": [(s, "") for s in channels(b, state.get("manager", ""), dict(cols)["channel"], o)],
+        project = txt(b.get("project"))
+        cell = {"bot": [(txt(b.get("bot")) or DASH, "bold")], "status": status, "host": [(host_label(state, b.get("host")), DIM)],
+                "channel": [(s, "") for s in channels(b, state.get("manager"), dict(cols)["channel"], o)],
                 "receives": [(s, "" if i == 0 or not o else DIM if s.startswith("DMs") else "")
                              for i, s in enumerate(receives(b, names, dict(cols).get("receives", 0), o))],
                 "last": [((ago(b.get("last_message_at"), now) or DASH).rjust(5), DIM)],
@@ -336,15 +363,16 @@ def open_alerts(state: dict) -> list[dict]:
     """What the channel was told and has not seen recover: every entry with `posted`, as an alerts record (with the text
     of the last finding sent for its key, when that record is still kept), newest first. Not a host that left the ledger
     (`left_s`: kept a day, frozen) nor its bots: nothing checks them, so nothing of theirs can recover."""
-    out, alerts, hosts = [], state.get("alerts") or [], state.get("hosts") or {}
+    out, alerts, hosts = [], [a for a in seq(state.get("alerts")) if isinstance(a, dict)], obj(state.get("hosts"))
     for scope in ("hosts", "bots"):
-        for k, e in (state.get(scope) or {}).items():
-            if e.get("posted") and (hosts.get(k if scope == "hosts" else e.get("host")) or {}).get("left_s") is None:
+        for k, e in obj(state.get(scope)).items():
+            e = obj(e)
+            if e.get("posted") and obj(hosts.get(k if scope == "hosts" else txt(e.get("host")))).get("left_s") is None:
                 key = k + "|-" if scope == "hosts" else k
-                out.append({"ts": e.get("posted_at"), "key": key, "kind": "finding", "verdict": e["posted"], "status": "sent", "detail": e.get("detail", ""),
+                out.append({"ts": txt(e.get("posted_at")), "key": key, "kind": "finding", "verdict": e["posted"], "status": "sent", "detail": e.get("detail"),
                             "text": next((x.get("text") for x in reversed(alerts) if x.get("key") == key and x.get("kind") == "finding"
                                           and x.get("status") == "sent"), None)})
-    return sorted(out, key=lambda a: a.get("ts") or "", reverse=True)
+    return sorted(out, key=lambda a: a["ts"], reverse=True)
 
 
 def render(items: list[tuple], cursor: str | None, width: int) -> tuple[Text, int, int]:
@@ -363,7 +391,7 @@ def render(items: list[tuple], cursor: str | None, width: int) -> tuple[Text, in
 
 def title_line(state: dict, width: int, now: float, live: bool, stopped: bool) -> Text:
     """`◆ claude-discord  <manager>` and, on the right, the backend's status: symbol + word + colour."""
-    m, mgr = state.get("monitor") or {}, state.get("manager", "?")
+    m, mgr = obj(state.get("monitor")), txt(state.get("manager")) or "?"
     left = Text.assemble(("◆ claude-discord", f"bold {BRAND}"), ("  " + mgr, DIM))
     due, took = epoch(m.get("next_pass")), m.get("pass_s")
     took = took if isinstance(took, (int, float)) and not isinstance(took, bool) else 0
@@ -379,7 +407,7 @@ def title_line(state: dict, width: int, now: float, live: bool, stopped: bool) -
         checked = ago(m.get("last_pass"), now)
         nxt = max(0, int(due - now) + 59) // 60 if due is not None else None
         right = Text.assemble(("● live", f"bold {OK}"), ("  " + " · ".join(
-            (["keeper"] if any(h.get("kind") == "keeper" for h in m.get("holders") or []) else [])
+            (["keeper"] if any(obj(h).get("kind") == "keeper" for h in seq(m.get("holders"))) else [])
             + ([f"checked {checked} ago" if checked != "now" else "checked just now"] if checked else ["not checked yet"])
             + ([f"next {nxt}m"] if nxt is not None else [])), DIM))
     if left.cell_len + 2 + right.cell_len > width:   # a narrow terminal: the status alone, cut at the edge
@@ -418,7 +446,7 @@ def bar_text(state: dict, note: str = "", stopped: bool = False, refused: bool =
     why `monitor --ensure` failed, when it did: the one place a refusal is visible. `stopped`: the `stopped` marker
     (monitor --stop) stands; the title says so. `refused`: this side's `refused.<pid namespace id>` marker (a detached
     start met a monitor lock this side cannot see; a start that gets through clears it) stands."""
-    m = state.get("monitor") or {}
+    m = obj(state.get("monitor"))
     pid = m.get("pid")
     bar = None
     if not state:
@@ -445,11 +473,13 @@ def load_names(state: dict) -> dict:
     """id -> display name, from the `user-names` file of every bot on this machine (written by on-prompt: `<id> <name>`).
     A remote bot's file is out of reach, so its ids get a name only when that person wrote to a local bot too."""
     names = {}
-    for b in (state.get("bots") or {}).values():
-        if b.get("host") != "local" or not b.get("bot") or not b.get("project"):
+    for b in obj(state.get("bots")).values():
+        b = obj(b)
+        bot, project = txt(b.get("bot")), txt(b.get("project"))
+        if b.get("host") != "local" or not bot or not project:
             continue
         try:
-            text = (Path(b["project"]) / ".claude" / "discord-agents" / b["bot"] / "user-names").read_text(errors="replace")
+            text = (Path(project) / ".claude" / "discord-agents" / bot / "user-names").read_text(errors="replace")
         except OSError:
             continue
         for line in text.splitlines():
@@ -462,8 +492,8 @@ def load_names(state: dict) -> dict:
 
 def entry_text(key: str, akey: str, entry: dict, alerts: list) -> str:
     """Every raw field of a bot or host entry, then the posts for its key."""
-    fields = "\n".join(f"{k:<16} {v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)}" for k, v in sorted(entry.items()) if k != "fix")
-    mine = [a for a in alerts if a.get("key") == akey]
+    fields = "\n".join(f"{k:<16} {v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)}" for k, v in sorted(obj(entry).items()) if k != "fix")
+    mine = [a for a in seq(alerts) if isinstance(a, dict) and a.get("key") == akey]
     return f"{key}\n\n{fields}\n\nposts for this key:\n" + ("\n".join(
         f"{a.get('ts')}  {a.get('kind')}  {a.get('verdict')}  {a.get('status')}" for a in mine) or "(none)")
 
@@ -487,7 +517,7 @@ class Detail(Screen):
 
 def key_parts(key: str) -> tuple[str, str]:
     """(host, bot) of an alerts key: `host|-` is the host itself, `host|project|-` a project with no bot known."""
-    parts = key.split("|")
+    parts = txt(key).split("|")
     return parts[0], (parts[-1] if len(parts) > 2 else DASH)
 
 
@@ -496,16 +526,17 @@ def kind(a: dict, opened: bool = False) -> tuple[str, str]:
     recovered: a server down, a blind host) it is a problem like a bot's."""
     if a.get("kind") == "recovery":
         return "✓ recovered", OK
-    if a.get("key", "").count("|") == 1:
+    if txt(a.get("key")).count("|") == 1:
         return "○ host", ALERT if opened else DIM
-    return ("✕ down", ALERT) if rank(a.get("verdict", "")) == 0 else ("▲ check", WARN)
+    return ("✕ down", ALERT) if rank(a.get("verdict")) == 0 else ("▲ check", WARN)
 
 
 def posted_text(a: dict) -> str:
     """The text of an alerts record's post, or why there is none."""
+    a = obj(a)
     if a.get("status") == "not_posted":
         return "(not posted: a warning only, or still inside its hold time)"
-    return a.get("text") or "(the posted text is no longer kept)"   # out of the 100 records, or a monitor older than 1.11.0 posted it
+    return txt(a.get("text")) or "(the posted text is no longer kept)"   # out of the 100 records, or a monitor older than 1.11.0 posted it
 
 
 def rule(name: str, count: int | None, note: str, width: int) -> Text:
@@ -522,7 +553,7 @@ def alerts_items(state: dict, width: int, now: float) -> list[tuple]:
     cols[-2] = ("what", max(10, width - 2 - sum(w for _, w in cols) - len(cols) + 1))
 
     def row(a: dict, bold: bool) -> list[Text]:
-        t, (host, bot) = epoch(a.get("ts")), key_parts(a.get("key", ""))
+        t, (host, bot) = epoch(a.get("ts")), key_parts(a.get("key"))
         word, style = kind(a, bold)
         post = ("✓ sent on retry", WARN) if a.get("retried") else ("✓ sent", OK) if a.get("status") == "sent" else ("— not posted", DIM)
         cell = {"when": [(f"{hhmm(t)} · {ago(a.get('ts'), now) or DASH}", "" if bold else DIM)],
@@ -533,7 +564,7 @@ def alerts_items(state: dict, width: int, now: float) -> list[tuple]:
     head = (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))
     opened = open_alerts(state)
     # A failed POST is retried next pass (the red bar says so); only what went out, or was never due to, is history.
-    hist = [(i, a) for i, a in reversed(list(enumerate(state.get("alerts") or []))) if isinstance(a, dict) and a.get("status") != "failed"
+    hist = [(i, a) for i, a in reversed(list(enumerate(seq(state.get("alerts"))))) if isinstance(a, dict) and a.get("status") != "failed"
             and now - (epoch(a.get("ts")) or 0) < 86400]
     items: list[tuple] = [(None, [rule("Open", len(opened), "posted and not recovered yet", width), Text()]), head]
     items += [(f"open {a['key']}", row(a, True)) for a in opened]
@@ -548,30 +579,30 @@ def config_items(state: dict, names: dict, width: int) -> list[tuple]:
     cols = ([("host", 12), ("ssh target", 0), ("kind", 7)] + ([("env", 16)] if wide else []) + [("reach", 14)]
             + ([("claude-discord", 15)] if wide else []) + [("bots", 4)])
     cols[1] = ("ssh target", max(10, width - 2 - sum(w for _, w in cols) - len(cols) + 1))
-    bots, m, mgr = state.get("bots") or {}, state.get("monitor") or {}, state.get("manager", "?")
-    hosts = sorted((state.get("hosts") or {}).items(), key=lambda kh: (kh[0] != "local", kh[0]))   # this machine first
+    bots, m, mgr = obj(state.get("bots")), obj(state.get("monitor")), txt(state.get("manager")) or "?"
+    hosts = sorted(obj(state.get("hosts")).items(), key=lambda kh: (kh[0] != "local", kh[0]))   # this machine first
     items: list[tuple] = [(None, [rule("Hosts", len(hosts), "", width), Text()]), (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))]
     for key, h in hosts:
-        v = h.get("verdict", "")
+        h = obj(h)
+        v, name, env = txt(h.get("verdict")), txt(h.get("hostname")), ids(h.get("env"))
         reach = ("● ok", OK) if v == "ok" else ("○ unreachable", DIM) if v == "hostdown" else (f"▲ {v or '?'}", WARN)
         if key == "local":
-            target = "this machine (local" + (f" name={h['display']}" if h.get("display") else "") + ")"
+            target = "this machine (local" + (f" name={h['display']}" if txt(h.get("display")) else "") + ")"
         else:
-            target = key + (f" ({h['hostname']})" if h.get("hostname") and h.get("hostname") != key else "")
+            target = key + (f" ({name})" if name and name != key else "")
         if h.get("left_s") is not None:   # out of the ledger, kept for a day so a brief removal does not post again
             target += " (left the ledger)"
-        env = h.get("env")
         up = h.get("reach") == "ok"
         cell = {"host": [(host_label(state, key), "bold")], "ssh target": [(target, DIM)], "kind": [("laptop" if h.get("laptop") else "server", DIM)],
-                "env": [(DASH if env is None else " ".join(env) or DASH, WARN if env else DIM)], "reach": [reach],
-                "claude-discord": [(((h.get("version") or "").split(" ")[0] if up else "") or DASH, "")],
-                "bots": [(str(sum(1 for b in bots.values() if b.get("host") == key and b.get("bot"))) if up else DASH, "")]}
+                "env": [(" ".join(env) or DASH, WARN if env else DIM)], "reach": [reach],
+                "claude-discord": [((txt(h.get("version")).split(" ")[0] if up else "") or DASH, "")],
+                "bots": [(str(sum(1 for b in bots.values() if obj(b).get("host") == key and txt(obj(b).get("bot")))) if up else DASH, "")]}
         items.append((key, row_lines([(cell[n], w) for n, w in cols])))
     # The monitor mentions an owner id only when it is all digits (its `owner`): any other value mentions nobody.
     owner = m.get("owner_id")
     who = "nobody" if owner == "" else "@" + names.get(owner, owner) if isinstance(owner, str) and owner.isascii() and owner.isdigit() else DASH
-    keeper = any(h.get("kind") == "keeper" for h in m.get("holders") or [])
-    rows = [("alert language", m.get("lang") or DASH, [("ALERT_LANG in config.env", DIM)]),
+    keeper = any(obj(h).get("kind") == "keeper" for h in seq(m.get("holders")))
+    rows = [("alert language", txt(m.get("lang")) or DASH, [("ALERT_LANG in config.env", DIM)]),
             ("mention on alert", who, [("DISCORD_USER_ID in config.env", DIM)]),
             ("check every", "5 min", [("fixed", DIM)]), ("alert channel", "#bot-health-check", [("fixed", DIM)]),
             ("kept running by", "keeper" if keeper else "nothing", [("stop: ", DIM), (f"claude-discord monitor --stop {mgr}", BRAND)])]
@@ -708,7 +739,7 @@ class MonitorTUI(App):
             self.state = load(path)
             self.names = load_names(self.state)
         # Checked on every refresh, not only on a new state.json: a monitor that died without its trap writes none.
-        pid = (self.state.get("monitor") or {}).get("pid")
+        pid = obj(self.state.get("monitor")).get("pid")
         if self.wrapper and not self.stopped() and not alive(pid, self.bot) and time.monotonic() - self.ensured >= 30:
             self.ensure()
         self.paint()
@@ -729,7 +760,7 @@ class MonitorTUI(App):
 
     def paint(self) -> None:
         now, w, stopped = time.time(), self.width, self.stopped() is not None
-        live = alive((self.state.get("monitor") or {}).get("pid"), self.bot)
+        live = alive(obj(self.state.get("monitor")).get("pid"), self.bot)
         self.show("#title", title_line(self.state, w, now, live, stopped))
         self.show("#tabs", tabs_lines(self.tab, len(open_alerts(self.state)), w))
         bar = bar_text(self.state, self.note, stopped, self.refused())
@@ -770,7 +801,7 @@ class MonitorTUI(App):
             self.paint()
 
     def action_open(self) -> None:
-        key, alerts = self.cursor[self.tab], self.state.get("alerts") or []
+        key, alerts = self.cursor[self.tab], seq(self.state.get("alerts"))
         if key is None:
             return
         if self.tab == "alerts":
@@ -779,12 +810,12 @@ class MonitorTUI(App):
             self.push_screen(Detail(posted_text(a)))
             return
         scope = "bots" if self.tab == "bots" else "hosts"
-        entry = (self.state.get(scope) or {}).get(key) or {}
+        entry = obj(obj(self.state.get(scope)).get(key))
         # A host's posts are keyed host|- in `alerts`; a bot's and a project row's by their own key.
-        self.push_screen(Detail(entry_text(key, key + "|-" if scope == "hosts" else key, entry, alerts), entry.get("fix") or ""))
+        self.push_screen(Detail(entry_text(key, key + "|-" if scope == "hosts" else key, entry, alerts), txt(entry.get("fix"))))
 
     def action_copy(self) -> None:
-        fix = fix_of(self.state, (self.state.get("bots") or {}).get(self.cursor["bots"] or "") or {}) if self.tab == "bots" else ""
+        fix = fix_of(self.state, obj(obj(self.state.get("bots")).get(self.cursor["bots"] or ""))) if self.tab == "bots" else ""
         if fix:   # only what the row shows as its fix line
             self.copy_to_clipboard(fix)   # OSC 52: the terminal's clipboard, over ssh too
             self.notify("fix copied (if your terminal allows it)")   # OSC 52 has no answer, and not every terminal takes it

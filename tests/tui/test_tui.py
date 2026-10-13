@@ -304,6 +304,64 @@ def pure():
           "older state lacks, and the monitor's settings")
 
 
+def fuzz():
+    """Every value of a small state replaced, one at a time, by a value of each other type: a host of another version
+    (the reducer copies a health document's fields unchecked), a hand edit. Nothing may raise: such a value is a dash."""
+    n = time.time()
+    st = lambda: json.loads(json.dumps({   # a copy each time: ACCESS is shared
+        "version": 1, "manager": "mgr",
+        "monitor": {"pid": 1, "last_pass": iso(n - 80), "next_pass": iso(n + 220), "pass_s": 2, "holders": [{"kind": "keeper", "pid": 9}], "lang": "en",
+                    "owner_id": "111", "error": "e", "stopped_at": iso(n), "post_failed": True},
+        "hosts": {"local": {"host": "local", "name": "box", "hostname": "box", "display": "lmd79", "env": ["HTTPS_PROXY"], "reach": "ok", "version": "1.11.0 (a)",
+                            "verdict": "ok", "laptop": False},
+                  "srv": {"host": "srv", "name": "srv", "reach": "hostdown", "verdict": "hostdown", "since": iso(n - 7200), "posted": "hostdown",
+                          "posted_at": iso(n - 5400), "detail": "ssh to srv failed", "fix": "ssh srv", "laptop": True, "left_s": None}},
+        "bots": {"local|/home/u/p|b1": {"host": "local", "project": "/home/u/p", "home": "/home/u", "bot": "b1", "verdict": "down", "since": iso(n - 700),
+                                        "detail": "no plugin server", "fix": FIX, "posted": "down", "posted_at": iso(n - 600), "channel": "900",
+                                        "channel_name": "dev", "last_message_at": iso(n - 100), "access": ACCESS},
+                 "srv|/p|b2": {"host": "srv", "project": "/p", "bot": "b2", "verdict": "throttled", "since": iso(n - 9000), "detail": "d", "posted": None}},
+        "alerts": [{"ts": iso(n - 600), "key": "local|/home/u/p|b1", "kind": "finding", "verdict": "down", "status": "sent", "detail": "no plugin server",
+                    "text": "[down] b1", "retried": True},
+                   {"ts": iso(n - 500), "key": "srv|-", "kind": "recovery", "verdict": "hostdown", "status": "not_posted", "detail": "d"}]}))
+
+    def views(s):
+        for w in (137, 80):
+            for opened in (set(), set(s["bots"]) if isinstance(s.get("bots"), dict) else set()):
+                tui.render(tui.bots_items(s, {"111": "dong"}, w, opened, n), None, w)
+            tui.alerts_items(s, w, n), tui.config_items(s, {"111": "dong"}, w), tui.title_line(s, w, n, True, False)
+            tui.tabs_lines("bots", len(tui.open_alerts(s)), w)
+        tui.bar_text(s), tui.load_names(s)
+        for a in tui.open_alerts(s) + (s.get("alerts") if isinstance(s.get("alerts"), list) else []):
+            tui.posted_text(a)
+        for scope in ("bots", "hosts"):
+            for k, e in (s[scope].items() if isinstance(s.get(scope), dict) else []):
+                tui.entry_text(k, k, e, s.get("alerts"))
+
+    def paths(o, p=()):
+        yield p
+        for k, v in o.items() if isinstance(o, dict) else enumerate(o) if isinstance(o, list) else ():
+            yield from paths(v, p + (k,))
+
+    views(st())
+    raised, total = {}, 0
+    for p in list(paths(st()))[1:]:
+        for v in (None, 7, "str", [], [1], {}, {"a": 1}, True, 1.5e30, ""):
+            s = o = st()
+            for k in p[:-1]:
+                o = o[k]
+            o[p[-1]] = v
+            total += 1
+            try:
+                views(s)
+            except Exception as e:
+                raised.setdefault(".".join(map(str, p)), set()).add(f"{type(v).__name__}: {type(e).__name__}: {e}")
+    assert total > 900 and not raised, f"{sum(map(len, raised.values()))} of {total} states raised: {raised}"
+    for s in ({}, {"bots": [], "hosts": [], "alerts": [], "monitor": []}, dict(st(), alerts=["x", None, 7]), dict(st(), bots={"k": None}),
+              dict(st(), hosts={"k": None}), dict(st(), monitor="x"), dict(st(), manager=None), dict(st(), manager=5)):
+        views(s)
+    print(f"ok: {total} states with one value of another type each (a string for a list, a number for a name, ...) draw without raising")
+
+
 FAKES = tempfile.TemporaryDirectory()
 
 
@@ -342,6 +400,10 @@ def variant(name):
         s["bots"]["local|/home/u/k\x1b[2J|kb\nx"] = dict(s["bots"][OLDBOT], host="local", bot="kb\nx")
         s["alerts"][6].update(detail="find\x1b[2Jing", text="[down]\x1b[2J photobot\nreason: x\x1b]0;T\x07")
         s["hosts"]["wmac"].update(display="w\x1b[5mmac", detail="ssh\x1b[2J failed")
+    elif name == "wrong_types":   # the app's own reads of the state (the fuzz above covers what it draws)
+        s["monitor"], s["alerts"] = "x", ["x", 7] + s["alerts"]
+        s["bots"][PHOTO].update(fix=7, access={"groups": {"900": {}}}, channel_name=["x"])
+        s["bots"]["local|/p|none"], s["hosts"]["odd"] = None, 7
     elif name == "many":   # more rows than a 20-line terminal shows
         for i in range(20):
             s["bots"][f"local|/home/u/m|m{i:02}"] = dict(s["bots"][OLDBOT], host="local", project="/home/u/m", bot=f"m{i:02}")
@@ -537,6 +599,20 @@ async def escapes(app, pilot):
     drawn()
 
 
+async def wrong_types(app, pilot):
+    assert row_of(app, "photobot").split()[:6] == ["▸", "photobot", "✕", "DOWN", "12m", "lmd79"] and "#900" in row_of(app, "photobot")
+    assert "fix  " not in text(app, "#body"), "a fix that is no text is no fix line"
+    await pilot.press("space", "c", "enter")
+    await pilot.pause()
+    assert app.clipboard == "" and str(app.screen.query_one("#fix").render()) == "(none)"
+    await pilot.press("escape", "right", "down", "down", "enter")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.Detail)
+    await pilot.press("escape", "right", "down", "enter")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.Detail) and str(app.screen.query_one("#body-detail").render()).startswith("odd\n")
+
+
 async def alerts(app, pilot):
     await pilot.press("right")
     assert body(app)[0].startswith("Open 1 ─") and any(l.startswith("History 7 ─") for l in body(app))
@@ -614,6 +690,9 @@ async def refused(app, pilot):
 
 async def main():
     pure()
+    t0 = time.time()
+    fuzz()
+    assert time.time() - t0 < 3, f"the fuzz took {time.time() - t0:.1f} s"
     await case("shell", shell, state="all_ok")
     await case("bots", bots, state="all_ok")
     await case("narrow", narrow, state="many", size=(100, 20))
@@ -621,6 +700,7 @@ async def main():
     await case("crashed_project", crashed_project)
     await case("markup", markup)
     await case("escapes", escapes)
+    await case("wrong_types", wrong_types)
     await case("alerts", alerts, state="all_ok")
     await case("config", config, state="all_ok")
     await case("stopped", stopped)
