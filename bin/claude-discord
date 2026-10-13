@@ -57,6 +57,9 @@
 #                                        a manager bot's hosts ledger: one line per
 #                                        host (alias, kind, display name, env key
 #                                        names; never a value)
+#   claude-discord hosts [--bot <name>] add [--no-probe] <alias> [laptop] [KEY=VALUE...]
+#                                        adds a host line (--no-probe: without
+#                                        asking the host who it is)
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
@@ -541,11 +544,17 @@ write_hosts() {
       new="$new$line"$'\n'
     done
   fi
-  # A temp file moved in: a running monitor reads the ledger every pass and must never see it half written. It takes
-  # the ledger's own mode (an owner's chmod survives), 600 when new, never the caller's umask (perl: stat's flags differ by OS).
-  local m=600
+  ledger_write "$f" "$new" || :
+}
+
+# ledger_write <ledger> <text>: the ledger replaced by <text> (one newline at its end, whether <text> has it or not).
+# A temp file moved in: a running monitor reads the ledger every pass and must never see it half written. It takes
+# the ledger's own mode (an owner's chmod survives), 600 when new, never the caller's umask (perl: stat's flags differ by OS).
+# Returns 1 when it could not, the ledger as it was. Used by setup (write_hosts) and by `hosts`.
+ledger_write() {
+  local f=$1 m=600
   [ ! -f "$f" ] || m=$(perl -e 'printf "%o", (stat shift)[2] & 07777' "$f") || m=600
-  (umask 077; printf '%s\n' "${new%$'\n'}" > "$f.tmp.$$") && chmod "$m" "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f" || rm -f "$f.tmp.$$"
+  (umask 077; printf '%s\n' "${2%$'\n'}" > "$f.tmp.$$") && chmod "$m" "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f" || { rm -f "$f.tmp.$$"; return 1; }
 }
 
 # --scope and --method, anywhere and in the = form too, for setup and install;
@@ -1930,16 +1939,18 @@ fi
 # hosts: lists and edits a manager bot's hosts ledger (<bot dir>/hosts; write_hosts above has its format), for people,
 # scripts and the TUI, which changes the ledger through this verb only. It never prints the value of a KEY=VALUE word
 # (a proxy URL may hold a password): key names only.
-# Exit status: 0 done (a warning goes to stderr), 1 it could not (no manager bot with a ledger, a failed write),
-# 2 usage or a word that is not allowed.
+# Exit status: 0 done (a warning goes to stderr), 1 it could not (no manager bot with a ledger, a failed write, the
+# ledger locked by another writer for 5 s), 2 usage or a word that is not allowed, 3 the alias is already in the
+# ledger (add).
 if [ "${1:-}" = hosts ]; then
   shift
-  h_usage="usage: claude-discord hosts [--bot <manager>] list [--json]"
-  hb="" h_json="" hw=()
+  h_usage="usage: claude-discord hosts [--bot <manager>] list [--json] | add [--no-probe] <alias> [laptop] [KEY=VALUE...]"
+  hb="" h_json="" h_probe=yes hw=()
   while [ $# -gt 0 ]; do
     case $1 in
       --bot) [ $# -ge 2 ] || { echo "$h_usage" >&2; exit 2; }; hb=$2; shift;;
       --json) h_json=1;;
+      --no-probe) h_probe="";;
       -*) echo "$h_usage" >&2; exit 2;;   # an ssh alias never starts with "-": ssh would read it as an option
       *) hw+=("$1");;
     esac
@@ -1973,6 +1984,58 @@ if [ "${1:-}" = hosts ]; then
   [ "$h_n" != 0 ] || { echo "claude-discord: hosts: no dev-manager bot${hb:+ '$hb'} with a hosts ledger in the project above $PWD or in a recorded one (claude-discord setup <bot> --mode writes the ledger)" >&2; exit 1; }
   [ "$h_n" = 1 ] || { echo "claude-discord: hosts: $h_n manager bots have a ledger; name one with --bot <manager>, in its project when two share a name:" >&2; printf '%s' "$h_cands" | sed 's/^/  /' >&2; exit 2; }
   hd=${h_cands%$'\n'}; hb=${hd##*/}; hf=$hd/hosts
+  # h_alias <word>: an ssh alias as the monitor's pass takes one (a line whose first word is anything else is skipped
+  # there): letters, digits and . _ @ - only, never a leading "-" (ssh would read it as an option), 255 at most. Or exit 2.
+  h_alias() {
+    case $1 in
+      ''|-*|*[!A-Za-z0-9._@-]*) echo "claude-discord: hosts: '${1//[[:cntrl:]]/?}' is no ssh alias: letters, digits and . _ @ - only, not starting with -" >&2; exit 2;;
+    esac
+    [ ${#1} -le 255 ] || { echo "claude-discord: hosts: an ssh alias is 255 characters at most" >&2; exit 2; }
+  }
+  # h_word <word>: a KEY=VALUE word (name=<display> too) that a ledger line can hold and the monitor will read, or
+  # exit 2. The word is never echoed, only its key once that is known to be one: the rest may be a secret pasted in
+  # the wrong place. A value holds no whitespace or control character (the word would end there) and no quote (the
+  # ledger has no quoting: the quote would travel as part of the value).
+  h_word() {
+    local k=${1%%=*} v=${1#*=} re='^[A-Za-z_][A-Za-z0-9_]*$'
+    case $1 in *=*) ;; *) k="";; esac
+    [[ $k =~ $re ]] && [ ${#k} -le 64 ] || { echo "claude-discord: hosts: a word is not KEY=VALUE (KEY: letters, digits and _, not starting with a digit, 64 at most)" >&2; exit 2; }
+    case $v in
+      *[[:space:]]*|*[[:cntrl:]]*|*[\'\"]*) echo "claude-discord: hosts: $k: a value holds no space, control character or quote (a ledger word is not shell-quoted: write the value bare)" >&2; exit 2;;
+    esac
+    [ ${#v} -le 1024 ] || { echo "claude-discord: hosts: $k: a value is 1024 characters at most" >&2; exit 2; }
+    [ "$k" != name ] || [ ${#v} -le 64 ] || { echo "claude-discord: hosts: name: a display name is 64 characters at most" >&2; exit 2; }
+  }
+  # h_lock: one writer of the ledger at a time (a TUI save while `hosts set` runs would otherwise lose one of the two:
+  # both read, then both write). flock through perl, as the monitor's lock, on <ledger>.lock: the lock stays with fd 7
+  # of this shell after perl is gone, and the kernel drops it on any death, so it is never stale. 5 s of tries, then
+  # exit 1. The ledger itself cannot be the lock: it is replaced by rename, so two writers would lock two files.
+  # 6 is LOCK_EX | LOCK_NB, written out: loading Fcntl for the two names costs 3 ms of every write.
+  h_lock() {
+    exec 7>>"$hf.lock"
+    perl -e 'open(my $l, ">&=", 7) or exit 1; for (1 .. 50) { exit 0 if flock($l, 6); select(undef, undef, undef, 0.1) } exit 1' ||
+      { echo "claude-discord: hosts: $hf is being changed by another claude-discord hosts; nothing was changed" >&2; exit 1; }
+  }
+  # h_edit <alias> add <word>...: the ledger read and written back under the lock, in one rename (ledger_write).
+  # A line that is not <alias>'s keeps its bytes, CRLF included. Sets h_changed to the number of lines it changed.
+  # add: <alias> must not be there (exit 3); the new line is the last.
+  h_edit() {
+    local alias=$1 how=$2 out="" line cr hit=0 changed=0
+    local -a words
+    shift 2
+    h_lock
+    while IFS= read -r line || [ -n "$line" ]; do
+      cr=""; case $line in *$'\r') cr=$'\r'; line=${line%$'\r'};; esac
+      set -f; words=($line); set +f
+      if [ "${words[0]:-}" != "$alias" ]; then out="$out$line$cr"$'\n'; continue; fi
+      hit=$((hit + 1))
+      [ "$how" != add ] || { echo "claude-discord: hosts: $alias is already in $hf" >&2; exit 3; }
+    done < "$hf"
+    out="$out$alias${*:+ $*}"$'\n'; changed=1
+    [ "$changed" = 0 ] || ledger_write "$hf" "$out" || { echo "claude-discord: hosts: could not write $hf; it is as it was" >&2; exit 1; }
+    exec 7>&-
+    h_changed=$changed
+  }
   case ${hw[0]:-} in
     list)
       [ "${#hw[@]}" = 1 ] || { echo "$h_usage" >&2; exit 2; }
@@ -2002,6 +2065,16 @@ if [ "${1:-}" = hosts ]; then
           printf '%-20s %-7s name=%s env=%s%s\n' "$a" "$kind" "${nm:--}" "${keys:--}" "$note"
         done <<<"$rows"
       fi;;
+    add)
+      [ "${#hw[@]}" -ge 2 ] || { echo "$h_usage" >&2; exit 2; }
+      a=${hw[1]}; h_alias "$a"
+      for w in "${hw[@]:2}"; do
+        [ "$w" = laptop ] && [ "$w" = "${hw[2]}" ] && continue
+        h_word "$w"
+        case $w in *=) echo "claude-discord: hosts: ${w%=}: add takes KEY=VALUE, a value that is not empty" >&2; exit 2;; esac
+      done
+      h_edit "$a" add "${hw[@]:2}"
+      echo "claude-discord: hosts: added $a to $hf";;
     *) echo "$h_usage" >&2; exit 2;;
   esac
   exit 0

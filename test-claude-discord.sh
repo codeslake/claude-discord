@@ -3617,6 +3617,50 @@ rc=0; out=$(printf '\n' | bash "$S" setup hosts 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -q "bot name 'hosts' is reserved" <<<"$out" || { echo "FAIL: 'hosts' is a subcommand now, so no bot may take the name: rc=$rc $out"; exit 1; }
 echo "ok: hosts list prints each host line as the monitor reads it (alias, kind, display name, env key names, skipped words; --json for the TUI) and never a value; the manager is the project's or a recorded project's one dev-manager bot with a ledger, or --bot's; 'hosts' is a reserved bot name"
 
+# hosts add --no-probe: the line is appended and every other byte of the ledger kept (CRLF lines, the comment, the
+# words the monitor skips); the file is replaced by rename (a monitor may be reading it), keeps the owner's mode and
+# leaves no temp file.
+chmod 640 "$MR/mgr/hosts"; li=$(stat -c %i "$MR/mgr/hosts")
+hc add --no-probe h9
+[ "$HRC" = 0 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER"$'\n'h9 ] && [ "$(tail -c 3 "$MR/mgr/hosts")" = "h9" ] && [ "$HO" = "claude-discord: hosts: added h9 to $MR/mgr/hosts" ] ||
+  { echo "FAIL: hosts add appends the alias as a line of its own and keeps every other byte: rc=$HRC $HO / $HE / $(od -c "$MR/mgr/hosts" | tail -4)"; exit 1; }
+[ "$(stat -c %a "$MR/mgr/hosts")" = 640 ] && [ "$(stat -c %i "$MR/mgr/hosts")" != "$li" ] && [ "$(ls "$MR/mgr" | grep -c '^hosts')" = 2 ] ||
+  { echo "FAIL: the ledger is written to a temp file and moved in (mode kept, no temp left; hosts.lock is the one new file): $(ls -l "$MR/mgr")"; exit 1; }
+hc add --no-probe lap2 laptop HTTPS_PROXY=http://u:p#w\$x@127.0.0.1:8118 name=랩-2 A_b1=-x
+[ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = 'lap2 laptop HTTPS_PROXY=http://u:p#w$x@127.0.0.1:8118 name=랩-2 A_b1=-x' ] && [[ $HO$HE != *127.0.0.1* ]] ||
+  { echo "FAIL: add writes laptop and the KEY=VALUE words as given (a #, a \$ and a leading - in a value are the monitor's to read literally) and prints no value: rc=$HRC $HO / $HE / $(tail -n 1 "$MR/mgr/hosts")"; exit 1; }
+LEDGER=$(<"$MR/mgr/hosts")
+hc add --no-probe h1 laptop
+[ "$HRC" = 3 ] && grep -q "h1 is already in $MR/mgr/hosts" <<<"$HE" && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] || { echo "FAIL: an alias already in the ledger is exit 3 and changes nothing: rc=$HRC $HE"; exit 1; }
+# What cannot be an alias: an ssh option, whitespace, a #, an =, a command substitution, an escape sequence, nothing,
+# 256 characters. Exit 2, the ledger untouched, ssh never run.
+rm -f "$HOME/ssh.log"
+for bad in '-oProxyCommand=touch$IFS/tmp/pwned' '-v' 'a b' 'a#b' 'a=b' '$(id)' $'a\033[2Jb' '' "$(printf 'a%.0s' {1..256})"; do
+  hc add --no-probe "$bad"
+  [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [ ! -e "$HOME/ssh.log" ] && [[ $HE != *$'\033'* ]] ||
+    { echo "FAIL: '$bad' is no ssh alias: exit 2, nothing written, no ssh, no escape sequence echoed: rc=$HRC $HE"; exit 1; }
+done
+# What cannot be a word of the line: no KEY=, a KEY that is no identifier, a value with a space, a quote or a control
+# character, a display name with a space, an empty value, a value past 1024 characters. Exit 2, and the word is not
+# echoed (a secret pasted in the wrong place), only a key that is one.
+for bad in 'secretpw' '1K=secretpw' 'K=secretpw x' 'K="secretpw"' $'K=secretpw\033[2J' 'name=secretpw box' 'K=' "K=secretpw$(printf 'a%.0s' {1..1020})"; do
+  hc add --no-probe h8 "$bad"
+  [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [[ $HO$HE != *secretpw* ]] || { echo "FAIL: '$bad' is no word of a ledger line: exit 2, nothing written, the word not echoed: rc=$HRC $HE"; exit 1; }
+done
+hc add --no-probe h8 'K=secretpw x'
+grep -q '^claude-discord: hosts: K: a value holds no space' <<<"$HE" || { echo "FAIL: a refused value is named by its key: $HE"; exit 1; }
+# Two writers: one holds the ledger's lock, reads the ledger, and 0.1 s later moves in its own version (as a TUI save
+# or another `hosts` call would). An add started meanwhile must wait for it and then add to THAT version; were it not
+# to wait, the first writer's rename would drop its line.
+perl -MFcntl=:flock -e 'my $f = shift; open(my $l, ">>", "$f.lock") or die; flock($l, LOCK_EX) or die; open(my $r, "<", $f) or die; my $c = do { local $/; <$r> };
+  open(my $g, ">", "$f.ready") or die; print $g "1\n"; close $g; select(undef, undef, undef, 0.1);
+  open(my $w, ">", "$f.held") or die; print $w $c . "held\n"; close $w; rename("$f.held", $f) or die' "$MR/mgr/hosts" &
+wait_for_file "$MR/mgr/hosts.ready"
+hc add --no-probe late; wait
+[ "$HRC" = 0 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER"$'\n'held$'\n'late ] || { echo "FAIL: an add started while another writer holds the ledger's lock waits and adds to that writer's version: rc=$HRC $HE / $(tail -n 3 "$MR/mgr/hosts")"; exit 1; }
+rm -f "$MR/mgr/hosts.ready"
+echo "ok: hosts add --no-probe appends a host line (laptop, KEY=VALUE and name= words) keeping every other byte, by temp file and rename with the ledger's mode; an alias that is an ssh option or holds anything but letters, digits and . _ @ - and a word that is no KEY=VALUE are exit 2 with nothing written and no word echoed; an alias already listed is exit 3; a second writer waits for the first"
+
 # The monitor runs fast here: a 0.01 s tick, a 0.03 s cap per host, 0.1 s for the lock (one retry), and a 60 s pass interval, so
 # each start runs exactly its first pass (these blocks need no second one). Thresholds are tested by seeding
 # state.json with old `since` times, never by waiting. The local host's command is the shim, stubbed to print
