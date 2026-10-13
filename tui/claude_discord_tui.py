@@ -239,13 +239,14 @@ def kpi_lines(state: dict, width: int) -> list[Text]:
     return [top, mid, bot]
 
 
-def columns(width: int) -> list[tuple[str, int]]:
+def columns(width: int, bot: int = 16) -> list[tuple[str, int]]:
     """The Bots table's columns and their widths in cells: 110 in all at WIDE (status holds `not posted (warning only)`),
     the room past it shared by channel, receives and project; below WIDE project and receives fold away and channel
-    takes what is left."""
+    takes what is left. `bot` is the bot column's width at WIDE and above (wider when a mode follows a name): what it
+    takes past 16 comes out of that shared room, so the table is as wide as before."""
     if width >= WIDE:
-        extra = width - WIDE
-        return [("bot", 16), ("status", 25), ("host", 9), ("channel", 18 + extra // 3), ("receives", 20 + extra // 3),
+        extra = width - WIDE - (bot - 16)
+        return [("bot", bot), ("status", 25), ("host", 9), ("channel", 18 + extra // 3), ("receives", 20 + extra // 3),
                 ("last", 5), ("project", 9 + extra - 2 * (extra // 3))]
     return [("bot", 16), ("status", 25), ("host", 9), ("channel", max(8, width - 62)), ("last", 5)]
 
@@ -260,15 +261,15 @@ def ids(v) -> list[str]:
 
 
 def channels(b: dict, manager: str, w: int, opened: bool) -> list[str]:
-    """The channel column: the bot's channel; open, every channel of its access groups (a name is known for the main one
-    only) and, for the manager bot, the alert channel it only writes to."""
+    """The channel column: the bot's channel; open, every channel of its access groups (by name when health 1.11.1 sent
+    one, by id otherwise) and, for the manager bot, the alert channel it only writes to."""
     ch = txt(b.get("channel"))
     if not ch:
         return [DASH]
     main = "#" + (txt(b.get("channel_name")) or ch)
     if not opened:
         return [main]
-    others = ["#" + g["id"] for g in groups(obj(b.get("access"))) if g["id"] != ch]
+    others = ["#" + (txt(g.get("name")) or g["id"]) for g in groups(obj(b.get("access"))) if g["id"] != ch]
     wo = ["#bot-health-check (write-only)"] if b.get("bot") == manager and b.get("host") == "local" else []
     out = []
     for line in [main + (" (main)" if others or wo else "")] + others + wo:   # a note that does not fit goes under its channel
@@ -302,6 +303,10 @@ def row_lines(cells: list[tuple[list, int]], lead: str = "  ") -> list[Text]:
         for j, (c, w) in enumerate(cells):
             s, style = c[i] if i < len(c) else ("", "")
             line.append(" " if j else "")
+            if isinstance(s, Text):   # a cell of two styles (a bot's name and mode): cut and padded as fit does
+                s.truncate(w, overflow="ellipsis", pad=True)
+                line.append_text(s)
+                continue
             line.append(fit(s, w), style)
         out.append(line)
     return out
@@ -313,9 +318,17 @@ def fix_of(state: dict, b: dict) -> str:
     return txt(b.get("fix")) if rank(b.get("verdict")) == 0 and not cut_off(state, b) else ""
 
 
+def with_mode(entry: dict) -> dict:
+    """A bot's entry for the all-fields screen: `mode` is always there, a dash when the host sent none (before 1.11.1)."""
+    return dict(obj(entry), mode=txt(obj(entry).get("mode")) or DASH)
+
+
 def bots_items(state: dict, names: dict, width: int, opened: set, now: float) -> list[tuple]:
     """The Bots tab as (row key or None, [Text, ...]) items: a key makes its lines one row the cursor can sit on."""
-    cols = columns(width)
+    # A mode other than `none` follows the bot's name at WIDE and above, and the bot column grows to hold the longest
+    # (29 cells at most: a 16-cell name, two spaces, `dev-manager`).
+    tags = {key: txt(b.get("mode")) for key, b in sorted_bots(state) if width >= WIDE and txt(b.get("mode")) not in ("", "none")}
+    cols = columns(width, min(29, max([16] + [cell_len(txt(b.get("bot")) or DASH) + 2 + cell_len(tags[key]) for key, b in sorted_bots(state) if key in tags])))
     items: list[tuple] = [(None, kpi_lines(state, width) + [Text()]),
                          (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))]
     for key, b in sorted_bots(state):
@@ -333,7 +346,8 @@ def bots_items(state: dict, names: dict, width: int, opened: set, now: float) ->
                 status.append((f"posted{since(b.get('posted_at'), now)}" if b.get("posted") else
                                "not posted yet" if v in LOUD else "not posted (warning only)", DIM))
         project = txt(b.get("project"))
-        cell = {"bot": [(txt(b.get("bot")) or DASH, "bold")], "status": status, "host": [(host_label(state, b.get("host")), DIM)],
+        name = txt(b.get("bot")) or DASH
+        cell = {"bot": [(Text.assemble((name, "bold"), ("  " + tags[key], DIM)) if key in tags else name, "bold")], "status": status, "host": [(host_label(state, b.get("host")), DIM)],
                 "channel": [(s, "") for s in channels(b, state.get("manager"), dict(cols)["channel"], o)],
                 "receives": [(s, "" if i == 0 or not o else DIM if s.startswith("DMs") else "")
                              for i, s in enumerate(receives(b, names, dict(cols).get("receives", 0), o))],
@@ -814,7 +828,8 @@ class MonitorTUI(App):
         scope = "bots" if self.tab == "bots" else "hosts"
         entry = obj(obj(self.state.get(scope)).get(key))
         # A host's posts are keyed host|- in `alerts`; a bot's and a project row's by their own key.
-        self.push_screen(Detail(entry_text(key, key + "|-" if scope == "hosts" else key, entry, alerts), txt(entry.get("fix"))))
+        self.push_screen(Detail(entry_text(key, key + "|-" if scope == "hosts" else key, with_mode(entry) if scope == "bots" else entry, alerts),
+                                txt(entry.get("fix"))))
 
     def action_copy(self) -> None:
         fix = fix_of(self.state, obj(obj(self.state.get("bots")).get(self.cursor["bots"] or ""))) if self.tab == "bots" else ""

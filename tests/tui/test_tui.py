@@ -19,6 +19,7 @@ from pathlib import Path
 os.environ["TZ"] = "UTC"   # HH:MM in the title and the Alerts tab is local time: fixed here
 time.tzset()
 from rich.cells import cell_len
+from rich.console import Console
 
 sys.dont_write_bytecode = True   # loading the TUI by path would leave tui/__pycache__ in the repo
 ROOT = Path(__file__).resolve().parents[2]
@@ -143,6 +144,43 @@ def pure():
         for o in (False, True):
             assert tui.receives(b[key], NAMES, 22, o) == ["-"] and tui.channels(b[key], "mgr", 22, o) == ["-"], (key, o)
     print("ok: receives and channel columns closed and open; ids without names; a dash for an older host's bot and for a bot with no token and no channel")
+
+    # 1.11.1: health gives each access group its `name`. Another channel is #<name> when that is a non-empty string and
+    # #<id> otherwise: an older host (no such field), a channel the guild has not (""), a value of another type.
+    named = lambda **g: dict(b[PHOTO], access=dict(ACCESS, groups=[ACCESS["groups"][0], dict(ACCESS["groups"][1], **g)]))
+    assert tui.channels(named(name="side-room"), "mgr", 22, True) == ["#photo (main)", "#side-room"]
+    for v in ("", None, 7, ["x"], {"a": 1}):
+        assert tui.channels(named(name=v), "mgr", 22, True) == ["#photo (main)", "#901"], v
+    assert tui.channels(named(name="side-room"), "mgr", 22, False) == ["#photo"], "a closed row shows the main channel only"
+    print("ok: an opened row names the bot's other channels (#name), and keeps #id for one with no name or a name of another type")
+
+    # 1.11.1: a bot's mode, when it is not `none`, follows its name in the bot column, dim, at 110 columns and more;
+    # the column grows for it (a 16-cell name and `dev-manager` are not cut) and the table stays inside the terminal.
+    NAME16 = "abcdefghijklmnop"
+    moded = lambda **kw: {"bots": {"k": dict(b[MGRBOT], bot=NAME16, **kw), "j": dict(b[PHOTO], bot="plain", mode="none")}}
+    for width in (110, 137):
+        lines = [l for k, ls in tui.bots_items(moded(mode="dev-manager"), NAMES, width, {"k", "j"}, T) if k for l in ls]
+        row = next(l for l in lines if NAME16 in l.plain)
+        assert row.plain.startswith(f"▸ {NAME16}  dev-manager ".replace("▸", "▾")), row.plain
+        at = row.plain.index("dev-manager")
+        assert "dim" in str(row.get_style_at_offset(Console(), at)) and "bold" in str(row.get_style_at_offset(Console(), 2)), "the mode is dim, the name bold"
+        assert len({cell_len(l.plain) for l in lines}) == 1 and cell_len(lines[0].plain) <= width, "one width for every line, inside the terminal"
+        assert not any("dev-manager" in l.plain or "none" in l.plain for l in lines if "plain" in l.plain), "mode none is not shown"
+    long = [l.plain for k, ls in tui.bots_items(moded(mode="autoresearchclaw"), NAMES, 110, set(), T) if k == "k" for l in ls][0]
+    assert long.startswith(f"▸ {NAME16}  autoresear… ") and cell_len(long) <= 110, long
+    short = [l.plain for k, ls in tui.bots_items({"bots": {"k": dict(b[MGRBOT], mode="autoresearchclaw")}}, NAMES, 110, set(), T) if k for l in ls][0]
+    assert short.startswith("▸ mgr  autoresearchclaw ") and cell_len(short) <= 110, short
+    assert all("dev-manager" not in l.plain for k, ls in tui.bots_items(moded(mode="dev-manager"), NAMES, 109, {"k"}, T) for l in ls), "no mode below 110 columns"
+    assert tui.columns(109, 29) == tui.columns(109) and dict(tui.columns(110))["bot"] == 16
+    for v in (None, "", "none", 7, ["dev-manager"], {"a": 1}):   # an older host, the default, a value of another type: the 1.11.0 table
+        assert [l.plain for _, ls in tui.bots_items(moded(mode=v), NAMES, 110, {"k"}, T) for l in ls] == \
+               [l.plain for _, ls in tui.bots_items(moded(), NAMES, 110, {"k"}, T) for l in ls], v
+    for w in (110, 111, 121, 122, 137, 200):
+        assert 2 + sum(c for _, c in tui.columns(w, 29)) + len(tui.columns(w, 29)) - 1 == 2 + sum(c for _, c in tui.columns(w)) + len(tui.columns(w)) - 1 <= w, w
+    assert "mode             -" in tui.entry_text("k", "k", tui.with_mode(b[OLDBOT]), []) and "mode             -" in tui.entry_text("k", "k", tui.with_mode({"mode": 7}), [])
+    assert "mode             dev-manager" in tui.entry_text("k", "k", tui.with_mode({"mode": "dev-manager"}), [])
+    print("ok: a mode other than none follows the bot's name, dim, at 110 columns and more (the bot column grows, the table keeps its width); "
+          "none, a missing one or another type shows nothing; the all-fields text has mode, a dash when unknown")
 
     for width in (137, 100):
         items = tui.bots_items(s, NAMES, width, {PHOTO, HBOT, MGRBOT, OLDBOT, NOTOK}, T)
@@ -318,7 +356,8 @@ def fuzz():
                           "posted_at": iso(n - 5400), "detail": "ssh to srv failed", "fix": "ssh srv", "laptop": True, "left_s": None}},
         "bots": {"local|/home/u/p|b1": {"host": "local", "project": "/home/u/p", "home": "/home/u", "bot": "b1", "verdict": "down", "since": iso(n - 700),
                                         "detail": "no plugin server", "fix": FIX, "posted": "down", "posted_at": iso(n - 600), "channel": "900",
-                                        "channel_name": "dev", "last_message_at": iso(n - 100), "access": ACCESS},
+                                        "channel_name": "dev", "last_message_at": iso(n - 100), "mode": "dev-manager",
+                                        "access": dict(ACCESS, groups=[dict(g, name="n" + g["id"]) for g in ACCESS["groups"]])},
                  "srv|/p|b2": {"host": "srv", "project": "/p", "bot": "b2", "verdict": "throttled", "since": iso(n - 9000), "detail": "d", "posted": None}},
         "alerts": [{"ts": iso(n - 600), "key": "local|/home/u/p|b1", "kind": "finding", "verdict": "down", "status": "sent", "detail": "no plugin server",
                     "text": "[down] b1", "retried": True},
@@ -335,7 +374,7 @@ def fuzz():
             tui.posted_text(a)
         for scope in ("bots", "hosts"):
             for k, e in (s[scope].items() if isinstance(s.get(scope), dict) else []):
-                tui.entry_text(k, k, e, s.get("alerts"))
+                tui.entry_text(k, k, tui.with_mode(e) if scope == "bots" else e, s.get("alerts"))
 
     def paths(o, p=()):
         yield p
@@ -501,7 +540,7 @@ async def bots(app, pilot):
     await pilot.pause()
     assert isinstance(app.screen, tui.Detail) and str(app.screen.query_one("#fix").render()) == FIX
     raw = str(app.screen.query_one("#body-detail").render())
-    for want in (PHOTO, "servers          0", "posted_at", '"dm_allow": ["111"]', "posts for this key:", "finding  down  sent"):
+    for want in (PHOTO, "servers          0", "mode             -", "posted_at", '"dm_allow": ["111"]', "posts for this key:", "finding  down  sent"):
         assert want in raw, (want, raw)
     await pilot.press("down", "right", "space")   # the row keys belong to the main view
     assert isinstance(app.screen, tui.Detail) and app.tab == "bots" and app.cursor["bots"] == PHOTO and app.opened == {HBOT}
@@ -510,11 +549,16 @@ async def bots(app, pilot):
     await pilot.press("down", "down")
     assert app.cursor["bots"] == MGRBOT
     state = json.loads((app.state_dir / "state.json").read_text())
-    state["bots"][MGRBOT].update(verdict="stale", detail="unanswered for 22m", fix="x")   # it moves up, among the problems
+    state["bots"][MGRBOT].update(verdict="stale", detail="unanswered for 22m", fix="x", mode="dev-manager")   # it moves up, among the problems
     (app.state_dir / "state.json").write_text(json.dumps(state))
     os.utime(app.state_dir / "state.json", (1, 1))   # a different mtime, whatever the clock's resolution
     app.refresh_state()
     assert app.cursor["bots"] == MGRBOT and app.opened == {HBOT} and "✕ STUCK" in row_of(app, "mgr "), row_of(app, "mgr ")
+    assert row_of(app, "mgr ").startswith("▸ mgr  dev-manager "), row_of(app, "mgr ")
+    await pilot.press("enter")
+    await pilot.pause()
+    assert "mode             dev-manager" in str(app.screen.query_one("#body-detail").render())
+    await pilot.press("escape")
     del state["bots"][MGRBOT]
     (app.state_dir / "state.json").write_text(json.dumps(state))
     os.utime(app.state_dir / "state.json", (2, 2))
