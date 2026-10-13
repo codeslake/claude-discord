@@ -726,7 +726,7 @@ apply='
 | reduce $rs[] as $r (.;
     (if $r.scope == "hosts" then $r.key + "|-" else $r.key end) as $ak
     | (.[$r.scope][$r.key] // {}) as $e
-    | ((.alerts // []) | map(select(.key == $ak)) | last) as $prev
+    | ((.alerts // []) | map(select(type == "object" and .key == $ak)) | last) as $prev   # a hand-edited element that is no record: skipped, never an error every pass
     | (if $r.status != "sent" then .
        elif $r.kind == "finding" then .[$r.scope][$r.key] |= (. + {posted: .verdict, posted_at: $now, posted_since_s: .since_s})
        else .[$r.scope][$r.key] |= del(.posted, .posted_at, .posted_since_s) end)

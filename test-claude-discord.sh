@@ -3171,12 +3171,16 @@ out=$(bash "$S" health --json 2>/dev/null) || :
 # A read time with a leading zero (a damaged or hand-edited line: nothing writes one). bash takes 08 for an octal number
 # that is none, and that error ends the whole health block, not the one test: the script then ran on into the launcher
 # and STARTED the bot's session, from a monitor pass every 5 minutes. It is decimal 8: an old line, read again.
-printf '900 5 name 08\n' > "$SD/channel-guild"
+# In the same run an access.json with no `groups` at all (a DM-only bot; its channel is config.env's): the DM policy is
+# still reported, with no group, not a null access.
+printf '900 5 name 08\n' > "$SD/channel-guild"; printf '{"dmPolicy":"allowlist","allowFrom":["111","x"]}\n' > "$SD/access.json"
 queue "200 $NONE" '200 {"guild_id":"5","name":"general"}' '200 {"threads":[]}'
 rc=0; out=$(bash "$S" health --json 2>"$HOME/health.err") || rc=$?
 [ "$rc" = 0 ] && [[ $out != *LAUNCHER* ]] && [ "$(verdict_of sbot "$out")" = ok ] && [ "$(guild_of "$SD")" = "900 5 general" ] && [ ! -s "$CURL_REPLIES" ] ||
   { echo "FAIL: a channel-guild read time of 08 must be read as 8 (an old line, read again): health prints its JSON, exits 0 and starts no claude (rc=$rc): $(head -c 300 <<<"$out") / $(cat "$HOME/health.err")"; exit 1; }
 rm -f "$HOME/health.err"
+jq -e '.[0] | .channel == "900" and .access == {dm: "allowlist", dm_allow: ["111"], groups: []}' <<<"$out" >/dev/null ||
+  { echo "FAIL: an access.json with no groups object must still report access, with its dm policy and allowFrom and no group: $(jq -c '.[0] | [.channel, .access]' <<<"$out")"; exit 1; }
 mv "$SD/access.json.keep" "$SD/access.json"; seed_guild "$SD"
 # A bot with no token and no channel (a .env with nothing in it, no access.json, no config.env): the new fields are
 # empty or null, never an error. Only the unauthenticated /gateway is asked.
@@ -3185,7 +3189,7 @@ queue
 out=$(cd "$NP" && bash "$S" health --json 2>/dev/null) || :
 jq -e '.[0] | .bot == "nobot" and .verdict == "unknown" and .channel == "" and .channel_name == "" and .last_message_at == null and .access == null' <<<"$out" >/dev/null && [ ! -s "$CURL_REPLIES" ] ||
   { echo "FAIL: a bot with no token and no channel has empty channel fields, a null time and a null access, and costs no call: $out"; exit 1; }
-echo "ok: health --json carries channel, channel_name (cached in channel-guild with the time it was read; read again after a day or for a line with no name; a failed read keeps it; a read time with a leading zero is decimal and never ends health early), last_message_at from the snowflake and the access policy (ids only), and empty or null ones for a bot with no token and no channel"
+echo "ok: health --json carries channel, channel_name (cached in channel-guild with the time it was read; read again after a day or for a line with no name; a failed read keeps it; a read time with a leading zero is decimal and never ends health early), last_message_at from the snowflake and the access policy (ids only; the DM policy alone when access.json has no groups), and empty or null ones for a bot with no token and no channel"
 
 # The age is measured from the OLDEST unanswered message, not the newest:
 # with the newest, every fresh message resets the clock, and a wedged bot is
@@ -3606,7 +3610,8 @@ posts() { sed -n 's/.* --data-binary \(.*\) https:\/\/discord.com\/api\/v10\/cha
 # land in /tmp. The start meets a state.json that is
 # not valid (it starts empty and says so) and a log past its cap (256 KiB: it becomes monitor.log.1, one generation).
 # 1.11.0: a name=<display> word is what the TUI calls the host, and never an environment word (the ssh line asserted below has none).
-printf '# mine\r\nlocal name=람다 HTTPS_PROXY=http://127.0.0.1:8118\r\nh3\r\nh1 name=box1\r\nh2\r\n' > "$MR/mgr/hosts"   # saved with CRLF line endings
+# Control characters in it go (h1's holds a US, the separator of the reducer's input, and an ESC): box1.
+printf '# mine\r\nlocal name=람다 HTTPS_PROXY=http://127.0.0.1:8118\r\nh3\r\nh1 name=bo\037x\0331\r\nh2\r\n' > "$MR/mgr/hosts"   # saved with CRLF line endings
 # The local answer is a 1.11.0 health document (channel, its name, the last message time, the access policy); h1 answers as 1.10 did, with none of them.
 mdoc lambda 0 "r1:ok" | jq -c '.projects[0].bots[0] += {channel: "900", channel_name: "dev", last_message_at: "2026-10-13T00:00:00Z", access: {dm: "allowlist", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: []}]}}' > "$MON/local.out"
 mdoc h1 0 "r2:ok" > "$MON/h1.out"
@@ -3677,7 +3682,7 @@ l1=$(PATH="$HOME/psbin:$PATH" TZ=XYZ-9 LC_ALL=en_US.utf8 bash -c '. "$1"; lstart
 l2=$(PATH="$HOME/psbin:$PATH" TZ=ABC+5 LC_ALL=C bash -c '. "$1"; lstart 999999999' x "$HOME/lstart.sh")
 [ -n "$l1" ] && [ "$l1" = "$l2" ] || { echo "FAIL: a ps start time must read the same in any zone and locale: '$l1' / '$l2'"; exit 1; }
 rm -rf "$HOME/psbin" "$HOME/lstart.sh"
-echo "ok: monitor: one instance for two --ensure calls, holder records with start times, local through the shim with the ledger's env, ssh for the rest (a CRLF ledger read as plain lines; a non-zero remote exit is blind even with a document, a wrong-shaped one blinds its host alone; a ledger name= word is the display name and no env word; env key names, hostname, the monitor's language and owner and health's 1.11.0 fields are in the state, null from an older host), nothing posted when all is well; it exits within a tick of its last holder (a reused pid counts as dead), leaving only lock, state.json (stopped), monitor.log (rotated at 256 KiB, one generation, the monitor's own output reopened onto the new file) and an empty holders/, nothing in TMPDIR; a broken state.json starts empty"
+echo "ok: monitor: one instance for two --ensure calls, holder records with start times, local through the shim with the ledger's env, ssh for the rest (a CRLF ledger read as plain lines; a non-zero remote exit is blind even with a document, a wrong-shaped one blinds its host alone; a ledger name= word is the display name, without its control characters, and no env word; env key names, hostname, the monitor's language and owner and health's 1.11.0 fields are in the state, null from an older host), nothing posted when all is well; it exits within a tick of its last holder (a reused pid counts as dead), leaving only lock, state.json (stopped), monitor.log (rotated at 256 KiB, one generation, the monitor's own output reopened onto the new file) and an empty holders/, nothing in TMPDIR; a broken state.json starts empty"
 
 # A crash leaves no lock behind: the pass's ssh is started without the lock's fd, so a new --ensure takes over while an
 # orphaned ssh still runs (that start's cap is 5 s, so its own cap never kills the ssh first). The exit race: an
@@ -3906,8 +3911,10 @@ echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 u
 # appears) is ONE not_posted record however often it flaps, not one per appearance, which would fill the 100 records in
 # 17 hours and push every real post out: a new one only for another verdict, or once the last is a day old. Six passes
 # of h1: throttled (a record), ok, throttled (none), apierror (a record), ok a day later, apierror (a record: the last
-# is 86400 s old). The state starts with 120 old records: the reducer keeps the last 100 (apply trims too, so only a
-# pass with nothing posted shows it).
+# is 86400 s old). A bot with no token (unknown, in every pass here) is no finding and never one of these records. The
+# state starts with 120 old records: the reducer keeps the last 100 (apply trims too, so only a pass with nothing posted
+# shows it). The last of them is no object (a hand edit): apply, which looks for the last record of a key, must not
+# fail on it (it failed every pass, so `posted` was never set and the finding went out again each time).
 eval "$(sed -n "/^reduce='\$/,/^'\$/p; /^apply='\$/,/^'\$/p" "$D/monitor/monitor.sh")"
 rpass() {  # $1 = the pass's start (epoch s), the rest = bot:verdict of h1; RS = the state, read and written
   local ns=$1 now; shift; TZ=UTC printf -v now '%(%Y-%m-%dT%H:%M:%SZ)T' "$ns"
@@ -3915,14 +3922,17 @@ rpass() {  # $1 = the pass's start (epoch s), the rest = bot:verdict of h1; RS =
     --argjson every 300 --argjson pass_s 1 --argjson holders '[]' "$reduce") || { echo "FAIL: the reducer rejected a pass ($*)"; exit 1; }
   RS=${RS#S}; RS=${RS%%$'\n'*}
 }
-RS='{"version":1,"manager":"m","monitor":{},"hosts":{},"bots":{},"alerts":['$(printf '{"ts":"2026-01-01T00:00:00Z","key":"pad|-","kind":"finding","verdict":"blind","status":"sent"},%.0s' {1..119})'{"ts":"2026-01-01T00:00:00Z","key":"pad|-"}]}'
-RT=1790000000; rpass $RT fl:throttled; rpass $((RT + 300)) fl:ok; rpass $((RT + 600)) fl:throttled
-rpass $((RT + 900)) fl:apierror; rpass $((RT + 87000)) fl:ok; rpass $((RT + 87300)) fl:apierror
-[ "$(jq -r '[(.alerts | length), ([.alerts[] | select(.key == "h1|/home/u/ws/p|fl") | "\(.verdict) \(.status) \(.ts)"] | join(","))] | join(" / ")' <<<"$RS")" \
-  = "100 / throttled not_posted 2026-09-21T14:13:20Z,apierror not_posted 2026-09-21T14:28:20Z,apierror not_posted 2026-09-22T14:28:20Z" ] ||
-  { echo "FAIL: a flapping warning is one not_posted record per verdict a day, and the reducer keeps 100 records: $(jq -c '[(.alerts | length), [.alerts[] | select(.key != "pad|-")]]' <<<"$RS")"; exit 1; }
-unset RS reduce apply
-echo "ok: monitor: a finding the channel is not told when it appears is one not_posted record per key and verdict a day however often it comes and goes; the reducer keeps the last 100 records"
+RS='{"version":1,"manager":"m","monitor":{},"hosts":{},"bots":{},"alerts":['$(printf '{"ts":"2026-01-01T00:00:00Z","key":"pad|-","kind":"finding","verdict":"blind","status":"sent"},%.0s' {1..120})'"x"]}'
+RT=1790000000; rpass $RT fl:throttled nt:unknown; rpass $((RT + 300)) fl:ok nt:unknown; rpass $((RT + 600)) fl:throttled nt:unknown
+rpass $((RT + 900)) fl:apierror nt:unknown; rpass $((RT + 87000)) fl:ok nt:unknown; rpass $((RT + 87300)) fl:apierror nt:unknown
+RA=$(printf '%s' "$RS" | jq -c --arg now 2026-09-22T14:28:20Z --arg results $'bots\x1fh1|/home/u/ws/p|fl\x1ffinding\x1fapierror\x1fsent\x1f{"content":"t"}\n' "$apply" 2>&1) ||
+  { echo "FAIL: apply must not fail on an alerts element that is not an object: $RA"; exit 1; }
+[ "$(jq -rn --argjson r "$RS" --argjson a "$RA" '[($r.alerts | length), ([$r.alerts[] | objects | select(.key == "h1|/home/u/ws/p|fl") | "\(.verdict) \(.status) \(.ts)"] | join(",")),
+  ([$r.alerts[] | objects | select(.key | endswith("|nt"))] | length), $a.bots["h1|/home/u/ws/p|fl"].posted, ($a.alerts[-1] | "\(.status) \(.text)")] | join(" / ")')" \
+  = "100 / throttled not_posted 2026-09-21T14:13:20Z,apierror not_posted 2026-09-21T14:28:20Z,apierror not_posted 2026-09-22T14:28:20Z / 0 / apierror / sent t" ] ||
+  { echo "FAIL: a flapping warning is one not_posted record per verdict a day, a bot with no token none, the reducer keeps 100 records, and apply records a post over an alerts element that is no object: $(jq -c '[(.alerts | length), [.alerts[] | objects | select(.key != "pad|-")]]' <<<"$RS") / $(jq -c '.bots | map_values(.posted)' <<<"$RA")"; exit 1; }
+unset RS RA reduce apply
+echo "ok: monitor: a finding the channel is not told when it appears is one not_posted record per key and verdict a day however often it comes and goes, and never one for a bot with no token; the reducer keeps the last 100 records; apply does not fail on an alerts element that is no object"
 
 # Cadence and self-update, counted, never timed. date and sleep are stubs for this monitor: date reads $HOME/clock,
 # which each local health run moves 1000 s on, and logs D for a pass's start stamp (the %s call); sleep logs its
