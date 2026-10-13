@@ -999,7 +999,9 @@ if [ "${1:-}" = health ]; then
   shift
   stale_min=15        # an addressed message older than this with no hook record is an alert
   turn_max_min=60     # a turns/<sid> file older than this is a wedged turn, not a live one
-  unknown_cap=6       # runs in a row (30 min at 5 min) that could not tell before saying so
+  unknown_cap=6       # runs in a row that could not tell, and
+  unknown_min_s=1500  # seconds since the first of them (25 min: six passes 5 min apart), before saying so: both, as a
+                      # pass can be asked for (monitor --check) and six runs may be seconds apart
   # However long a turn claims to be running, a message left unanswered this
   # long is worth saying out loud. `working` is a claim by the daemon, and a
   # session can sit in that state wedged on a tool call or a prompt that
@@ -1598,28 +1600,36 @@ if [ "${1:-}" = health ]; then
         # makes it a tested command, which set -e allows.
         working=1
         [ -z "$turn" ] || { session_working "$bot" && working=0 || working=$?; }
-        # A run that could not tell is counted; a run that could resets the
-        # count. Past the cap the hold is given up and the not-knowing is
-        # itself the finding: `claude agents` failing repeatedly means the
-        # daemon is unwell, which is exactly when a bot breaks.
+        # A run that could not tell is counted, with the time of the first of
+        # the streak; a run that could resets both. Past the cap (so many
+        # runs AND so long since the first) the hold is given up and the
+        # not-knowing is itself the finding: `claude agents` failing
+        # repeatedly means the daemon is unwell, which is exactly when a bot
+        # breaks. health-unknown holds "<count> <epoch of the first>"; a file
+        # of before 1.12.0 holds the count only, and its streak starts now.
         if [ "$working" = 2 ]; then
-          # Checked and stripped of leading zeros BEFORE the arithmetic (see cat_s above): what is no count starts at 0.
-          unknowns=$(cat "$d/health-unknown" 2>/dev/null) || unknowns=0
-          case $unknowns in ''|*[!0-9]*) unknowns=0;; esac
+          # Checked and stripped of leading zeros BEFORE the arithmetic (see cat_s above): what is no count starts at 0,
+          # and what is no time of the past is now.
+          unknowns="" first=""
+          { read -r unknowns first < "$d/health-unknown"; } 2>/dev/null || :
+          case $unknowns in ''|*[!0-9]*) unknowns=0 first="";; esac
+          case $first in ''|*[!0-9]*) first=$now_s;; esac
           unknowns=${unknowns#"${unknowns%%[!0]*}"}; unknowns=$(( ${unknowns:-0} + 1 ))
-          printf '%s\n' "$unknowns" > "$d/health-unknown" 2>/dev/null || :
+          first=${first#"${first%%[!0]*}"}; [ "${first:-0}" -le "$now_s" ] || first=$now_s
+          first=${first:-0}
+          printf '%s %s\n' "$unknowns" "$first" > "$d/health-unknown" 2>/dev/null || :
         else
           unknowns=0
           [ ! -f "$d/health-unknown" ] || unlink "$d/health-unknown" 2>/dev/null || :
         fi
-        if [ "$working" = 2 ] && [ "$unknowns" -ge "$unknown_cap" ]; then
+        if [ "$working" = 2 ] && [ "$unknowns" -ge "$unknown_cap" ] && [ $((now_s - first)) -ge "$unknown_min_s" ]; then
           verdict=nostate detail="unanswered for ${age}m and 'claude agents' has not answered for $unknowns runs, so whether a turn is running cannot be told; the daemon itself may be unwell"
         elif [ -n "$turn" ] && { [ "$turn" -lt "$turn_max_min" ] || [ "$working" != 1 ]; } &&
              [ "$age" -lt "$busy_cap_min" ]; then
           verdict=busy detail="a turn has been in flight ${turn}m; holding the finding"
           case $working in
             0) detail="$detail (the session is running one now)";;
-            2) detail="$detail (run $unknowns of $unknown_cap with no answer from 'claude agents')";;
+            2) detail="$detail (run $unknowns with no answer from 'claude agents', for $(( (now_s - first) / 60 ))m; a finding after $unknown_cap runs and $((unknown_min_s / 60))m)";;
           esac
         else
           verdict=stale

@@ -3416,16 +3416,23 @@ stale_one
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of wbot "$out")" = busy ] || { echo "FAIL: an unknown session state must count as working: $out"; exit 1; }
 case $(detail_of wbot "$out") in *"no answer from 'claude agents'"*) ;; *) echo "FAIL: the held line should say the state is unknown: $(detail_of wbot "$out")"; exit 1;; esac
-[ "$(<"$WD/health-unknown")" = 1 ] || { echo "FAIL: an unknown must be counted: $(<"$WD/health-unknown")"; exit 1; }
-# Seeded past the cap rather than looped there: the count is read from this
-# file and written back, so the next run is one that has crossed. With a
-# leading zero (a hand edit): decimal 8, where bash would read an octal number
-# that is none and end the whole health block (as for channel-guild above).
-printf '%s\n' 08 > "$WD/health-unknown"
-stale_one
-out=$(bash "$S" health --json 2>/dev/null) || :
-[ "$(verdict_of wbot "$out")" = nostate ] || { echo "FAIL: past the cap the not-knowing is itself the finding: $out"; exit 1; }
-case $(detail_of wbot "$out") in *'daemon itself may be unwell'*) ;; *) echo "FAIL: the finding should name the likely cause: $(detail_of wbot "$out")"; exit 1;; esac
+[[ $(<"$WD/health-unknown") =~ ^1\ ([0-9]+)$ ]] && [ $(( $(date +%s) - BASH_REMATCH[1] )) -lt 60 ] || { echo "FAIL: an unknown must be counted, with the time of the first: $(<"$WD/health-unknown")"; exit 1; }
+# The cap is so many runs AND so long since the first of them: a pass can be asked for (monitor --check), so six runs
+# may be seconds apart. Six runs within a second hold; so does a long streak of fewer runs. Seeded rather than looped
+# there: the count and the time are read from this file and written back.
+unk() { printf '%s\n' "$1" > "$WD/health-unknown"; stale_one; out=$(bash "$S" health --json 2>/dev/null) || :; }
+unk "5 $(date +%s)"
+[ "$(verdict_of wbot "$out")" = busy ] && [[ $(<"$WD/health-unknown") =~ ^6\ [0-9]+$ ]] || { echo "FAIL: six runs with no answer within a second are no finding yet (the cap is 25 minutes too): $out / $(<"$WD/health-unknown")"; exit 1; }
+unk "4 $(( $(date +%s) - 9000 ))"
+[ "$(verdict_of wbot "$out")" = busy ] || { echo "FAIL: fewer than six runs with no answer are no finding, however long ago the first: $out"; exit 1; }
+# A file of before 1.12.0 holds the count only: its streak starts now (an upgrade must not alert), and with a leading
+# zero (a hand edit) it is decimal 8, where bash would read an octal number that is none and end the whole health block
+# (as for channel-guild above).
+unk 08
+[ "$(verdict_of wbot "$out")" = busy ] && [[ $(<"$WD/health-unknown") =~ ^9\ [0-9]+$ ]] || { echo "FAIL: a count with no time (a file of before 1.12.0) starts its 25 minutes now: $out / $(<"$WD/health-unknown")"; exit 1; }
+unk "09 0$(( $(date +%s) - 1500 ))"
+[ "$(verdict_of wbot "$out")" = nostate ] || { echo "FAIL: past the cap (six runs and 25 minutes) the not-knowing is itself the finding: $out"; exit 1; }
+case $(detail_of wbot "$out") in *"'claude agents' has not answered for 10 runs"*'daemon itself may be unwell'*) ;; *) echo "FAIL: the finding should name the likely cause: $(detail_of wbot "$out")"; exit 1;; esac
 # A run that CAN tell resets the count, so a single hiccup never accumulates.
 agents_say "$WORKING"
 stale_one

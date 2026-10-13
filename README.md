@@ -786,7 +786,8 @@ Three things would make that signal cry wolf, and each is filtered:
   Anything unknown there (no `claude`, a listing that fails) counts as
   working: a missed finding is recoverable, one telling someone to
   force-refresh a busy session is not. That hold is capped at six runs in a
-  row (half an hour), because `claude agents` failing repeatedly means the
+  row and 25 minutes since the first of them (both: a pass can be asked for,
+  so six runs may be seconds apart), because `claude agents` failing repeatedly means the
   daemon itself is unwell — exactly when a bot breaks — and holding for ever
   would hide it; past the cap the not-knowing is reported as `nostate`. One
   run that *can* tell resets the count.
