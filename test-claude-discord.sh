@@ -3788,6 +3788,76 @@ hc add old
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -f "$HOME/ssh.log" "$MON"/*
 echo "ok: host-id is made once (eight first calls agree, a damaged file is replaced); hosts add asks the host with the command --dry-run prints (stdin closed, ConnectTimeout, -- before the alias, a 255 retried with ControlPath=none), refuses the same home (exit 4) and a host that did not answer, hung past the cap, printed megabytes or has no claude-discord (exit 5, its last line cleaned), and adds an older claude-discord with a warning; --no-probe, local and a listed alias run no ssh"
 
+# watchers/<manager>, on the checked host (this sandbox HOME plays that host): --watch writes one line, --host-id lists
+# every file, --unwatch removes only the record of the home that wrote it. A word of the wrong shape writes nothing.
+WD="$HOME/.claude-discord/watchers"; ID_C=$(printf 'c%.0s' {1..32}); rm -rf "$WD"
+A=$(bash "$S" --version --watch other "$ID_B" my-alias | sed 1d)
+read -r wi wa ws < "$WD/other"
+[ "$A" = "watched other" ] && [ "$wi $wa" = "$ID_B my-alias" ] && [[ $ws =~ ^20[0-9-]{8}T[0-9:]{8}Z$ ]] && [ "$(stat -c %a "$WD/other")$(stat -c %a "$WD")" = 600700 ] && [ "$(ls -A "$WD")" = other ] ||
+  { echo "FAIL: --version --watch writes watchers/<manager> as '<host-id> <alias> <time>': $A / $(cat "$WD/other" 2>&1) / $(ls -lA "$WD" 2>&1)"; exit 1; }
+mkdir "$WD/adir"; : > "$WD/.hidden"; : > "$WD/we ird"; printf 'x\033[2J y z w v\n' > "$WD/junk"
+[ "$(bash "$S" --version --host-id | sed 1d)" = "$(printf 'host-id %s\nwatcher junk x[2J y z w v\nwatcher other %s my-alias %s' "$L" "$ID_B" "$ws")" ] ||
+  { echo "FAIL: --version --host-id lists each watcher file after the host-id (plain names only, no control character): $(bash "$S" --version --host-id | od -c | head -20)"; exit 1; }
+rm -rf "$WD/adir" "$WD/.hidden" "$WD/we ird" "$WD/junk"
+for bad in "../x $ID_B a" "ok nothex a" "ok $ID_B -oProxyCommand=x"; do
+  rc=0; bash "$S" --version --watch $bad >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] && [ "$(ls -A "$WD")" = other ] && [ ! -e "$HOME/.claude-discord/x" ] || { echo "FAIL: --watch '$bad' has a word of the wrong shape: exit 2, nothing written: rc=$rc $(ls -A "$WD" "$HOME/.claude-discord")"; exit 1; }
+done
+rc=0; bash "$S" --version --watch me "$L" a >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] && [ ! -e "$WD/me" ] || { echo "FAIL: a home never records itself as its own watcher: rc=$rc"; exit 1; }
+A=$(bash "$S" --version --unwatch other "$ID_C" | sed 1d)
+[ "$A" = "unwatched other" ] && [ -e "$WD/other" ] || { echo "FAIL: --unwatch from another home must leave the record: $A"; exit 1; }
+bash "$S" --version --unwatch other "$ID_B" >/dev/null
+[ ! -e "$WD/other" ] || { echo "FAIL: --unwatch from the home that wrote the record removes it"; exit 1; }
+rm -rf "$WD"
+# hosts add reads the host's watchers. Another manager's record: a warning, added all the same, and this manager's
+# own record is then written there (the second ssh call), with words that need no quoting.
+LEDGER=$(<"$MR/mgr/hosts"); rm -f "$HOME/ssh.log"
+ans w1 1.12.0 "$ID_B"; printf 'watcher other %s their-alias 2026-10-01T00:00:00Z\nwatcher ev/il %s a 2026-10-01T00:00:00Z\nwatcher bad nothex a 2026-10-01T00:00:00Z\nwatcher\n' "$ID_C" "$ID_C" >> "$MON/w1.out"
+hc add w1
+[ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = w1 ] && [ "$HE" = "claude-discord: hosts: warning: w1 is already watched by other (since 2026-10-01T00:00:00Z): both managers will report its bots" ] &&
+  [ "$(sed -n 2p "$HOME/ssh.log")" = "-o BatchMode=yes -o ConnectTimeout=8 -- w1 ~/.local/bin/claude-discord --version --watch mgr $L w1" ] && [ "$(wc -l < "$HOME/ssh.log")" = 2 ] ||
+  { echo "FAIL: another manager's watcher record is a warning (a record of the wrong shape is none); the host is added and this manager's record sent: rc=$HRC $HE / $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
+# This manager's own record under another alias that is still listed: the same home again, refused. No --watch call.
+ans w2 1.12.0 "$ID_B"; printf 'watcher mgr %s w1 2026-10-02T00:00:00Z\n' "$L" >> "$MON/w2.out"
+LEDGER=$(<"$MR/mgr/hosts"); rm -f "$HOME/ssh.log"
+refused w2 4 '^claude-discord: hosts: w2 is the same home as w1 \(' "a host this manager already checks under another alias is the same home"
+[ "$(wc -l < "$HOME/ssh.log")" = 1 ] || { echo "FAIL: a refused add sends no --watch: $(<"$HOME/ssh.log")"; exit 1; }
+# The same record once w1 is out of the ledger is stale: added, no warning. A record for this very alias is ours too.
+hc rm --no-probe w1; hc add w2; A=$HRC$HE
+printf 'watcher mgr %s w3 2026-10-02T00:00:00Z\n' "$L" >> "$MON/w2.out"; cp "$MON/w2.out" "$MON/w3.out"; hc add w3
+[ "$A$HRC$HE" = 00 ] && [ "$(tail -n 2 "$MR/mgr/hosts")" = "$(printf 'w2\nw3')" ] || { echo "FAIL: this manager's own record under an alias no longer listed, or under the alias being added, is no obstacle: $A / rc=$HRC $HE"; exit 1; }
+# A manager of the same name from another home: a warning that says so.
+ans w4 1.12.0 "$ID_B"; printf 'watcher mgr %s x 2026-10-03T00:00:00Z\n' "$ID_C" >> "$MON/w4.out"
+hc add w4
+[ "$HRC" = 0 ] && grep -q '^claude-discord: hosts: warning: w4 is already watched by a manager also named mgr, from another home (since 2026-10-03T00:00:00Z)' <<<"$HE" || { echo "FAIL: a watcher of the same name from another home is said as such: rc=$HRC $HE"; exit 1; }
+# The --watch call fails (the host went away between the two calls): added, with a warning.
+ans w5 1.12.0 "$ID_B"; rm -f "$HOME/ssh.log"
+printf '#!/bin/bash\ncase "$*" in *--watch*) exit 255;; esac\nexec "%s" "$@"\n' "$HOME/bin/ssh" > "$HOME/ssh-nowatch"; chmod +x "$HOME/ssh-nowatch"
+mkdir -p "$HOME/nwbin"; ln -sf "$HOME/ssh-nowatch" "$HOME/nwbin/ssh"
+HRC=0; HE=$(PATH="$HOME/nwbin:$PATH" bash "$S" hosts add w5 2>&1 >/dev/null) || HRC=$?
+[ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = w5 ] && grep -q '^claude-discord: hosts: warning: w5 is added, but this manager could not be recorded there (ssh exit 255)' <<<"$HE" || { echo "FAIL: a failed --watch is a warning, the host stays added: rc=$HRC $HE"; exit 1; }
+rm -rf "$HOME/nwbin" "$HOME/ssh-nowatch"
+# An older claude-discord (no host-id) is sent no --watch; a manager whose name a file name cannot carry sends none and says so.
+ans w6 1.11.1; rm -f "$HOME/ssh.log"; hc add w6
+mkdir -p "$MR/m gr"; echo dev-manager > "$MR/m gr/mode"; echo local > "$MR/m gr/hosts"; ans w7 1.12.0 "$ID_B"
+hc --bot "m gr" add w7
+[ "$HRC" = 0 ] && [ "$(wc -l < "$HOME/ssh.log")" = 2 ] && [ "$(<"$MR/m gr/hosts")" = "$(printf 'local\nw7')" ] && grep -q "^claude-discord: hosts: warning: no watcher record is written for a manager named 'm gr'" <<<"$HE" ||
+  { echo "FAIL: no --watch to an older claude-discord, and none for a manager name that is no plain file name: rc=$HRC $HE / $(<"$HOME/ssh.log")"; exit 1; }
+rm -rf "$MR/m gr"
+# hosts rm: the ledger first, then --unwatch with this home's id. Unreachable: exit 0, the line gone, the way to
+# remove the record later said. --no-probe, and a home with no host-id, send nothing.
+rm -f "$HOME/ssh.log"; hc rm w2
+[ "$HRC" = 0 ] && [ -z "$HE" ] && [ "$(<"$HOME/ssh.log")" = "-o BatchMode=yes -o ConnectTimeout=8 -- w2 ~/.local/bin/claude-discord --version --unwatch mgr $L" ] && ! grep -q '^w2' "$MR/mgr/hosts" ||
+  { echo "FAIL: rm removes the line, then this manager's watcher record on the host: rc=$HRC $HE / $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
+echo 255 > "$MON/w3.rc"; hc rm w3
+[ "$HRC" = 0 ] && ! grep -q '^w3' "$MR/mgr/hosts" && grep -q "^claude-discord: hosts: warning: w3 did not answer (ssh exit 255), so this manager's watcher record stays there.*ssh w3 '~/.local/bin/claude-discord --version --unwatch mgr $L'" <<<"$HE" ||
+  { echo "FAIL: rm of a host that cannot be reached still removes the line (exit 0) and says how to remove the record later: rc=$HRC $HE"; exit 1; }
+rm -f "$HOME/ssh.log"; hc rm --no-probe w4; mv "$HID" "$HID.off"; hc rm w5; mv "$HID.off" "$HID"
+[ "$HRC" = 0 ] && [ ! -e "$HOME/ssh.log" ] && [ ! -e "$HID.off" ] && ! command grep -qE '^w[45]' "$MR/mgr/hosts" || { echo "FAIL: rm --no-probe, and rm from a home with no host-id, run no ssh: rc=$HRC $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
+printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -f "$HOME/ssh.log" "$MON"/*
+echo "ok: watchers: --version --watch/--unwatch write and remove watchers/<manager> on the checked host (words of the wrong shape write nothing, a home removes only its own record) and --host-id lists them; hosts add warns of another manager's record, refuses a home this manager already checks under a listed alias (exit 4), then records itself there (a failure is a warning); hosts rm removes the line first and the record after, also when the host is unreachable"
+
 # The monitor runs fast here: a 0.01 s tick, a 0.03 s cap per host, 0.1 s for the lock (one retry), and a 60 s pass interval, so
 # each start runs exactly its first pass (these blocks need no second one). Thresholds are tested by seeding
 # state.json with old `since` times, never by waiting. The local host's command is the shim, stubbed to print

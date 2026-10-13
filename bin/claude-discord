@@ -1897,6 +1897,9 @@ fi
 # hard-linked in, and ln fails when the name is there, so of two first calls at once one wins and both print the
 # winner's. A file that is there but holds no id (cut off, hand-edited) is replaced.
 hid_re='^[0-9a-f]{32}$'   # what a host-id is
+# What travels in a watcher record: a manager bot's name that can be a file name on another machine and a bare word of
+# an ssh command line, and an ssh alias as `hosts` takes one.
+mgr_re='^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$' alias_re='^[A-Za-z0-9._@][A-Za-z0-9._@-]{0,254}$'
 host_id() {
   local f=$helpers/host-id id=""
   { read -r id < "$f"; } 2>/dev/null || :
@@ -1921,8 +1924,29 @@ if [ "${1:-}" = --version ]; then
   # What `hosts add` asks another machine over ssh (1.12.0). It rides on --version because a claude-discord before
   # 1.12.0 prints the line above and exits whatever follows, while any new verb would be read there as a bot name
   # and reach the launcher.
+  # watchers/<manager>, on a checked host: "<host-id of the manager's home> <its alias for this host> <UTC time>", one
+  # line, written when that manager's `hosts add` took this host and removed by its `hosts rm`. The words arrive over
+  # ssh from another machine, so each is matched before a file name is made from one.
+  wd=$helpers/watchers
   case ${2:-} in
-    --host-id) id=$(host_id) || exit 1; echo "host-id $id";;
+    --host-id)
+      id=$(host_id) || exit 1; echo "host-id $id"
+      for f in "$wd"/*; do
+        [ -f "$f" ] && [[ ${f##*/} =~ $mgr_re ]] || continue
+        w=""; { read -r w < "$f"; } 2>/dev/null || :
+        echo "watcher ${f##*/} ${w//[[:cntrl:]]/}"
+      done;;
+    --watch)   # <manager> <the host-id of its home> <its alias for this host>
+      [[ ${3:-} =~ $mgr_re ]] && [[ ${4:-} =~ $hid_re ]] && [[ ${5:-} =~ $alias_re ]] || exit 2
+      id=$(host_id) || exit 1
+      [ "$id" != "$4" ] || exit 1   # this very home: it is checked through `local`, never through an alias
+      (umask 077; mkdir -p "$wd" && printf '%s %s %s\n' "$4" "$5" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$wd/.$3.$$" && mv -f "$wd/.$3.$$" "$wd/$3") || exit 1
+      echo "watched $3";;
+    --unwatch)   # <manager> <the host-id of its home>: only the record that home wrote
+      [[ ${3:-} =~ $mgr_re ]] && [[ ${4:-} =~ $hid_re ]] || exit 2
+      w=""; { read -r w rest < "$wd/$3"; } 2>/dev/null || :
+      [ "$w" != "$4" ] || rm -f "$wd/$3"
+      echo "unwatched $3";;
   esac
   exit 0
 fi
@@ -2149,17 +2173,18 @@ if [ "${1:-}" = hosts ]; then
   # into variables and matched: a version is N.N.N, an id 32 hex digits. Nothing of it is run or becomes a command's word.
   h_who='~/.local/bin/claude-discord --version --host-id'
   h_ask() {
-    local l a b rest re_v='^[0-9]+\.[0-9]+\.[0-9]+$'
+    local l a b c d e rest re_v='^[0-9]+\.[0-9]+\.[0-9]+$' re_t='^[0-9TZ:-]{1,20}$'
     h_ssh "$1" "$h_who"
-    h_ver="" h_id="" h_last=""
+    h_ver="" h_id="" h_last="" h_watch=""   # h_watch: the host's watcher records, "<manager> <host-id> <alias> <time>" a line
     while IFS= read -r l; do
       l=${l//[[:cntrl:]]/}; l=${l:0:200}
       [ -n "$l" ] || continue
-      h_last=$l a="" b=""
-      read -r a b rest <<<"$l" || :
+      h_last=$l a="" b="" c="" d="" e=""
+      read -r a b c d e rest <<<"$l" || :
       case $a in
         claude-discord) if [ -z "$h_ver" ] && [[ $b =~ $re_v ]]; then h_ver=$b; fi;;
         host-id) if [[ $b =~ $hid_re ]]; then h_id=$b; fi;;
+        watcher) if [[ $b =~ $mgr_re ]] && [[ $c =~ $hid_re ]] && [[ $d =~ $alias_re ]] && [[ $e =~ $re_t ]] && [ -z "$rest" ]; then h_watch="$h_watch$b $c $d $e"$'\n'; fi;;
       esac
     done <<<"$h_out"
   }
@@ -2222,10 +2247,34 @@ if [ "${1:-}" = hosts ]; then
           mine=$(host_id) || { echo "claude-discord: hosts: could not make $helpers/host-id" >&2; exit 1; }
           # One home behind two ledger lines: every bot of it would be reported twice, one side as down.
           [ "$h_id" != "$mine" ] || { echo "claude-discord: hosts: $a is the same home as local (it answered with this home's host-id): not added. Its bots are already checked through local" >&2; exit 4; }
+          while read -r wm wi wa ws; do
+            [ -n "$wm" ] || continue
+            if [ "$wm" = "$hb" ] && [ "$wi" = "$mine" ]; then
+              # This manager's own record: the home is in this ledger already, under that alias, unless that line is gone
+              # (an rm that could not reach the host left the record: stale, and overwritten below).
+              if [ "$wa" != "$a" ] && h_has "$wa"; then
+                echo "claude-discord: hosts: $a is the same home as $wa (this manager's own record is there under that alias): not added. Its bots are already checked through $wa" >&2; exit 4
+              fi
+            elif [ "$wm" = "$hb" ]; then
+              echo "claude-discord: hosts: warning: $a is already watched by a manager also named $wm, from another home (since $ws): both will report its bots, and this add takes over its record there" >&2
+            else
+              echo "claude-discord: hosts: warning: $a is already watched by $wm (since $ws): both managers will report its bots" >&2
+            fi
+          done <<<"$h_watch"
         fi
       fi
       h_edit "$a" add "${hw[@]:2}"
-      echo "claude-discord: hosts: added $a to $hf";;
+      echo "claude-discord: hosts: added $a to $hf"
+      # This manager's record on the host, for the next manager that adds it. Only a claude-discord that printed a
+      # host-id knows --watch (1.12.0); its failure is a warning, the host is added and checked all the same.
+      if [ -n "$h_id" ]; then
+        if [[ $hb =~ $mgr_re ]]; then
+          h_ssh "$a" "~/.local/bin/claude-discord --version --watch $hb $mine $a"
+          [ "$h_rc" = 0 ] || echo "claude-discord: hosts: warning: $a is added, but this manager could not be recorded there (ssh exit $h_rc): another manager adding it will not be warned" >&2
+        else
+          echo "claude-discord: hosts: warning: no watcher record is written for a manager named '$hb' (letters, digits and . _ - only): another manager adding $a will not be warned" >&2
+        fi
+      fi;;
     set|laptop)
       [ "${#hw[@]}" -ge 2 ] || { echo "$h_usage" >&2; exit 2; }
       a=${hw[1]}; h_alias "$a"
@@ -2255,7 +2304,14 @@ if [ "${1:-}" = hosts ]; then
       # The monitor's own Discord calls take their environment from the local line, and the README promises it is there.
       [ "$a" != local ] || { echo "claude-discord: hosts: local is this machine and stays in the ledger (to turn the monitor off: claude-discord monitor --stop $hb)" >&2; exit 2; }
       h_edit "$a" rm
-      echo "claude-discord: hosts: removed $a from $hf (the monitor keeps it a day as 'left the ledger', then drops it)";;
+      echo "claude-discord: hosts: removed $a from $hf (the monitor keeps it a day as 'left the ledger', then drops it)"
+      # This manager's watcher record on the host goes too, when it can be reached; the ledger line is already gone
+      # either way. A home with no host-id never wrote a record anywhere, and makes no id for this.
+      mine=""; { read -r mine < "$helpers/host-id"; } 2>/dev/null || :
+      if [ -n "$h_probe" ] && [[ $mine =~ $hid_re ]] && [[ $hb =~ $mgr_re ]]; then
+        h_ssh "$a" "~/.local/bin/claude-discord --version --unwatch $hb $mine"
+        [ "$h_rc" = 0 ] || echo "claude-discord: hosts: warning: $a did not answer (ssh exit $h_rc), so this manager's watcher record stays there. It only makes another manager's add warn; to remove it later: ssh $a '~/.local/bin/claude-discord --version --unwatch $hb $mine'" >&2
+      fi;;
     *) echo "$h_usage" >&2; exit 2;;
   esac
   exit 0
