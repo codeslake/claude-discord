@@ -720,8 +720,8 @@ jq '.groups["999"].allowFrom = ["501"] | .allowFrom = "3"' "$DSD/access.json.kee
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1o","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"999\" message_id=\"226\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}')
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
 grep -q ' in channel 999\. ' <<<"$ctx" && grep -q '^People in this channel (mention one as <@id> to reach them): <@501>, Own 5 er <@111>, ' <<<"$ctx" || { echo "FAIL: a top-level allowFrom that is no array must cost only its own ids, not the channel or the group's: $ctx"; exit 1; }
-jq '.groups["999"] = true' "$DSD/access.json.keep" > "$DSD/access.json"
-(DSD0=$DSD; DISCORD_STATE_DIR=$DSD0; . "$R/hooks/lib/discord.sh"; resolve_channel; [ "$bot_channel" = 999 ]) || { echo "FAIL: a group that is no object must still name the channel"; exit 1; }
+jq '.groups = {"998": true}' "$DSD/access.json.keep" > "$DSD/access.json"   # 998: not config.env's channel, which a fallback would answer
+(DISCORD_STATE_DIR=$DSD; . "$R/hooks/lib/discord.sh"; resolve_channel; [ "$bot_channel" = 998 ]) || { echo "FAIL: a group that is no object must still name the channel"; exit 1; }
 cfg_ch=$(sed -n "s/^DISCORD_CHANNEL_ID='\{0,1\}\([0-9]*\)'\{0,1\}$/\1/p" "$R/config.env")
 for body in '' '  '; do
   printf '%s' "$body" > "$DSD/access.json"
