@@ -254,6 +254,8 @@ async def case(name, check, wrapper=None, state=None, size=(137, 40)):
         app = tui.MonitorTUI(Path(d), "mgr", wrapper(d) if wrapper else None)
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
+            app.names = dict(NAMES)   # the fixture's projects do not exist, so no user-names file is read
+            app.paint()
             await check(app, pilot)
     print(f"ok: {name}")
 
@@ -270,6 +272,11 @@ def line_of(app, word):
     return next(l for l in body(app) if word in l)
 
 
+def row_of(app, bot):
+    """The first line of a bot's row in the Bots table."""
+    return next(l for l in body(app) if l[:2] in ("▸ ", "▾ ") and l[2:].startswith(bot))
+
+
 # ---- pilot cases -----------------------------------------------------------
 async def shell(app, pilot):
     assert text(app, "#title").endswith("● live  keeper · checked 1m ago · next 4m"), text(app, "#title")
@@ -283,6 +290,44 @@ async def shell(app, pilot):
     assert app.tab == "bots"
     await pilot.press("left")
     assert app.tab == "config"
+
+
+async def bots(app, pilot):
+    assert [l[:2] for l in body(app) if l[:2] in ("▸ ", "▾ ")] == ["▸ "] * 5
+    assert app.cursor["bots"] == PHOTO and row_of(app, "photobot").startswith("▸ photobot") and "fix  " + FIX in text(app, "#body")
+    await pilot.press("space")
+    assert row_of(app, "photobot").startswith("▾ photobot") and "posted 11m ago" in text(app, "#body") and "from dongyong22, gpuvillain," in text(app, "#body")
+    await pilot.press("down", "space")   # several rows may be open
+    assert app.opened == {PHOTO, HBOT} and "not posted (warning only)" in text(app, "#body") and "DMs pairing" in text(app, "#body")
+    await pilot.press("c")
+    assert app.clipboard == "", "a row with no fix copies nothing"
+    await pilot.press("up", "c")
+    assert app.clipboard == FIX, app.clipboard
+    await pilot.press("space")
+    assert app.opened == {HBOT}
+    await pilot.press("enter")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.Detail) and str(app.screen.query_one("#fix").render()) == FIX
+    raw = str(app.screen.query_one("#body-detail").render())
+    for want in (PHOTO, "servers          0", "posted_at", '"dm_allow": ["111"]', "posts for this key:", "finding  down  sent"):
+        assert want in raw, (want, raw)
+    await pilot.press("down", "right", "space")   # the row keys belong to the main view
+    assert isinstance(app.screen, tui.Detail) and app.tab == "bots" and app.cursor["bots"] == PHOTO and app.opened == {HBOT}
+    await pilot.press("escape")
+    # A new pass: the selected row stays selected, open rows stay open, and what changed is shown.
+    await pilot.press("down", "down")
+    assert app.cursor["bots"] == MGRBOT
+    state = json.loads((app.state_dir / "state.json").read_text())
+    state["bots"][MGRBOT].update(verdict="stale", detail="unanswered for 22m", fix="x")   # it moves up, among the problems
+    (app.state_dir / "state.json").write_text(json.dumps(state))
+    os.utime(app.state_dir / "state.json", (1, 1))   # a different mtime, whatever the clock's resolution
+    app.refresh_state()
+    assert app.cursor["bots"] == MGRBOT and app.opened == {HBOT} and "✕ STUCK" in row_of(app, "mgr "), row_of(app, "mgr ")
+    del state["bots"][MGRBOT]
+    (app.state_dir / "state.json").write_text(json.dumps(state))
+    os.utime(app.state_dir / "state.json", (2, 2))
+    app.refresh_state()
+    assert app.cursor["bots"] == PHOTO, "a selected row that left the state gives the cursor to the first row"
 
 
 async def narrow(app, pilot):
@@ -305,10 +350,25 @@ async def narrow(app, pilot):
     assert "receives" in line_of(app, "status") and body(app)[0].startswith("╭"), "a wider terminal gets the columns and the KPI band back"
 
 
+async def crashed_project(app, pilot):
+    row = line_of(app, "▲ blind")
+    assert row.split()[:5] == ["▸", "-", "▲", "blind", "wmac"] and row.rstrip().endswith("q"), f"a project row, among what needs a look: {row}"
+    assert "of 5 bots" in "\n".join(body(app)[:3]), "a project row is not a bot"
+    await pilot.press("down", "down", "enter")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.Detail) and "claude-discord health" in str(app.screen.query_one("#fix").render())
+    assert CRASHED in str(app.screen.query_one("#body-detail").render())
+
+
 async def markup(app, pilot):
     assert "mgr [bold]" in text(app, "#title"), text(app, "#title")
     assert "[down]x" in text(app, "#bar"), text(app, "#bar")
     assert "pho[/]to" in text(app, "#body") and "#[red]x" in text(app, "#body") and "fix  echo patch output [down] here" in text(app, "#body")
+    await pilot.press("space", "enter")
+    await pilot.pause()
+    assert "error [/] near" in text(app, "#body")
+    assert str(app.screen.query_one("#fix").render()) == "echo patch output [down] here"
+    await pilot.press("escape")
 
 
 async def stopped(app, pilot):
@@ -362,7 +422,9 @@ async def refused(app, pilot):
 async def main():
     pure()
     await case("shell", shell, state="all_ok")
+    await case("bots", bots, state="all_ok")
     await case("narrow", narrow, state="many", size=(100, 20))
+    await case("crashed_project", crashed_project)
     await case("markup", markup)
     await case("stopped", stopped)
     await case("stopped_by_user", stopped_by_user)
@@ -375,6 +437,15 @@ async def main():
     await case("missing_wrapper", missing_wrapper, wrapper=lambda d: "/nonexistent/claude-discord", state="all_ok")
     await case("refused", refused, state="all_ok",
                wrapper=lambda d: stub(d, 'echo "$*" > "$(dirname "$0")/args"; echo "claude-discord: monitor: no hosts ledger [x]" >&2; exit 1'))
+    # the display names come from the user-names files of this machine's bots
+    with tempfile.TemporaryDirectory() as d:
+        s = base()
+        s["bots"][PHOTO]["project"] = d
+        names = Path(d) / ".claude" / "discord-agents" / "photobot" / "user-names"
+        names.parent.mkdir(parents=True)
+        names.write_text("111 dong yong\nnot-an-id x\n222\n333 한글이름\n")
+        assert tui.load_names(s) == {"111": "dong yong", "333": "한글이름"}, tui.load_names(s)
+    print("ok: names are read from the local bots' user-names files (<id> <name>), other lines skipped")
     # q removes the holder record
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "holders").mkdir()

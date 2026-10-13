@@ -8,8 +8,9 @@ Started by `claude-discord tui [<bot>]` through `uv run --script`. It registers
 itself as a holder of the monitor (which starts the monitor if none runs),
 re-reads state.json when its mtime changes (checked every 2 s) and removes its
 holder record on quit. Three tabs (Bots, Alerts, Configuration) over that one
-file. It changes nothing else: no restart, no post, no patch, and it never
-reads a .env, so it cannot show a token.
+file, plus the display names the bots of this machine keep in `user-names`.
+It changes nothing else: no restart, no post, no patch, and it never reads a
+.env, so it cannot show a token.
 """
 from __future__ import annotations
 
@@ -28,8 +29,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Resize
 from textual.geometry import Region
-from textual.screen import ModalScreen
-from textual.widgets import Button, Static
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Button, Footer, Static
 
 # The slack4agents pane's palette: nothing saturated but an alert.
 BRAND, WARN, OK, ALERT, BAR, TAB, CURSOR = "#5fd7ff", "#ffaf00", "#87d787", "#ff5f87", "#3a3a3a", "#585858", "#4e4e4e"
@@ -381,6 +382,49 @@ def bar_text(state: dict, note: str = "", stopped: bool = False, refused: bool =
     return bar
 
 
+def load_names(state: dict) -> dict:
+    """id -> display name, from the `user-names` file of every bot on this machine (written by on-prompt: `<id> <name>`).
+    A remote bot's file is out of reach, so its ids get a name only when that person wrote to a local bot too."""
+    names = {}
+    for b in (state.get("bots") or {}).values():
+        if b.get("host") != "local" or not b.get("bot") or not b.get("project"):
+            continue
+        try:
+            text = (Path(b["project"]) / ".claude" / "discord-agents" / b["bot"] / "user-names").read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            uid, _, name = line.partition(" ")
+            if uid.isdigit() and name:
+                names[uid] = name
+    return names
+
+
+def entry_text(key: str, akey: str, entry: dict, alerts: list) -> str:
+    """Every raw field of a bot or host entry, then the posts for its key."""
+    fields = "\n".join(f"{k:<16} {v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)}" for k, v in sorted(entry.items()) if k != "fix")
+    mine = [a for a in alerts if a.get("key") == akey]
+    return f"{key}\n\n{fields}\n\nposts for this key:\n" + ("\n".join(
+        f"{a.get('ts')}  {a.get('kind')}  {a.get('verdict')}  {a.get('status')}" for a in mine) or "(none)")
+
+
+class Detail(Screen):
+    """Enter on a row: its text in full, and the recovery command in a widget of its own so it selects and copies whole."""
+    BINDINGS = [Binding("escape", "app.pop_screen", "back")]
+
+    def __init__(self, body: str, fix: str | None = None) -> None:
+        super().__init__()
+        self.body, self.fix = body, fix
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll():
+            yield Static(self.body, id="body-detail", markup=False)   # state-derived text: [..] in it is text, not markup
+            if self.fix is not None:
+                yield Static("\nrecovery command:", markup=False)
+                yield Static(self.fix or "(none)", id="fix", markup=False)
+        yield Footer()
+
+
 class Confirm(ModalScreen[bool]):
     """A yes/no question, No by default (focused, and Enter, n and Escape answer it)."""
     CSS = "Confirm { align: center middle; } #confirm { width: 70; height: auto; border: thick $error; padding: 1 2; }"
@@ -420,12 +464,14 @@ class MonitorTUI(App):
     #foot {{ background: {BAR}; }}
     """
     BINDINGS = [Binding("q", "quit", "quit"), Binding("Q", "quit_stop", "quit + stop backend"),
-                Binding("up", "move(-1)"), Binding("down", "move(1)"), Binding("left", "tab(-1)"), Binding("right", "tab(1)")]
+                Binding("up", "move(-1)"), Binding("down", "move(1)"), Binding("left", "tab(-1)"), Binding("right", "tab(1)"),
+                Binding("space", "toggle"), Binding("enter", "open"), Binding("c", "copy")]
 
     def __init__(self, state_dir: Path, bot: str, wrapper: str | None) -> None:
         super().__init__()
         self.state_dir, self.bot, self.wrapper = state_dir, bot, wrapper
         self.state: dict = {}
+        self.names: dict = {}
         self.note = ""   # why `monitor --ensure` failed, shown in the red bar
         self.mtime: float | None = None
         self.ensured = float("-inf")   # when `monitor --ensure` last ran (time.monotonic())
@@ -433,6 +479,7 @@ class MonitorTUI(App):
         self.width = 0   # the terminal's: set at mount, then by each Resize (self.size still holds the old one while that event runs)
         self.tab = "bots"
         self.cursor: dict = {t: None for t in TABS}   # the selected row's key, per tab
+        self.opened: set = set()                      # the expanded bot rows
         self.shown: dict = {}                         # widget id -> the Text it shows: an update only when it changes
 
     def compose(self) -> ComposeResult:
@@ -504,6 +551,7 @@ class MonitorTUI(App):
         if mtime is None or mtime != self.mtime:
             self.mtime = mtime
             self.state = load(path)
+            self.names = load_names(self.state)
         # Checked on every refresh, not only on a new state.json: a monitor that died without its trap writes none.
         pid = (self.state.get("monitor") or {}).get("pid")
         if self.wrapper and not self.stopped() and not alive(pid, self.bot) and time.monotonic() - self.ensured >= 30:
@@ -513,7 +561,7 @@ class MonitorTUI(App):
     def items(self, now: float) -> list[tuple]:
         w = self.width
         if self.tab == "bots":
-            return bots_items(self.state, {}, w, set(), now)
+            return bots_items(self.state, self.names, w, self.opened, now)
         return []
 
     def show(self, wid: str, text: Text) -> bool:
@@ -548,7 +596,7 @@ class MonitorTUI(App):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         # The row keys belong to the main view: under a Detail or a dialog they do nothing.
-        return len(self.screen_stack) == 1 or action not in ("move", "tab")
+        return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy")
 
     def action_tab(self, d: int) -> None:
         self.tab = TABS[(TABS.index(self.tab) + d) % len(TABS)]
@@ -560,6 +608,26 @@ class MonitorTUI(App):
             i = keys.index(self.cursor[self.tab]) if self.cursor[self.tab] in keys else 0
             self.cursor[self.tab] = keys[max(0, min(len(keys) - 1, i + d))]
             self.paint()
+
+    def action_toggle(self) -> None:
+        if self.tab == "bots" and self.cursor["bots"]:
+            self.opened ^= {self.cursor["bots"]}
+            self.paint()
+
+    def action_open(self) -> None:
+        key, alerts = self.cursor[self.tab], self.state.get("alerts") or []
+        if key is None:
+            return
+        scope = "bots" if self.tab == "bots" else "hosts"
+        entry = (self.state.get(scope) or {}).get(key) or {}
+        # A host's posts are keyed host|- in `alerts`; a bot's and a project row's by their own key.
+        self.push_screen(Detail(entry_text(key, key + "|-" if scope == "hosts" else key, entry, alerts), entry.get("fix") or ""))
+
+    def action_copy(self) -> None:
+        fix = ((self.state.get("bots") or {}).get(self.cursor["bots"] or "") or {}).get("fix") if self.tab == "bots" else None
+        if fix:
+            self.copy_to_clipboard(fix)   # OSC 52: the terminal's clipboard, over ssh too
+            self.notify("fix copied")
 
     def action_quit_stop(self) -> None:
         if not self.wrapper:

@@ -1047,8 +1047,16 @@ channel, receives, last (since its session was last handed a message),
 project. Problems come first (`down`, `stale` shown as `STUCK`, `duplicate`,
 `unreachable`), then what needs a look (`throttled` shown as `rate-limited`,
 `apierror`, `nostate`, `blind`), then `working` and `ok`, then `no token`.
-A problem row has its recovery command on a line of its own under it. Below
-110 columns project and receives fold away.
+A problem row has its recovery command on a line of its own under it, and `c`
+copies it (OSC 52, so over ssh too). `space` opens a row, and several may be
+open: the status column gains the reason and `posted Nm ago`, `not posted
+yet` or `not posted (warning only)`; the channel column every channel of the
+bot's `access.json` (ids but for the main one; the manager's own row adds
+`#bot-health-check (write-only)`); the receives column the mention rule, who
+may write (names from the `user-names` files of this machine's bots, ids
+otherwise, `+N` past three lines) and the DM policy. `Enter` shows every raw
+field of the row and the posts for it. Below 110 columns project and
+receives fold away.
 A bot on a host whose claude-discord is older than 1.11.0 shows `-` for
 channel, receives and last. A project whose `health` crashed before any of
 its bots was known is one row with bot `-` (it alerts as `blind`) and is not
