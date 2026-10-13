@@ -15,11 +15,14 @@ It changes nothing else: no restart, no post, no patch, and it never reads a
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 
 from rich.cells import cell_len, set_cell_size
@@ -625,6 +628,103 @@ def config_items(state: dict, names: dict, width: int) -> list[tuple]:
     items.append((None, [Text(), rule("Monitor", None, "config.env values change with setup; fixed ones do not", width), Text()]
                   + [Text.assemble((fit(label, 18), DIM), value, "   ", *note) for label, value, note in rows]))
     return items
+
+
+# ---- ~/.ssh/config, read as text ---------------------------------------------
+# The add-host picker lists the Host aliases of ~/.ssh/config and of the files it Includes. They are read here as text
+# and never through `ssh -G`: that evaluates the configuration, and a `Match exec` line runs a command, once per alias
+# asked about. `ssh -G` runs for the one alias the user chose. A configuration is the user's own file, but nothing in
+# it may hang or crash the picker: a bound on the files, on the bytes read of each, on the depth of Includes, on the
+# blocks and on the candidates; each file once (a cycle of Includes ends there); only a regular file is opened (a FIFO would block).
+ALIAS = re.compile(r"[A-Za-z0-9._@][A-Za-z0-9._@-]{0,254}")   # what `claude-discord hosts add` takes as an ssh alias
+SSH_MAX_FILES, SSH_MAX_BYTES, SSH_MAX_DEPTH, SSH_MAX_BLOCKS, SSH_MAX_HOSTS = 32, 1 << 18, 8, 2000, 500
+
+
+def ssh_blocks(path: Path, home: Path, depth: int = 0, seen: set | None = None) -> list[tuple]:
+    """The Host blocks of an ssh configuration file in file order, as (patterns, {option: its first value}), with the
+    blocks of each Include where it stands. The options above the first Host line are a block for `*`. A Match block is
+    (None, {}): never evaluated, so nothing in it counts, an Include neither."""
+    seen = set() if seen is None else seen
+    try:
+        real = path.resolve()
+        if depth > SSH_MAX_DEPTH or real in seen or len(seen) >= SSH_MAX_FILES or not real.is_file():
+            return []
+        seen.add(real)
+        with open(real, "rb") as f:
+            text = f.read(SSH_MAX_BYTES).decode("utf-8", "replace")
+    except (OSError, RuntimeError):   # RuntimeError: a loop of symlinks, before Python 3.13
+        return []
+    cur = (["*"], {})
+    blocks = [cur]
+    for line in text.splitlines():
+        m = re.match(r"\s*([A-Za-z]+)\s*(?:=\s*|\s+)(.*)$", line)
+        if not m:
+            continue
+        key, words = m.group(1).lower(), []
+        for quoted, bare in re.findall(r'"([^"]*)"|(\S+)', m.group(2)):
+            if bare.startswith("#"):
+                break
+            words.append(quoted or bare)
+        if key in ("host", "match"):
+            cur = (words if key == "host" else None, {})
+            blocks.append(cur)
+        elif cur[0] is None:
+            continue
+        elif key == "include":
+            for w in words:
+                pattern = str(home / w[2:]) if w.startswith("~/") else w if w.startswith("/") else str(home / ".ssh" / w)
+                for p in sorted(islice(glob.iglob(pattern), SSH_MAX_FILES)):
+                    blocks += ssh_blocks(Path(p), home, depth + 1, seen)
+        elif key in ("hostname", "user", "port", "proxyjump") and words:
+            cur[1].setdefault(key, words[0])
+    return blocks
+
+
+def ssh_hosts(home: Path) -> list[dict]:
+    """The picker's candidates: every Host pattern of ~/.ssh/config and its Includes that is a plain alias (no `*`, `?`
+    or `!`, and one `hosts add` would take), once, in file order, with what the text says of it: `hostname`, `user`,
+    `port`, `proxyjump`, each the first value among the blocks whose patterns match the alias, as ssh takes them.
+    Every string is cleaned: it is drawn."""
+    blocks = [b for b in ssh_blocks(home / ".ssh" / "config", home) if b[0] is not None][:SSH_MAX_BLOCKS]
+    rx = lambda p: re.compile(".*".join(".".join(map(re.escape, part.split("?"))) for part in p.split("*")))
+    matchers = [([rx(p) for p in pats if not p.startswith("!")], [rx(p[1:]) for p in pats if p.startswith("!")], opts) for pats, opts in blocks]
+    hosts: dict = {}
+    for pats, _ in blocks:
+        for alias in pats:
+            if alias in hosts or len(hosts) >= SSH_MAX_HOSTS or not ALIAS.fullmatch(alias):
+                continue
+            h = {"alias": alias}
+            for yes, no, opts in matchers:
+                if any(r.fullmatch(alias) for r in yes) and not any(r.fullmatch(alias) for r in no):
+                    for k, v in opts.items():
+                        h.setdefault(k, clean(v))
+            hosts[alias] = h
+    return list(hosts.values())
+
+
+def ssh_target(h: dict) -> str:
+    """`user@hostname:port · via <ProxyJump>` as the configuration's text gives them: the alias for no HostName, 22
+    for no Port, no user and no `via` when it names none."""
+    h = obj(h)
+    user, jump = txt(h.get("user")), txt(h.get("proxyjump"))
+    return (f"{user}@" if user else "") + (txt(h.get("hostname")) or txt(h.get("alias"))) + ":" + (txt(h.get("port")) or "22") + (f" · via {jump}" if jump else "")
+
+
+def fuzzy(query: str, hosts: list[dict]) -> list[dict]:
+    """The hosts a search finds, best first: an alias that starts with the query, one that holds it, one that holds its
+    characters in order, then a host whose target holds it; file order within each, and for no query at all."""
+    q = query.lower()
+
+    def score(h: dict) -> int | None:
+        a = h["alias"].lower()
+        if a.startswith(q):
+            return 0
+        if q in a:
+            return 1
+        rest = iter(a)
+        return 2 if all(c in rest for c in q) else 3 if q in ssh_target(h).lower() else None
+
+    return [h for s, h in sorted(((score(h), h) for h in hosts), key=lambda sh: 9 if sh[0] is None else sh[0]) if s is not None]
 
 
 class Confirm(ModalScreen[bool]):

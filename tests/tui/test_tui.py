@@ -342,6 +342,80 @@ def pure():
     print("ok: the Configuration tab: one row per ledger host (display name, target, kind, env key names, reach, version, bots), dashes for what an "
           "older state lacks, and the monitor's settings")
 
+    # ---- ~/.ssh/config as text ----
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        ssh = home / ".ssh"
+        (ssh / "conf.d").mkdir(parents=True)
+        (ssh / "config").write_bytes(
+            b"# a comment with bytes that are no UTF-8: \xff\xfe\r\n"
+            b"User early\r\n"                                     # above the first Host: for every host
+            b"Include conf.d/*.conf ~/abs.conf missing.conf conf.d\r\n"
+            b"Host lmd_dkim lmd79-host *.wild !neg ?q \"quoted name\" -oProxyCommand=x ev\x1bil # trailing words\r\n"
+            b"  HostName = lmd-%h.example\r\n"
+            b"  port 2222\r\n"
+            b"Host=equals\r\n"
+            b"HostName=equals.example\r\n"
+            b"Match exec \"touch " + str(home / "pwned").encode() + b"\"\r\n"
+            b"  HostName evil.example\r\n"
+            b"  Include matched.conf\r\n"
+            b"Host lmd*\r\n"
+            b"  User late\r\n"
+            b"  ProxyJump bastion\r\n"
+            b"Host !lmd79-host lmd*\r\n"
+            b"  HostName \xff.example\r\n"
+            b"Host lmd_dkim\r\n"                                  # a second block for one alias: still one candidate
+            b"  Port 1\r\n")
+        (ssh / "conf.d" / "b.conf").write_text("Host from-b\n  HostName b.example\nInclude config\nInclude conf.d/a.conf\n")   # a cycle, and a file read before
+        (ssh / "conf.d" / "a.conf").write_text("Host from-a\n  User ua\n")
+        (ssh / "conf.d" / "skip.txt").write_text("Host not-included\n")
+        (ssh / "matched.conf").write_text("Host in-a-match\n")
+        (home / "abs.conf").write_text(f"Include {ssh}/deep0.conf\n")
+        for i in range(12):                                       # 12 levels of Include: read 8 deep
+            (ssh / f"deep{i}.conf").write_text(f"Host deep{i}\nInclude deep{i + 1}.conf\n")
+        os.mkfifo(ssh / "conf.d" / "fifo.conf")                   # opening it would block for ever
+        ran = subprocess.run
+        subprocess.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("reading ssh config ran a command"))
+        try:
+            hosts = tui.ssh_hosts(home)
+        finally:
+            subprocess.run = ran
+        by = {h["alias"]: h for h in hosts}
+        assert sum(b[0] == ["from-a"] for b in tui.ssh_blocks(ssh / "config", home)) == 1, "a file is read once, whatever includes it again"
+        assert [h["alias"] for h in hosts] == ["from-a", "from-b", "deep0", "deep1", "deep2", "deep3", "deep4", "deep5", "deep6", "lmd_dkim", "lmd79-host", "equals"], [h["alias"] for h in hosts]
+        assert not (home / "pwned").exists() and "in-a-match" not in by and "not-included" not in by
+        assert by["lmd_dkim"] == {"alias": "lmd_dkim", "user": "early", "hostname": "lmd-%h.example", "port": "2222", "proxyjump": "bastion"}, by["lmd_dkim"]
+        assert by["from-a"] == {"alias": "from-a", "user": "early"} and by["from-b"]["hostname"] == "b.example" and by["equals"] == {"alias": "equals", "user": "early", "hostname": "equals.example"}, by
+        assert tui.ssh_target(by["lmd_dkim"]) == "early@lmd-%h.example:2222 · via bastion" and tui.ssh_target(by["from-a"]) == "early@from-a:22"
+        assert tui.ssh_target({}) == ":22" and tui.ssh_target({"alias": 7, "port": ["x"]}) == ":22", "a wrong-typed field is a missing one"
+        # a HostName of bytes that are no UTF-8 is drawn as the replacement character, never raised on
+        (ssh / "config").write_bytes(b"Host bin\n  HostName \xff\x1b[2J.example\n")
+        assert tui.ssh_hosts(home) == [{"alias": "bin", "hostname": "�[2J.example"}], tui.ssh_hosts(home)
+        # huge: 40,000 Host blocks in 1.2 MiB: 256 KiB are read, 2000 blocks and 500 candidates kept, in about half a second
+        (ssh / "config").write_text("".join(f"Host big{i:05}\n  HostName h{i}\n" for i in range(40000)))
+        t0 = time.time()
+        big = tui.ssh_hosts(home)
+        assert len(big) == tui.SSH_MAX_HOSTS == 500 and big[0] == {"alias": "big00000", "hostname": "h0"} and time.time() - t0 < 2, (len(big), time.time() - t0)
+        # an Include of itself, a config that is a directory, one that cannot be read, none at all: no candidates, no error
+        (ssh / "config").write_text("Include config\nInclude ~/.ssh/config\nHost only\n")
+        assert [h["alias"] for h in tui.ssh_hosts(home)] == ["only"]
+        (ssh / "config").chmod(0)
+        assert tui.ssh_hosts(home) == [] or os.geteuid() == 0
+        (ssh / "config").unlink()
+        (ssh / "config").mkdir()
+        assert tui.ssh_hosts(home) == [] and tui.ssh_hosts(home / "nowhere") == []
+    print("ok: ~/.ssh/config is read as text: Host aliases in file order through Includes (globs, ~/, relative to ~/.ssh, 8 levels, a cycle, each file "
+          "once), patterns and Match blocks no candidates and never evaluated, HostName/User/Port/ProxyJump first value wins; CRLF, bytes that are no "
+          "UTF-8, a FIFO, a huge, unreadable or missing file neither hang nor raise")
+
+    hs = [{"alias": "wmac", "hostname": "wmac.example"}, {"alias": "lmd-a100"}, {"alias": "lmd_dkim", "user": "dykim"}, {"alias": "almd"}, {"alias": "l-m-d"},
+          {"alias": "bastion", "hostname": "gw.lmd.example"}]
+    assert [h["alias"] for h in tui.fuzzy("lmd", hs)] == ["lmd-a100", "lmd_dkim", "almd", "l-m-d", "bastion"], [h["alias"] for h in tui.fuzzy("lmd", hs)]
+    assert tui.fuzzy("", hs) == hs and tui.fuzzy("zzz", hs) == [] and [h["alias"] for h in tui.fuzzy("LMD_", hs)] == ["lmd_dkim"]
+    assert [h["alias"] for h in tui.fuzzy("dykim", hs)] == ["lmd_dkim"], "a query the alias does not hold is looked for in the target"
+    print("ok: the picker's search: an alias that starts with the query, then one that holds it, then one that holds its characters in order, "
+          "then a target that holds it; all in file order for no query")
+
 
 def fuzz():
     """Every value of a small state replaced, one at a time, by a value of each other type: a host of another version
