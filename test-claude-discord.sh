@@ -3529,7 +3529,7 @@ cd "$P"
 # --- backend monitor ------------------------------------------------------
 # ssh, stubbed for setup's host probe and the monitor's passes: argv to ssh.log; per host, $HOME/mon/<host>.out is
 # printed, .rc is the exit status (.rc2 instead on the ControlPath=none retry; .out is printed with a non-zero one only
-# when .both exists), .sleep delays it; a byte left on
+# when .both exists), .sleep delays it, .hold leaves a detached child behind that keeps the output open so long; a byte left on
 # stdin is reported as "ATE" (a probe must never eat setup's piped answers).
 MON="$HOME/mon"; mkdir -p "$MON"
 cat > "$HOME/bin/ssh" <<'STUB'
@@ -3540,6 +3540,7 @@ host="" none=""
 for a in "$@"; do [ "$a" != ControlPath=none ] || none=1; done
 while [ $# -gt 0 ]; do case $1 in -o) shift 2;; --) shift;; *) host=$1; break;; esac; done
 d=$HOME/mon
+[ ! -f "$d/$host.hold" ] || setsid /bin/sleep "$(<"$d/$host.hold")" &
 if [ -f "$d/$host.sleep" ]; then echo $$ > "$d/$host.pid"; /bin/sleep "$(<"$d/$host.sleep")"; fi
 rc=0; [ ! -f "$d/$host.rc" ] || rc=$(<"$d/$host.rc")
 [ -z "$none" ] || [ ! -f "$d/$host.rc2" ] || rc=$(<"$d/$host.rc2")
@@ -3767,8 +3768,9 @@ LEDGER=$(<"$MR/mgr/hosts")
 # The same home (the answer carries this home's id): refused.
 ans same 1.12.0 "$L"
 refused same 4 '^claude-discord: hosts: same is the same home as local' "a host that answers with this home's host-id is the same home"
-# ssh itself fails (255), also on the ControlPath=none retry: not added, with ssh's own last line, cleaned.
-printf 'banner \033[2J\nssh: connect to host dead port 22: Connection timed out\033]0;x\007\n' > "$MON/dead.out"; echo 255 > "$MON/dead.rc"; : > "$MON/dead.both"
+# ssh itself fails (255), also on the ControlPath=none retry: not added, with ssh's own last line, cleaned: no C0 or C1
+# control, no bidi override or isolate, no byte that is no UTF-8, in whatever locale.
+printf 'banner \033[2J\nssh: connect to host dead port 22: Connect\302\233ion \342\200\256timed\342\201\246 out\033]0;x\007\377\n' > "$MON/dead.out"; echo 255 > "$MON/dead.rc"; : > "$MON/dead.both"
 refused dead 5 'dead did not answer \(ssh exit 255, also with ControlPath=none\): ssh: connect to host dead port 22: Connection timed out\]0;x\. Not added; .*hosts add --no-probe dead' "an unreachable host is not added"
 [ "$(command grep -c ' -- dead ' "$HOME/ssh.log")" = 2 ] && [ "$(command grep -c 'ControlPath=none -- dead ' "$HOME/ssh.log")" = 1 ] || { echo "FAIL: an ssh exit 255 is tried once more with ControlPath=none: $(<"$HOME/ssh.log")"; exit 1; }
 # 255 on the first try only (a stale master): the retry's answer counts.
@@ -3776,13 +3778,39 @@ ans stale 1.12.0 "$ID_B"; echo 255 > "$MON/stale.rc"; echo 0 > "$MON/stale.rc2"
 hc add stale
 [ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = stale ] || { echo "FAIL: a host that answers on the ControlPath=none retry is added: rc=$HRC $HE"; exit 1; }
 LEDGER=$(<"$MR/mgr/hosts")
-# A host that connects and never answers: the cap (0.1 s here) ends it, the whole ssh process group with it.
-ans hang 1.12.0 "$ID_B"; echo 5 > "$MON/hang.sleep"
-t0=$(date +%s%N); CLAUDE_DISCORD_PROBE_CAP=0.1 refused hang 5 'hang gave no answer within 0.1s\. Not added' "a probe that hangs is ended by the cap"
-[ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 2000 ] && ! kill -0 "$(<"$MON/hang.pid")" 2>/dev/null || { echo "FAIL: a hung probe must end at its cap, its ssh killed: $(( ($(date +%s%N) - t0) / 1000000 )) ms"; exit 1; }
-# A host that prints megabytes: cut off at 4096 bytes. Whatever follows them is not waded through, were it a version line.
+# A host that connects and never answers: the cap (1 s here) ends the whole call, the ssh process group killed. Also
+# when a process ssh left behind outside its group still holds the output open (as a ControlPersist master does): it
+# is not waited for.
+ans hang 1.12.0 "$ID_B"; echo 4 > "$MON/hang.sleep"; echo 4 > "$MON/hang.hold"
+t0=$(date +%s%N); CLAUDE_DISCORD_PROBE_CAP=1 refused hang 5 'hang gave no answer within 1s\. Not added' "a probe that hangs is ended by the cap"
+[ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 3000 ] && ! kill -0 "$(<"$MON/hang.pid")" 2>/dev/null || { echo "FAIL: a hung probe must end at its cap (1 s; within 2 s more), its ssh killed, whatever still holds its output: $(( ($(date +%s%N) - t0) / 1000000 )) ms"; exit 1; }
+# The cap is an integer from 1 to 300, else the default 20 (0 would be no cap at all); a HUP or a TERM to the runner
+# (a closed terminal) ends ssh as the cap does. Seen through the one message that names the cap.
+for c in 0 301; do
+  rm -f "$MON/hang.pid" "$MON/hang.hold"; sig=HUP; [ "$c" = 0 ] || sig=TERM
+  CLAUDE_DISCORD_PROBE_CAP=$c bash "$S" hosts add hang >/dev/null 2>"$HOME/hosts.err" & hp=$!
+  wait_for_file "$MON/hang.pid"; read -r _ _ _ pp _ < "/proc/$(<"$MON/hang.pid")/stat"
+  kill -"$sig" "$pp"; HRC=0; wait "$hp" || HRC=$?
+  [ "$HRC" = 5 ] && grep -q 'hang gave no answer within 20s' "$HOME/hosts.err" && ! kill -0 "$(<"$MON/hang.pid")" 2>/dev/null ||
+    { echo "FAIL: CLAUDE_DISCORD_PROBE_CAP=$c is the default 20, and a $sig to the runner kills ssh: rc=$HRC $(<"$HOME/hosts.err")"; exit 1; }
+done
+# ssh has ended and answered, and something it left behind holds the output open for 3 s more: the answer counts at once.
+ans quick 1.12.0 "$ID_B"; echo 3 > "$MON/quick.hold"
+t0=$(date +%s%N); hc add quick
+[ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = quick ] && [ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 1500 ] || { echo "FAIL: an answer is taken when ssh ends, not when the last holder of its output does: rc=$HRC $HE $(( ($(date +%s%N) - t0) / 1000000 )) ms"; exit 1; }
+LEDGER=$(<"$MR/mgr/hosts")
+# A host that prints megabytes: read up to 65536 bytes and no further. Whatever follows them is not waded through, were it a version line.
 { head -c 2000000 /dev/zero | tr '\0' 'x' | fold -w 100; printf '\nclaude-discord 1.12.0 (abc1234)\nhost-id %s\n' "$ID_B"; } > "$MON/big.out"
-refused big 5 'big answered, but not as claude-discord \(exit [0-9]+\)' "an answer is read up to 4096 bytes and no further"
+refused big 5 'big answered, but not as claude-discord \(exit [0-9]+\)' "an answer is read up to 65536 bytes and no further"
+# A banner before the answer (sshd's, the shell's), longer than the 4096 bytes kept: the LAST line that reads as a
+# version line counts, with what follows it. Here the banner holds a version line and this home's own id.
+{ printf 'claude-discord 0.0.1 (banner)\nhost-id %s\n' "$L"; head -c 6000 /dev/zero | tr '\0' 'b' | fold -w 100; printf '\nclaude-discord 1.12.0 (abc1234)\nhost-id %s\n' "$ID_B"; } > "$MON/banner.out"
+hc add banner
+[ "$HRC" = 0 ] && [ -z "$HE" ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = banner ] || { echo "FAIL: a long banner before the version line is skipped, and a version line in it is not the answer: rc=$HRC $HE"; exit 1; }
+LEDGER=$(<"$MR/mgr/hosts")
+# A line of the answer is cut at 200 characters before any of it is printed.
+printf 'y%.0s' {1..300} > "$MON/long.out"; echo 127 > "$MON/long.rc"; : > "$MON/long.both"
+refused long 5 "\(exit 127\): y{200}\. Install" "an answer's line is cut at 200 characters"
 # No claude-discord there (the remote shell's exit 127).
 echo 'bash: line 1: /home/u/.local/bin/claude-discord: No such file or directory' > "$MON/bare.out"; echo 127 > "$MON/bare.rc"; : > "$MON/bare.both"
 refused bare 5 'bare answered, but not as claude-discord \(exit 127\): bash: line 1: /home/u/.local/bin/claude-discord: No such file or directory\. Install it there first' "a host with no claude-discord is not added"
@@ -3793,7 +3821,7 @@ hc add old
 [ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = old ] && grep -q '^claude-discord: hosts: warning: claude-discord 1.11.1 on old is older than 1.12.0 and has no host-id' <<<"$HE" && [[ $HE != *$'\033'* ]] && [[ $HE != *motd* ]] ||
   { echo "FAIL: a host whose claude-discord is older than 1.12.0 is added with a warning (a host-id line that is no id is none): rc=$HRC $HE"; exit 1; }
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -f "$HOME/ssh.log" "$MON"/*
-echo "ok: host-id is made once (eight first calls agree, a damaged file is replaced); hosts add asks the host with the command --dry-run prints (stdin closed, ConnectTimeout, -- before the alias, a 255 retried with ControlPath=none), refuses the same home (exit 4) and a host that did not answer, hung past the cap, printed megabytes or has no claude-discord (exit 5, its last line cleaned), and adds an older claude-discord with a warning; --no-probe, local and a listed alias run no ssh"
+echo "ok: host-id is made once (eight first calls agree, a damaged file is replaced); hosts add asks the host with the command --dry-run prints (stdin closed, ConnectTimeout, -- before the alias, a 255 retried with ControlPath=none), refuses the same home (exit 4) and a host that did not answer, hung past the cap (whatever holds its output open), printed megabytes or has no claude-discord (exit 5, its last line cleaned and cut), takes the last version line after a banner, and adds an older claude-discord with a warning; --no-probe, local and a listed alias run no ssh"
 
 # watchers/<manager>, on the checked host (this sandbox HOME plays that host): --watch writes one line, --host-id lists
 # every file, --unwatch removes only the record of the home that wrote it. A word of the wrong shape writes nothing.

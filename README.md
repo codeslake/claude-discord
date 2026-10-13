@@ -984,9 +984,13 @@ pass: findings are held for so many passes, and those must stay minutes.
 ConnectTimeout=8 -- <alias> '~/.local/bin/claude-discord --version
 --host-id'` (`--dry-run` prints that line and runs nothing; an exit 255 is
 tried once more with `-o ControlPath=none`, as a monitor pass does; the
-whole call is ended after 20 s). The answer is another machine's output: at
-most 4096 bytes of it are read, each line is stripped of control characters,
-and it is only matched, never run. Then:
+whole call is ended after 20 s, whatever ssh leaves behind holding its
+output open: `CLAUDE_DISCORD_PROBE_CAP`, 1 to 300 s). The answer is another
+machine's output: at most 65536 bytes of it are read, and of those what
+counts is the last line that reads as a version line and what follows it
+(so a banner before it does not), 4096 bytes at most. Each line is stripped
+of control characters (C0, C1, the bidi overrides and isolates, bytes that
+are no UTF-8) and cut at 200, and it is only matched, never run. Then:
 
 - **the same home: refused (exit 4).** Each home has an id,
   `~/.claude-discord/host-id` (32 hex digits, made once). A host that
