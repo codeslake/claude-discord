@@ -818,10 +818,23 @@ run.
 `channel` and `channel_name`, `last_message_at` (the time inside the
 `last-message-id` snowflake: when the session was last handed a message) and
 `access` (`dm`, `dm_allow` and, per channel of `access.json`, `groups[].id`,
-`mention` and `allow`: ids only, never a name or a token). The channel's name
+`mention` and `allow`: user ids only, never a token). The channel's name
 is kept in `channel-guild` as a third field, with the second it was read as a
 fourth, and is read again once that is a day old (one call a day per bot); a
 read that fails keeps the line. No `jq` start was added for any of it.
+
+Since 1.11.1 each bot also has `mode` (the first line of its `mode` file,
+`none` when there is none) and each element of `access.groups` a `name` (`""`
+when unknown). The daily read is the guild's channel list
+(`guilds/<gid>/channels`) instead of the channel: still one call a day per
+bot, two the first time ever (the channel for its guild, then the list), none
+on any other run. From that list the names of the bot's access groups, the
+main channel included, go to `<bot dir>/channel-names`, one `<id> <name>` line
+each, cleaned as the main name is; `channel-guild` keeps its four fields. A
+group the guild has not (another guild's channel, a deleted one) has no line
+and `name: ""`; one added to `access.json` gets its name at the next daily
+read. A list that fails or is no array falls back to the channel for the main
+name, as in 1.11.0, and the names already kept stay.
 
 **It never restarts and never stops anything.** A misjudged restart is what
 puts two sessions on one token, and a health check is the thing most likely to
@@ -1051,7 +1064,9 @@ one space: an escape sequence in it never reaches the terminal.
 every bot; a bot with no token is counted apart, never as a problem. Then one
 row per bot: bot, status, host (the ledger's `name=`, else the hostname),
 channel, receives, last (since its session was last handed a message),
-project. Problems come first (`down`, `stale` shown as `STUCK`, `duplicate`,
+project. A mode other than `none` follows the bot's name, dim (`DY-DevBot
+dev-manager`), at 110 columns and more; the bot column grows for it, by up
+to 13 cells taken from channel, receives and project. Problems come first (`down`, `stale` shown as `STUCK`, `duplicate`,
 `unreachable`), then what needs a look (`throttled` shown as `rate-limited`,
 `apierror`, `nostate`, `blind`), then the bots of a host the last pass could
 not reach (`○ host unreachable`, dim, whatever they were last seen as: the
@@ -1063,14 +1078,15 @@ copies it (OSC 52, so over ssh too, in a terminal that allows it; no other
 row has one to copy). `space` opens a row, and several may be
 open: the status column gains the reason and `posted Nm ago`, `not posted
 yet` or `not posted (warning only)`; the channel column every channel of the
-bot's `access.json` (ids but for the main one; the manager's own row adds
+bot's `access.json` (by name, `#<id>` for one health has no name for; the manager's own row adds
 `#bot-health-check (write-only)`); the receives column the mention rule, who
 may write (names from the `user-names` files of this machine's bots, ids
 otherwise, `+N` past three lines) and the DM policy. `Enter` shows every raw
 field of the row and the posts for it. Below 110 columns project and
 receives fold away.
 A bot on a host whose claude-discord is older than 1.11.0 shows `-` for
-channel, receives and last, and so does any field a host sends in a shape
+channel, receives and last (one older than 1.11.1 shows no mode, `-` on the
+`Enter` screen, and its other channels as `#<id>`), and so does any field a host sends in a shape
 this version does not expect (a number for a name, an object for a list):
 it is never an error. A project whose `health` crashed before any of
 its bots was known is one row with bot `-` (it alerts as `blind`) and is not
