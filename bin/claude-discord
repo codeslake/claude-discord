@@ -1254,6 +1254,25 @@ if [ "${1:-}" = health ]; then
     case $status in ''|*[!0-9]*) status=000;; esac
   }
 
+  # 1.11.1: the names of this bot's channels, from ONE call for the guild's channel list: the main channel ($ch) and
+  # every group of its access policy ($access). They are kept in <bot dir>/channel-names, one "<id> <name>" line each
+  # (a name cleaned as the main one always was; written beside the file and moved over it), the main one in channel-guild
+  # too, as before. Fails, and writes nothing, when the answer is no array or has not the main channel in it. $names is
+  # what the document is built from. A channel the guild has not (another guild's, a deleted one) gets no line.
+  guild_names() {
+    local nl="" t
+    api "guilds/$gid/channels"
+    nl=$(printf '%s' "$resp" | jq -r --arg c "$ch" --argjson a "${access:-null}" '
+      ([$c] + [$a.groups[]?.id]) as $ids
+      | arrays | .[] | objects | select(.id as $i | any($ids[]; . == $i))
+      | (.name // "" | tostring | gsub("[[:space:][:cntrl:]]+"; "-")) as $n | select($n != "") | "\(.id) \($n)"' 2>/dev/null) || nl=""
+    case $'\n'$nl in *$'\n'"$ch "*) ;; *) return 1;; esac
+    t=$'\n'$nl; t=${t#*$'\n'"$ch "}
+    names=$nl cname=${t%%$'\n'*}
+    { printf '%s\n' "$nl" > "$d/channel-names.$$" && mv "$d/channel-names.$$" "$d/channel-names"; } 2>/dev/null || :
+    printf '%s %s %s %s\n' "$ch" "$gid" "$cname" "$now_s" > "$d/channel-guild" 2>/dev/null || :
+  }
+
   # The ids in a messages array that addressed this bot. An author
   # outside allowFrom is dropped exactly as the plugin drops it, so
   # last-message-id's inability to ever reach such a message cannot become
@@ -1440,6 +1459,11 @@ if [ "${1:-}" = health ]; then
     case $cat_s in ''|*[!0-9]*) cat_s=0;; esac
     cat_s=${cat_s#"${cat_s%%[!0]*}"}; cat_s=${cat_s:-0}
     [ "$cname" != - ] || cname=""
+    # 1.11.1: the names kept for this bot's channels (guild_names) and its mode, both read by the shell itself.
+    names="" mode=""
+    { while read -r cch t; do names="$names$cch $t"$'\n'; done < "$d/channel-names"; } 2>/dev/null || :
+    { read -r mode < "$d/mode"; } 2>/dev/null || :
+    mode=${mode//[[:cntrl:]]/}; mode=${mode:-none}
 
     verdict=ok detail="" oldest="" age=0 me="" status=000 resp=""
     if [ "$net" = down ]; then
@@ -1499,7 +1523,11 @@ if [ "${1:-}" = health ]; then
           # A read that fails keeps the line as it is: the guild in it is still right. Two steps, since bash 3.2
           # misreads a quoted jq program inside "$( )" inside double quotes. "-" stands for a missing guild or name,
           # so no field is empty (a tab is IFS whitespace) and the line always has four words.
-          if ! is_id "$gid" || [ $((now_s - cat_s)) -ge 86400 ]; then
+          # Since 1.11.1 the daily read is the guild's channel list (guild_names), which has the name of every channel
+          # of the bot and costs the same one call. The channel itself is asked only for what the list cannot give: the
+          # guild, the first time ever (two calls, once), and the main name on a day the list fails.
+          had=$gid
+          if ! is_id "$gid" || { [ $((now_s - cat_s)) -ge 86400 ] && ! guild_names; }; then
             api "channels/$ch"
             cg=$(printf '%s' "$resp" | jq -r '[(.guild_id // "-" | tostring), (.name // "" | tostring | gsub("[[:space:][:cntrl:]]+"; "-") | if . == "" then "-" else . end)] | @tsv' 2>/dev/null) || cg=""
             ngid="" nname=""
@@ -1509,6 +1537,7 @@ if [ "${1:-}" = health ]; then
               printf '%s %s %s %s\n' "$ch" "$gid" "$cname" "$now_s" > "$d/channel-guild" 2>/dev/null || :
               [ "$cname" != - ] || cname=""
             fi
+            is_id "$had" || ! is_id "$gid" || guild_names || :
           fi
           if is_id "$gid"; then
             api "guilds/$gid/threads/active"
@@ -1600,7 +1629,7 @@ if [ "${1:-}" = health ]; then
     lm=""
     [ "$last_seen" = 0 ] || { lm=${last_seen#"${last_seen%%[!0]*}"}; lm=$(( ((${lm:-0} >> 22) + 1420070400000) / 1000 )); }
     is_id "$ch" || ch=""
-    rows=$rows$ch$'\x1f'$cname$'\x1f'$lm$'\x1f'$access$'\x1f'
+    rows=$rows$ch$'\x1f'$cname$'\x1f'$lm$'\x1f'$access$'\x1f'$names$'\x1f'$mode$'\x1f'
 
 
     line="claude-discord health: $bot $verdict${detail:+ -- $detail}"
@@ -1615,7 +1644,7 @@ if [ "${1:-}" = health ]; then
     [ "$as_json" = yes ] || echo "$line"
   done
   # One jq for the whole run: it reads the NUL-separated fields, groups them
-  # fourteen at a time into objects, prints them when asked, and reports through
+  # sixteen at a time into objects, prints them when asked, and reports through
   # its exit status whether anything needs a human -- so a caller can tell
   # without parsing anything. `busy` is not a
   # finding. No bots at all is an empty list, which is "nothing wrong".
@@ -1626,14 +1655,17 @@ if [ "${1:-}" = health ]; then
   # (-r prints only a string raw), so printing it needs no second jq.
   rows=$(printf '%s' "$rows" | jq -rRs --argjson show "$([ "$as_json" = yes ] && echo true || echo false)" --arg owner "${DISCORD_USER_ID:-}" '
     [ splits("\u001f") ] | .[:-1]
-    | [ range(0; length; 14) as $i
+    | [ range(0; length; 16) as $i
+        # 1.11.1: the kept "<id> <name>" lines, as a name per id for the groups of `access`.
+        | (.[$i+14] | split("\n") | map(select(. != "") | split(" ") | {key: .[0], value: (.[1] // "")}) | from_entries) as $n
         | { bot: .[$i], verdict: .[$i+1], detail: .[$i+2], servers: .[$i+3],
             turn_min: .[$i+4], oldest_unanswered: .[$i+5], last_seen: .[$i+6],
             unanswered_min: (.[$i+7] | tonumber? // 0), refresh_tail: .[$i+8],
             trusted: .[$i+9], owner_id: $owner,
             channel: .[$i+10], channel_name: .[$i+11],
             last_message_at: ((.[$i+12] | tonumber? // null) | if . == null then null else todate end),
-            access: (.[$i+13] | try fromjson catch null) } ]
+            mode: .[$i+15],
+            access: (.[$i+13] | (try fromjson catch null) | if type == "object" then .groups |= map(. + {name: ($n[.id] // "")}) else . end) } ]
     | (if $show then . else empty end),
       (if all(.[]; .verdict == "ok" or .verdict == "busy") then "ok" else "finding" end)
     ' 2>/dev/null) || rows=finding

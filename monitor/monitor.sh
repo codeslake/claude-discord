@@ -635,7 +635,9 @@ def host_step($r):
                  project: $b.project, bot: $b.bot, home: ($doc.home // ""), owner_id: ($b.owner_id // ""), servers: ($b.servers // ""),
                  # What health 1.11.0 adds, for the TUI. An older claude-discord on that host sends none: null, shown as "-".
                  channel: ($b.channel // null), channel_name: ($b.channel_name // null), last_message_at: ($b.last_message_at // null),
-                 access: ($b.access // null)})
+                 access: ($b.access // null),
+                 # 1.11.1: the bot mode (the name of each access group travels inside `access`); null from an older host.
+                 mode: ($b.mode // null)})
             | if $bw != $b.verdict and ($bw != null or ($b.verdict | good | not)) then .events += ["transition \($k) \($bw // "new")->\($b.verdict)"] else . end)
         # A crashed project with no entry at all here (crashed on first sight): an entry of its own, or it would vanish.
         | reduce ($errs | keys[]) as $p (.;

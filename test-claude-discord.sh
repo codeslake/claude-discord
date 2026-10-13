@@ -3110,21 +3110,31 @@ start_server "$SD"
 # The two caches are independent files read in a fixed order (bot id, messages, guild, threads), so each run below
 # exercises both: A neither cached, B both cached, C both stale (one run for each of the id's and the guild's cases).
 rm -f "$SD/bot-id" "$SD/channel-guild"
-queue "200 $me_json" "200 $NONE" '200 {"guild_id":"5","name":"general"}' '200 {"threads":[]}'
+# 1.11.1: the names come from the guild's channel list, so the first read ever is two calls (the channel for its guild,
+# then that list) and every later daily one is the list alone. dcalls counts a run's calls to one path, anchored at its end.
+GLIST='200 [{"id":"900","name":"general"}]'
+dcalls() { command grep -c -- "/api/v10/$1\$" "$CURL_LOG" || :; }
+: > "$CURL_LOG"
+queue "200 $me_json" "200 $NONE" '200 {"guild_id":"5","name":"general"}' "$GLIST" '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: the first run must ask for the bot id and the guild and carry on: $out"; exit 1; }
+[ "$(dcalls channels/900)" = 1 ] && [ "$(dcalls guilds/5/channels)" = 1 ] && [ "$(wc -l < "$CURL_LOG")" = 6 ] && [ "$(<"$SD/channel-names")" = "900 general" ] ||
+  { echo "FAIL: the first read ever is one channels/<id> call and one guilds/<gid>/channels call, six calls in all, and the name is kept in channel-names: $(<"$CURL_LOG") / $(cat "$SD/channel-names" 2>&1)"; exit 1; }
 [ "$(<"$SD/bot-id")" = 777 ] || { echo "FAIL: the bot id must be kept: $(cat "$SD/bot-id" 2>&1)"; exit 1; }
 [ "$(guild_of "$SD")" = "900 5 general" ] || { echo "FAIL: the guild must be kept with its channel: $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
+: > "$CURL_LOG"
 queue "200 $NONE" '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: a later run must use the cached id and guild and make no users/@me and no channels/<id> call: $out"; exit 1; }
+[ "$(dcalls channels/900)" = 0 ] && [ "$(dcalls guilds/5/channels)" = 0 ] && [ "$(wc -l < "$CURL_LOG")" = 3 ] ||
+  { echo "FAIL: a run the same day asks for neither the channel nor the guild's list (three calls: gateway, messages, threads): $(<"$CURL_LOG")"; exit 1; }
 [ ! -s "$CURL_REPLIES" ] || { echo "FAIL: a cached id and guild must cost no extra call: $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
 printf 'not-an-id\n' > "$SD/bot-id"; printf '901 5\n' > "$SD/channel-guild"   # an id that is not one; a guild cached for another channel
-queue "200 $me_json" "200 $NONE" '200 {"guild_id":"5","name":"general"}' '200 {"threads":[]}'
+queue "200 $me_json" "200 $NONE" '200 {"guild_id":"5","name":"general"}' "$GLIST" '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of sbot "$out")" = ok ] && [ "$(<"$SD/bot-id")" = 777 ] && [ "$(guild_of "$SD")" = "900 5 general" ] ||
   { echo "FAIL: a cached id that is not an id, and a guild cached for another channel, must be re-fetched and replaced: $out / $(cat "$SD/bot-id" "$SD/channel-guild" 2>&1)"; exit 1; }
-[ ! -s "$CURL_REPLIES" ] || { echo "FAIL: the two stale caches must cost exactly the two re-fetches: $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
+[ ! -s "$CURL_REPLIES" ] || { echo "FAIL: the two stale caches must cost exactly their re-fetches: $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
 echo "ok: health asks for a bot's own id once, keeps it, reuses it without another call, and re-fetches a cached value that is not an id"
 
 # The channel's guild, cached the same way and for the same reason: that
@@ -3137,11 +3147,11 @@ echo "ok: health asks for a bot's own id once, keeps it, reuses it without anoth
 # The guild's first fetch, its reuse and the cache written for another channel ran above, in the same three runs as the
 # bot id's. Left here: a cached guild that is not an id must be re-fetched rather than used.
 printf '900 not-an-id\n' > "$SD/channel-guild"
-queue "200 $NONE" '200 {"guild_id":"5","name":"general"}' '200 {"threads":[]}'
+queue "200 $NONE" '200 {"guild_id":"5","name":"general"}' "$GLIST" '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of sbot "$out")" = ok ] && [ "$(guild_of "$SD")" = "900 5 general" ] ||
   { echo "FAIL: a cache reading '900 not-an-id' must be re-fetched and replaced: $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
-[ ! -s "$CURL_REPLIES" ] || { echo "FAIL: '900 not-an-id' must cost exactly the one re-fetch: $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
+[ ! -s "$CURL_REPLIES" ] || { echo "FAIL: '900 not-an-id' must cost exactly the re-fetch (the channel, then its guild's list): $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
 echo "ok: health asks for a channel's guild once, keeps it with the channel it was learned for, reuses it without another call, and re-fetches it for another channel or a value that is not an id"
 
 # 1.11.0: what the TUI shows travels in the same --json: the channel and its name, every access group, the DM policy
@@ -3151,45 +3161,67 @@ echo "ok: health asks for a channel's guild once, keeps it with the channel it w
 cp "$SD/access.json" "$SD/access.json.keep"
 # Two numeric groups (the channel then comes from config.env, 900), a key that is no channel id, a DM policy, and an
 # allowFrom entry that is not an id (a hand edit): only ids reach the document.
-jq '.dmPolicy = "pairing" | .allowFrom = ["111", "1>@everyone"] | .groups["901"] = {requireMention: false, allowFrom: []} | .groups["not-an-id"] = {allowFrom: ["5"]}' "$SD/access.json.keep" > "$SD/access.json"
+# 1.11.1: 902 is a group the guild's list does not have (another guild's channel, a deleted one): its name stays "".
+# The list also has a channel that is no group of this bot (999, never kept), a name with a quote and a backslash, and
+# an element that is no object. The bot's mode file travels in the same document.
+jq '.dmPolicy = "pairing" | .allowFrom = ["111", "1>@everyone"] | .groups["901"] = {requireMention: false, allowFrom: []} | .groups["902"] = {allowFrom: []} | .groups["not-an-id"] = {allowFrom: ["5"]}' "$SD/access.json.keep" > "$SD/access.json"
 printf '900 5\n' > "$SD/channel-guild"   # as 1.10 wrote it: no name, no age
-queue "200 $NONE" '200 {"guild_id":"5","name":"봇 dev"}' '200 {"threads":[]}'
+printf '  dev-manager \nsecond line\n' > "$SD/mode"
+: > "$CURL_LOG"
+queue "200 $NONE" '200 [{"id":"999","name":"not ours"},7,{"id":"901","name":"side \"room\\\tx"},{"id":"900","name":"봇 dev"}]' '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
 read -r c g n t < "$SD/channel-guild"
 [ "$c $g $n" = "900 5 봇-dev" ] && [ "$t" -ge "$SEED_S" ] && [ ! -s "$CURL_REPLIES" ] ||
   { echo "FAIL: a channel-guild line with no name must be read again once, and kept as <channel> <guild> <name> <read at>, a space in the name made '-': $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
+[ "$(dcalls guilds/5/channels)" = 1 ] && [ "$(dcalls channels/900)" = 0 ] && [ "$(wc -l < "$CURL_LOG")" = 4 ] ||
+  { echo "FAIL: the daily read is ONE call, the guild's channel list, and no channels/<id>: $(<"$CURL_LOG")"; exit 1; }
+[ "$(sort "$SD/channel-names")" = $'900 봇-dev\n901 side-"room\\-x' ] && [ -z "$(find "$SD" -name 'channel-names?*')" ] ||
+  { echo "FAIL: channel-names holds one '<id> <name>' line per access group the guild has, cleaned as the main name is, and no temp file is left: $(cat "$SD/channel-names" 2>&1) / $(ls "$SD")"; exit 1; }
 jq -e --arg at "$(date -u -d "@$(( ((ID_SEEN >> 22) + 1420070400000) / 1000 ))" +%Y-%m-%dT%H:%M:%SZ)" '.[0] | .verdict == "ok" and .channel == "900" and .channel_name == "봇-dev"
   and .last_message_at == $at
-  and .access == {dm: "pairing", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: ["111", "222"]}, {id: "901", mention: false, allow: []}]}' <<<"$out" >/dev/null ||
-  { echo "FAIL: --json must carry channel, channel_name, last_message_at (from the last-message-id snowflake) and access (every numeric group, dmPolicy and its allowFrom, ids only): $out"; exit 1; }
+  and .mode == "dev-manager"
+  and .access == {dm: "pairing", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: ["111", "222"], name: "봇-dev"},
+    {id: "901", mention: false, allow: [], name: "side-\"room\\-x"}, {id: "902", mention: true, allow: [], name: ""}]}' <<<"$out" >/dev/null ||
+  { echo "FAIL: --json must carry channel, channel_name, last_message_at (from the last-message-id snowflake), mode (the first line of the mode file) and access (every numeric group with its name, \"\" for one the guild's list has not; dmPolicy and its allowFrom, ids only): $out"; exit 1; }
+# The guild's list fails (a 200 that is no array: the bot lost a permission) on a line a day old: what 1.11.0 did, the
+# channel alone for the main name (two calls), and the names already kept stay, in the file and in the document.
+# An empty mode file is none.
+printf '900 5 old-name %s\n' "$(( SEED_S - 86401 ))" > "$SD/channel-guild"; : > "$SD/mode"; : > "$CURL_LOG"
+queue "200 $NONE" '200 {"message":"Missing Access"}' '200 {"guild_id":"5","name":"renamed"}' '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(guild_of "$SD")" = "900 5 renamed" ] && [ "$(dcalls guilds/5/channels)" = 1 ] && [ "$(dcalls channels/900)" = 1 ] && [ "$(wc -l < "$CURL_LOG")" = 5 ] && [ ! -s "$CURL_REPLIES" ] &&
+  [ "$(sort "$SD/channel-names")" = $'900 봇-dev\n901 side-"room\\-x' ] &&
+  jq -e '.[0] | .verdict == "ok" and .channel_name == "renamed" and .mode == "none" and ([.access.groups[].name] == ["봇-dev", "side-\"room\\-x", ""])' <<<"$out" >/dev/null ||
+  { echo "FAIL: a guild list that is no array falls back to channels/<id> for the main name (two calls) and keeps the names already cached; an empty mode file is none: $(<"$CURL_LOG") / $(cat "$SD/channel-guild" "$SD/channel-names" 2>&1) / $out"; exit 1; }
 # A day and a second old, and the read fails (HTTP 500): the line stays as it is, its name is still shown, the bot is ok.
 printf '900 5 kept-name %s\n' "$(( SEED_S - 86401 ))" > "$SD/channel-guild"
-queue "200 $NONE" '500 {}' '200 {"threads":[]}'
+queue "200 $NONE" '500 {}' '500 {}' '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of sbot "$out")" = ok ] && [ "$(field_of sbot channel_name "$out")" = kept-name ] && [ "$(<"$SD/channel-guild")" = "900 5 kept-name $(( SEED_S - 86401 ))" ] && [ ! -s "$CURL_REPLIES" ] ||
-  { echo "FAIL: a channel-guild line a day old is read again (one call); a failed read keeps the line and its name and fails nothing: $out / $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
+  { echo "FAIL: a channel-guild line a day old is read again (the guild's list, then the channel when that fails); a failed read keeps the line and its name and fails nothing: $out / $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
 # A read time with a leading zero (a damaged or hand-edited line: nothing writes one). bash takes 08 for an octal number
 # that is none, and that error ends the whole health block, not the one test: the script then ran on into the launcher
 # and STARTED the bot's session, from a monitor pass every 5 minutes. It is decimal 8: an old line, read again.
 # In the same run an access.json with no `groups` at all (a DM-only bot; its channel is config.env's): the DM policy is
 # still reported, with no group, not a null access.
-printf '900 5 name 08\n' > "$SD/channel-guild"; printf '{"dmPolicy":"allowlist","allowFrom":["111","x"]}\n' > "$SD/access.json"
-queue "200 $NONE" '200 {"guild_id":"5","name":"general"}' '200 {"threads":[]}'
+printf '900 5 name 08\n' > "$SD/channel-guild"; printf '{"dmPolicy":"allowlist","allowFrom":["111","x"]}\n' > "$SD/access.json"; rm -f "$SD/mode"
+queue "200 $NONE" "$GLIST" '200 {"threads":[]}'
 rc=0; out=$(bash "$S" health --json 2>"$HOME/health.err") || rc=$?
 [ "$rc" = 0 ] && [[ $out != *LAUNCHER* ]] && [ "$(verdict_of sbot "$out")" = ok ] && [ "$(guild_of "$SD")" = "900 5 general" ] && [ ! -s "$CURL_REPLIES" ] ||
   { echo "FAIL: a channel-guild read time of 08 must be read as 8 (an old line, read again): health prints its JSON, exits 0 and starts no claude (rc=$rc): $(head -c 300 <<<"$out") / $(cat "$HOME/health.err")"; exit 1; }
 rm -f "$HOME/health.err"
-jq -e '.[0] | .channel == "900" and .access == {dm: "allowlist", dm_allow: ["111"], groups: []}' <<<"$out" >/dev/null ||
-  { echo "FAIL: an access.json with no groups object must still report access, with its dm policy and allowFrom and no group: $(jq -c '.[0] | [.channel, .access]' <<<"$out")"; exit 1; }
-mv "$SD/access.json.keep" "$SD/access.json"; seed_guild "$SD"
+jq -e '.[0] | .channel == "900" and .mode == "none" and .access == {dm: "allowlist", dm_allow: ["111"], groups: []}' <<<"$out" >/dev/null ||
+  { echo "FAIL: an access.json with no groups object must still report access, with its dm policy and allowFrom and no group, and a bot with no mode file is mode none: $(jq -c '.[0] | [.channel, .mode, .access]' <<<"$out")"; exit 1; }
+mv "$SD/access.json.keep" "$SD/access.json"; seed_guild "$SD"; rm -f "$SD/channel-names"
 # A bot with no token and no channel (a .env with nothing in it, no access.json, no config.env): the new fields are
 # empty or null, never an error. Only the unauthenticated /gateway is asked.
 NP="$HOME/none-project"; mkdir -p "$NP/.claude/discord-agents/nobot"; : > "$NP/.claude/discord-agents/nobot/.env"
 queue
 out=$(cd "$NP" && bash "$S" health --json 2>/dev/null) || :
-jq -e '.[0] | .bot == "nobot" and .verdict == "unknown" and .channel == "" and .channel_name == "" and .last_message_at == null and .access == null' <<<"$out" >/dev/null && [ ! -s "$CURL_REPLIES" ] ||
+jq -e '.[0] | .bot == "nobot" and .verdict == "unknown" and .channel == "" and .channel_name == "" and .mode == "none" and .last_message_at == null and .access == null' <<<"$out" >/dev/null && [ ! -s "$CURL_REPLIES" ] ||
   { echo "FAIL: a bot with no token and no channel has empty channel fields, a null time and a null access, and costs no call: $out"; exit 1; }
 echo "ok: health --json carries channel, channel_name (cached in channel-guild with the time it was read; read again after a day or for a line with no name; a failed read keeps it; a read time with a leading zero is decimal and never ends health early), last_message_at from the snowflake and the access policy (ids only; the DM policy alone when access.json has no groups), and empty or null ones for a bot with no token and no channel"
+echo "ok: health 1.11.1: the daily read is one guilds/<gid>/channels call (two calls the first time ever, none the same day) and gives every access group its name (channel-names, \"\" for a channel the guild has not); a list that fails falls back to channels/<id> and keeps the cached names; mode is the first line of the mode file, none without one"
 
 # The age is measured from the OLDEST unanswered message, not the newest:
 # with the newest, every fresh message resets the clock, and a wedged bot is
@@ -3613,7 +3645,7 @@ posts() { sed -n 's/.* --data-binary \(.*\) https:\/\/discord.com\/api\/v10\/cha
 # Control characters in it go (h1's holds a US, the separator of the reducer's input, and an ESC): box1.
 printf '# mine\r\nlocal name=람다 HTTPS_PROXY=http://127.0.0.1:8118\r\nh3\r\nh1 name=bo\037x\0331\r\nh2\r\n' > "$MR/mgr/hosts"   # saved with CRLF line endings
 # The local answer is a 1.11.0 health document (channel, its name, the last message time, the access policy); h1 answers as 1.10 did, with none of them.
-mdoc lambda 0 "r1:ok" | jq -c '.projects[0].bots[0] += {channel: "900", channel_name: "dev", last_message_at: "2026-10-13T00:00:00Z", access: {dm: "allowlist", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: []}]}}' > "$MON/local.out"
+mdoc lambda 0 "r1:ok" | jq -c '.projects[0].bots[0] += {channel: "900", channel_name: "dev", last_message_at: "2026-10-13T00:00:00Z", mode: "dev-manager", access: {dm: "allowlist", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: [], name: "dev"}]}}' > "$MON/local.out"
 mdoc h1 0 "r2:ok" > "$MON/h1.out"
 # h3 (before h1) answers JSON of the wrong shape inside: that host alone is blind, the hosts after it still count.
 echo '{"projects":["x"]}' > "$MON/h3.out"
@@ -3640,11 +3672,11 @@ jq -e '(.hosts.h2| .verdict == "blind" and (.detail | test("exited 3"))) and (.b
 # language and owner; and per bot the four fields health 1.11.0 adds, null for a host whose claude-discord sends none.
 jq -e '(.hosts.local | .display == "람다" and .env == ["HTTPS_PROXY"] and .hostname == "lambda" and .name == "lambda")
   and (.hosts.h1 | .display == "box1" and .env == [] and .hostname == "h1") and (.hosts.h3 | .display == "" and .env == [])
-  and (.bots["local|/home/u/ws/p|r1"] | .channel == "900" and .channel_name == "dev" and .last_message_at == "2026-10-13T00:00:00Z" and .access.groups[0].id == "900")
-  and (.bots["h1|/home/u/ws/p|r2"] | has("channel") and .channel == null and .channel_name == null and .last_message_at == null and .access == null)
+  and (.bots["local|/home/u/ws/p|r1"] | .channel == "900" and .channel_name == "dev" and .last_message_at == "2026-10-13T00:00:00Z" and .access.groups[0] == {id: "900", mention: true, allow: [], name: "dev"} and .mode == "dev-manager")
+  and (.bots["h1|/home/u/ws/p|r2"] | has("channel") and .channel == null and .channel_name == null and .last_message_at == null and .access == null and has("mode") and .mode == null)
   and (.monitor | .lang == "ko" and .owner_id == "111")' "$MB/state.json" >/dev/null &&
   ! command grep -qF '127.0.0.1:8118' "$MB/state.json" && ! command grep -q 'not KEY=VALUE' "$MB/monitor.log" ||
-  { echo "FAIL: the state must carry each host's display name, env key names (no value) and hostname, the monitor's language and owner, and health's 1.11.0 fields (null from an older host): $(jq -c '[.hosts, .monitor, .bots]' "$MB/state.json") $(command grep 'ledger:' "$MB/monitor.log")"; exit 1; }
+  { echo "FAIL: the state must carry each host's display name, env key names (no value) and hostname, the monitor's language and owner, and health's 1.11.0 fields and 1.11.1's mode and group names (null from an older host): $(jq -c '[.hosts, .monitor, .bots]' "$MB/state.json") $(command grep 'ledger:' "$MB/monitor.log")"; exit 1; }
 # The launcher opened monitor.log as the monitor's stdout and stderr; the rotation at start renamed that file, so the
 # monitor must have reopened it, or its output would grow monitor.log.1 past the cap. Polled: the monitor runs builtins
 # with 2>/dev/null nearly all the time at this tick, so one read of fd 2 can land on /dev/null.
