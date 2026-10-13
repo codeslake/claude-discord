@@ -942,7 +942,9 @@ another bot's project on a machine with one manager, it changes that
 manager's ledger: each change prints the ledger's path. A change takes
 effect at the monitor's next pass (5 minutes at most; `claude-discord
 monitor --check <manager>` asks for one now, and the TUI does that itself
-after each change it makes).
+after each change it makes). A pass that was asked for starts a minute after
+the last pass began at the earliest, and requests made before then are one
+pass: findings are held for so many passes, and those must stay minutes.
 
 - `list` prints a line per host line as the monitor reads it: alias, kind,
   display name and the KEY NAMES of its env words. `--json` gives the same
@@ -1084,7 +1086,7 @@ Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 | `monitor.log`, `monitor.log.1` | one line per event, 256 KiB each at most |
 | `holders/<kind>-<pid>` | one record per keeper (`keeper`) or open TUI (`tui`): `<pid> <start time> <kind>` (a `session` record from 1.10.2 is read until its session ends) |
 | `stopped` | `monitor --stop` was run: nothing starts the backend until `monitor --start` |
-| `pass-now` | `monitor --check` was run: the monitor removes it at its next tick and runs a pass at once |
+| `pass-now` | `monitor --check` was run: the monitor removes it at a tick and runs a pass, a minute after its last pass began at the earliest (one pass, however many requests). One it cannot remove is logged once and no request is served until the monitor is started again |
 | `keeper.lock` | the keeper's `flock` target, held on fd 8 for its whole life: the one-keeper rule |
 | `refused.<id>` | a detached start met a monitor this side cannot see: this side's hooks start nothing until `monitor --start` or a start that gets through (`<id>` is the digits of `readlink /proc/self/ns/pid`, so the other side of a shared home is not stopped by it; plain `refused` where there is no `/proc`, a Mac). The TUI says `auto-start refused here` |
 | `last-start.<id>` | the epoch second of this side's last automatic start (a hook, not `monitor --start` or the TUI): a prompt within 60 s of it starts nothing, so a keeper that dies at once is not forked again on every prompt of every bot (`<id>` as for `refused.<id>`) |

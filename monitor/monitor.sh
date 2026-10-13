@@ -36,7 +36,8 @@
 #   monitor.log, monitor.log.1 256 KiB each at most
 #   holders/<kind>-<pid>       "<pid> <start time> <kind>"
 #   stopped                    `--stop` was run: no automatic start until `--start`
-#   pass-now                   `--check` was run: the monitor removes it at its next tick and runs a pass
+#   pass-now                   `--check` was run: the monitor removes it at a tick and runs a pass, 60 s at least
+#                              after the last pass began (however many requests: one pass)
 #   refused.<id>               a detached start met a monitor this side cannot see: this side's hooks start nothing until
 #                              `--start` or a start that gets through. <id> is the pid namespace (the digits of
 #                              `readlink /proc/self/ns/pid`), so the other side of a shared home is not stopped by it;
@@ -152,13 +153,13 @@ if [ -n "$stop" ]; then
 fi
 if [ -n "$check" ]; then
   # A pass now, asked of the monitor that runs (the TUI: its Check now button, and after it changed the ledger). Only a
-  # marker: the monitor meets it at its next tick, removes it and runs the pass itself, so there is still one monitor,
+  # marker: the monitor meets it at a tick (see the loop below), removes it and runs the pass itself, so there is still one monitor,
   # one writer of state.json and one poster. Nothing is started here: with no monitor of this bot that this side can
   # see there is nobody to ask, and no marker is left for a later one (its first pass comes at once anyway).
   l=""; { read -r l < "$M/lock"; } 2>/dev/null
   a_monitor "$l" || { echo "claude-discord: monitor: no monitor of $bot runs here, so nothing was asked (claude-discord monitor --start $bot starts the backend)" >&2; exit 1; }
   : > "$M/pass-now" || exit 1
-  echo "claude-discord: monitor: $bot checks its hosts at its next tick (within 30 s)"
+  echo "claude-discord: monitor: $bot checks its hosts at its next tick (within 30 s; a minute after its last pass began at the earliest)"
   exit 0
 fi
 # This side's refused marker (see the header): named by the pid namespace, so the other side of a shared home neither
@@ -300,18 +301,19 @@ fi
 # Every child that can outlive a moment (sleep, ssh, the local health, curl)
 # is started with 9>&-: a child that survived a crash would otherwise keep the
 # lock and no new monitor could start.
-# CLAUDE_DISCORD_MONITOR_LOCK_WAIT (above; 5) is the fourth interval the suite shortens.
+# CLAUDE_DISCORD_MONITOR_LOCK_WAIT (above; 5) is the fourth interval the suite shortens, CHECK_GAP the fifth.
 sig0=$(sig)   # this file as this process started
 bad=""        # the signature of a changed monitor.sh that did not parse, logged once
 seen=""       # the signature of a changed monitor.sh, exec'd once it is still the same a pass later
 tick=${CLAUDE_DISCORD_MONITOR_TICK:-30}        # holder check, seconds
-pass=${CLAUDE_DISCORD_MONITOR_PASS:-300}       # a pass at most this often; health's unknown_cap=6 assumes 300
+pass=${CLAUDE_DISCORD_MONITOR_PASS:-300}       # a pass at most this often, but for one asked for (--check):
+gap=${CLAUDE_DISCORD_MONITOR_CHECK_GAP:-60}    # that one this long after the last pass began, at the earliest
 cap=${CLAUDE_DISCORD_MONITOR_HOST_CAP:-90}     # per host, enforced here (no timeout(1) on macOS)
 # Fractional values are for the suite; bash counts in whole steps. A running
 # host is polled every step (1 s, or a fifth of a tick shorter than 5 s).
-read -r step pass_n cap_n tick_n < <(awk -v t="$tick" -v p="$pass" -v c="$cap" 'BEGIN {
-  s = (t < 5 ? t / 5 : 1); printf "%s %d %d %d\n", s, (p / t < 1 ? 1 : int(p / t + 0.5)), int(c / s + 0.5), int(t / s + 0.5) }')
-child="" tp="" state="" h_rc=0 local_env=() p_code=000 p_retry="" used=0 part=""
+read -r step pass_n cap_n tick_n gap_n < <(awk -v t="$tick" -v p="$pass" -v c="$cap" -v g="$gap" 'BEGIN {
+  s = (t < 5 ? t / 5 : 1); printf "%s %d %d %d %d\n", s, (p / t < 1 ? 1 : int(p / t + 0.5)), int(c / s + 0.5), int(t / s + 0.5), int(g / t + 0.5) }')
+child="" tp="" state="" h_rc=0 local_env=() p_code=000 p_retry="" used=0 part="" stuck=""
 # A pass child runs as its own process group (perl, as for the lock: setsid(1) is util-linux), so the cap and finish
 # kill its whole subtree: a health's $(...) or an ssh's children would otherwise outlive both. The pid survives the exec.
 pg='setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127'
@@ -860,9 +862,16 @@ n=$pass_n   # the first pass right after start
 while :; do
   [ -f "$dir/hosts" ] || finish no-ledger
   tick_check
-  # A pass asked for (monitor --check): now, not when the interval is up. The marker goes before the pass, so one
-  # request is one pass; a request made while a pass runs gets the pass after it.
-  [ ! -e "$M/pass-now" ] || { rm -f "$M/pass-now"; n=$pass_n; log "check requested: a pass now"; }
+  # A pass asked for (monitor --check): now, not when the interval is up, but CHECK_GAP (60 s) after the last pass
+  # began at the earliest (n counts the ticks since then): what a finding waits is counted in passes here and in health
+  # runs there, and a request every tick would turn their minutes into seconds. A marker met earlier stays and is
+  # served then: one pass, however many requests. The marker goes before the pass, so a request made while a pass runs
+  # gets one after it. A marker that cannot be removed would mean a pass every tick: said once, then none is looked at
+  # until this monitor is started again.
+  if [ -z "$stuck" ] && [ "$n" -ge "$gap_n" ] && [ -e "$M/pass-now" ]; then
+    if rm -f "$M/pass-now" 2>/dev/null; then n=$pass_n; log "check requested: a pass now"
+    else stuck=1; log "check requested, but $M/pass-now cannot be removed: no request is served until the monitor is started again"; fi
+  fi
   # Straight back to the tick's checks after a pass: the last in-pass one may be most of a tick old.
   # Passes start PASS apart, not PASS after the last one ended: the ticks its hosts took count, and the first sleep
   # after it is the rest of the tick they ended in.
