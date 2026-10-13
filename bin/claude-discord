@@ -1432,7 +1432,10 @@ if [ "${1:-}" = health ]; then
     # not used; one an older version wrote (two fields) has no name and no age.
     gid="" cname="" cat_s="" cached=$(cat "$d/channel-guild" 2>/dev/null) || cached=""
     case $cached in "$ch "*) read -r cch gid cname cat_s <<<"$cached";; esac
+    # Leading zeros go, as for lm below: to bash 08 is an octal number that is none, and that error would end this whole
+    # health block and let the script run on into the launcher (it started the bot's session). All zeros is 0.
     case $cat_s in ''|*[!0-9]*) cat_s=0;; esac
+    cat_s=${cat_s#"${cat_s%%[!0]*}"}; cat_s=${cat_s:-0}
     [ "$cname" != - ] || cname=""
 
     verdict=ok detail="" oldest="" age=0 me="" status=000 resp=""
@@ -1540,8 +1543,10 @@ if [ "${1:-}" = health ]; then
         # itself the finding: `claude agents` failing repeatedly means the
         # daemon is unwell, which is exactly when a bot breaks.
         if [ "$working" = 2 ]; then
-          unknowns=$(( $(cat "$d/health-unknown" 2>/dev/null || echo 0) + 1 ))
-          case $unknowns in ''|*[!0-9]*) unknowns=1;; esac
+          # Checked and stripped of leading zeros BEFORE the arithmetic (see cat_s above): what is no count starts at 0.
+          unknowns=$(cat "$d/health-unknown" 2>/dev/null) || unknowns=0
+          case $unknowns in ''|*[!0-9]*) unknowns=0;; esac
+          unknowns=${unknowns#"${unknowns%%[!0]*}"}; unknowns=$(( ${unknowns:-0} + 1 ))
           printf '%s\n' "$unknowns" > "$d/health-unknown" 2>/dev/null || :
         else
           unknowns=0

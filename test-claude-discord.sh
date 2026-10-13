@@ -3168,6 +3168,15 @@ queue "200 $NONE" '500 {}' '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of sbot "$out")" = ok ] && [ "$(field_of sbot channel_name "$out")" = kept-name ] && [ "$(<"$SD/channel-guild")" = "900 5 kept-name $(( SEED_S - 86401 ))" ] && [ ! -s "$CURL_REPLIES" ] ||
   { echo "FAIL: a channel-guild line a day old is read again (one call); a failed read keeps the line and its name and fails nothing: $out / $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
+# A read time with a leading zero (a damaged or hand-edited line: nothing writes one). bash takes 08 for an octal number
+# that is none, and that error ends the whole health block, not the one test: the script then ran on into the launcher
+# and STARTED the bot's session, from a monitor pass every 5 minutes. It is decimal 8: an old line, read again.
+printf '900 5 name 08\n' > "$SD/channel-guild"
+queue "200 $NONE" '200 {"guild_id":"5","name":"general"}' '200 {"threads":[]}'
+rc=0; out=$(bash "$S" health --json 2>"$HOME/health.err") || rc=$?
+[ "$rc" = 0 ] && [[ $out != *LAUNCHER* ]] && [ "$(verdict_of sbot "$out")" = ok ] && [ "$(guild_of "$SD")" = "900 5 general" ] && [ ! -s "$CURL_REPLIES" ] ||
+  { echo "FAIL: a channel-guild read time of 08 must be read as 8 (an old line, read again): health prints its JSON, exits 0 and starts no claude (rc=$rc): $(head -c 300 <<<"$out") / $(cat "$HOME/health.err")"; exit 1; }
+rm -f "$HOME/health.err"
 mv "$SD/access.json.keep" "$SD/access.json"; seed_guild "$SD"
 # A bot with no token and no channel (a .env with nothing in it, no access.json, no config.env): the new fields are
 # empty or null, never an error. Only the unauthenticated /gateway is asked.
@@ -3176,7 +3185,7 @@ queue
 out=$(cd "$NP" && bash "$S" health --json 2>/dev/null) || :
 jq -e '.[0] | .bot == "nobot" and .verdict == "unknown" and .channel == "" and .channel_name == "" and .last_message_at == null and .access == null' <<<"$out" >/dev/null && [ ! -s "$CURL_REPLIES" ] ||
   { echo "FAIL: a bot with no token and no channel has empty channel fields, a null time and a null access, and costs no call: $out"; exit 1; }
-echo "ok: health --json carries channel, channel_name (cached in channel-guild with the time it was read; read again after a day or for a line with no name; a failed read keeps it), last_message_at from the snowflake and the access policy (ids only), and empty or null ones for a bot with no token and no channel"
+echo "ok: health --json carries channel, channel_name (cached in channel-guild with the time it was read; read again after a day or for a line with no name; a failed read keeps it; a read time with a leading zero is decimal and never ends health early), last_message_at from the snowflake and the access policy (ids only), and empty or null ones for a bot with no token and no channel"
 
 # The age is measured from the OLDEST unanswered message, not the newest:
 # with the newest, every fresh message resets the clock, and a wedged bot is
@@ -3369,9 +3378,11 @@ out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of wbot "$out")" = busy ] || { echo "FAIL: an unknown session state must count as working: $out"; exit 1; }
 case $(detail_of wbot "$out") in *"no answer from 'claude agents'"*) ;; *) echo "FAIL: the held line should say the state is unknown: $(detail_of wbot "$out")"; exit 1;; esac
 [ "$(<"$WD/health-unknown")" = 1 ] || { echo "FAIL: an unknown must be counted: $(<"$WD/health-unknown")"; exit 1; }
-# Seeded to one short of the cap rather than looped there: the count is read
-# from this file and written back, so the next run is the one that crosses.
-printf '%s\n' 5 > "$WD/health-unknown"
+# Seeded past the cap rather than looped there: the count is read from this
+# file and written back, so the next run is one that has crossed. With a
+# leading zero (a hand edit): decimal 8, where bash would read an octal number
+# that is none and end the whole health block (as for channel-guild above).
+printf '%s\n' 08 > "$WD/health-unknown"
 stale_one
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of wbot "$out")" = nostate ] || { echo "FAIL: past the cap the not-knowing is itself the finding: $out"; exit 1; }
