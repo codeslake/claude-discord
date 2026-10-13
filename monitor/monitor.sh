@@ -25,6 +25,8 @@
 #   claude-discord monitor --stop <bot>     TERMs the keepers and the monitor and leaves the `stopped` marker:
 #                                           nothing starts them again but
 #   claude-discord monitor --start <bot>    clears the marker and starts the keeper detached.
+#   claude-discord monitor --check <bot>    asks the running monitor for a pass at its next tick (the TUI's Check now,
+#                                           and after it changed the ledger); starts nothing.
 #
 # Everything it keeps is under ~/.claude-discord/records/monitor/<bot>/:
 #   lock                       the flock target (fd 9 of the monitor), holding its pid
@@ -34,6 +36,7 @@
 #   monitor.log, monitor.log.1 256 KiB each at most
 #   holders/<kind>-<pid>       "<pid> <start time> <kind>"
 #   stopped                    `--stop` was run: no automatic start until `--start`
+#   pass-now                   `--check` was run: the monitor removes it at its next tick and runs a pass
 #   refused.<id>               a detached start met a monitor this side cannot see: this side's hooks start nothing until
 #                              `--start` or a start that gets through. <id> is the pid namespace (the digits of
 #                              `readlink /proc/self/ns/pid`), so the other side of a shared home is not stopped by it;
@@ -48,8 +51,8 @@
 set -u
 self=${1:?wrapper path}; shift
 alert_channel=1558283274487341137   # #bot-health-check: both owners' managers post here; write-only
-locked=no start="" kind="" hpid="" bot="" keep="" stop="" detach="" kept=""
-usage="usage: claude-discord monitor [--ensure] <bot> [--holder tui|keeper <pid>] | --keep <bot> [--detach] | --stop <bot> | --start <bot>"
+locked=no start="" kind="" hpid="" bot="" keep="" stop="" detach="" kept="" check=""
+usage="usage: claude-discord monitor [--ensure] <bot> [--holder tui|keeper <pid>] | --keep <bot> [--detach] | --stop <bot> | --start <bot> | --check <bot>"
 while [ $# -gt 0 ]; do
   case $1 in
     --ensure) ;;
@@ -57,6 +60,7 @@ while [ $# -gt 0 ]; do
     --keep) keep=yes;;
     --kept) kept=yes;;       # internal: this keeper holds keeper.lock on fd 8
     --stop) stop=yes;;
+    --check) check=yes;;
     --start) start=yes keep=yes detach=yes;;
     --detach) detach=yes;;
     --holder) kind=${2:-} hpid=${3:-}; shift 3 2>/dev/null || shift $#; continue;;
@@ -144,6 +148,17 @@ if [ -n "$stop" ]; then
   [ ! -s "$M/state.json" ] || { jq -c '.monitor.stopped_by_user = true' "$M/state.json" > "$M/state.json.tmp" && mv -f "$M/state.json.tmp" "$M/state.json"; } 2>/dev/null
   [ -n "$said" ] || echo "claude-discord: monitor: no keeper or monitor of $bot runs here"
   echo "claude-discord: monitor: $bot stays stopped until: claude-discord monitor --start $bot"
+  exit 0
+fi
+if [ -n "$check" ]; then
+  # A pass now, asked of the monitor that runs (the TUI: its Check now button, and after it changed the ledger). Only a
+  # marker: the monitor meets it at its next tick, removes it and runs the pass itself, so there is still one monitor,
+  # one writer of state.json and one poster. Nothing is started here: with no monitor of this bot that this side can
+  # see there is nobody to ask, and no marker is left for a later one (its first pass comes at once anyway).
+  l=""; { read -r l < "$M/lock"; } 2>/dev/null
+  a_monitor "$l" || { echo "claude-discord: monitor: no monitor of $bot runs here, so nothing was asked (claude-discord monitor --start $bot starts the backend)" >&2; exit 1; }
+  : > "$M/pass-now" || exit 1
+  echo "claude-discord: monitor: $bot checks its hosts at its next tick (within 30 s)"
   exit 0
 fi
 # This side's refused marker (see the header): named by the pid namespace, so the other side of a shared home neither
@@ -845,6 +860,9 @@ n=$pass_n   # the first pass right after start
 while :; do
   [ -f "$dir/hosts" ] || finish no-ledger
   tick_check
+  # A pass asked for (monitor --check): now, not when the interval is up. The marker goes before the pass, so one
+  # request is one pass; a request made while a pass runs gets the pass after it.
+  [ ! -e "$M/pass-now" ] || { rm -f "$M/pass-now"; n=$pass_n; log "check requested: a pass now"; }
   # Straight back to the tick's checks after a pass: the last in-pass one may be most of a tick old.
   # Passes start PASS apart, not PASS after the last one ended: the ticks its hosts took count, and the first sleep
   # after it is the rest of the tick they ended in.

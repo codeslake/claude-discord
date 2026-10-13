@@ -956,6 +956,7 @@ class HostEdit(ModalScreen):
             yield Static("", id="h-last")
             yield Static("", id="h-fix", markup=False)
             with Horizontal(id="h-buttons"):
+                yield Button("Check now", id="h-check", compact=True)
                 yield Button("Save", id="h-save", compact=True, disabled=True)
                 yield Button("Stop monitoring this host", id="h-stop", variant="error", compact=True, disabled=True)
                 yield Static("asks first; its bots leave the list", classes="hint")
@@ -975,9 +976,9 @@ class HostEdit(ModalScreen):
         self.query_one("#h-fix", Static).update(" " * 16 + txt(obj(h).get("fix")) if txt(obj(h).get("fix")) else "")
 
     def run(self, args: tuple, stdin: str | None, saying: str, then) -> None:
-        """A hosts CLI call in a worker thread, its answer to `then` on the event loop; the buttons wait meanwhile."""
+        """A hosts CLI call in a worker thread, its answer to `then` on the event loop; Save and Stop wait meanwhile."""
         self.say(saying)
-        for b in self.query(Button):
+        for b in self.query("#h-save, #h-stop"):
             b.disabled = True
         cli = self.app.hosts_cli
         self.run_worker(lambda: self.app.call_from_thread(then, cli(*args, stdin=stdin)), thread=True)
@@ -994,6 +995,7 @@ class HostEdit(ModalScreen):
             doc = None
         rows = [h for h in seq(obj(doc).get("hosts")) if isinstance(h, dict) and h.get("alias") == self.alias]
         if not rows:
+            self.query_one("#h-check", Button).disabled = False   # the monitor can be asked whatever the ledger's reading said
             return self.say(err or (f"{self.alias} is not in the ledger" if isinstance(doc, dict) else f"claude-discord hosts list gave no ledger (exit {rc})"), ALERT)
         keys = list(dict.fromkeys(k for h in rows for k in ids(h.get("env"))))   # two lines for one alias: every key of both
         self.was = (txt(rows[0].get("name")), rows[0].get("laptop") is True, keys)
@@ -1048,7 +1050,13 @@ class HostEdit(ModalScreen):
         self.changed()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "h-save":
+        if event.button.id == "h-check":
+            # Not a probe of its own: the one monitor is asked for a pass now (monitor --check), so there is still one
+            # writer of the state and one poster. The line above repaints from the state when that pass ends.
+            self.say("asking the monitor ...")
+            ask = self.app.ask_pass
+            self.run_worker(lambda: self.app.call_from_thread(lambda text: self.say(text) if self.is_attached else None, ask()), thread=True)
+        elif event.button.id == "h-save":
             self.stage()   # a key and a value typed and not entered are meant too
             name, laptop = self.query_one("#h-name", Input).value, self.query_one(Kind).laptop
             lines = ([f"name={name}"] if name != self.was[0] else []) + ([f"laptop {'on' if laptop else 'off'}"] if laptop != self.was[1] else []) \
@@ -1067,7 +1075,7 @@ class HostEdit(ModalScreen):
         rc, out, err = answer
         if rc == 0:
             return self.dismiss("\n".join(x for x in (out, err) if x))
-        for b in self.query(Button):
+        for b in self.query("#h-save, #h-stop"):
             b.disabled = b.id == "h-stop" and self.alias == "local"
         self.say(err or f"claude-discord hosts exited {rc}", ALERT)
 
@@ -1284,7 +1292,7 @@ class MonitorTUI(App):
             named = next((h for h in ssh_hosts(self.home) if h["alias"] == key), {"alias": key})
             name = txt(entry.get("hostname"))
             target = "this machine" if key == "local" else ssh_target(named) + (f" ({name})" if name and name != key else "")
-            self.push_screen(HostEdit(key, target), self.said)
+            self.push_screen(HostEdit(key, target), self.wrote)
             return
         entry = obj(entry)
         # A host's posts are keyed host|- in `alerts`; a bot's and a project row's by their own key.
@@ -1305,15 +1313,28 @@ class MonitorTUI(App):
         return run_capped([self.wrapper, "hosts", "--bot", self.bot, *args], 90, stdin)
 
     def said(self, text: str | None) -> None:
-        """What a dialog was dismissed with: the CLI's own words, shown as they are (never as markup)."""
+        """Words of the CLI, shown as they are (never as markup)."""
         if text:
             self.notify(text, timeout=10, markup=False)
+
+    def ask_pass(self) -> str:
+        """`monitor --check`: the running monitor is asked for a pass at its next tick (it reads the ledger afresh at
+        every pass, 5 minutes apart otherwise). Returns what to tell the user: that it will, or why nobody was asked
+        (no monitor runs: stopped by its owner). Run in a worker thread."""
+        rc, out, err = run_capped([self.wrapper, "monitor", "--check", self.bot], 10) if self.wrapper else (127, "", "")
+        return out if rc == 0 else err or f"claude-discord monitor --check exited {rc}"
+
+    def wrote(self, text: str | None) -> None:
+        """A dialog was dismissed with the CLI's words about a change it made to the ledger (None: it made none): the
+        monitor is asked for a pass, so the table shows the change within a tick and a pass, and both are said."""
+        if text:
+            self.run_worker(lambda: self.call_from_thread(self.said, f"{text}\n{self.ask_pass()}"), thread=True)
 
     def hosts_do(self, *args: str) -> None:
         """A hosts CLI call from a key of the main view, in a worker thread; what it says is shown when it ends."""
         def work() -> None:
             rc, out, err = self.hosts_cli(*args)
-            self.call_from_thread(self.said, "\n".join(x for x in (out, err) if x) or f"claude-discord hosts exited {rc}")
+            self.call_from_thread(self.said, "\n".join(x for x in (out, err, self.ask_pass() if rc == 0 else "") if x) or f"claude-discord hosts exited {rc}")
         self.run_worker(work, thread=True)
 
     def action_remove(self) -> None:
@@ -1331,7 +1352,7 @@ class MonitorTUI(App):
     def action_add(self) -> None:
         if self.tab == "config":
             listed = {k for k, h in obj(self.state.get("hosts")).items() if obj(h).get("left_s") is None}
-            self.push_screen(AddHost(ssh_hosts(self.home), listed), self.said)
+            self.push_screen(AddHost(ssh_hosts(self.home), listed), self.wrote)
 
     def action_quit_stop(self) -> None:
         if not self.wrapper:

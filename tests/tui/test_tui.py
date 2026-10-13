@@ -882,6 +882,18 @@ def ssh_home(app, config=SSH_CONFIG):
     app.notify = lambda m, **k: app.said_all.append(m if k.get("markup") is False else ("markup", m))
 
 
+CHECKS = "claude-discord: monitor: mgr checks its hosts at its next tick (within 30 s)"
+NO_MONITOR = "claude-discord: monitor: no monitor of mgr runs here, so nothing was asked (claude-discord monitor --start mgr starts the backend)"
+# The stub's `monitor --check`: the monitor's own answer, or its refusal once the case made a `nomonitor` file.
+CHECK_STUB = f'''
+case "$*" in "monitor --check mgr") [ -e "$d/nomonitor" ] && {{ echo "{NO_MONITOR}" >&2; exit 1; }}; echo "{CHECKS}";; esac'''
+
+
+def checks(app):
+    """How many times the wrapper stub was asked `monitor --check mgr`."""
+    return (Path(app.state_dir) / "args").read_text().splitlines().count("monitor --check mgr")
+
+
 def cli_calls(app):
     """The wrapper stub's `hosts` calls (the mount's `monitor --ensure` is in the file too)."""
     return [l for l in (Path(app.state_dir) / "args").read_text().splitlines() if l.startswith("hosts ")]
@@ -919,7 +931,9 @@ async def add_host(app, pilot):
     await pilot.press("enter")
     await settle(app, pilot)
     assert len(app.screen_stack) == 1 and cli_calls(app)[1:] == ["hosts --bot mgr add lmd_dkim"], cli_calls(app)
-    assert app.said_all == ["claude-discord: hosts: added lmd_dkim to /p/hosts\nclaude-discord: hosts: warning: lmd_dkim is already watched by [bold]other"], app.said_all
+    # The change is said with what the monitor answered to `monitor --check`: it is asked for a pass after every change.
+    assert app.said_all == ["claude-discord: hosts: added lmd_dkim to /p/hosts\nclaude-discord: hosts: warning: lmd_dkim is already watched by [bold]other\n" + CHECKS], app.said_all
+    assert checks(app) == 1
     # A host that does not answer (exit 5): said, cleaned, and a third Enter adds it unchecked.
     await pilot.press("a")
     app.screen.query_one("#q").value = "a100"
@@ -931,7 +945,7 @@ async def add_host(app, pilot):
                                                              "enter adds it unchecked (hosts add --no-probe) · esc cancel"), info()
     await pilot.press("enter")
     await settle(app, pilot)
-    assert len(app.screen_stack) == 1 and cli_calls(app)[-1] == "hosts --bot mgr add --no-probe lmd-a100" and app.said_all[-1] == "claude-discord: hosts: added lmd-a100 to /p/hosts"
+    assert len(app.screen_stack) == 1 and cli_calls(app)[-1] == "hosts --bot mgr add --no-probe lmd-a100" and app.said_all[-1] == "claude-discord: hosts: added lmd-a100 to /p/hosts\n" + CHECKS
     # An alias the configuration does not name can be typed; the same home (exit 4) is said and nothing is added.
     await pilot.press("a")
     app.screen.query_one("#q").value = "newbox"
@@ -959,6 +973,7 @@ async def add_host(app, pilot):
     assert info() == "claude-discord: hosts: wmac is already in /p/hosts" and "\x1b" not in info()
     await pilot.press("escape")
     assert len(app.screen_stack) == 1 and len(app.said_all) == 2 and not Path("/tmp/claude-discord-tui-test-pwned").exists()
+    assert checks(app) == 2, "a pass is asked for after each change, and for nothing else (a dry run, a refusal, a closed dialog)"
 
 
 async def add_host_bare(app, pilot):
@@ -991,7 +1006,7 @@ esac'''
 
 def edit_cli(d, ledger=LEDGER_JSON):
     (Path(d) / "ledger.json").write_text(ledger)
-    return stub(d, EDIT_CLI)
+    return stub(d, EDIT_CLI + CHECK_STUB)
 
 
 def drawn(app):
@@ -1032,7 +1047,7 @@ async def host_edit(app, pilot):
     await settle(app, pilot)
     assert len(app.screen_stack) == 1 and cli_calls(app)[1:] == ["hosts --bot mgr set wmac --stdin"], cli_calls(app)
     assert (d / "stdin").read_text() == "name=w[2Jmac2\nlaptop off\nFOO=s3c\nHTTPS_PROXY=\nNO_PROXY=s3d\n", (d / "stdin").read_text()
-    assert "s3" not in (d / "args").read_text() and app.said_all == ["claude-discord: hosts: changed wmac in /p/hosts (2 lines)"], app.said_all
+    assert "s3" not in (d / "args").read_text() and app.said_all == ["claude-discord: hosts: changed wmac in /p/hosts (2 lines)\n" + CHECKS], app.said_all
     # Escape with no change closes; with one it asks (No by default). Nothing is written either way.
     await pilot.press("enter")
     await settle(app, pilot)
@@ -1058,12 +1073,18 @@ async def host_edit(app, pilot):
     await pilot.pause()
     await pilot.press("y")
     await settle(app, pilot)
-    assert len(app.screen_stack) == 1 and cli_calls(app)[-1] == "hosts --bot mgr rm wmac" and app.said_all[-1] == "claude-discord: hosts: removed wmac from /p/hosts"
+    assert len(app.screen_stack) == 1 and cli_calls(app)[-1] == "hosts --bot mgr rm wmac" and app.said_all[-1] == "claude-discord: hosts: removed wmac from /p/hosts\n" + CHECKS
     # local: its settings open like any host's, but it cannot be stopped.
     await pilot.press("up", "up", "enter")
     await settle(app, pilot)
     assert scr("#h-title") == "Host · local" and scr("#h-target") == "target          this machine" and app.screen.query_one("#h-stop").disabled and not app.screen.query_one("#h-save").disabled
     assert scr("#h-env").split() == "env HTTPS_PROXY ••••".split() and scr("#h-last").startswith("last check      ● ok   checked 1m ago")
+    # Check now asks the monitor that runs for a pass (monitor --check) and says what it answered: no ssh, no hosts
+    # call, nothing written from here.
+    n, c = len(cli_calls(app)), checks(app)
+    app.screen.query_one("#h-check").press()
+    await settle(app, pilot)
+    assert scr("#h-msg") == CHECKS and checks(app) == c + 1 and len(cli_calls(app)) == n and not (d / "ssh.args").exists(), scr("#h-msg")
     await pilot.press("escape")
     # A ledger entry of another shape (a name that is a number, env an object): read as empty, never raised on.
     await pilot.press("down", "enter")
@@ -1080,10 +1101,11 @@ async def host_edit(app, pilot):
     await pilot.press("l", "down", "l")
     await settle(app, pilot)
     assert cli_calls(app)[-3:] == ["hosts --bot mgr rm old", "hosts --bot mgr laptop old on", "hosts --bot mgr laptop wmac off"], cli_calls(app)[-3:]
-    assert app.said_all[-2:] == ["claude-discord: hosts: changed old in /p/hosts (1 line)", "claude-discord: hosts: changed wmac in /p/hosts (1 line)"], app.said_all
+    assert app.said_all[-2:] == ["claude-discord: hosts: changed old in /p/hosts (1 line)\n" + CHECKS, "claude-discord: hosts: changed wmac in /p/hosts (1 line)\n" + CHECKS], app.said_all
     await pilot.press("right", "x", "l")
     await settle(app, pilot)
     assert len(app.screen_stack) == 1 and len(cli_calls(app)) == 10, "x and l are the Configuration tab's keys"
+    assert checks(app) == 6, "one pass asked for per change (a save, two removals, two kind flips) and one by Check now"
 
 
 async def host_edit_refused(app, pilot):
@@ -1104,6 +1126,12 @@ async def host_edit_refused(app, pilot):
     await settle(app, pilot)
     assert isinstance(app.screen, tui.HostEdit) and text(app.screen, "#h-msg") == "claude-discord: hosts: K: a value holds no space [/]", text(app.screen, "#h-msg")
     assert text(app.screen, "#h-title").endswith("● unsaved changes") and not app.screen.query_one("#h-save").disabled and app.said_all == []
+    assert checks(app) == 0, "a refused change (the l key's, the save's) asks for no pass"
+    # With no monitor running (stopped by its owner) Check now says so: it starts nothing.
+    (d / "nomonitor").write_text("")
+    app.screen.query_one("#h-check").press()
+    await settle(app, pilot)
+    assert text(app.screen, "#h-msg") == NO_MONITOR, text(app.screen, "#h-msg")
     await pilot.press("escape", "y")
     await pilot.pause()
     for ledger, want in (("not json", "claude-discord hosts list gave no ledger (exit 0)"), ("[]", "claude-discord hosts list gave no ledger (exit 0)"),
@@ -1112,6 +1140,7 @@ async def host_edit_refused(app, pilot):
         await pilot.press("enter")
         await settle(app, pilot)
         assert text(app.screen, "#h-msg") == want and app.screen.query_one("#h-save").disabled and app.screen.query_one("#h-name").disabled, (ledger, text(app.screen, "#h-msg"))
+        assert not app.screen.query_one("#h-check").disabled, "the monitor can be asked whatever the ledger's reading said"
         await pilot.press("escape")
         await pilot.pause()
         assert len(app.screen_stack) == 1
@@ -1185,7 +1214,7 @@ async def main():
     await case("wrong_types", wrong_types)
     await case("alerts", alerts, state="all_ok")
     await case("config", config, state="all_ok")
-    await case("add_host", add_host, state="all_ok", wrapper=lambda d: stub(d, HOSTS_CLI))
+    await case("add_host", add_host, state="all_ok", wrapper=lambda d: stub(d, HOSTS_CLI + CHECK_STUB))
     await case("add_host_bare", add_host_bare, state="all_ok")
     await case("host_edit", host_edit, state="all_ok", wrapper=edit_cli)
     await case("host_edit_refused", host_edit_refused, state="all_ok", wrapper=edit_cli)

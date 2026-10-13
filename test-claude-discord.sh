@@ -4723,6 +4723,22 @@ gpass
   [ "$(grep -o 'g[0-9][0-9]' <<<"$GC" | sort -u | wc -l)" = 22 ] && jq -e '[.bots[].posted] | all(. == "down") and length == 22' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a group past the post limit must name every bot (whole entries, then '… and K more: names'), all marked posted (len ${#GC}): $GC"; exit 1; }
 
+# monitor --check (the TUI's Check now, and what it runs after it changed the ledger): the running monitor starts a pass
+# at its next tick instead of waiting out the interval (60 s here), one pass per request, and that pass reads the
+# ledger as it is on disk then. With no monitor running nobody is asked: exit 1, no marker left.
+printf 'h1\n' > "$MR/mgr/hosts"; gdoc g1:ok; : > "$CURL_REPLIES"; : > "$CURL_LOG"; mstate '.hosts = {} | .bots = {} | .alerts = []'
+rc=0; out=$(cd "$MP" && bash "$S" monitor --check mgr 2>&1) || rc=$?
+[ "$rc" = 1 ] && [ ! -e "$MB/pass-now" ] && grep -q 'no monitor of mgr runs here, so nothing was asked' <<<"$out" || { echo "FAIL: monitor --check with no monitor running is exit 1 and leaves no marker: rc=$rc $out"; exit 1; }
+mstart; p=$(passes); nap 0.05
+[ "$(passes)" = "$p" ] || { echo "FAIL: control: no second pass by itself within the interval"; exit 1; }
+printf 'h1\nhnew\n' > "$MR/mgr/hosts"
+rc=0; out=$(cd "$MP" && bash "$S" monitor --check mgr 2>&1) || rc=$?
+wait_log $((p + 1)) ' pass hosts='; nap 0.05
+[ "$rc" = 0 ] && [ "$(passes)" = $((p + 1)) ] && [ ! -e "$MB/pass-now" ] && grep -q 'check requested: a pass now$' "$MB/monitor.log" && jq -e '.hosts | has("hnew")' "$MB/state.json" >/dev/null && [ -z "$(posts)" ] ||
+  { echo "FAIL: monitor --check makes the running monitor run ONE pass at its next tick, over the ledger as it is then, and posts nothing itself: rc=$rc $out passes=$(passes) (was $p) $(tail -3 "$MB/monitor.log")"; exit 1; }
+mstop
+echo "ok: monitor --check asks the running monitor for one pass at its next tick (the ledger read afresh), starts nothing and posts nothing itself, and is exit 1 with no monitor running"
+
 # The monitor blocks end here: the real shim back, the stubs and fixtures gone.
 mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"
 rm -rf "$MON" "$HOME/ssh.log" "$HOME/local.calls" "$HOME/ro" "$HOME/bin/ssh"; : > "$CURL_REPLIES"
