@@ -174,8 +174,15 @@ def pure():
     t = tui.title_line(mon(), 100, T, True, False).plain
     assert t.startswith("◆ claude-discord  mgr ") and t.endswith("● live  keeper · checked 1m ago · next 4m") and cell_len(t) == 100, t
     assert tui.title_line(mon(holders=[]), 100, T, True, False).plain.endswith("● live  checked 1m ago · next 4m")
-    assert tui.title_line(mon(), 100, T + 250, True, False).plain.endswith("● live  keeper · checked 5m ago · next 0m"), "one tick past due is not overdue yet"
-    assert tui.title_line(mon(), 100, T + 251, True, False).plain.endswith("▲ check overdue  due 17:52 · now 17:53")
+    # next_pass is the pass's START plus the interval and state.json is written when the pass ENDS, so a pass under way
+    # is not overdue: only one that is a tick (30 s) past the longer of 120 s and twice the last pass (pass_s; 0 when
+    # missing or not a number). Due here at T+220.
+    live, late = "● live  keeper · checked", "▲ check overdue  due 17:52 · now "
+    assert tui.title_line(mon(pass_s=45), 100, T + 260, True, False).plain.endswith(live + " 5m ago · next 0m"), "a 45 s pass, 40 s past due, is live"
+    for took, last in ((45, 370), (None, 370), ("x", 370), (True, 370), (100, 450)):
+        st = mon() if took is None else mon(pass_s=took)
+        assert live in tui.title_line(st, 100, T + last, True, False).plain, (took, last)
+        assert tui.title_line(st, 100, T + last + 1, True, False).plain.endswith(late + tui.hhmm(T + last + 1)), (took, last)
     for st in (mon(stopped_by_user=True), mon()):
         t = tui.title_line(st, 100, T, False, st["monitor"].get("stopped_by_user") is None).plain
         assert t.endswith("○ stopped by you  start: claude-discord monitor --start mgr"), t
@@ -275,7 +282,7 @@ def variant(name):
     elif name == "stopped_by_user":
         s["monitor"].update(pid=None, stopped_at="2026-10-11T12:00:00Z", holders=[], stopped_by_user=True)
     elif name == "overdue":
-        s["monitor"]["next_pass"] = iso(time.time() - 100)
+        s["monitor"]["next_pass"] = iso(time.time() - 400)   # past the 30 s + 120 s a pass is given
     elif name == "post_failed":
         s["monitor"]["post_failed"] = True
     elif name == "pass_failed":

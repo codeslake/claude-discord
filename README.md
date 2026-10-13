@@ -1024,7 +1024,9 @@ picks among the manager bots of the projects `claude-discord` has recorded:
 the one, or a numbered list at a terminal, else exit 2 naming them;
 `tui <bot>` picks the project that has it). The title line names the manager
 and, on the right, the backend: `● live  keeper · checked 1m ago · next 4m`;
-`▲ check overdue  due HH:MM · now HH:MM` once a pass is more than 30 s late;
+`▲ check overdue  due HH:MM · now HH:MM` once no pass has ended 30 s after
+the time one may take past its due time (twice the last pass, 2 minutes at
+least: a pass under way is not overdue);
 `○ stopped by you  start: claude-discord monitor --start <manager>` after
 `--stop`; `○ not running` otherwise. Under it three tabs, changed with `←`
 `→`: Bots, Alerts N (N findings posted and not recovered) and Configuration.

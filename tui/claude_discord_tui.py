@@ -311,12 +311,15 @@ def title_line(state: dict, width: int, now: float, live: bool, stopped: bool) -
     """`◆ claude-discord  <manager>` and, on the right, the backend's status: symbol + word + colour."""
     m, mgr = state.get("monitor") or {}, state.get("manager", "?")
     left = Text.assemble(("◆ claude-discord", f"bold {BRAND}"), ("  " + mgr, DIM))
-    due = epoch(m.get("next_pass"))
+    due, took = epoch(m.get("next_pass")), m.get("pass_s")
+    took = took if isinstance(took, (int, float)) and not isinstance(took, bool) else 0
     if stopped or m.get("stopped_by_user"):   # monitor --stop: nothing starts it until monitor --start
         right = Text.assemble(("○ stopped by you", "bold"), ("  start: ", DIM), (f"claude-discord monitor --start {mgr}", BRAND))
     elif not live:
         right = Text("○ not running", DIM)
-    elif due is not None and now - due > 30:   # more than one tick (30 s) past the pass that was due
+    # next_pass is the last pass's START plus the interval, and state.json is written when a pass ENDS: a pass under way
+    # is not overdue. Overdue is one tick (30 s) past the time a pass may take: twice the last one, 120 s at least.
+    elif due is not None and now - due > 30 + max(120, 2 * took):
         right = Text.assemble(("▲ check overdue", f"bold {WARN}"), (f"  due {hhmm(due)} · now {hhmm(now)}", DIM))
     else:
         checked = ago(m.get("last_pass"), now)
