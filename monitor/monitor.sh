@@ -29,7 +29,8 @@
 # Everything it keeps is under ~/.claude-discord/records/monitor/<bot>/:
 #   lock                       the flock target (fd 9 of the monitor), holding its pid
 #   keeper.lock                the flock target of the keeper (fd 8), held for its whole life
-#   state.json (+ .tmp)        what the TUI shows; `posted` makes a restart quiet
+#   state.json (+ .tmp)        what the TUI shows; `posted` makes a restart quiet. Never a token and never the value
+#                              of a ledger KEY=VALUE word (a proxy URL may hold a password): the key names only
 #   monitor.log, monitor.log.1 256 KiB each at most
 #   holders/<kind>-<pid>       "<pid> <start time> <kind>"
 #   stopped                    `--stop` was run: no automatic start until `--start`
@@ -517,8 +518,8 @@ run_host() {  # uses $host $remote, the envs array, and run_pass's step counter 
 #   - a host that left the ledger is kept for a day (left_s), frozen with its
 #     bots and their `posted`, so a brief removal posts nothing again; then it
 #     is dropped with its bots, logged, not announced.
-# Input, raw lines: the state JSON, then two lines per host, "<host> US <laptop> US <exit status>" and the host's
-# answer with its newlines made spaces (still valid JSON when it was).
+# Input, raw lines: the state JSON, then two lines per host, "<host> US <laptop> US <exit status> US <display name> US
+# <env key names, space-separated>" and the answer of the host with its newlines made spaces (still valid JSON when it was).
 # Output lines: "S<state JSON>", "N<bot count>", "E<event>", "O<scope US key US kind US verdict US payload JSON>".
 reduce='
 def hold: {"down": 300, "duplicate": 300, "unreachable": 300, "throttled": 1800, "apierror": 1800,
@@ -613,8 +614,8 @@ def host_step($r):
     | (.state.hosts[$r.host].verdict // null) as $was
     | .state.hosts[$r.host] |= observe($hv; $hd;
         {host: $r.host, name: (if $r.host == "local" then ($doc.host // (.name // "local")) else $r.host end),
-         laptop: $r.laptop, reach: $reach, owner_id: $mowner, checked: $now}
-        + (if $doc != null then {version: ($doc.version // "?"), patch: (if $doc.patch == null then "-" elif ($doc.patch.rc // 0) == 0 then "ok" else "fail" end)} else {} end))
+         laptop: $r.laptop, reach: $reach, owner_id: $mowner, checked: $now, display: $r.display, env: $r.env}
+        + (if $doc != null then {hostname: ($doc.host // ""), version: ($doc.version // "?"), patch: (if $doc.patch == null then "-" elif ($doc.patch.rc // 0) == 0 then "ok" else "fail" end)} else {} end))
     | (if $was != $hv and ($was != null or ($hv | good | not)) then .events += ["transition \($r.host)|- \($was // "new")->\($hv)"] else . end)
     | if $reach != "ok" then .
       else
@@ -625,7 +626,10 @@ def host_step($r):
             | (.state.bots[$k].verdict // null) as $bw
             | .state.bots[$k] |= observe($b.verdict; ($b.detail // "");
                 {host: $r.host, name: (if $r.host == "local" then ($doc.host // "local") else $r.host end),
-                 project: $b.project, bot: $b.bot, home: ($doc.home // ""), owner_id: ($b.owner_id // ""), servers: ($b.servers // "")})
+                 project: $b.project, bot: $b.bot, home: ($doc.home // ""), owner_id: ($b.owner_id // ""), servers: ($b.servers // ""),
+                 # What health 1.11.0 adds, for the TUI. An older claude-discord on that host sends none: null, shown as "-".
+                 channel: ($b.channel // null), channel_name: ($b.channel_name // null), last_message_at: ($b.last_message_at // null),
+                 access: ($b.access // null)})
             | if $bw != $b.verdict and ($bw != null or ($b.verdict | good | not)) then .events += ["transition \($k) \($bw // "new")->\($b.verdict)"] else . end)
         # A crashed project with no entry at all here (crashed on first sight): an entry of its own, or it would vanish.
         | reduce ($errs | keys[]) as $p (.;
@@ -654,7 +658,8 @@ def host_step($r):
 [inputs] as $in
 | ($in[0] | fromjson) as $old
 | [range(1; $in | length - 1; 2) as $i | ($in[$i] | split("\u001f")) as $h
-   | {host: $h[0], laptop: ($h[1] == "true"), rc: ($h[2] | tonumber), doc: ($in[$i + 1] | try fromjson catch null)}] as $res
+   | {host: $h[0], laptop: ($h[1] == "true"), rc: ($h[2] | tonumber), display: ($h[3] // ""), env: (($h[4] // "") | split(" ")),
+      doc: ($in[$i + 1] | try fromjson catch null)}] as $res
 # A document that parses but has another shape inside (an older or newer claude-discord, a broken shim) makes
 # host_step raise: that host alone is blind, with the error (capped, it may quote the document); the rest still count.
 | reduce $res[] as $r ({state: $old, events: []};
@@ -670,7 +675,8 @@ def host_step($r):
 | ([.state.bots | to_entries[] | select((.value.host // "") as $h | $hk[$h] == null) | .key]) as $bgone
 | .events += ($hleft | map("left \(.)|- (kept a day)")) + ($hgone | map("drop \(.)|-")) + ($bgone | map("drop \(.)"))
 | .state.bots |= with_entries(select(.key as $k | $bgone | index($k) == null))
-| .state.monitor += {last_pass: $now, next_pass: (($now_s + $every) | floor | todate), pass_s: $pass_s, holders: $holders, post_failed: false}
+| .state.monitor += {last_pass: $now, next_pass: (($now_s + $every) | floor | todate), pass_s: $pass_s, holders: $holders, post_failed: false,
+                     lang: $lang, owner_id: $mowner}
 | del(.state.monitor.error)
 | .state as $s | .events as $ev
 # Bots of a host that is not reachable as a whole, or that left the ledger, are frozen: this pass says nothing about them.
@@ -706,7 +712,7 @@ apply='
 | .monitor.post_failed = any($rs[]; .status == "failed")
 '
 run_pass() {
-  local t0=$SECONDS now_s start line w host laptop remote doc results="" out l rest hosts=0 nb=0 mowner ts="" hj k=0 \
+  local t0=$SECONDS now_s start line w host laptop hname hkeys remote doc results="" out l rest hosts=0 nb=0 mowner ts="" hj k=0 \
     lang scope key lk knd verdict payload st posts="" findings=0 posted=0 inflight=""
   local envs=()
   local_env=()   # a ledger that lost its local line: POSTs with the monitor's own env
@@ -721,9 +727,13 @@ run_pass() {
     # An ssh host name, never an option: the ledger is the owner's file, but a leading "-" would be read by ssh as a flag.
     case $host in -*|*[!A-Za-z0-9._@-]*) log "ledger: host skipped (not a plain ssh host name)"; continue;; esac
     laptop=false; [ "${1:-}" != laptop ] || { laptop=true; shift; }
-    envs=()
+    envs=() hname="" hkeys=""
     for w in "$@"; do
+      # name=<display> (lower case, the one reserved word of that shape) is what the TUI calls this host: it is never an
+      # environment word, for env here or over ssh. Control characters go: US and a newline are this pass's separators.
+      case $w in name=*) hname=${w#name=}; hname=${hname//[[:cntrl:]]/}; continue;; esac
       [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { log "ledger: $host: a word that is not KEY=VALUE was skipped"; continue; }
+      hkeys="$hkeys${hkeys:+ }${w%%=*}"   # the names only, for the TUI: a value (a proxy URL may hold a password) never reaches state.json
       # A proxy word sets both spellings: curl prefers the lowercase one, which the session's own env may already set.
       case ${w%%=*} in
         HTTPS_PROXY|https_proxy) envs+=("HTTPS_PROXY=${w#*=}" "https_proxy=${w#*=}");;
@@ -737,7 +747,7 @@ run_pass() {
     remote="env $([ ${#envs[@]} = 0 ] || printf '%q ' "${envs[@]}")~/.local/bin/claude-discord health --all --json --patch"
     run_host
     doc=$(< "$M/pass.out") 2>/dev/null || doc=""
-    results="$results$host"$'\x1f'"$laptop"$'\x1f'"$h_rc"$'\n'"${doc//$'\n'/ }"$'\n'
+    results="$results$host"$'\x1f'"$laptop"$'\x1f'"$h_rc"$'\x1f'"$hname"$'\x1f'"$hkeys"$'\n'"${doc//$'\n'/ }"$'\n'
     hosts=$((hosts + 1))
   done < "$dir/hosts"
   rm -f "$M/pass.out"

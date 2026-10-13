@@ -3594,8 +3594,11 @@ posts() { sed -n 's/.* --data-binary \(.*\) https:\/\/discord.com\/api\/v10\/cha
 # Single instance, the exit rule and the footprint, with every host answering ok. TMPDIR is unwritable: nothing may
 # land in /tmp. The start meets a state.json that is
 # not valid (it starts empty and says so) and a log past its cap (256 KiB: it becomes monitor.log.1, one generation).
-printf '# mine\r\nlocal HTTPS_PROXY=http://127.0.0.1:8118\r\nh3\r\nh1\r\nh2\r\n' > "$MR/mgr/hosts"   # saved with CRLF line endings
-mdoc lambda 0 "r1:ok" > "$MON/local.out"; mdoc h1 0 "r2:ok" > "$MON/h1.out"
+# 1.11.0: a name=<display> word is what the TUI calls the host, and never an environment word (the ssh line asserted below has none).
+printf '# mine\r\nlocal name=람다 HTTPS_PROXY=http://127.0.0.1:8118\r\nh3\r\nh1 name=box1\r\nh2\r\n' > "$MR/mgr/hosts"   # saved with CRLF line endings
+# The local answer is a 1.11.0 health document (channel, its name, the last message time, the access policy); h1 answers as 1.10 did, with none of them.
+mdoc lambda 0 "r1:ok" | jq -c '.projects[0].bots[0] += {channel: "900", channel_name: "dev", last_message_at: "2026-10-13T00:00:00Z", access: {dm: "allowlist", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: []}]}}' > "$MON/local.out"
+mdoc h1 0 "r2:ok" > "$MON/h1.out"
 # h3 (before h1) answers JSON of the wrong shape inside: that host alone is blind, the hosts after it still count.
 echo '{"projects":["x"]}' > "$MON/h3.out"
 # h2 prints a whole document and exits 3: health --all exits 0 whenever it printed one, so this is blind, not ok.
@@ -3616,6 +3619,16 @@ jq -e '(.hosts.h3 | .verdict == "blind" and (.detail | test("wrong shape.*Cannot
   { echo "FAIL: a host whose document has the wrong shape is blind, and only it: $(jq -c .hosts "$MB/state.json") $(tail -2 "$MB/monitor.log")"; exit 1; }
 jq -e '(.hosts.h2| .verdict == "blind" and (.detail | test("exited 3"))) and (.bots | has("h2|/home/u/ws/p|r3") | not)' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a host whose remote exits non-zero is blind (its bots unread), document or not: $(jq -c .hosts.h2 "$MB/state.json")"; exit 1; }
+# What the TUI reads from the state since 1.11.0: a host's display name (its ledger name= word), the key names of its env
+# words (never a value: the proxy URL is nowhere in the file) and the machine's own hostname; the monitor's alert
+# language and owner; and per bot the four fields health 1.11.0 adds, null for a host whose claude-discord sends none.
+jq -e '(.hosts.local | .display == "람다" and .env == ["HTTPS_PROXY"] and .hostname == "lambda" and .name == "lambda")
+  and (.hosts.h1 | .display == "box1" and .env == [] and .hostname == "h1") and (.hosts.h3 | .display == "" and .env == [])
+  and (.bots["local|/home/u/ws/p|r1"] | .channel == "900" and .channel_name == "dev" and .last_message_at == "2026-10-13T00:00:00Z" and .access.groups[0].id == "900")
+  and (.bots["h1|/home/u/ws/p|r2"] | has("channel") and .channel == null and .channel_name == null and .last_message_at == null and .access == null)
+  and (.monitor | .lang == "ko" and .owner_id == "111")' "$MB/state.json" >/dev/null &&
+  ! command grep -qF '127.0.0.1:8118' "$MB/state.json" && ! command grep -q 'not KEY=VALUE' "$MB/monitor.log" ||
+  { echo "FAIL: the state must carry each host's display name, env key names (no value) and hostname, the monitor's language and owner, and health's 1.11.0 fields (null from an older host): $(jq -c '[.hosts, .monitor, .bots]' "$MB/state.json") $(command grep 'ledger:' "$MB/monitor.log")"; exit 1; }
 # The launcher opened monitor.log as the monitor's stdout and stderr; the rotation at start renamed that file, so the
 # monitor must have reopened it, or its output would grow monitor.log.1 past the cap. Polled: the monitor runs builtins
 # with 2>/dev/null nearly all the time at this tick, so one read of fd 2 can land on /dev/null.
@@ -3653,7 +3666,7 @@ l1=$(PATH="$HOME/psbin:$PATH" TZ=XYZ-9 LC_ALL=en_US.utf8 bash -c '. "$1"; lstart
 l2=$(PATH="$HOME/psbin:$PATH" TZ=ABC+5 LC_ALL=C bash -c '. "$1"; lstart 999999999' x "$HOME/lstart.sh")
 [ -n "$l1" ] && [ "$l1" = "$l2" ] || { echo "FAIL: a ps start time must read the same in any zone and locale: '$l1' / '$l2'"; exit 1; }
 rm -rf "$HOME/psbin" "$HOME/lstart.sh"
-echo "ok: monitor: one instance for two --ensure calls, holder records with start times, local through the shim with the ledger's env, ssh for the rest (a CRLF ledger read as plain lines; a non-zero remote exit is blind even with a document, a wrong-shaped one blinds its host alone), nothing posted when all is well; it exits within a tick of its last holder (a reused pid counts as dead), leaving only lock, state.json (stopped), monitor.log (rotated at 256 KiB, one generation, the monitor's own output reopened onto the new file) and an empty holders/, nothing in TMPDIR; a broken state.json starts empty"
+echo "ok: monitor: one instance for two --ensure calls, holder records with start times, local through the shim with the ledger's env, ssh for the rest (a CRLF ledger read as plain lines; a non-zero remote exit is blind even with a document, a wrong-shaped one blinds its host alone; a ledger name= word is the display name and no env word; env key names, hostname, the monitor's language and owner and health's 1.11.0 fields are in the state, null from an older host), nothing posted when all is well; it exits within a tick of its last holder (a reused pid counts as dead), leaving only lock, state.json (stopped), monitor.log (rotated at 256 KiB, one generation, the monitor's own output reopened onto the new file) and an empty holders/, nothing in TMPDIR; a broken state.json starts empty"
 
 # A crash leaves no lock behind: the pass's ssh is started without the lock's fd, so a new --ensure takes over while an
 # orphaned ssh still runs (that start's cap is 5 s, so its own cap never kills the ssh first). The exit race: an

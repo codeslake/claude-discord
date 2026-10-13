@@ -884,11 +884,15 @@ all on that machine (the other side of a shared home, below); `--start` and
 environment. `local` is this machine and is always there; its `KEY=VALUE`
 words are also the environment of the monitor's own Discord calls. A proxy
 word (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`, in either case)
-is set in both cases, since curl prefers the lowercase one.
+is set in both cases, since curl prefers the lowercase one. A `name=<display>`
+word (lower case) is no environment word: it is what the TUI calls that host
+(`local name=lmd79`); with none the TUI shows this machine's hostname for
+`local` and the ssh name for the others. Of the `KEY=VALUE` words
+`state.json` and the TUI keep the key names only, never a value.
 
 ```
 # ssh host names this manager checks; "local" is this machine (no ssh)
-local HTTPS_PROXY=http://127.0.0.1:8118
+local name=lmd79 HTTPS_PROXY=http://127.0.0.1:8118
 wmac  laptop HTTPS_PROXY=http://127.0.0.1:8118
 pmac  laptop
 ```
@@ -905,7 +909,9 @@ TUI), and alive only while one of them is: it exits within 30 s of the last. Eve
 `ssh -o BatchMode=yes -o ConnectTimeout=8 <host> 'env <KEY=VALUE...>
 ~/.local/bin/claude-discord health --all --json --patch'` (`local`: the same
 command without ssh), so every ledger host needs the shim and claude-discord
-1.10.0 or later, and one `claude-discord health` run in each bot project to
+1.10.0 or later (a host before 1.11.0 is checked the same; the TUI shows `-`
+for its bots' channel, receives and last), and one `claude-discord health`
+run in each bot project to
 enter it in `~/.claude-discord/records/projects`. A project listed there
 whose folder is missing (a volume not mounted yet) alerts as `blind` and is
 never dropped from the list; delete its line by hand once it is gone for
