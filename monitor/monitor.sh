@@ -404,10 +404,11 @@ lock_check() {
 # record_posts: the posts this pass sent, applied to the state (not written). Mid-pass, run_pass's locals are visible
 # here. A TERM during a POST lands only once curl is done (bash defers a trap for its foreground pipeline), before the
 # post is added to `posts`: curl's own output in post.out says whether it went out, and a 2xx counts as sent.
+# The payload of that POST is visible here too: its text goes into the alerts record.
 record_posts() {
   if [ -n "${inflight:-}" ]; then
     o=$(< "$M/post.out") 2>/dev/null || o=""
-    case ${o##*$'\n'} in 2??) posts="${posts:-}$inflight"$'\x1f'sent$'\n';; esac
+    case ${o##*$'\n'} in 2??) posts="${posts:-}$inflight"$'\x1f'sent$'\x1f'"${payload:-}"$'\n';; esac
   fi
   [ -z "${posts:-}" ] || state=$(printf '%s' "$state" | jq -c --arg results "$posts" --arg now "${ts:-$(now)}" "$apply" 2>/dev/null || printf '%s' "$state")
 }
@@ -583,6 +584,11 @@ def observe($v; $d; $meta): (. // {}) as $o
   | $o + $meta + {verdict: $v, detail: $d}
   | if ($o.verdict // null) != $v or ($o.since_s | type) != "number" then . + {since: $now, since_s: $now_s} else . end
   | . + {fix: fix};
+# warn_only: a finding the channel is not told when it appears: never posted at all (noreach, hostdown of a laptop) or
+# only once it has held for half an hour (throttled, apierror, hostdown). The pass that first sees one records it in
+# `alerts` as not_posted, so the Alerts tab of the TUI shows what the channel was never told. `unknown` (a bot with no
+# token or channel) is not a finding. (No apostrophe in these comments: the program is one single-quoted string.)
+def warn_only: .verdict != "unknown" and (hold[.verdict] == null or hold[.verdict] >= 1800 or (.verdict == "hostdown" and .laptop == true));
 def due:
   if (.verdict | good) and (.posted // null) != null then "recovery"
   elif hold[.verdict] != null and ((.verdict == "hostdown" and .laptop == true) | not)
@@ -683,7 +689,9 @@ def host_step($r):
 | [$s.hosts | to_entries[] | select(.value.reach != "ok" or .value.left_s != null) | .key] as $frozen
 | ([$s.hosts | to_entries[] | select(.value.left_s == null) | {scope: "hosts", key: .key, e: .value}]
    + [$s.bots | to_entries[] | select(.value.host as $h | $frozen | index($h) == null) | {scope: "bots", key: .key, e: .value}]) as $all
-| "S" + ($s | tojson), "N\([$s.bots[] | select(.bot)] | length)",
+| ([$all[] | select(.e.since_s == $now_s and (.e.verdict | good | not) and (.e | warn_only) and (.e | due) != "finding")
+    | {ts: $now, key: (if .scope == "hosts" then .key + "|-" else .key end), kind: "finding", verdict: .e.verdict, status: "not_posted", detail: (.e.detail // "")}]) as $quiet
+| "S" + ($s | .alerts = (((.alerts // []) + $quiet) | .[-100:]) | tojson), "N\([$s.bots[] | select(.bot)] | length)",
   ($ev[] | "E" + .),
   ($all[] | select((.e | due) == "finding" and (.e.owner_id // "" | tostring) != "" and (.e | owner) == "")
    | "Eowner_id of \(.key) is not a Discord id: posted without a mention"),
@@ -700,15 +708,28 @@ def host_step($r):
 # apply: the POST results back into the state. A sent finding sets `posted`
 # (what makes a restart, and the next pass, quiet); a sent recovery clears it;
 # a failed one changes nothing, so the next pass tries again.
+# Input lines: "<scope> US <key> US <kind> US <verdict> US <status> US <payload JSON>" (the payload may be missing).
 apply='
-# A grouped post (keys RS-separated) counts for each of its bots: `posted` stays per bot.
-($results | split("\n") | map(select(. != "") | split("\u001f") | {scope: .[0], key: (.[1] | split("\u001e")[]), kind: .[2], verdict: .[3], status: .[4]})) as $rs
+# A grouped post (keys RS-separated) counts for each of its bots: `posted` stays per bot. Each result becomes one
+# `alerts` record with what the TUI shows: the reason (`detail`; for a recovery, how long it took) and the posted
+# text. A sent post went out on a retry when the last record of its key is a failed one. A POST that keeps failing is
+# recorded once, not once a pass: 100 records are kept, and a Discord outage must not push a day of history out.
+($results | split("\n") | map(select(. != "") | split("\u001f") | {scope: .[0], key: (.[1] | split("\u001e")[]), kind: .[2], verdict: .[3], status: .[4],
+   text: (.[5] // "" | try (fromjson | .content) catch null)})) as $rs
+| ($now | fromdate) as $now_s
 | reduce $rs[] as $r (.;
-    (if $r.status != "sent" then .
-     elif $r.kind == "finding" then .[$r.scope][$r.key] |= (. + {posted: .verdict, posted_at: $now, posted_since_s: .since_s})
-     else .[$r.scope][$r.key] |= del(.posted, .posted_at, .posted_since_s) end)
-    | .alerts += [{ts: $now, key: (if $r.scope == "hosts" then $r.key + "|-" else $r.key end), kind: $r.kind, verdict: $r.verdict, status: $r.status}])
-| .alerts |= .[-50:]
+    (if $r.scope == "hosts" then $r.key + "|-" else $r.key end) as $ak
+    | (.[$r.scope][$r.key] // {}) as $e
+    | ((.alerts // []) | map(select(.key == $ak)) | last) as $prev
+    | (if $r.status != "sent" then .
+       elif $r.kind == "finding" then .[$r.scope][$r.key] |= (. + {posted: .verdict, posted_at: $now, posted_since_s: .since_s})
+       else .[$r.scope][$r.key] |= del(.posted, .posted_at, .posted_since_s) end)
+    | if $r.status == "failed" and $prev.status == "failed" and $prev.kind == $r.kind and $prev.verdict == $r.verdict then .
+      else .alerts += [{ts: $now, key: $ak, kind: $r.kind, verdict: $r.verdict, status: $r.status,
+                        detail: (if $r.kind == "recovery" then "back after \((($now_s - ($e.posted_since_s // $now_s)) / 60) | floor)m" else ($e.detail // "") end)}
+                       + (if $r.status == "sent" then {text: $r.text} else {} end)
+                       + (if $r.status == "sent" and $prev.status == "failed" then {retried: true} else {} end)] end)
+| .alerts |= .[-100:]
 | .monitor.post_failed = any($rs[]; .status == "failed")
 '
 run_pass() {
@@ -783,7 +804,7 @@ run_pass() {
             log "post $lk $verdict failed $p_code${p_retry:+ retry_after=$p_retry}"; st=failed
           fi
           # One command for both: a trap runs between commands, never inside one, so it sees the post once.
-          posts="$posts$inflight"$'\x1f'"$st"$'\n' inflight="";;
+          posts="$posts$inflight"$'\x1f'"$st"$'\x1f'"$payload"$'\n' inflight="";;
     esac
   done < <(printf '%s\n' "$out")
   rm -f "$M/post.out"

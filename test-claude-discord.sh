@@ -3782,12 +3782,15 @@ st=$(printf '%s\n' "$P1" | jq -c 'select(.content | startswith("<@222> [stale] s
   grep -q 'owner_id of h1|/home/u/ws/p|un is not a Discord id: posted without a mention$' "$MB/monitor.log" ||
   { echo "FAIL: an owner_id that is not digits is posted with no mention, pings nobody, and is logged: $(grep '] un on' <<<"$C1")"; exit 1; }
 # The state checks below, read in one go (each keeps its own message).
-IFS=$'\t' read -r s_h2 s_h5 s_lap2 s_frozen s_local s_wsc s_alerts < <(jq -r --arg fix "ssh h1 'cd ~/ws/c && ~/.local/bin/claude-discord health'" '[
+IFS=$'\t' read -r s_h2 s_h5 s_lap2 s_frozen s_local s_wsc s_sent s_quiet s_rec < <(jq -r --arg fix "ssh h1 'cd ~/ws/c && ~/.local/bin/claude-discord health'" '[
   .hosts.h2.verdict, (.hosts.h5 | .verdict == "blind" and (.detail | test("did not finish"))), .hosts.lap2.verdict,
   (.bots["h3|/home/u/ws/p|z"].posted == "stale" and .bots["h6|/home/u/ws/p|l1"].posted == "down" and .hosts.h6.verdict == "noreach"),
   (.hosts.local | .verdict == "blind" and (.detail | test("exited 255"))),
   (.bots["h1|/home/u/ws/c|-"] | .verdict == "blind" and .detail == "health exited 3 with no document" and .owner_id == "111" and .fix == $fix and .bot == null),
-  ([.alerts[].status] | "\(length) \(unique | join(","))")] | @tsv' "$MB/state.json")
+  ([.alerts[] | select(.status == "sent")] | length), ([.alerts[] | select(.status != "sent") | "\(.key) \(.verdict) \(.status)"] | sort | join(",") | if . == "" then "none" else . end),
+  (.alerts | any(.key == "h1|/home/u/ws/p|st" and .detail == "why stale" and (.text | startswith("<@222> [stale] st on h1 (~/ws/p)\n")))
+            and any(.key == "h1|/home/u/ws/p|ok" and .kind == "recovery" and .detail == "back after 35m" and (.text | startswith("[recovered] ok on h1")))
+            and any(.key == "lap2|-" and (.detail | test("asleep")) and (has("text") | not)))] | @tsv' "$MB/state.json")
 grep -q 'ledger: host skipped' "$MB/monitor.log" && ! grep -q ProxyCommand "$HOME/ssh.log" || { echo "FAIL: a ledger line that is not a plain host name must be skipped, never passed to ssh"; exit 1; }
 [ "$(printf '%s\n' "$P1" | jq -r 'select(.content | contains("[nostate]")) | .content | length')" = 1900 ] || { echo "FAIL: a message is cut to 1900 characters"; exit 1; }
 grep -q 'ControlPath=none h2 ' "$HOME/ssh.log" && grep -q 'host h2 ssh-failed rc=255 (retried with ControlPath=none)' "$MB/monitor.log" &&
@@ -3806,8 +3809,11 @@ grep -q 'Authorization: Bot tokMgrUnique' "$CURL_STDIN_LOG" && ! grep -q tokMgrU
 rm -f "$HOME/curl.proxy"
 leak=$(command grep -rlF tokMgrUnique "$HOME/.claude-discord/records" "$MP" | command grep -v '/mgr/\.env$' || :)
 [ -z "$leak" ] || { echo "FAIL: the token may appear in no file but the bot's .env: $leak"; exit 1; }
-[ "$s_alerts" = "16 sent" ] || { echo "FAIL: alerts keeps each post: $(jq -c .alerts "$MB/state.json")"; exit 1; }
-echo "ok: monitor: every row of the failure table posts after its hold and not before (a new finding after a posted one too; a finding that cleared starts its hold over) (noreach and a laptop's hostdown never), frozen bots under hostdown and noreach, a local health exiting 255 is blind, ssh 255 retried with ControlPath=none, a host silent past the cap is blind (a laptop's is hostdown, unposted), a project crashed on first sight has its own entry (and its recovery once it answers), POSTs with the local line's env, recovery lines ping nobody, a path with a space and a quote survives both shells, 1900-character cut, token on stdin only"
+# 1.11.0: each of the 16 posts is kept with its reason and its text (a recovery: how long it took), and the two findings
+# this pass saw appear and does not post when they appear (h6 noreach: never; lap2, a laptop, hostdown: never) are kept as not_posted, with no text.
+[ "$s_sent" = 16 ] && [ "$s_quiet" = "h6|- noreach not_posted,lap2|- hostdown not_posted" ] && [ "$s_rec" = true ] ||
+  { echo "FAIL: alerts keeps each post with its reason and text, and as not_posted each finding the channel is not told when it appears: sent=$s_sent quiet=$s_quiet rec=$s_rec $(jq -c '[.alerts[] | del(.text)]' "$MB/state.json")"; exit 1; }
+echo "ok: monitor: every row of the failure table posts after its hold and not before (a new finding after a posted one too; a finding that cleared starts its hold over) (noreach and a laptop's hostdown never), frozen bots under hostdown and noreach, a local health exiting 255 is blind, ssh 255 retried with ControlPath=none, a host silent past the cap is blind (a laptop's is hostdown, unposted), a project crashed on first sight has its own entry (and its recovery once it answers), POSTs with the local line's env, recovery lines ping nobody, a path with a space and a quote survives both shells, 1900-character cut, token on stdin only; alerts keeps each post with its reason and text and, as not_posted, each finding the channel is not told when it appears"
 
 # A failed POST stays pending: logged, shown (post_failed, an alert with status failed), retried next pass; a 429 under
 # 10 s is waited out in the pass, a longer one (the retry's answer here) is left for the next pass.
@@ -3833,9 +3839,11 @@ kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :; rm -f "$HOME/curl.
 # The in-flight path ran, not the ordinary one: a TERM that came after curl returned would have the pass log the post
 # (and record it) itself, and this case would pass without finish ever reading post.out. Here no 'post ... tm' line
 # exists, and state.json has tm as posted all the same: finish took it from curl's own answer.
-! command grep -q 'post h1|/home/u/ws/p|tm ' "$MB/monitor.log" && [ "$(jq -r '.bots["h1|/home/u/ws/p|tm"].posted' "$MB/state.json")" = stale ] ||
-  { echo "FAIL: a TERM during a POST must be recorded from post.out by finish, not by the pass (late TERM, or tm unrecorded): $(command grep ' post ' "$MB/monitor.log") $(jq -c '.bots["h1|/home/u/ws/p|tm"]' "$MB/state.json")"; exit 1; }
-mstate --argjson n "$(date +%s)" '.hosts.h5.left_s = $n - 86401 | .hosts.h6.left_s = $n - 86401'
+! command grep -q 'post h1|/home/u/ws/p|tm ' "$MB/monitor.log" && [ "$(jq -r '"\(.bots["h1|/home/u/ws/p|tm"].posted) \(.alerts[-1] | .key == "h1|/home/u/ws/p|tm" and .status == "sent" and (.text // "" | startswith("<@222> [stale] tm on h1")))"' "$MB/state.json")" = "stale true" ] ||
+  { echo "FAIL: a TERM during a POST must be recorded from post.out by finish, with the post's text, not by the pass (late TERM, or tm unrecorded): $(command grep ' post ' "$MB/monitor.log") $(jq -c '[.bots["h1|/home/u/ws/p|tm"], .alerts[-1]]' "$MB/state.json")"; exit 1; }
+# 120 old records too: alerts keeps the last 100.
+mstate --argjson n "$(date +%s)" '.hosts.h5.left_s = $n - 86401 | .hosts.h6.left_s = $n - 86401
+  | .alerts = ([range(0; 120) | {ts: "2026-01-01T00:00:00Z", key: "pad|-", kind: "finding", verdict: "blind", status: "sent"}] + .alerts)'
 export CLAUDE_DISCORD_MONITOR_PASS=0.02
 printf '%s\n' '429 {"retry_after": 0.01}' '429 {"retry_after": 60}' > "$CURL_REPLIES"; : > "$CURL_LOG"
 mdoc h1 1 nf:stale tm:stale > "$MON/h1.out"
@@ -3847,8 +3855,9 @@ mv "$MR/mgr/.env.keep" "$MR/mgr/.env"; wait_log 1 ' failed 429 retry_after=60$'
 [ "$(posts | grep -c '\[stale\] nf')" -ge 2 ] && ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the restart must post only what is new (nf, twice: the 429 then its retry), never the patchfail already posted nor tm, sent while a TERM waited: $(posts)"; exit 1; }
 next_pass
 ! grep -q 'retry_after=0.01' "$MB/monitor.log" || { echo "FAIL: a 429 with retry_after under 10 s must be waited out and retried in the same pass: $(grep ' post ' "$MB/monitor.log")"; exit 1; }
-jq -e '(.bots["h1|/home/u/ws/p|nf"].posted // "none") == "none" and .monitor.post_failed and (.alerts[-1].status == "failed")' "$MB/state.json" >/dev/null ||
-  { echo "FAIL: a failed POST leaves the finding unposted and shows the failure: $(jq -c .monitor "$MB/state.json")"; exit 1; }
+jq -e '(.bots["h1|/home/u/ws/p|nf"].posted // "none") == "none" and .monitor.post_failed and (.alerts[-1].status == "failed")
+  and (.alerts | length) == 100 and ([.alerts[] | select(.key == "h1|/home/u/ws/p|nf")] | length) == 1' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: a failed POST leaves the finding unposted and shows the failure, as one alerts record however many passes it fails, of the 100 kept: $(jq -c '[.monitor, (.alerts | length), [.alerts[] | select(.key == "h1|/home/u/ws/p|nf")]]' "$MB/state.json")"; exit 1; }
 # A stray file in holders/ named other than <kind>-<digits> (here a copy of the live record): removed, never read as a
 # pid, which would break the holders' JSON and with it every pass.
 cp "$MB/holders/tui-$HPID" "$MB/holders/tui-${HPID}x"; next_pass
@@ -3856,7 +3865,8 @@ n=0; while [ -e "$MB/holders/tui-${HPID}x" ] && [ "$n" -lt 100 ]; do nap 0.01; n
 [ ! -e "$MB/holders/tui-${HPID}x" ] && ! grep -q 'pass failed' "$MB/monitor.log" || { echo "FAIL: a holder record whose name is not <kind>-<digits> must be dropped, never fail a pass: $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
 printf '200 {}\n' > "$CURL_REPLIES"
 wait_log 1 'post h1\|/home/u/ws/p\|nf stale 200$'; next_pass
-jq -e '.bots["h1|/home/u/ws/p|nf"].posted == "stale" and .monitor.post_failed == false' "$MB/state.json" >/dev/null &&
+jq -e '.bots["h1|/home/u/ws/p|nf"].posted == "stale" and .monitor.post_failed == false
+  and ([.alerts[] | select(.key == "h1|/home/u/ws/p|nf") | [.status, .retried]] == [["failed", null], ["sent", true]])' "$MB/state.json" >/dev/null &&
   ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the pending post must be sent on a later pass, and nothing else posted: $(posts)"; exit 1; }
 [ "$(posts | tail -n 1 | jq -r .content)" = "$(printf "<@222> [stale] nf on h1 (~/ws/p)\nreason: why stale\nfix: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord refresh nf --force'")" ] || { echo "FAIL: ALERT_LANG=EN must give English labels: $(posts | tail -n 1)"; exit 1; }
 jq -e --arg sp "h2|/home/u/it's \$x here|s p'q" '(.hosts | keys) == ["h1", "h2", "h3", "h4", "lap", "lap2", "local"]
@@ -3878,7 +3888,7 @@ rm -f "$MB/stopped"; kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || 
   jq -e '.bots["h1|/home/u/ws/p|x1"].posted == "stale" and .bots["h1|/home/u/ws/p|x2"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a stopped marker met between posts ends the posting (the rest stay pending), what was sent recorded, nf not sent again: $(posts) $(jq -c '.bots | map_values(.posted)' "$MB/state.json")"; exit 1; }
 jq -e '.hosts.local | .verdict == "blind" and (.detail | test("did not finish")) and (has("left_s") | not)' "$MB/state.json" >/dev/null || { echo "FAIL: a local laptop past the cap is blind (it alerts), not hostdown, and a host back in the ledger is no longer left: $(jq -c .hosts.local "$MB/state.json")"; exit 1; }
-echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; bots that left are dropped and logged, hosts that left kept a day (frozen, posted kept) then dropped; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting; a POST under way when a TERM comes is recorded once it went out; a stray holder file is dropped"
+echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 under 10 s waited in the pass), sent once when it goes through; a pass that sees nothing new posts nothing and neither does a restart; a missing token is logged as the reason; bots that left are dropped and logged, hosts that left kept a day (frozen, posted kept) then dropped; ALERT_LANG=EN gives English labels; a local laptop past the cap is blind, never hostdown; a holder gone between posts stops the posting; a POST under way when a TERM comes is recorded once it went out; a stray holder file is dropped; a POST that keeps failing is one alerts record and the one that goes out is marked retried; alerts keeps 100 records"
 
 # Cadence and self-update, counted, never timed. date and sleep are stubs for this monitor: date reads $HOME/clock,
 # which each local health run moves 1000 s on, and logs D for a pass's start stamp (the %s call); sleep logs its

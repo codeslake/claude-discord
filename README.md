@@ -975,7 +975,7 @@ Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
 | file | what |
 |---|---|
 | `lock` | the single-instance lock (`flock` through perl); holds the running monitor's pid, and a monitor whose lock file was removed or replaced exits at its next tick |
-| `state.json` | what the TUI shows; kept after exit, and what keeps a restart from repeating a finding |
+| `state.json` | what the TUI shows; kept after exit, and what keeps a restart from repeating a finding. Its `alerts` holds the last 100 records: every post with its reason and text, and every finding the channel was not told when it appeared (`not_posted`) |
 | `monitor.log`, `monitor.log.1` | one line per event, 256 KiB each at most |
 | `holders/<kind>-<pid>` | one record per keeper (`keeper`) or open TUI (`tui`): `<pid> <start time> <kind>` (a `session` record from 1.10.2 is read until its session ends) |
 | `stopped` | `monitor --stop` was run: nothing starts the backend until `monitor --start` |
@@ -1005,6 +1005,12 @@ message there wakes no session.
 | `down`, `duplicate`, `unreachable`, `blind` | 5 min | `blind`: the host answered ssh but gave no health document (no claude-discord there, or one before 1.10.0) |
 | `throttled`, `apierror`, `hostdown` | 30 min | `hostdown`: ssh itself failed, also with `-o ControlPath=none`; never posted for a `laptop` |
 | `noreach` | never | that host cannot reach Discord; logged and shown |
+
+A finding the channel is not told when it appears (`noreach`, a laptop's
+`hostdown`, and `throttled`, `apierror` and `hostdown` until their 30 minutes
+are up) is recorded all the same, as `not_posted`: the TUI's Alerts tab shows
+it. A post that keeps failing is one record, and the one that finally goes
+out is marked as sent on a retry.
 
 While a host is `noreach`, `hostdown` or `blind`, nothing is said about its
 bots. A bot's owner is `DISCORD_USER_ID` of its project's `config.env`; a
