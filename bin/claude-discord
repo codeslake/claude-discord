@@ -124,8 +124,10 @@ jq_edit() {  # $1 = file, the rest = jq arguments
   local f=$1 base='{}' merged
   shift
   if [ -e "$f" ]; then
-    # Nothing to change in a file already in jq's own form (as every file written here is): said by one jq, not two.
-    if [ -s "$f" ] && merged=$(jq "$@" "$f" 2>/dev/null) && [ -n "$merged" ] && [ "$merged" = "$(<"$f")" ]; then return 0; fi
+    # Nothing to change in a file already in jq's own form (as every file written here is): said by one jq, not two
+    # (an edit that does change it then costs three; those are setup and a first start). 2>/dev/null: bash warns
+    # about a NUL byte in a file it reads.
+    if [ -s "$f" ] && merged=$(jq "$@" "$f" 2>/dev/null) && [ -n "$merged" ] && { [ "$merged" = "$(<"$f")" ]; } 2>/dev/null; then return 0; fi
     base=$(jq . "$f" 2>/dev/null) || { echo "claude-discord: $f is not valid JSON, leaving it alone" >&2; return 0; }
     [ -n "$base" ] || base='{}'
   fi
@@ -2083,9 +2085,9 @@ bin=$(command -v claude) || { echo "claude-discord: claude is not on PATH" >&2; 
 launcher=${CLAUDE_DISCORD_LAUNCHER:-${CLAUDE_CODE_PROCESS_WRAPPER:-}}
 # Asked of jq only when the file names it at all: every bot start comes through here, and one jq start is 10 ms with jq 1.6.
 if [ -z "$launcher" ] && [ -r "$HOME/.claude/settings.json" ]; then
-  case $(<"$HOME/.claude/settings.json") in
-    *CLAUDE_CODE_PROCESS_WRAPPER*) launcher=$(jq -r '.env.CLAUDE_CODE_PROCESS_WRAPPER // empty' "$HOME/.claude/settings.json" 2>/dev/null) || : ;;
-  esac
+  { case $(<"$HOME/.claude/settings.json") in   # 2>/dev/null: bash warns about a NUL byte in a file it reads
+    *CLAUDE_CODE_PROCESS_WRAPPER*) launcher=$(jq -r '.env.CLAUDE_CODE_PROCESS_WRAPPER // empty' "$HOME/.claude/settings.json") || : ;;
+  esac; } 2>/dev/null
 fi
 run=("$bin")
 [ -n "$launcher" ] && run=("$launcher" "$bin")

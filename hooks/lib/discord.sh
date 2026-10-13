@@ -39,10 +39,11 @@ resolve_channel() {
     bot_channel=${bot_channel%\'}
   fi
   # One jq for both answers (a jq start is 10 ms with jq 1.6, and every prompt asks): the channel on the first line,
-  # then the ids that channel's group and the top-level allowFrom name, one a line.
+  # then the ids that channel's group and the top-level allowFrom name, one a line. An allowFrom of the wrong shape
+  # costs only the ids, never the channel (try), and a file jq reads as nothing (empty) leaves config.env's channel.
   out=$(jq -r --arg fb "$bot_channel" '((.groups | objects | keys) // []) as $k
     | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) as $ch
-    | $ch, (.groups[$ch].allowFrom // [])[], (.allowFrom // [])[]' "$DISCORD_STATE_DIR/access.json" 2>/dev/null) || return 0
+    | $ch, try ((.groups[$ch].allowFrom // [])[], (.allowFrom // [])[]) catch empty' "$DISCORD_STATE_DIR/access.json" 2>/dev/null) && [ -n "$out" ] || return 0
   bot_channel=${out%%$'\n'*}
   case $out in *$'\n'*) bot_access_ids=${out#*$'\n'};; esac
 }

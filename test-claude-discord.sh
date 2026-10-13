@@ -714,6 +714,20 @@ jq '.groups["999"].allowFrom = ["501"] | .allowFrom = ["502"]' "$DSD/access.json
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1n","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"999\" message_id=\"225\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}')
 printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext' | grep -q '^People in this channel (mention one as <@id> to reach them): <@501>, <@502>, Own 5 er <@111>, ' || { echo "FAIL: the People line must name the channel group's allowFrom, then the top-level one, then the owner: $out"; exit 1; }
 jq '.groups["999"].allowFrom = [] | .allowFrom = []' "$DSD/access.json.keep" > "$DSD/access.json"
+# An allowFrom of the wrong shape costs only its ids, never the channel; an access.json that is empty leaves config.env's
+# channel (jq_edit empties the file for a moment as it writes).
+jq '.groups["999"].allowFrom = ["501"] | .allowFrom = "3"' "$DSD/access.json.keep" > "$DSD/access.json"
+out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1o","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"999\" message_id=\"226\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}')
+ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
+grep -q ' in channel 999\. ' <<<"$ctx" && grep -q '^People in this channel (mention one as <@id> to reach them): <@501>, Own 5 er <@111>, ' <<<"$ctx" || { echo "FAIL: a top-level allowFrom that is no array must cost only its own ids, not the channel or the group's: $ctx"; exit 1; }
+jq '.groups["999"] = true' "$DSD/access.json.keep" > "$DSD/access.json"
+(DSD0=$DSD; DISCORD_STATE_DIR=$DSD0; . "$R/hooks/lib/discord.sh"; resolve_channel; [ "$bot_channel" = 999 ]) || { echo "FAIL: a group that is no object must still name the channel"; exit 1; }
+cfg_ch=$(sed -n "s/^DISCORD_CHANNEL_ID='\{0,1\}\([0-9]*\)'\{0,1\}$/\1/p" "$R/config.env")
+for body in '' '  '; do
+  printf '%s' "$body" > "$DSD/access.json"
+  (DISCORD_STATE_DIR=$DSD; . "$R/hooks/lib/discord.sh"; resolve_channel; [ -n "$cfg_ch" ] && [ "$bot_channel" = "$cfg_ch" ] && [ -z "$bot_access_ids" ]) || { echo "FAIL: an empty access.json ('$body') must leave config.env's channel ($cfg_ch)"; exit 1; }
+done
+jq '.groups["999"].allowFrom = [] | .allowFrom = []' "$DSD/access.json.keep" > "$DSD/access.json"
 # 21 writers: the file keeps the newest 20, the one who wrote last is last. Twenty of them are written straight into the file, so one real prompt takes it past the cap.
 for i in $(seq 1 20); do printf '50%s p%s\n' "$i" "$i"; done >> "$DSD/user-names"
 i=21; DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"{\"session_id\":\"s1m\",\"prompt\":\"<channel source=\\\"plugin:discord:discord\\\" chat_id=\\\"999\\\" message_id=\\\"3$i\\\" user=\\\"p$i\\\" user_id=\\\"50$i\\\" ts=\\\"t\\\">\\nhi\\n</channel>\"}" >/dev/null
