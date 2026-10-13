@@ -468,11 +468,12 @@ def tabs_lines(tab: str, n_open: int, width: int) -> Text:
 
 
 def foot_line(tab: str, width: int = WIDE) -> Text:
-    """The keys of a tab. The Bots tab's are 85 cells: below WIDE two labels are shorter, so all six keys fit in 80."""
-    fields, copy = ("all fields", "copy fix") if width >= WIDE else ("fields", "copy")
+    """The keys of a tab. The Bots tab's are 85 cells and the Configuration tab's 91: below WIDE two labels of each are
+    shorter, so every key fits in 80."""
+    fields, copy, edit, add = ("all fields", "copy fix", "settings", "add host") if width >= WIDE else ("fields", "copy", "edit", "add")
     keys = {"bots": (("↑↓", "select"), ("space", "expand"), ("enter", fields), ("c", copy), ("←→", "tabs"), ("q", "quit")),
             "alerts": (("↑↓", "select"), ("enter", "the post's text"), ("←→", "tabs"), ("q", "quit")),
-            "config": (("←→", "tabs"), ("↑↓", "select"), ("enter", "all fields"), ("a", "add host"), ("q", "quit"))}[tab]
+            "config": (("←→", "tabs"), ("↑↓", "select"), ("enter", edit), ("a", add), ("x", "remove"), ("l", "laptop"), ("q", "quit"))}[tab]
     out = Text(" ")
     for k, what in keys:
         out.append(f" {k} ", f"bold on {TAB}")
@@ -612,20 +613,36 @@ def alerts_items(state: dict, width: int, now: float) -> list[tuple]:
     return items
 
 
+def reach_of(h: dict) -> tuple[str, str]:
+    """Whether the last pass reached a host: symbol + word, and its colour."""
+    v = txt(obj(h).get("verdict"))
+    return ("● ok", OK) if v == "ok" else ("○ unreachable", DIM) if v == "hostdown" else (f"▲ {v or '?'}", WARN)
+
+
+def last_check(h, now: float) -> Text:
+    """The host popup's `last check`: the reach, for how long when it is not ok, the monitor's reason, and when it was
+    checked. A host the state does not have yet (added since the last pass) says so."""
+    if not isinstance(h, dict):
+        return Text("not checked yet: the monitor meets it at its next pass", DIM)
+    word, style = reach_of(h)
+    since, checked, detail = ago(h.get("since"), now), ago(h.get("checked"), now), txt(h.get("detail"))
+    return Text.assemble((word + (f" {since}" if since and h.get("verdict") != "ok" else ""), style), "   " + detail if detail else "",
+                         ("   checked just now" if checked == "now" else f"   checked {checked} ago" if checked else "", DIM))
+
+
 def config_items(state: dict, names: dict, width: int) -> list[tuple]:
-    """The Configuration tab, read-only: the ledger's hosts as the last pass saw them, and the monitor's settings."""
+    """The Configuration tab: the ledger's hosts as the last pass saw them, and the monitor's settings."""
     wide = width >= WIDE
     cols = ([("host", 12), ("ssh target", 0), ("kind", 7)] + ([("env", 16)] if wide else []) + [("reach", 14)]
             + ([("claude-discord", 15)] if wide else []) + [("bots", 4)])
     cols[1] = ("ssh target", max(10, width - 2 - sum(w for _, w in cols) - len(cols) + 1))
     bots, m, mgr = obj(state.get("bots")), obj(state.get("monitor")), txt(state.get("manager")) or "?"
     hosts = sorted(obj(state.get("hosts")).items(), key=lambda kh: (kh[0] != "local", kh[0]))   # this machine first
-    add = Text.assemble((" + Add host ", f"bold #000000 on {BRAND}"), ("    a · from ~/.ssh/config and its Includes, or an ssh alias typed in", DIM))
+    add = Text.assemble((" + Add host ", f"bold #000000 on {BRAND}"), ("    a · x remove (asks) · l laptop on/off · enter settings", DIM))
     items: list[tuple] = [(None, [rule("Hosts", len(hosts), "", width), Text(), add, Text()]), (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))]
     for key, h in hosts:
         h = obj(h)
-        v, name, env = txt(h.get("verdict")), txt(h.get("hostname")), ids(h.get("env"))
-        reach = ("● ok", OK) if v == "ok" else ("○ unreachable", DIM) if v == "hostdown" else (f"▲ {v or '?'}", WARN)
+        name, env, reach = txt(h.get("hostname")), ids(h.get("env")), reach_of(h)
         if key == "local":
             target = "this machine (local" + (f" name={h['display']}" if txt(h.get("display")) else "") + ")"
         else:
@@ -885,6 +902,182 @@ class AddHost(ModalScreen):
             self.say(err or f"claude-discord hosts exited {rc}", ALERT)
 
 
+class Kind(Static, can_focus=True):
+    """The host popup's kind, a radio pair drawn `( ) server   (●) laptop`: space or an arrow flips it while it has the focus."""
+    BINDINGS = [Binding("space", "flip"), Binding("left", "flip"), Binding("right", "flip")]
+    laptop = False
+
+    def paint(self) -> None:
+        pair = [(f"{'(●)' if on else '( )'} {word}", "bold" if on else "") for word, on in (("server", not self.laptop), ("laptop", self.laptop))]
+        self.update(Text.assemble((fit("kind", 16), DIM), pair[0], "   ", pair[1], ("    a laptop that is off is not alerted", DIM)))
+
+    def action_flip(self) -> None:
+        self.laptop = not self.laptop
+        self.paint()
+        self.screen.changed()
+
+
+class HostEdit(ModalScreen):
+    """Enter on a host row of the Configuration tab: that host's line of the ledger. What can be changed: its display
+    name, its kind and its env words. The ledger is read through `hosts list --json` (key names only: this program
+    never sees a value) and changed through `hosts set <alias> --stdin`: Save sends every change in that one call, a
+    new value on stdin and in no argument list. A value is typed masked and is never drawn: an env word shows `••••`
+    whatever it holds, and to change one is to type a new one. Dismissed with what there is to say, or None."""
+    CSS = f"""HostEdit {{ align: center middle; }}
+    #host {{ width: 112; max-width: 96%; height: auto; border: round {BRAND}; padding: 1 2; }}
+    #host Horizontal {{ height: 1; }} #host .lab {{ width: 16; color: $text-muted; }} #host .hint {{ width: auto; padding-left: 2; color: $text-muted; }}
+    #h-name {{ width: 26; }} #h-key {{ width: 22; }} #h-value {{ width: 34; }} #h-eq {{ width: 3; }}
+    #h-buttons {{ margin-top: 1; }} #host Button {{ margin-right: 2; }} Kind:focus {{ background: {CURSOR}; }}"""
+    BINDINGS = [Binding("escape", "close", "close")]
+
+    def __init__(self, alias: str, target: str) -> None:
+        super().__init__()
+        self.alias, self.target = alias, target
+        self.was: tuple | None = None   # (display name, laptop, env key names) as the ledger has them; None until it is read
+        self.staged: dict = {}          # env key -> its new value ("" removes the key): sent by Save, drawn nowhere
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="host"):
+            yield Static("", id="h-title")
+            yield Static(Text.assemble((fit("ssh alias", 16), DIM), (self.alias, "bold")))
+            yield Static(Text.assemble((fit("target", 16), DIM), self.target), id="h-target")
+            with Horizontal():
+                yield Static("display name", classes="lab")
+                yield Input(id="h-name", restrict=r"[^\s'\"]*", max_length=64, compact=True, disabled=True, select_on_focus=False)   # the first key adds to the name
+                yield Static("shown instead of the hostname", classes="hint")
+            yield Kind(id="h-kind", disabled=True)
+            yield Static("", id="h-env")
+            with Horizontal():
+                yield Static("", classes="lab")
+                yield Input(id="h-key", placeholder="KEY", restrict=r"[A-Za-z_][A-Za-z0-9_]*", max_length=64, compact=True, disabled=True)
+                yield Static(" = ", id="h-eq")
+                yield Input(id="h-value", placeholder="a new value; none removes KEY", password=True, restrict=r"[^\s'\"]*", max_length=1024, compact=True, disabled=True)
+                yield Static("enter", classes="hint")
+            yield Static("", id="h-last")
+            yield Static("", id="h-fix", markup=False)
+            with Horizontal(id="h-buttons"):
+                yield Button("Save", id="h-save", compact=True, disabled=True)
+                yield Button("Stop monitoring this host", id="h-stop", variant="error", compact=True, disabled=True)
+                yield Static("asks first; its bots leave the list", classes="hint")
+            yield Static("reading the ledger ...", id="h-msg", markup=False)
+
+    def on_mount(self) -> None:
+        self.paint_last()
+        self.set_interval(2, self.paint_last)   # the app re-reads state.json every 2 s: a pass that ends shows here
+        self.run(("list", "--json"), None, "reading the ledger ...", self.loaded)
+
+    def say(self, text: str, style: str = DIM) -> None:
+        self.query_one("#h-msg", Static).update(Text(text, style))
+
+    def paint_last(self) -> None:
+        h = obj(self.app.state.get("hosts")).get(self.alias)
+        self.query_one("#h-last", Static).update(Text.assemble((fit("last check", 16), DIM), last_check(h, time.time())))
+        self.query_one("#h-fix", Static).update(" " * 16 + txt(obj(h).get("fix")) if txt(obj(h).get("fix")) else "")
+
+    def run(self, args: tuple, stdin: str | None, saying: str, then) -> None:
+        """A hosts CLI call in a worker thread, its answer to `then` on the event loop; the buttons wait meanwhile."""
+        self.say(saying)
+        for b in self.query(Button):
+            b.disabled = True
+        cli = self.app.hosts_cli
+        self.run_worker(lambda: self.app.call_from_thread(then, cli(*args, stdin=stdin)), thread=True)
+
+    def loaded(self, answer: tuple) -> None:
+        """The ledger's line(s) for this alias, from `hosts list --json`. Its text is another program's output: parsed
+        as JSON, cleaned, and every field read through txt/obj/seq, so a wrong shape is a refusal to edit, never a crash."""
+        if not self.is_attached:
+            return
+        rc, out, err = answer
+        try:
+            doc = clean(json.loads(out)) if rc == 0 else None
+        except ValueError:
+            doc = None
+        rows = [h for h in seq(obj(doc).get("hosts")) if isinstance(h, dict) and h.get("alias") == self.alias]
+        if not rows:
+            return self.say(err or (f"{self.alias} is not in the ledger" if isinstance(doc, dict) else f"claude-discord hosts list gave no ledger (exit {rc})"), ALERT)
+        keys = list(dict.fromkeys(k for h in rows for k in ids(h.get("env"))))   # two lines for one alias: every key of both
+        self.was = (txt(rows[0].get("name")), rows[0].get("laptop") is True, keys)
+        self.query_one(Kind).laptop = self.was[1]
+        for w in list(self.query(Input)) + list(self.query(Button)) + [self.query_one(Kind)]:
+            w.disabled = w.id == "h-stop" and self.alias == "local"   # local is this machine: it stays
+        name = self.query_one("#h-name", Input)
+        name.value = self.was[0]
+        name.focus()
+        self.query_one(Kind).paint()
+        self.changed()
+        self.say("tab moves · enter in the value field stages an env change · Save writes them all · esc closes without saving")
+
+    def dirty(self) -> bool:
+        return self.was is not None and (self.query_one("#h-name", Input).value != self.was[0] or self.query_one(Kind).laptop != self.was[1] or bool(self.staged))
+
+    def changed(self) -> None:
+        """The title (unsaved changes are said there) and the env line: each key masked, and what Save will do to it."""
+        if self.was is None:
+            return
+        self.query_one("#h-title", Static).update(Text.assemble(("Host", f"bold {BRAND}"), (" · ", DIM), (self.alias, f"bold {BRAND}"),
+                                                                ("    ● unsaved changes", WARN) if self.dirty() else ""))
+        env = Text(fit("env", 16), DIM)
+        for k in self.was[2] + [k for k in self.staged if k not in self.was[2]]:
+            new = self.staged.get(k)
+            env.append_text(Text.assemble((k, "" if new != "" else DIM), (" ••••" if new != "" else "", DIM),
+                                          (" (removed on save)" if new == "" else " (changed)" if new is not None and k in self.was[2] else " (new)" if new is not None else "", WARN), "   "))
+        if not self.was[2] and not self.staged:
+            env.append("none", DIM)
+        self.query_one("#h-env", Static).update(env)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self.changed()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "h-value":
+            self.stage()
+        else:
+            self.focus_next()
+
+    def stage(self) -> None:
+        """KEY and its new value (none: remove KEY) from the two fields into `staged`; the fields are emptied."""
+        key, value = self.query_one("#h-key", Input), self.query_one("#h-value", Input)
+        if not key.value:
+            return
+        if value.value or key.value in self.was[2]:
+            self.staged[key.value] = value.value
+        else:   # no value for a key the line does not have: nothing to remove
+            self.staged.pop(key.value, None)
+        key.value = value.value = ""
+        key.focus()
+        self.changed()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "h-save":
+            self.stage()   # a key and a value typed and not entered are meant too
+            name, laptop = self.query_one("#h-name", Input).value, self.query_one(Kind).laptop
+            lines = ([f"name={name}"] if name != self.was[0] else []) + ([f"laptop {'on' if laptop else 'off'}"] if laptop != self.was[1] else []) \
+                + [f"{k}={v}" for k, v in self.staged.items()]
+            if not lines:
+                return self.say("nothing to save")
+            self.run(("set", self.alias, "--stdin"), "\n".join(lines) + "\n", f"saving {self.alias} ...", self.ran)
+        elif event.button.id == "h-stop":
+            self.app.push_screen(Confirm(f"Stop monitoring {self.alias}? Its line leaves the ledger of {self.app.bot}; its bots leave the list (the monitor "
+                                         "keeps them a day as 'left the ledger'). Nothing is stopped on the host itself."),
+                                 lambda yes: self.run(("rm", self.alias), None, f"removing {self.alias} ...", self.ran) if yes else None)
+
+    def ran(self, answer: tuple) -> None:
+        if not self.is_attached:
+            return
+        rc, out, err = answer
+        if rc == 0:
+            return self.dismiss("\n".join(x for x in (out, err) if x))
+        for b in self.query(Button):
+            b.disabled = b.id == "h-stop" and self.alias == "local"
+        self.say(err or f"claude-discord hosts exited {rc}", ALERT)
+
+    def action_close(self) -> None:
+        if self.dirty():
+            self.app.push_screen(Confirm(f"Close without saving the changes to {self.alias}?"), lambda yes: self.dismiss(None) if yes else None)
+        else:
+            self.dismiss(None)
+
+
 class Confirm(ModalScreen[bool]):
     """A yes/no question, No by default (focused, and Enter, n and Escape answer it)."""
     CSS = "Confirm { align: center middle; } #confirm { width: 70; height: auto; border: thick $error; padding: 1 2; }"
@@ -925,7 +1118,8 @@ class MonitorTUI(App):
     """
     BINDINGS = [Binding("q", "quit", "quit"), Binding("Q", "quit_stop", "quit + stop backend"),
                 Binding("up", "move(-1)"), Binding("down", "move(1)"), Binding("left", "tab(-1)"), Binding("right", "tab(1)"),
-                Binding("space", "toggle"), Binding("enter", "open"), Binding("c", "copy"), Binding("a", "add")]
+                Binding("space", "toggle"), Binding("enter", "open"), Binding("c", "copy"), Binding("a", "add"), Binding("x", "remove"),
+                Binding("l", "laptop")]
 
     def __init__(self, state_dir: Path, bot: str, wrapper: str | None) -> None:
         super().__init__()
@@ -1057,7 +1251,7 @@ class MonitorTUI(App):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         # The row keys belong to the main view: under a Detail or a dialog they do nothing.
-        return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy", "add")
+        return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy", "add", "remove", "laptop")
 
     def action_tab(self, d: int) -> None:
         self.tab = TABS[(TABS.index(self.tab) + d) % len(TABS)]
@@ -1085,7 +1279,14 @@ class MonitorTUI(App):
             self.push_screen(Detail(posted_text(a)))
             return
         scope = "bots" if self.tab == "bots" else "hosts"
-        entry = obj(obj(self.state.get(scope)).get(key))
+        entry = obj(self.state.get(scope)).get(key)
+        if scope == "hosts" and isinstance(entry, dict) and entry.get("left_s") is None:   # a host of the ledger: its settings
+            named = next((h for h in ssh_hosts(self.home) if h["alias"] == key), {"alias": key})
+            name = txt(entry.get("hostname"))
+            target = "this machine" if key == "local" else ssh_target(named) + (f" ({name})" if name and name != key else "")
+            self.push_screen(HostEdit(key, target), self.said)
+            return
+        entry = obj(entry)
         # A host's posts are keyed host|- in `alerts`; a bot's and a project row's by their own key.
         self.push_screen(Detail(entry_text(key, key + "|-" if scope == "hosts" else key, with_mode(entry) if scope == "bots" else entry, alerts),
                                 txt(entry.get("fix"))))
@@ -1107,6 +1308,25 @@ class MonitorTUI(App):
         """What a dialog was dismissed with: the CLI's own words, shown as they are (never as markup)."""
         if text:
             self.notify(text, timeout=10, markup=False)
+
+    def hosts_do(self, *args: str) -> None:
+        """A hosts CLI call from a key of the main view, in a worker thread; what it says is shown when it ends."""
+        def work() -> None:
+            rc, out, err = self.hosts_cli(*args)
+            self.call_from_thread(self.said, "\n".join(x for x in (out, err) if x) or f"claude-discord hosts exited {rc}")
+        self.run_worker(work, thread=True)
+
+    def action_remove(self) -> None:
+        key = self.cursor["config"] if self.tab == "config" else None
+        if key:
+            self.push_screen(Confirm(f"Stop monitoring {key}? Its line leaves the ledger of {self.bot}; its bots leave the list (the monitor keeps them "
+                                     "a day as 'left the ledger'). Nothing is stopped on the host itself."),
+                             lambda yes: self.hosts_do("rm", key) if yes else None)
+
+    def action_laptop(self) -> None:
+        key = self.cursor["config"] if self.tab == "config" else None
+        if key:   # from what the last pass saw; when the ledger was changed since, the CLI says `already so`
+            self.hosts_do("laptop", key, "off" if obj(obj(self.state.get("hosts")).get(key)).get("laptop") else "on")
 
     def action_add(self) -> None:
         if self.tab == "config":

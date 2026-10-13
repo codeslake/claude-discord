@@ -339,7 +339,8 @@ def pure():
     assert tui.foot_line("bots", 109).plain.split() == "↑↓ select space expand enter fields c copy ←→ tabs q quit".split()
     assert all(tui.foot_line(t, 80).plain.split()[-2:] == ["q", "quit"] and cell_len(tui.foot_line(t, 80).plain.rstrip()) <= 80 for t in tui.TABS)
     assert tui.foot_line("alerts").plain.split() == "↑↓ select enter the post's text ←→ tabs q quit".split()
-    assert tui.foot_line("config").plain.split() == "←→ tabs ↑↓ select enter all fields a add host q quit".split()
+    assert tui.foot_line("config").plain.split() == "←→ tabs ↑↓ select enter settings a add host x remove l laptop q quit".split()
+    assert tui.foot_line("config", 80).plain.split() == "←→ tabs ↑↓ select enter edit a add x remove l laptop q quit".split() and cell_len(tui.foot_line("config", 80).plain.rstrip()) <= 80
     assert tui.bar_text({}) == "no state yet: the monitor has not written state.json"
     assert tui.bar_text(mon(stopped_by_user=True)) is None and tui.bar_text(mon(), stopped=True) is None, "the title says stopped by you"
     assert tui.bar_text(mon(), note="no ledger", stopped=True) == "no ledger"
@@ -841,11 +842,14 @@ async def config(app, pilot):
     await pilot.press("left")
     assert body(app)[0].startswith("Hosts 3 ─") and app.cursor["config"] == "local"
     assert "this machine (local name=lmd79)" in line_of(app, "lmd79") and "http" not in text(app, "#body")
+    # Enter on a host row is its settings (1.12.0). With no wrapper (as here) nothing can be read or changed, and it says so.
     await pilot.press("down", "down", "enter")
-    await pilot.pause()
-    assert isinstance(app.screen, tui.Detail) and "ControlPath=none wmac 'echo up'" in str(app.screen.query_one("#fix").render())
-    raw = str(app.screen.query_one("#body-detail").render())
-    assert raw.startswith("wmac\n") and "hostname         SECA2033002083" in raw and "finding  hostdown  not_posted" in raw, raw
+    await settle(app, pilot)
+    assert isinstance(app.screen, tui.HostEdit) and text(app.screen, "#h-msg").startswith("started without the wrapper"), text(app.screen, "#h-msg")
+    assert text(app.screen, "#h-last") == "last check      ○ unreachable 4h   ssh to wmac failed (exit 255), also with ControlPath=none   checked 1m ago", text(app.screen, "#h-last")
+    assert "ControlPath=none wmac 'echo up'" in text(app.screen, "#h-fix") and app.screen.query_one("#h-save").disabled
+    await pilot.press("escape")
+    assert len(app.screen_stack) == 1
 
 
 SSH_CONFIG = ("Host lmd_dkim\n  HostName lmd-dkim.example\nHost lmd79-host lmd-a100\nHost lmd-gpu-01\n  ProxyJump bastion\n"
@@ -890,7 +894,7 @@ async def add_host(app, pilot):
     await pilot.press("a")
     assert len(app.screen_stack) == 1, "a is the Configuration tab's key"
     await pilot.press("left")
-    assert "+ Add host" in body(app)[2] and text(app, "#foot").split()[-4:] == ["a", "add", "host", "q", "quit"][-4:]
+    assert "+ Add host" in body(app)[2] and " a  add host " in text(app, "#foot")
     await pilot.press("a")
     await pilot.pause()
     assert isinstance(app.screen, tui.AddHost) and isinstance(app.focused, tui.Input)
@@ -967,6 +971,152 @@ async def add_host_bare(app, pilot):
     assert str(app.screen.query_one("#info").render()).startswith("started without the wrapper"), str(app.screen.query_one("#info").render())
 
 
+# The hosts CLI as the host popup meets it: the ledger's lines by name (two for wmac: every env key of both), a set that
+# keeps what came on stdin, an rm, a laptop switch. `bad` is refused by set.
+LEDGER_JSON = json.dumps({"manager": "mgr", "ledger": "/p/hosts", "ignored": 0, "hosts": [
+    {"alias": "local", "laptop": False, "name": "lmd79", "env": ["HTTPS_PROXY"], "skipped": 0},
+    {"alias": "wmac", "laptop": True, "name": "w\x1b[2Jmac", "env": ["HTTPS_PROXY", "NO_PROXY"], "skipped": 0},
+    {"alias": "wmac", "laptop": False, "name": "", "env": ["NO_PROXY", "EXTRA"], "skipped": 1},
+    {"alias": "old", "laptop": "yes", "name": 7, "env": {"A": 1}, "skipped": None}, "x", None]})
+EDIT_CLI = r'''d=$(dirname "$0"); echo "$*" >> "$d/args"
+case "$*" in
+  *"list --json") cat "$d/ledger.json";;
+  *"set bad --stdin") cat > /dev/null; echo "claude-discord: hosts: K: a value holds no space [/]" >&2; exit 2;;
+  *"set "*" --stdin") cat > "$d/stdin"; echo "claude-discord: hosts: changed $5 in /p/hosts (2 lines)";;
+  *"rm "*) echo "claude-discord: hosts: removed $5 from /p/hosts";;
+  *"laptop bad "*) echo "claude-discord: hosts: bad is not in /p/hosts" >&2; exit 3;;
+  *"laptop "*) echo "claude-discord: hosts: changed $5 in /p/hosts (1 line)";;
+esac'''
+
+
+def edit_cli(d, ledger=LEDGER_JSON):
+    (Path(d) / "ledger.json").write_text(ledger)
+    return stub(d, EDIT_CLI)
+
+
+def drawn(app):
+    """Everything the terminal is sent for the screen as it stands."""
+    return app.screen._compositor.render_full_update().render_segments(app.console)
+
+
+async def host_edit(app, pilot):
+    ssh_home(app)
+    d, scr = Path(app.state_dir), lambda sel: text(app.screen, sel)
+    await pilot.press("left", "down", "down", "enter")
+    await settle(app, pilot)
+    # What the popup shows comes from three places: the ledger through `hosts list --json` (name, kind, env KEY NAMES),
+    # ~/.ssh/config as text (the target) and the state (the last check). No value is anywhere, and the name is cleaned.
+    assert isinstance(app.screen, tui.HostEdit) and cli_calls(app) == ["hosts --bot mgr list --json"], cli_calls(app)
+    assert scr("#h-title") == "Host · wmac" and app.screen.query_one("#h-name").value == "w[2Jmac" and app.focused.id == "h-name"
+    assert scr("#h-kind").startswith("kind            ( ) server   (●) laptop"), scr("#h-kind")
+    assert scr("#h-env").split() == "env HTTPS_PROXY •••• NO_PROXY •••• EXTRA ••••".split(), scr("#h-env")
+    assert scr("#h-target") == "target          dykim@wmac.example:22 (SECA2033002083)" and "http" not in drawn(app) and "\x1b[2J" not in drawn(app), scr("#h-target")
+    # Changes are staged and said: the name, the kind (space on the radio pair), a new env word typed masked, a removal.
+    await pilot.press("2")
+    assert scr("#h-title") == "Host · wmac    ● unsaved changes"
+    await pilot.press("tab", "space")
+    assert scr("#h-kind").startswith("kind            (●) server   ( ) laptop") and app.focused.id == "h-kind"
+    await pilot.press("tab", *"FOO", "enter", *"s3c")
+    assert app.focused.id == "h-value" and "s3c" not in drawn(app) and "•••" in drawn(app), "a value is typed masked"
+    await pilot.press("enter")
+    key = app.screen.query_one("#h-key")
+    assert app.focused is key and key.value == "" and app.screen.query_one("#h-value").value == ""
+    key.value = "HTTPS_PROXY"                                         # a key and no value: remove it
+    await pilot.press("enter", "enter")
+    key.value = "NOPE"                                                # no value for a key the line does not have: nothing
+    await pilot.press("enter", "enter")
+    assert " ".join(scr("#h-env").split()) == "env HTTPS_PROXY (removed on save) NO_PROXY •••• EXTRA •••• FOO •••• (new)", scr("#h-env")
+    key.value, app.screen.query_one("#h-value").value = "NO_PROXY", "s3d"   # typed and not entered: Save takes it too
+    # Save: ONE call, `hosts set <alias> --stdin`, every change a line of its stdin. No value is in an argument list.
+    app.screen.query_one("#h-save").press()
+    await settle(app, pilot)
+    assert len(app.screen_stack) == 1 and cli_calls(app)[1:] == ["hosts --bot mgr set wmac --stdin"], cli_calls(app)
+    assert (d / "stdin").read_text() == "name=w[2Jmac2\nlaptop off\nFOO=s3c\nHTTPS_PROXY=\nNO_PROXY=s3d\n", (d / "stdin").read_text()
+    assert "s3" not in (d / "args").read_text() and app.said_all == ["claude-discord: hosts: changed wmac in /p/hosts (2 lines)"], app.said_all
+    # Escape with no change closes; with one it asks (No by default). Nothing is written either way.
+    await pilot.press("enter")
+    await settle(app, pilot)
+    await pilot.press("escape")
+    await pilot.pause()
+    assert len(app.screen_stack) == 1, "no change, no question"
+    await pilot.press("enter")
+    await settle(app, pilot)
+    await pilot.press("x", "escape")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.Confirm) and "Close without saving the changes to wmac?" in app.screen.text
+    await pilot.press("enter")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.HostEdit) and [c for c in cli_calls(app) if " set " in c] == ["hosts --bot mgr set wmac --stdin"]
+    # Stop monitoring this host asks first (No by default), then runs `hosts rm`.
+    app.screen.query_one("#h-stop").press()
+    await pilot.pause()
+    assert isinstance(app.screen, tui.Confirm) and "Stop monitoring wmac?" in app.screen.text
+    await pilot.press("enter")
+    await settle(app, pilot)
+    assert isinstance(app.screen, tui.HostEdit) and not [c for c in cli_calls(app) if " rm " in c]
+    app.screen.query_one("#h-stop").press()
+    await pilot.pause()
+    await pilot.press("y")
+    await settle(app, pilot)
+    assert len(app.screen_stack) == 1 and cli_calls(app)[-1] == "hosts --bot mgr rm wmac" and app.said_all[-1] == "claude-discord: hosts: removed wmac from /p/hosts"
+    # local: its settings open like any host's, but it cannot be stopped.
+    await pilot.press("up", "up", "enter")
+    await settle(app, pilot)
+    assert scr("#h-title") == "Host · local" and scr("#h-target") == "target          this machine" and app.screen.query_one("#h-stop").disabled and not app.screen.query_one("#h-save").disabled
+    assert scr("#h-env").split() == "env HTTPS_PROXY ••••".split() and scr("#h-last").startswith("last check      ● ok   checked 1m ago")
+    await pilot.press("escape")
+    # A ledger entry of another shape (a name that is a number, env an object): read as empty, never raised on.
+    await pilot.press("down", "enter")
+    await settle(app, pilot)
+    assert scr("#h-title") == "Host · old" and app.screen.query_one("#h-name").value == "" and scr("#h-env").split() == ["env", "none"]
+    assert scr("#h-kind").startswith("kind            (●) server   ( ) laptop")
+    await pilot.press("escape")
+    # x on a row asks, then removes; l flips the kind the last pass saw. Each is one CLI call, said when it ends.
+    await pilot.press("x")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.Confirm) and "Stop monitoring old?" in app.screen.text
+    await pilot.press("y")
+    await settle(app, pilot)
+    await pilot.press("l", "down", "l")
+    await settle(app, pilot)
+    assert cli_calls(app)[-3:] == ["hosts --bot mgr rm old", "hosts --bot mgr laptop old on", "hosts --bot mgr laptop wmac off"], cli_calls(app)[-3:]
+    assert app.said_all[-2:] == ["claude-discord: hosts: changed old in /p/hosts (1 line)", "claude-discord: hosts: changed wmac in /p/hosts (1 line)"], app.said_all
+    await pilot.press("right", "x", "l")
+    await settle(app, pilot)
+    assert len(app.screen_stack) == 1 and len(cli_calls(app)) == 10, "x and l are the Configuration tab's keys"
+
+
+async def host_edit_refused(app, pilot):
+    """What the CLI refuses stays on the screen, as text; a ledger that cannot be read is said and nothing can be saved."""
+    ssh_home(app)
+    d = Path(app.state_dir)
+    app.state["hosts"]["bad"] = dict(app.state["hosts"]["old"], host="bad")
+    (d / "ledger.json").write_text(json.dumps({"hosts": [{"alias": "bad", "laptop": False, "name": "", "env": []}]}))
+    app.paint()
+    await pilot.press("left", "down", "l")
+    await settle(app, pilot)
+    assert app.said_all == ["claude-discord: hosts: bad is not in /p/hosts"], app.said_all
+    app.said_all.clear()
+    await pilot.press("enter")
+    await settle(app, pilot)
+    await pilot.press("n")
+    app.screen.query_one("#h-save").press()
+    await settle(app, pilot)
+    assert isinstance(app.screen, tui.HostEdit) and text(app.screen, "#h-msg") == "claude-discord: hosts: K: a value holds no space [/]", text(app.screen, "#h-msg")
+    assert text(app.screen, "#h-title").endswith("● unsaved changes") and not app.screen.query_one("#h-save").disabled and app.said_all == []
+    await pilot.press("escape", "y")
+    await pilot.pause()
+    for ledger, want in (("not json", "claude-discord hosts list gave no ledger (exit 0)"), ("[]", "claude-discord hosts list gave no ledger (exit 0)"),
+                         ('{"hosts": [{"alias": ["bad"]}, 7, {"bad": 1}]}', "bad is not in the ledger")):
+        (d / "ledger.json").write_text(ledger)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert text(app.screen, "#h-msg") == want and app.screen.query_one("#h-save").disabled and app.screen.query_one("#h-name").disabled, (ledger, text(app.screen, "#h-msg"))
+        await pilot.press("escape")
+        await pilot.pause()
+        assert len(app.screen_stack) == 1
+
+
 async def stopped(app, pilot):
     assert text(app, "#title").endswith("○ not running") and f"monitor stopped at 2026-10-11T12:00:00Z" in text(app, "#bar")
 
@@ -1002,7 +1152,10 @@ async def post_failed(app, pilot):
 async def pass_failed(app, pilot):
     assert "the last pass failed: the reducer rejected its input" in text(app, "#bar"), text(app, "#bar")
     await pilot.press("left")
-    assert "wmac (SECA2033002083) (left the ledger)" in line_of(app, "laptop"), line_of(app, "laptop")
+    assert "wmac (SECA2033002083) (left the ledger)" in line_of(app, "(left"), line_of(app, "(left")
+    await pilot.press("down", "down", "enter")   # out of the ledger: nothing to set, so its raw fields as before 1.12.0
+    await pilot.pause()
+    assert isinstance(app.screen, tui.Detail) and str(app.screen.query_one("#body-detail").render()).startswith("wmac\n")
 
 
 async def missing_wrapper(app, pilot):
@@ -1034,6 +1187,8 @@ async def main():
     await case("config", config, state="all_ok")
     await case("add_host", add_host, state="all_ok", wrapper=lambda d: stub(d, HOSTS_CLI))
     await case("add_host_bare", add_host_bare, state="all_ok")
+    await case("host_edit", host_edit, state="all_ok", wrapper=edit_cli)
+    await case("host_edit_refused", host_edit_refused, state="all_ok", wrapper=edit_cli)
     await case("stopped", stopped)
     await case("stopped_by_user", stopped_by_user)
     await case("overdue", overdue)
