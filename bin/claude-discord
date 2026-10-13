@@ -124,6 +124,8 @@ jq_edit() {  # $1 = file, the rest = jq arguments
   local f=$1 base='{}' merged
   shift
   if [ -e "$f" ]; then
+    # Nothing to change in a file already in jq's own form (as every file written here is): said by one jq, not two.
+    if [ -s "$f" ] && merged=$(jq "$@" "$f" 2>/dev/null) && [ -n "$merged" ] && [ "$merged" = "$(<"$f")" ]; then return 0; fi
     base=$(jq . "$f" 2>/dev/null) || { echo "claude-discord: $f is not valid JSON, leaving it alone" >&2; return 0; }
     [ -n "$base" ] || base='{}'
   fi
@@ -226,9 +228,9 @@ select_one() (
 # that exact path; setup asks before writing it.
 has_path() { [ -e "$1" ] || [ -L "$1" ]; }   # a dangling link counts
 # Read in the shell, not with jq: every start asks (sync_runtime), and one jq start is 10 ms with jq 1.6. The manifest is
-# ours and flat: its "version" line, a key at the start of a line; "?" when there is none.
+# ours and flat (no other "version" key in it): the first one's string; "?" when there is none.
 plugin_version() {
-  local l re='^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]*)"'
+  local l re='"version"[[:space:]]*:[[:space:]]*"([^"]*)"'
   if [ -r "$1/.claude-plugin/plugin.json" ]; then
     while IFS= read -r l || [ -n "$l" ]; do
       if [[ $l =~ $re ]]; then echo "${BASH_REMATCH[1]}"; return 0; fi

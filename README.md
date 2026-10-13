@@ -15,7 +15,7 @@ Origin: written by d.kim4, extended here.
 |---|---|
 | Claude Code 2.1.x with channels support | `--channels` flag |
 | `bun` | the plugin's runtime (`curl -fsSL https://bun.sh/install \| bash`) |
-| `jq` | writes `access.json` and the settings files, reads the plugin's install path; every hook needs it too, and without it they silently do nothing |
+| `jq` | writes `access.json` and the settings files, reads the plugin's install path; every hook needs it too, and without it they silently do nothing. 1.7 or newer is recommended: jq 1.6 (still `/usr/bin/jq` on Ubuntu 22.04) takes about 10 ms to start against 2 ms, and a prompt runs it two or three times (the suite: 40 s against 31.5 s on one machine). The official static `jq-linux-amd64` in `~/.local/bin` needs no root |
 | the plugin | `claude plugin install discord@claude-plugins-official` then `claude plugin disable discord@claude-plugins-official` (see below) |
 | `curl` (optional) | the ✅ and ☑️ reactions at the end of a turn, and the `tools/thread` helper; without it no reaction is sent and no thread can be opened, everything else still works |
 | `python3` (optional, stdlib only) | `thread-guard` rewrites a markdown table in a reply into an aligned code block; without it a reply with a table is denied instead |
@@ -1106,7 +1106,8 @@ and prints `ALL PASS`. It runs on Linux only: it finds its stand-in plugin
 servers through `/proc`, and assumes GNU `wc`, `sed` and a `/tmp` that is not a
 symlink, none of which hold on macOS. A C compiler (`cc`) is optional: with
 one the suite builds a faster jq stub, without it a bash stub runs (about 1.5 s
-slower, same checks).
+slower, same checks). With jq 1.6 the suite runs some 8 s longer than with 1.7 or
+newer: it starts jq about 2,400 times.
 
 `uv run --script tests/tui/test_tui.py` drives the TUI over fixture state
 files (Textual's pilot). It needs uv and the Textual wheel, so it sits

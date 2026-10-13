@@ -709,6 +709,11 @@ grep -qx '111 Own 5 er' "$DSD/user-names" && printf '%s' "$out" | jq -r '.hookSp
 cp "$DSD/access.json" "$DSD/access.json.keep"; jq '.groups["999"].allowFrom = [] | .allowFrom = []' "$DSD/access.json.keep" > "$DSD/access.json"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1m","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"999\" message_id=\"224\" user=\"Mx (owner), \"q\"\" user_id=\"77\" ts=\"t\">\nhi\n</channel>"}')
 printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext' | grep -q '^People in this channel .*Mx owner q <@77>' || { echo "FAIL: with an empty allowFrom, whoever wrote must be listed, its name without \" ( ) ,: $(<"$DSD/user-names") / $out"; exit 1; }
+# The ids access.json names come first: the channel group's allowFrom, then the top-level one, then config.env's owner.
+jq '.groups["999"].allowFrom = ["501"] | .allowFrom = ["502"]' "$DSD/access.json.keep" > "$DSD/access.json"
+out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1n","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"999\" message_id=\"225\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}')
+printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext' | grep -q '^People in this channel (mention one as <@id> to reach them): <@501>, <@502>, Own 5 er <@111>, ' || { echo "FAIL: the People line must name the channel group's allowFrom, then the top-level one, then the owner: $out"; exit 1; }
+jq '.groups["999"].allowFrom = [] | .allowFrom = []' "$DSD/access.json.keep" > "$DSD/access.json"
 # 21 writers: the file keeps the newest 20, the one who wrote last is last. Twenty of them are written straight into the file, so one real prompt takes it past the cap.
 for i in $(seq 1 20); do printf '50%s p%s\n' "$i" "$i"; done >> "$DSD/user-names"
 i=21; DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"{\"session_id\":\"s1m\",\"prompt\":\"<channel source=\\\"plugin:discord:discord\\\" chat_id=\\\"999\\\" message_id=\\\"3$i\\\" user=\\\"p$i\\\" user_id=\\\"50$i\\\" ts=\\\"t\\\">\\nhi\\n</channel>\"}" >/dev/null
