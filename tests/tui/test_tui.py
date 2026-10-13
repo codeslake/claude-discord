@@ -301,6 +301,16 @@ def variant(name):
         s["monitor"].update(pid=None, stopped_at="[down]x", holders=[])
         s["bots"][PHOTO].update(bot="pho[/]to", detail="error [/] near", fix="echo patch output [down] here", channel_name="[red]x")
         s["alerts"][6].update(detail="find[/]ing", text="[bold]posted[/]")
+    elif name == "escapes":
+        # Text another machine wrote (a ledger host's health document, a Discord display name) with what a terminal
+        # obeys: an OSC 52 (sets the clipboard), an OSC 0 (the window title), ESC[2J (clears the screen), ESC[8m (hides
+        # text), a bidi override (reorders the line) and a line break (splits the row).
+        s["bots"][PHOTO].update(bot="pho\x1b]52;c;aGFjaw==\x1b\\to", detail="d\x1b[2J\x1b[Hgone\x9b2J", channel_name="c\x1b]0;TITLE\x1b\\",
+                                fix="echo \x1b[8mhidden\x1b[0m;\trm -rf x")
+        s["bots"][HBOT].update(bot="evil\u202etxt\u200b.\ufeffsh", detail="one\r\ntwo\x7f")
+        s["bots"]["local|/home/u/k\x1b[2J|kb\nx"] = dict(s["bots"][OLDBOT], host="local", bot="kb\nx")
+        s["alerts"][6].update(detail="find\x1b[2Jing", text="[down]\x1b[2J photobot\nreason: x\x1b]0;T\x07")
+        s["hosts"]["wmac"].update(display="w\x1b[5mmac", detail="ssh\x1b[2J failed")
     elif name == "many":   # more rows than a 20-line terminal shows
         for i in range(20):
             s["bots"][f"local|/home/u/m|m{i:02}"] = dict(s["bots"][OLDBOT], host="local", project="/home/u/m", bot=f"m{i:02}")
@@ -455,6 +465,37 @@ async def markup(app, pilot):
     assert str(app.screen.query_one("#body-detail").render()) == "[bold]posted[/]"
 
 
+ESCAPES = ("\x1b", "\x9b", "\x7f", "\x07", "\u202e", "\u200b", "\ufeff", "\t", "\r")
+
+
+async def escapes(app, pilot):
+    def drawn():   # what the terminal is sent: the styles' own sequences are in it, so the four of the fixture are looked for
+        out = app.screen._compositor.render_full_update().render_segments(app.console)
+        assert not [q for q in ("\x1b]52", "\x1b]0;", "\x1b[2J", "\x1b[8m", "\x1b[5m", "\x1b[H") if q in out], out
+    for tab in tui.TABS:
+        lines = [l.plain for _, ls in app.items(time.time()) for l in ls] + [text(app, w) for w in ("#title", "#bar", "#foot")] + text(app, "#tabs").split("\n")
+        assert not [(c, l) for l in lines for c in ESCAPES + ("\n",) if c in l], (tab, [l for l in lines if any(c in l for c in ESCAPES + ("\n",))])
+        drawn()
+        await pilot.press("right")
+    assert row_of(app, "pho]52;c;aGFjaw…") and "#c]0;TITLE\\" in row_of(app, "pho") and row_of(app, "eviltxt.sh") and row_of(app, "kb x")
+    assert "local|/home/u/k[2J|kb x" in app.state["bots"], "keys are cleaned too"
+    await pilot.press("space", "c")
+    drawn()
+    assert "d[2J[Hgone2J" in text(app, "#body") and app.clipboard == "echo [8mhidden[0m; rm -rf x", app.clipboard
+    await pilot.press("enter")
+    await pilot.pause()
+    raw = str(app.screen.query_one("#body-detail").render())
+    assert not [c for c in ESCAPES if c in raw] and "detail           d[2J[Hgone2J" in raw and str(app.screen.query_one("#fix").render()) == app.clipboard, raw
+    drawn()
+    await pilot.press("escape", "down", "space")
+    assert "one two" in text(app, "#body"), "a line break in a reason is a space, not a second row"
+    await pilot.press("right", "enter")
+    await pilot.pause()
+    raw = str(app.screen.query_one("#body-detail").render())
+    assert raw == "[down][2J photobot reason: x]0;T", repr(raw)
+    drawn()
+
+
 async def alerts(app, pilot):
     await pilot.press("right")
     assert body(app)[0].startswith("Open 1 ─") and any(l.startswith("History 7 ─") for l in body(app))
@@ -537,6 +578,7 @@ async def main():
     await case("narrow", narrow, state="many", size=(100, 20))
     await case("crashed_project", crashed_project)
     await case("markup", markup)
+    await case("escapes", escapes)
     await case("alerts", alerts, state="all_ok")
     await case("config", config, state="all_ok")
     await case("stopped", stopped)
@@ -556,9 +598,9 @@ async def main():
         s["bots"][PHOTO]["project"] = d
         names = Path(d) / ".claude" / "discord-agents" / "photobot" / "user-names"
         names.parent.mkdir(parents=True)
-        names.write_text("111 dong yong\nnot-an-id x\n222\n333 한글이름\n")
-        assert tui.load_names(s) == {"111": "dong yong", "333": "한글이름"}, tui.load_names(s)
-    print("ok: names are read from the local bots' user-names files (<id> <name>), other lines skipped")
+        names.write_text("111 dong yong\nnot-an-id x\n222\n333 한글이름\n444 es\x1b]52;c;eA==\x07c\u202eape\t!\n555 \x1b\n")
+        assert tui.load_names(s) == {"111": "dong yong", "333": "한글이름", "444": "es]52;c;eA==cape !"}, tui.load_names(s)
+    print("ok: names are read from the local bots' user-names files (<id> <name>), other lines skipped, control characters dropped")
     # q removes the holder record
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "holders").mkdir()

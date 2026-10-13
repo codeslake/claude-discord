@@ -1039,7 +1039,10 @@ here: another side holds the monitor lock`, `monitor pid <pid> is gone`
 (killed without cleaning up; the TUI starts it again, once per 30 s at
 most), the last pass failed (the state could not be updated; `monitor.log`
 has the line) or the last post failed. The TUI changes nothing, never reads
-a `.env` and never shows a token.
+a `.env` and never shows a token. Text that came from another machine or
+from Discord (names, reasons, commands, posted texts) is drawn and copied
+without its control, bidi and zero-width characters, a tab or line break as
+one space: an escape sequence in it never reaches the terminal.
 
 *Bots tab.* A band of counts first (`✕ Problems`, `▲ Needs a look`,
 `● Healthy N of M bots`, `Hosts R / H`; one line below 110 columns). M is

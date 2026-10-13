@@ -45,10 +45,29 @@ WORD = {"down": "DOWN", "stale": "STUCK", "duplicate": "DUPLICATE", "unreachable
         "unknown": "no token"}
 
 
+# What text another machine wrote (a ledger host's health document is copied into the state as it is, a display name
+# comes from Discord) must not bring to the terminal: the C0 and C1 controls and DEL (an ESC opens a sequence that sets
+# the clipboard or the window title, hides text or clears the screen; Rich and Textual let it through), the bidi
+# controls (they reorder the rest of the line) and the zero-width characters (cells that are not there). A tab or a
+# line break would split a row: one space each.
+UNSAFE = dict.fromkeys([*range(0x20), *range(0x7f, 0xa0), *range(0x202a, 0x202f), *range(0x2066, 0x206a), *range(0x200b, 0x2010), 0x2060, 0xfeff])
+UNSAFE.update({9: " ", 10: " ", 13: " "})
+
+
+def clean(v):
+    """`v` with every string in it, a dict's keys too, safe to draw (UNSAFE)."""
+    if isinstance(v, str):
+        return v.translate(UNSAFE)
+    if isinstance(v, dict):
+        return {clean(k): clean(x) for k, x in v.items()}
+    return [clean(x) for x in v] if isinstance(v, list) else v
+
+
 def load(path: Path) -> dict:
+    """The state, cleaned once here: nothing drawn or copied (`c`) is built from the file's own strings."""
     try:
         data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else {}
+        return clean(data) if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -420,6 +439,7 @@ def load_names(state: dict) -> dict:
             continue
         for line in text.splitlines():
             uid, _, name = line.partition(" ")
+            name = clean(name)   # on-prompt removes whitespace runs and <>@"(), only
             if uid.isdigit() and name:
                 names[uid] = name
     return names
