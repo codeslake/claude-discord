@@ -3617,9 +3617,10 @@ hc --bot mgr2 list
 hc --bot plain list
 [ "$HRC" = 1 ] && grep -q "no dev-manager bot 'plain' with a hosts ledger" <<<"$HE" || { echo "FAIL: a bot that is no dev-manager with a ledger is exit 1: rc=$HRC $HE"; exit 1; }
 rm -rf "$MR/mgr2" "$MR/plain" "$MP/sub"
-for bad in "" "nosuchverb" "list extra" "--bot" "list --frob"; do
-  hc $bad
-  [ "$HRC" = 2 ] && grep -q '^usage: claude-discord hosts ' <<<"$HE" || { echo "FAIL: 'hosts $bad' is a usage error (exit 2): rc=$HRC $HE"; exit 1; }
+# A flag that means nothing for the verb is a usage error too, not ignored (`rm --dry-run` would remove).
+for bad in "" "nosuchverb" "list extra" "--bot" "list --frob" "list --no-probe" "list --stdin" "rm --dry-run h1" "rm --json h1" "set h1 X=1 --dry-run" "add --stdin h7" "add --json h7" "laptop --no-probe h1 on" "--json"; do
+  hc $bad </dev/null
+  [ "$HRC" = 2 ] && grep -q '^usage: claude-discord hosts ' <<<"$HE" && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] || { echo "FAIL: 'hosts $bad' is a usage error (exit 2), nothing written: rc=$HRC $HE"; exit 1; }
 done
 rc=0; out=$(printf '\n' | bash "$S" setup hosts 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -q "bot name 'hosts' is reserved" <<<"$out" || { echo "FAIL: 'hosts' is a subcommand now, so no bot may take the name: rc=$rc $out"; exit 1; }
@@ -3641,22 +3642,44 @@ LEDGER=$(<"$MR/mgr/hosts")
 hc add --no-probe h1 laptop
 [ "$HRC" = 3 ] && grep -q "h1 is already in $MR/mgr/hosts" <<<"$HE" && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] || { echo "FAIL: an alias already in the ledger is exit 3 and changes nothing: rc=$HRC $HE"; exit 1; }
 # What cannot be an alias: an ssh option, whitespace, a #, an =, a command substitution, an escape sequence, nothing,
-# 256 characters. Exit 2, the ledger untouched, ssh never run.
+# 256 characters, and a letter that is not ASCII (accented, fullwidth: a range of a UTF-8 locale takes them, so the
+# match is made in the C locale). Exit 2, the ledger untouched, ssh never run, and the word is not echoed: only where
+# it stands and the rule.
 rm -f "$HOME/ssh.log"
-for bad in '-oProxyCommand=touch$IFS/tmp/pwned' '-v' 'a b' 'a#b' 'a=b' '$(id)' $'a\033[2Jb' '' "$(printf 'a%.0s' {1..256})"; do
-  hc add --no-probe "$bad"
-  [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [ ! -e "$HOME/ssh.log" ] && [[ $HE != *$'\033'* ]] ||
-    { echo "FAIL: '$bad' is no ssh alias: exit 2, nothing written, no ssh, no escape sequence echoed: rc=$HRC $HE"; exit 1; }
+NOALIAS="claude-discord: hosts: the alias (argument 2) is not an ssh alias: letters, digits, . _ @ -, not starting with -, 255 at most"
+for bad in 'a b' 'a#b' 'a=b' '$(id)' $'a\033[2Jb' '' "$(printf 'a%.0s' {1..256})" 'é' 'ｗeb' 'ａ'; do
+  HRC=0; HE=$(LC_ALL=en_US.utf8 bash "$S" hosts add --no-probe "$bad" 2>&1) || HRC=$?
+  [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [ ! -e "$HOME/ssh.log" ] && [ "$HE" = "$NOALIAS" ] ||
+    { echo "FAIL: '$bad' is no ssh alias: exit 2, nothing written, no ssh, the word not echoed: rc=$HRC $HE"; exit 1; }
 done
-# What cannot be a word of the line: no KEY=, a KEY that is no identifier, a value with a space, a quote or a control
-# character, a display name with a space, an empty value, a value past 1024 characters. Exit 2, and the word is not
-# echoed (a secret pasted in the wrong place), only a key that is one.
-for bad in 'secretpw' '1K=secretpw' 'K=secretpw x' 'K="secretpw"' $'K=secretpw\033[2J' 'name=secretpw box' 'K=' "K=secretpw$(printf 'a%.0s' {1..1020})"; do
-  hc add --no-probe h8 "$bad"
-  [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [[ $HO$HE != *secretpw* ]] || { echo "FAIL: '$bad' is no word of a ledger line: exit 2, nothing written, the word not echoed: rc=$HRC $HE"; exit 1; }
+for bad in '-oProxyCommand=touch$IFS/tmp/pwned' '-v'; do
+  hc add --no-probe "$bad"
+  [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [ ! -e "$HOME/ssh.log" ] && grep -q '^usage: ' <<<"$HE" || { echo "FAIL: an alias that is an ssh option ($bad) is a usage error: rc=$HRC $HE"; exit 1; }
+done
+# The arguments swapped, a secret where the alias belongs: every verb says the same and echoes nothing of it.
+for cmd in "set HTTPS_PROXY=http://u:secretpw@h lap" "add K=secretpw h8" "rm secretpw/x" "laptop secretpw! on" "set secretpw~ --stdin"; do
+  hc $cmd </dev/null
+  [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [ ! -e "$HOME/ssh.log" ] && [ "$HO$HE" = "$NOALIAS" ] || { echo "FAIL: 'hosts $cmd': a refused alias is never echoed: rc=$HRC $HO $HE"; exit 1; }
+done
+# What cannot be a word of the line: no KEY=, a KEY that is no identifier (a letter that is not ASCII neither), a value
+# with a space, a quote or a control character, a display name with a space, an empty value (the word may be a token
+# that ends in =), a value past 1024 characters, a display name past 40. Exit 2, and nothing of the word is echoed
+# (a secret pasted in the wrong place), its key neither: only where it stands.
+for bad in 'secretpw' '1K=secretpw' 'K=secretpw x' 'K="secretpw"' $'K=secretpw\033[2J' 'name=secretpw box' 'secretpw=' "K=secretpw$(printf 'a%.0s' {1..1020})" 'Ｋ=secretpw' 'secretpwé=1' "name=secretpw$(printf '가%.0s' {1..33})"; do
+  HRC=0; HE=$(LC_ALL=en_US.utf8 bash "$S" hosts add --no-probe h8 "$bad" 2>&1) || HRC=$?
+  [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [[ $HE != *secretpw* ]] && [[ $HE == "claude-discord: hosts: argument 3"* ]] || { echo "FAIL: '$bad' is no word of a ledger line: exit 2, nothing written, the word not echoed: rc=$HRC $HE"; exit 1; }
 done
 hc add --no-probe h8 'K=secretpw x'
-grep -q '^claude-discord: hosts: K: a value holds no space' <<<"$HE" || { echo "FAIL: a refused value is named by its key: $HE"; exit 1; }
+grep -q '^claude-discord: hosts: argument 3: a value holds no space' <<<"$HE" || { echo "FAIL: a refused value is named by where it stands: $HE"; exit 1; }
+# laptop is the third word or none, and a KEY comes once.
+for cmd in "h8 laptop laptop" "h8 X=1 laptop" "h8 laptop X=secretpw Y=2 X=3"; do
+  hc add --no-probe $cmd
+  [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [[ $HE != *secretpw* ]] && [[ $HE == "claude-discord: hosts: argument "[46][:\ ]* ]] || { echo "FAIL: 'hosts add $cmd' repeats a word: exit 2, nothing written: rc=$HRC $HE"; exit 1; }
+done
+# A display name is counted in characters of the user's locale (40 Hangul are 120 bytes), and may hold any of them.
+HRC=0; HE=$(LC_ALL=en_US.utf8 bash "$S" hosts add --no-probe h40 "name=$(printf '가%.0s' {1..40})" 2>&1 >/dev/null) || HRC=$?
+[ "$HRC" = 0 ] && [ -z "$HE" ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = "h40 name=$(printf '가%.0s' {1..40})" ] || { echo "FAIL: a display name of 40 characters that are not ASCII is taken: rc=$HRC $HE"; exit 1; }
+hc rm --no-probe h40
 # Two writers: one holds the ledger's lock, reads the ledger, and 0.1 s later moves in its own version (as a TUI save
 # or another `hosts` call would). An add started meanwhile must wait for it and then add to THAT version; were it not
 # to wait, the first writer's rename would drop its line.
@@ -3690,7 +3713,7 @@ HRC=0; HO=$(printf 'name=랩\nHTTPS_PROXY=http://u:pw2@h:1\r\nlaptop off\n\nK=' 
   { echo "FAIL: set --stdin applies every line of stdin in one write: rc=$HRC $HO / $(<"$MR/mgr/hosts")"; exit 1; }
 LEDGER=$(<"$MR/mgr/hosts"); li=$(stat -c %i "$MR/mgr/hosts")
 HRC=0; HO=$(printf 'A=1\nB=secretpw x\n' | bash "$S" hosts set lap --stdin 2>&1) || HRC=$?
-[ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [[ $HO != *secretpw* ]] || { echo "FAIL: one bad line on stdin fails the whole set --stdin, nothing written: rc=$HRC $HO"; exit 1; }
+[ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [ "${HO%%:*:*:*}" = "claude-discord" ] && [[ $HO == "claude-discord: hosts: line 2 of stdin: a value holds no space"* ]] || { echo "FAIL: one bad line on stdin fails the whole set --stdin, nothing written, and is named by its line: rc=$HRC $HO"; exit 1; }
 # A change that is already so writes nothing: the line keeps its bytes (h2's two spaces) and the file its inode.
 hc set h2 A=1; A=$HRC$HO; hc laptop h2 off
 [ "$A$HRC$HO" = "0claude-discord: hosts: h2 is already so in $MR/mgr/hosts0claude-discord: hosts: h2 is already so in $MR/mgr/hosts" ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [ "$(stat -c %i "$MR/mgr/hosts")" = "$li" ] ||
@@ -3720,6 +3743,25 @@ hc rm --no-probe lap; hc rm --no-probe h2
 [ "$HRC" = 0 ] && ledger_is "$HEAD$LOCAL-oProxyCommand=x" || { echo "FAIL: removing the last other host leaves the ledger in place with local: rc=$HRC $(<"$MR/mgr/hosts")"; exit 1; }
 echo "ok: hosts set replaces, adds or removes a KEY=VALUE or name= word on every line of the alias (values on stdin with --stdin, all changes in one write, none when a line is bad), laptop on|off sets the second word, rm removes the alias's lines; other lines and words keep their bytes, a change already so writes nothing, an alias not listed is exit 3, rm local is refused"
 
+# An alias is matched whole: web is not web2, for any verb. A word of a line that is a glob pattern (the monitor skips
+# it) is kept as it is, never matched against the files of the directory the command runs in.
+printf "$HEAD${LOCAL}web2 A=1 * [a-z]*\n" > "$MR/mgr/hosts"; LEDGER=$(<"$MR/mgr/hosts"); : > "$MP/zz1"
+for cmd in "set web A=9" "laptop web on" "rm --no-probe web"; do
+  hc $cmd
+  [ "$HRC" = 3 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] || { echo "FAIL: 'hosts $cmd' must not touch web2: rc=$HRC $HE / $(<"$MR/mgr/hosts")"; exit 1; }
+done
+hc add --no-probe web; hc set web2 A=2; hc laptop web on; hc rm --no-probe web
+[ "$HRC" = 0 ] && ledger_is "$HEAD${LOCAL}web2 A=2 * [a-z]*" || { echo "FAIL: web is added, set and removed beside web2, whose line keeps its words (a * is no file list): rc=$HRC $HE / $(<"$MR/mgr/hosts")"; exit 1; }
+# A ledger with no local line (hand-edited): its last host stays, or the monitor would run with none and say nothing;
+# and `add local` adds this machine with no ssh (nobody is asked who local is).
+printf '# c\nh1\nh2 X=1\n-x\n' > "$MR/mgr/hosts"; rm -f "$HOME/ssh.log"
+hc rm --no-probe h1; A=$HRC; hc rm --no-probe h2
+[ "$A$HRC" = 02 ] && ledger_is '# c\nh2 X=1\n-x' && grep -q 'the ledger would be empty: the monitor needs at least one host' <<<"$HE" || { echo "FAIL: rm must not leave a ledger with no host line: $A rc=$HRC $HE / $(<"$MR/mgr/hosts")"; exit 1; }
+hc add local laptop
+[ "$HRC" = 0 ] && [ ! -e "$HOME/ssh.log" ] && ledger_is '# c\nh2 X=1\n-x\nlocal laptop' || { echo "FAIL: add local, when the ledger has none, adds it and runs no ssh: rc=$HRC $HE / $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
+printf "$HEAD$LOCAL-oProxyCommand=x" > "$MR/mgr/hosts"; rm -f "$MP/zz1"
+echo "ok: hosts: an alias is matched whole (web is not web2), a glob word of a line is kept as it is, rm never leaves a ledger with no host, add local runs no ssh"
+
 # ~/.claude-discord/host-id: 32 hex digits, made once. Eight first calls at once agree on one id and leave no temp
 # file; a file that is no id is replaced; a plain --version makes none.
 HID="$HOME/.claude-discord/host-id"; rm -f "$HID"
@@ -3746,8 +3788,9 @@ LEDGER=$(<"$MR/mgr/hosts"); rm -f "$HOME/ssh.log"
 # is the printed line without its quoting), with stdin closed, and adds the host.
 ans h5 1.12.0 "$ID_B"
 hc add --dry-run h5; SHOWN=$HO
-[ "$HRC" = 0 ] && [ "$SHOWN" = "ssh -o BatchMode=yes -o ConnectTimeout=8 -- h5 '~/.local/bin/claude-discord --version --host-id'" ] && [ ! -e "$HOME/ssh.log" ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] ||
-  { echo "FAIL: add --dry-run prints the probe's command and runs nothing: rc=$HRC $HO / $HE"; exit 1; }
+[ "$HRC" = 0 ] && [ "$SHOWN" = "$(printf "ssh -o BatchMode=yes -o ConnectTimeout=8 -- h5 '~/.local/bin/claude-discord --version --host-id'\nchecks it and writes ~/.claude-discord/host-id there if missing; adding it writes ~/.claude-discord/watchers/mgr")" ] && [ ! -e "$HOME/ssh.log" ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] ||
+  { echo "FAIL: add --dry-run prints the probe's command and what the add writes on that machine, and runs nothing: rc=$HRC $HO / $HE"; exit 1; }
+SHOWN=${SHOWN%%$'\n'*}
 HRC=0; HO=$(printf 'left on stdin\n' | bash "$S" hosts add h5 laptop X=1 2>"$HOME/hosts.err") || HRC=$?
 SHOWN=${SHOWN#ssh }; SHOWN=${SHOWN//\'/}
 [ "$HRC" = 0 ] && [ ! -s "$HOME/hosts.err" ] && [ "$(sed -n 1p "$HOME/ssh.log")" = "$SHOWN" ] && [ "$(command grep -c -- '--host-id$' "$HOME/ssh.log")" = 1 ] && ! grep -q '^ATE' "$HOME/ssh.log" && [ "$(tail -n 1 "$MR/mgr/hosts")" = "h5 laptop X=1" ] ||
@@ -3820,6 +3863,12 @@ printf 'motd \033[2J\033]52;c;eA==\007 banner\nclaude-discord 1.11.1 (abc1234)\n
 hc add old
 [ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = old ] && grep -q '^claude-discord: hosts: warning: claude-discord 1.11.1 on old is older than 1.12.0 and has no host-id' <<<"$HE" && [[ $HE != *$'\033'* ]] && [[ $HE != *motd* ]] ||
   { echo "FAIL: a host whose claude-discord is older than 1.12.0 is added with a warning (a host-id line that is no id is none): rc=$HRC $HE"; exit 1; }
+# A claude-discord of 1.12.0 that prints no host-id could not make one (its exit 1): said as that, not as an older
+# version; added, and sent no --watch.
+ans noid 1.12.0; echo 1 > "$MON/noid.rc"; : > "$MON/noid.both"; rm -f "$HOME/ssh.log"
+hc add noid
+[ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = noid ] && [ "$(wc -l < "$HOME/ssh.log")" = 1 ] && [ "${HE%% (*}" = "claude-discord: hosts: warning: claude-discord 1.12.0 on noid answered but could not create its host-id" ] ||
+  { echo "FAIL: a 1.12.0 host with no host-id is added with the warning that it could not create one: rc=$HRC $HE"; exit 1; }
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -f "$HOME/ssh.log" "$MON"/*
 echo "ok: host-id is made once (eight first calls agree, a damaged file is replaced); hosts add asks the host with the command --dry-run prints (stdin closed, ConnectTimeout, -- before the alias, a 255 retried with ControlPath=none), refuses the same home (exit 4) and a host that did not answer, hung past the cap (whatever holds its output open), printed megabytes or has no claude-discord (exit 5, its last line cleaned and cut), takes the last version line after a banner, and adds an older claude-discord with a warning; --no-probe, local and a listed alias run no ssh"
 

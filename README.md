@@ -951,13 +951,16 @@ pass: findings are held for so many passes, and those must stay minutes.
   as `{manager, ledger, ignored, hosts: [{alias, laptop, name, env, skipped}]}`
   (`ignored`: lines whose first word is no host name; `skipped`: words the
   monitor skips). Neither ever prints a value.
-- `add` appends a line. An alias is letters, digits and `. _ @ -`, not
+- `add` appends a line. An alias is ASCII letters, digits and `. _ @ -`, not
   starting with `-` (ssh would read that as an option), 255 at most: what
   the monitor accepts as a host. A value holds no space, control character
   or quote (the ledger has no quoting: write `HTTPS_PROXY=http://h:8118`,
-  not `"http://…"`); `#`, `$` and `\` are fine.
+  not `"http://…"`); `#`, `$` and `\` are fine. `laptop` is the word right
+  after the alias or absent, and a KEY (ASCII letters, digits and `_`) comes
+  once.
 - `set` replaces a `KEY=` word where it stands or adds it last, `KEY=`
-  removes it, `name=<display>` (no spaces) is what the TUI calls the host.
+  removes it, `name=<display>` (no spaces, 40 characters at most, any
+  script) is what the TUI calls the host.
   `set <alias> --stdin` reads the same words from stdin, one a line, and
   `laptop on` / `laptop off` among them: every change in one write, and a
   value in no argument list. On a command line the value is in your shell's
@@ -966,23 +969,27 @@ pass: findings are held for so many passes, and those must stay minutes.
 - `laptop <alias> on|off` sets or removes the `laptop` word.
 - `rm` removes the host's line(s). The monitor keeps the host a day as
   "left the ledger", then drops it; nothing is posted. `local` cannot be
-  removed.
+  removed, and neither can the last host of a ledger that has no `local`
+  line (the monitor needs one host).
 - Lines that are not changed keep their bytes (comments, blank lines,
   spacing, CRLF, words the monitor skips). An alias with two lines is one
   host: `set`, `laptop` and `rm` act on both.
+- A flag is taken only by the verb it is listed with above: any other is a
+  usage error (`rm --dry-run` removes nothing).
 
 | exit | means |
 |---|---|
 | 0 | done; a warning, if any, is on stderr |
 | 1 | it could not: no manager bot with a ledger here, a failed write, or the ledger locked by another `hosts` for 5 s |
-| 2 | usage, or a word that is not allowed (the word itself is never echoed: it may be a secret in the wrong place) |
+| 2 | usage, or a word that is not allowed. Nothing of the word is echoed, an alias and a KEY included: the message says where it stands (`argument 3`, `line 2 of stdin`) and the rule, as it may be a secret in the wrong place |
 | 3 | the alias is already in the ledger (`add`) or is not in it (`set`, `laptop`, `rm`) |
 | 4 | `add` refused: the host is the same home as one already checked |
 | 5 | not added: the host did not answer or has no claude-discord (`--no-probe` adds it unchecked) |
 
 **What `add` asks first.** `hosts add <alias>` runs `ssh -o BatchMode=yes -o
 ConnectTimeout=8 -- <alias> '~/.local/bin/claude-discord --version
---host-id'` (`--dry-run` prints that line and runs nothing; an exit 255 is
+--host-id'` (`--dry-run` prints that line, and under it what the add writes
+on that machine, and runs nothing; an exit 255 is
 tried once more with `-o ControlPath=none`, as a monitor pass does; the
 whole call is ended after 20 s, whatever ssh leaves behind holding its
 output open: `CLAUDE_DISCORD_PROBE_CAP`, 1 to 300 s). The answer is another
@@ -998,7 +1005,10 @@ are no UTF-8) and cut at 200, and it is only matched, never run. Then:
   another alias still in the ledger, is `the same home as <host>`: a second
   line for it would report every bot twice. The id names a home, not a
   machine: a container and its host that share `$HOME` (below) have one id,
-  which is exactly the pair that must not both be listed.
+  which is exactly the pair that must not both be listed. Asking is what
+  makes the id: the check writes `~/.claude-discord/host-id` on that host
+  when it has none. A host that answers as 1.12.0 or later with no id could
+  not create it: added, with a warning that says so.
 - **watched by another manager: a warning.** A host keeps
   `~/.claude-discord/watchers/<manager>` (`<host-id of that manager's home>
   <its alias for this host> <time>`), written by that manager's `hosts add`

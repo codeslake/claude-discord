@@ -1911,20 +1911,25 @@ hid_re='^[0-9a-f]{32}$'   # what a host-id is
 # What travels in a watcher record: a manager bot's name that can be a file name on another machine and a bare word of
 # an ssh command line, and an ssh alias as `hosts` takes one.
 mgr_re='^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$' alias_re='^[A-Za-z0-9._@][A-Za-z0-9._@-]{0,254}$'
+# c_match <string> <regex>: the match in the C locale, where A-Z, a-z and 0-9 are those ASCII characters and no other
+# (in a UTF-8 locale a range also takes accented and fullwidth letters, by the locale's collation). For what must be
+# plain: a host-id, a manager's name, an ssh alias, an env KEY. The locale is this function's own: the rest of the
+# script keeps the user's (a display name is counted in its characters).
+c_match() { local LC_ALL=C; [[ $1 =~ $2 ]]; }
 host_id() {
   local f=$helpers/host-id id=""
   { read -r id < "$f"; } 2>/dev/null || :
-  if ! [[ $id =~ $hid_re ]]; then
+  if ! c_match "$id" "$hid_re"; then
     mkdir -p "$helpers" || return 1
     (umask 077; id=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') && printf '%s\n' "$id" > "$f.tmp.$$") || { rm -f "$f.tmp.$$"; return 1; }
     if ! ln "$f.tmp.$$" "$f" 2>/dev/null; then
       # The name is taken: by another first call's id (kept: read below), or by a file that is no id (replaced).
       id=""; { read -r id < "$f"; } 2>/dev/null || :
-      [[ $id =~ $hid_re ]] || mv -f "$f.tmp.$$" "$f" || :
+      c_match "$id" "$hid_re" || mv -f "$f.tmp.$$" "$f" || :
     fi
     rm -f "$f.tmp.$$"
     id=""; { read -r id < "$f"; } 2>/dev/null || :
-    [[ $id =~ $hid_re ]] || return 1
+    c_match "$id" "$hid_re" || return 1
   fi
   printf '%s\n' "$id"
 }
@@ -1943,18 +1948,18 @@ if [ "${1:-}" = --version ]; then
     --host-id)
       id=$(host_id) || exit 1; echo "host-id $id"
       for f in "$wd"/*; do
-        [ -f "$f" ] && [[ ${f##*/} =~ $mgr_re ]] || continue
+        [ -f "$f" ] && c_match "${f##*/}" "$mgr_re" || continue
         w=""; { read -r w < "$f"; } 2>/dev/null || :
         echo "watcher ${f##*/} ${w//[[:cntrl:]]/}"
       done;;
     --watch)   # <manager> <the host-id of its home> <its alias for this host>
-      [[ ${3:-} =~ $mgr_re ]] && [[ ${4:-} =~ $hid_re ]] && [[ ${5:-} =~ $alias_re ]] || exit 2
+      c_match "${3:-}" "$mgr_re" && c_match "${4:-}" "$hid_re" && c_match "${5:-}" "$alias_re" || exit 2
       id=$(host_id) || exit 1
       [ "$id" != "$4" ] || exit 1   # this very home: it is checked through `local`, never through an alias
       (umask 077; mkdir -p "$wd" && printf '%s %s %s\n' "$4" "$5" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$wd/.$3.$$" && mv -f "$wd/.$3.$$" "$wd/$3") || exit 1
       echo "watched $3";;
     --unwatch)   # <manager> <the host-id of its home>: only the record that home wrote
-      [[ ${3:-} =~ $mgr_re ]] && [[ ${4:-} =~ $hid_re ]] || exit 2
+      c_match "${3:-}" "$mgr_re" && c_match "${4:-}" "$hid_re" || exit 2
       w=""; { read -r w rest < "$wd/$3"; } 2>/dev/null || :
       [ "$w" != "$4" ] || rm -f "$wd/$3"
       echo "unwatched $3";;
@@ -2015,25 +2020,28 @@ fi
 # scripts and the TUI, which changes the ledger through this verb only. It never prints the value of a KEY=VALUE word
 # (a proxy URL may hold a password): key names only.
 # Exit status: 0 done (a warning goes to stderr), 1 it could not (no manager bot with a ledger, a failed write, the
-# ledger locked by another writer for 5 s), 2 usage or a word that is not allowed, 3 the alias is already in the
+# ledger locked by another writer for 5 s), 2 usage or a word that is not allowed (never echoed), 3 the alias is already in the
 # ledger (add) or is not in it (set, laptop, rm), 4 add refused: the host is the same home as one already checked,
 # 5 not added: the host did not answer or has no claude-discord (--no-probe adds it unchecked).
 if [ "${1:-}" = hosts ]; then
   shift
   h_usage="usage: claude-discord hosts [--bot <manager>] list [--json] | add [--no-probe|--dry-run] <alias> [laptop] [KEY=VALUE...] | set <alias> name=<display>|KEY=VALUE|KEY=... | set <alias> --stdin | laptop <alias> on|off | rm [--no-probe] <alias>"
-  hb="" h_json="" h_probe=yes h_stdin="" h_dry="" hw=()
+  hb="" h_json="" h_probe=yes h_stdin="" h_dry="" h_flags="" hw=()
   while [ $# -gt 0 ]; do
     case $1 in
       --bot) [ $# -ge 2 ] || { echo "$h_usage" >&2; exit 2; }; hb=$2; shift;;
-      --json) h_json=1;;
-      --no-probe) h_probe="";;
-      --stdin) h_stdin=1;;
-      --dry-run) h_dry=1;;
+      --json) h_json=1 h_flags="$h_flags $1";;
+      --no-probe) h_probe="" h_flags="$h_flags $1";;
+      --stdin) h_stdin=1 h_flags="$h_flags $1";;
+      --dry-run) h_dry=1 h_flags="$h_flags $1";;
       -*) echo "$h_usage" >&2; exit 2;;   # an ssh alias never starts with "-": ssh would read it as an option
       *) hw+=("$1");;
     esac
     shift
   done
+  # A flag that means nothing for the verb is a usage error, not ignored: `rm --dry-run` would remove.
+  case ${hw[0]:-} in list) h_ok=" --json ";; add) h_ok=" --no-probe --dry-run ";; set) h_ok=" --stdin ";; rm) h_ok=" --no-probe ";; *) h_ok=" ";; esac
+  for w in $h_flags; do case $h_ok in *" $w "*) ;; *) echo "$h_usage" >&2; exit 2;; esac; done
   # Which manager. In the project above the cwd: its dev-manager bots that have a ledger (only the one named, with
   # --bot); none there: the same among the recorded projects (records/projects), as `tui` and `monitor` find theirs.
   # Exactly one must be left. This verb never asks (the TUI and scripts run it): it names the candidates and exits 2.
@@ -2063,26 +2071,26 @@ if [ "${1:-}" = hosts ]; then
   [ "$h_n" = 1 ] || { echo "claude-discord: hosts: $h_n manager bots have a ledger; name one with --bot <manager>, in its project when two share a name:" >&2; printf '%s' "$h_cands" | sed 's/^/  /' >&2; exit 2; }
   hd=${h_cands%$'\n'}; hb=${hd##*/}; hf=$hd/hosts
   # h_alias <word>: an ssh alias as the monitor's pass takes one (a line whose first word is anything else is skipped
-  # there): letters, digits and . _ @ - only, never a leading "-" (ssh would read it as an option), 255 at most. Or exit 2.
+  # there): letters, digits and . _ @ - only, never a leading "-" (ssh would read it as an option), 255 at most. Or
+  # exit 2. It is the word after the verb, and like any refused word it is never echoed, only where it stands and what
+  # it must be: it may be a secret that landed in the wrong place (`hosts set KEY=secret <alias>`).
   h_alias() {
-    case $1 in
-      ''|-*|*[!A-Za-z0-9._@-]*) echo "claude-discord: hosts: '${1//[[:cntrl:]]/?}' is no ssh alias: letters, digits and . _ @ - only, not starting with -" >&2; exit 2;;
-    esac
-    [ ${#1} -le 255 ] || { echo "claude-discord: hosts: an ssh alias is 255 characters at most" >&2; exit 2; }
+    c_match "$1" "$alias_re" || { echo "claude-discord: hosts: the alias (argument 2) is not an ssh alias: letters, digits, . _ @ -, not starting with -, 255 at most" >&2; exit 2; }
   }
-  # h_word <word>: a KEY=VALUE word (name=<display> too) that a ledger line can hold and the monitor will read, or
-  # exit 2. The word is never echoed, only its key once that is known to be one: the rest may be a secret pasted in
-  # the wrong place. A value holds no whitespace or control character (the word would end there) and no quote (the
-  # ledger has no quoting: the quote would travel as part of the value).
+  # h_word <where> <word>: a KEY=VALUE word (name=<display> too) that a ledger line can hold and the monitor will read,
+  # or exit 2 naming <where> it stands ("argument 4", "line 2 of stdin") and the rule. Nothing of the word is echoed,
+  # not its key either: a word that ends in "=" may be a token. A value holds no whitespace or control character (the
+  # word would end there) and no quote (the ledger has no quoting: the quote would travel as part of the value). A
+  # display name may hold any other character and is 40 at most, counted in the user's locale.
   h_word() {
-    local k=${1%%=*} v=${1#*=} re='^[A-Za-z_][A-Za-z0-9_]*$'
-    case $1 in *=*) ;; *) k="";; esac
-    [[ $k =~ $re ]] && [ ${#k} -le 64 ] || { echo "claude-discord: hosts: a word is not KEY=VALUE (KEY: letters, digits and _, not starting with a digit, 64 at most)" >&2; exit 2; }
+    local k=${2%%=*} v=${2#*=}
+    case $2 in *=*) ;; *) k="";; esac
+    c_match "$k" '^[A-Za-z_][A-Za-z0-9_]{0,63}$' || { echo "claude-discord: hosts: $1 is not KEY=VALUE (KEY: letters, digits and _, not starting with a digit, 64 at most)" >&2; exit 2; }
     case $v in
-      *[[:space:]]*|*[[:cntrl:]]*|*[\'\"]*) echo "claude-discord: hosts: $k: a value holds no space, control character or quote (a ledger word is not shell-quoted: write the value bare)" >&2; exit 2;;
+      *[[:space:]]*|*[[:cntrl:]]*|*[\'\"]*) echo "claude-discord: hosts: $1: a value holds no space, control character or quote (a ledger word is not shell-quoted: write the value bare)" >&2; exit 2;;
     esac
-    [ ${#v} -le 1024 ] || { echo "claude-discord: hosts: $k: a value is 1024 characters at most" >&2; exit 2; }
-    [ "$k" != name ] || [ ${#v} -le 64 ] || { echo "claude-discord: hosts: name: a display name is 64 characters at most" >&2; exit 2; }
+    [ ${#v} -le 1024 ] || { echo "claude-discord: hosts: $1: a value is 1024 characters at most" >&2; exit 2; }
+    [ "$k" != name ] || [ ${#v} -le 40 ] || { echo "claude-discord: hosts: $1: a display name is 40 characters at most" >&2; exit 2; }
   }
   # h_lock: one writer of the ledger at a time (a TUI save while `hosts set` runs would otherwise lose one of the two:
   # both read, then both write). flock through perl, as the monitor's lock, on <ledger>.lock: the lock stays with fd 7
@@ -2103,16 +2111,20 @@ if [ "${1:-}" = hosts ]; then
   #   last word; KEY= removes them (name= is one more key here). The other words keep their place, the ones the
   #   monitor skips too. A changed line is written with one space between words and keeps its CRLF; a line that comes
   #   out the same keeps its bytes, and when none changes nothing is written.
-  # rm: every line of <alias> goes. set and rm: exit 3 when <alias> has no line.
+  # rm: every line of <alias> goes, unless no host line would be left (exit 2). set and rm: exit 3 when <alias> has no line.
   h_edit() {
-    local alias=$1 how=$2 out="" line cr hit=0 changed=0 op w k seen was i
+    local alias=$1 how=$2 out="" line cr hit=0 changed=0 others=0 op w k seen was i
     local -a words nw
     shift 2
     h_lock
     while IFS= read -r line || [ -n "$line" ]; do
       cr=""; case $line in *$'\r') cr=$'\r'; line=${line%$'\r'};; esac
       set -f; words=($line); set +f
-      if [ "${words[0]:-}" != "$alias" ]; then out="$out$line$cr"$'\n'; continue; fi
+      if [ "${words[0]:-}" != "$alias" ]; then
+        out="$out$line$cr"$'\n'
+        case ${words[0]:-} in ''|-*|*[!A-Za-z0-9._@-]*) ;; *) others=$((others + 1));; esac   # a host line, as the monitor's pass tells one
+        continue
+      fi
       hit=$((hit + 1))
       [ "$how" != add ] || { echo "claude-discord: hosts: $alias is already in $hf" >&2; exit 3; }
       if [ "$how" = rm ]; then changed=$((changed + 1)); continue; fi
@@ -2142,6 +2154,8 @@ if [ "${1:-}" = hosts ]; then
       add) out="$out$alias${*:+ $*}"$'\n'; changed=1;;
       *) [ "$hit" != 0 ] || { echo "claude-discord: hosts: $alias is not in $hf" >&2; exit 3; };;
     esac
+    # Only a ledger with no local line (hand-edited) can come to this: its monitor would run with no host and say nothing.
+    [ "$how" != rm ] || [ "$others" != 0 ] || { echo "claude-discord: hosts: $alias is not removed: the ledger would be empty: the monitor needs at least one host" >&2; exit 2; }
     [ "$changed" = 0 ] || ledger_write "$hf" "$out" || { echo "claude-discord: hosts: could not write $hf; it is as it was" >&2; exit 1; }
     exec 7>&-
     h_changed=$changed
@@ -2225,8 +2239,8 @@ if [ "${1:-}" = hosts ]; then
       read -r a b c d e rest <<<"$l" || :
       case $a in
         claude-discord) if [ -z "$h_ver" ] && [[ $b =~ $re_v ]]; then h_ver=$b; fi;;
-        host-id) if [[ $b =~ $hid_re ]]; then h_id=$b; fi;;
-        watcher) if [[ $b =~ $mgr_re ]] && [[ $c =~ $hid_re ]] && [[ $d =~ $alias_re ]] && [[ $e =~ $re_t ]] && [ -z "$rest" ]; then h_watch="$h_watch$b $c $d $e"$'\n'; fi;;
+        host-id) if c_match "$b" "$hid_re"; then h_id=$b; fi;;
+        watcher) if c_match "$b" "$mgr_re" && c_match "$c" "$hid_re" && c_match "$d" "$alias_re" && [[ $e =~ $re_t ]] && [ -z "$rest" ]; then h_watch="$h_watch$b $c $d $e"$'\n'; fi;;
       esac
     done <<<"$h_out"
   }
@@ -2262,15 +2276,22 @@ if [ "${1:-}" = hosts ]; then
     add)
       [ "${#hw[@]}" -ge 2 ] || { echo "$h_usage" >&2; exit 2; }
       a=${hw[1]}; h_alias "$a"
+      # laptop is the third word or none; a KEY comes once (two words of one key on a line: the monitor takes the last).
+      i=2 keys=" "
       for w in "${hw[@]:2}"; do
-        [ "$w" = laptop ] && [ "$w" = "${hw[2]}" ] && continue
-        h_word "$w"
-        case $w in *=) echo "claude-discord: hosts: ${w%=}: add takes KEY=VALUE, a value that is not empty" >&2; exit 2;; esac
+        i=$((i + 1))
+        [ "$w" = laptop ] && [ "$i" = 3 ] && continue
+        h_word "argument $i" "$w"
+        case $w in *=) echo "claude-discord: hosts: argument $i: add takes KEY=VALUE, a value that is not empty" >&2; exit 2;; esac
+        case $keys in *" ${w%%=*} "*) echo "claude-discord: hosts: argument $i: its KEY was already given" >&2; exit 2;; esac
+        keys="$keys${w%%=*} "
       done
       ! h_has "$a" || { echo "claude-discord: hosts: $a is already in $hf" >&2; exit 3; }
       if [ -n "$h_dry" ]; then
         # The line `add` is about to run, for a person or the TUI to read first. local is this machine: nobody is asked.
-        [ -z "$h_probe" ] || [ "$a" = local ] || echo "ssh -o BatchMode=yes -o ConnectTimeout=8 -- $a '$h_who'"
+        # The second line: what the two calls leave on that machine (the TUI shows both lines before the second Enter).
+        [ -z "$h_probe" ] || [ "$a" = local ] || printf '%s\n' "ssh -o BatchMode=yes -o ConnectTimeout=8 -- $a '$h_who'" \
+          "checks it and writes ~/.claude-discord/host-id there if missing; adding it writes ~/.claude-discord/watchers/$hb"
         exit 0
       fi
       h_id=""
@@ -2283,6 +2304,8 @@ if [ "${1:-}" = hosts ]; then
           echo "claude-discord: hosts: $a gave no answer within ${h_cap}s. $unchecked" >&2; exit 5
         elif [ -z "$h_ver" ]; then
           echo "claude-discord: hosts: $a answered, but not as claude-discord (exit $h_rc): ${h_last:-no output}. Install it there first (README, Install): a host without it is reported blind. $unchecked" >&2; exit 5
+        elif [ -z "$h_id" ] && ver_ge "$h_ver" 1.12.0; then
+          echo "claude-discord: hosts: warning: claude-discord $h_ver on $a answered but could not create its host-id (is ~/.claude-discord writable there?): it could not be checked for being this same home" >&2
         elif [ -z "$h_id" ]; then
           echo "claude-discord: hosts: warning: claude-discord $h_ver on $a is older than 1.12.0 and has no host-id: it could not be checked for being this same home" >&2
         else
@@ -2310,7 +2333,7 @@ if [ "${1:-}" = hosts ]; then
       # This manager's record on the host, for the next manager that adds it. Only a claude-discord that printed a
       # host-id knows --watch (1.12.0); its failure is a warning, the host is added and checked all the same.
       if [ -n "$h_id" ]; then
-        if [[ $hb =~ $mgr_re ]]; then
+        if c_match "$hb" "$mgr_re"; then
           h_ssh "$a" "~/.local/bin/claude-discord --version --watch $hb $mine $a"
           [ "$h_rc" = 0 ] || echo "claude-discord: hosts: warning: $a is added, but this manager could not be recorded there (ssh exit $h_rc): another manager adding it will not be warned" >&2
         else
@@ -2322,26 +2345,28 @@ if [ "${1:-}" = hosts ]; then
       a=${hw[1]}; h_alias "$a"
       ops=()
       if [ "${hw[0]}" = laptop ]; then
-        [ "${#hw[@]}" = 3 ] && [ -z "$h_stdin" ] || { echo "$h_usage" >&2; exit 2; }
+        [ "${#hw[@]}" = 3 ] || { echo "$h_usage" >&2; exit 2; }
         case ${hw[2]} in on|off) ops=("laptop ${hw[2]}");; *) echo "$h_usage" >&2; exit 2;; esac
       elif [ -n "$h_stdin" ]; then
         # One change a line; all of them are checked before the ledger is touched.
         [ "${#hw[@]}" = 2 ] || { echo "$h_usage" >&2; exit 2; }
+        i=0
         while IFS= read -r w || [ -n "$w" ]; do
-          w=${w%$'\r'}
+          w=${w%$'\r'}; i=$((i + 1))
           [ -n "$w" ] || continue
-          case $w in "laptop on"|"laptop off") ;; *) h_word "$w";; esac
+          case $w in "laptop on"|"laptop off") ;; *) h_word "line $i of stdin" "$w";; esac
           ops+=("$w")
         done
       else
-        for w in "${hw[@]:2}"; do h_word "$w"; ops+=("$w"); done
+        i=2
+        for w in "${hw[@]:2}"; do i=$((i + 1)); h_word "argument $i" "$w"; ops+=("$w"); done
       fi
       [ "${#ops[@]}" != 0 ] || { echo "$h_usage" >&2; exit 2; }
       h_edit "$a" set "${ops[@]}"
       if [ "$h_changed" = 0 ]; then echo "claude-discord: hosts: $a is already so in $hf"
       else echo "claude-discord: hosts: changed $a in $hf ($h_changed line$([ "$h_changed" = 1 ] || echo s))"; fi;;
     rm)
-      [ "${#hw[@]}" = 2 ] && [ -z "$h_stdin" ] || { echo "$h_usage" >&2; exit 2; }
+      [ "${#hw[@]}" = 2 ] || { echo "$h_usage" >&2; exit 2; }
       a=${hw[1]}; h_alias "$a"
       # The monitor's own Discord calls take their environment from the local line, and the README promises it is there.
       [ "$a" != local ] || { echo "claude-discord: hosts: local is this machine and stays in the ledger (to turn the monitor off: claude-discord monitor --stop $hb)" >&2; exit 2; }
@@ -2350,7 +2375,7 @@ if [ "${1:-}" = hosts ]; then
       # This manager's watcher record on the host goes too, when it can be reached; the ledger line is already gone
       # either way. A home with no host-id never wrote a record anywhere, and makes no id for this.
       mine=""; { read -r mine < "$helpers/host-id"; } 2>/dev/null || :
-      if [ -n "$h_probe" ] && [[ $mine =~ $hid_re ]] && [[ $hb =~ $mgr_re ]]; then
+      if [ -n "$h_probe" ] && c_match "$mine" "$hid_re" && c_match "$hb" "$mgr_re"; then
         h_ssh "$a" "~/.local/bin/claude-discord --version --unwatch $hb $mine"
         [ "$h_rc" = 0 ] || echo "claude-discord: hosts: warning: $a did not answer (ssh exit $h_rc), so this manager's watcher record stays there. It only makes another manager's add warn; to remove it later: ssh $a '~/.local/bin/claude-discord --version --unwatch $hb $mine'" >&2
       fi;;
