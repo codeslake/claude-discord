@@ -3661,6 +3661,57 @@ hc add --no-probe late; wait
 rm -f "$MR/mgr/hosts.ready"
 echo "ok: hosts add --no-probe appends a host line (laptop, KEY=VALUE and name= words) keeping every other byte, by temp file and rename with the ledger's mode; an alias that is an ssh option or holds anything but letters, digits and . _ @ - and a word that is no KEY=VALUE are exit 2 with nothing written and no word echoed; an alias already listed is exit 3; a second writer waits for the first"
 
+# hosts set / laptop / rm. ledger_is <printf format>: the ledger is exactly that.
+ledger_is() { [ "$(<"$MR/mgr/hosts")" = "$(printf "$1")" ]; }
+HEAD='# mine\r\n\r\n'; LOCAL='local laptop name=람다 HTTPS_PROXY=http://u:secretpw@127.0.0.1:8118\r\n'; TAIL='-oProxyCommand=x\nlap laptop\nh2  A=1\n'
+printf "$HEAD${LOCAL}h1   X=1 odd name=a  name=b Y=2 X=3\n${TAIL}h1 laptop" > "$MR/mgr/hosts"
+# KEY=VALUE replaces the first KEY= word where it stands (a later one of the same key goes), else is added last; on
+# every line of the alias; every other word and line as it was.
+hc set h1 X=9 Z=http://secretz
+[ "$HRC" = 0 ] && ledger_is "$HEAD${LOCAL}h1 X=9 odd name=a name=b Y=2 Z=http://secretz\n${TAIL}h1 laptop X=9 Z=http://secretz" && [ "$HO" = "claude-discord: hosts: changed h1 in $MR/mgr/hosts (2 lines)" ] && [[ $HE != *secretz* ]] ||
+  { echo "FAIL: set KEY=VALUE replaces the key's first word in place or adds it last, on every line of the alias, and prints no value: rc=$HRC $HO / $HE / $(<"$MR/mgr/hosts")"; exit 1; }
+hc set h1 Y= name=box
+[ "$HRC" = 0 ] && ledger_is "$HEAD${LOCAL}h1 X=9 odd name=box Z=http://secretz\n${TAIL}h1 laptop X=9 Z=http://secretz name=box" || { echo "FAIL: set KEY= removes the word; name=<display> is one word, where the first stood: rc=$HRC $HE / $(<"$MR/mgr/hosts")"; exit 1; }
+hc set h1 name= X= NOPE=
+[ "$HRC" = 0 ] && ledger_is "$HEAD${LOCAL}h1 odd Z=http://secretz\n${TAIL}h1 laptop Z=http://secretz" || { echo "FAIL: name= and KEY= remove, a key that is not there is no error: rc=$HRC $HE / $(<"$MR/mgr/hosts")"; exit 1; }
+# --stdin: one change a line (a value never in an argument list), laptop on|off among them, all in one rename. A line
+# that is not allowed fails the whole call before anything is written.
+li=$(stat -c %i "$MR/mgr/hosts")
+HRC=0; HO=$(printf 'name=랩\nHTTPS_PROXY=http://u:pw2@h:1\r\nlaptop off\n\nK=' | bash "$S" hosts set lap --stdin 2>&1) || HRC=$?
+[ "$HRC" = 0 ] && ledger_is "$HEAD${LOCAL}h1 odd Z=http://secretz\n-oProxyCommand=x\nlap name=랩 HTTPS_PROXY=http://u:pw2@h:1\nh2  A=1\nh1 laptop Z=http://secretz" && [[ $HO != *pw2* ]] ||
+  { echo "FAIL: set --stdin applies every line of stdin in one write: rc=$HRC $HO / $(<"$MR/mgr/hosts")"; exit 1; }
+LEDGER=$(<"$MR/mgr/hosts"); li=$(stat -c %i "$MR/mgr/hosts")
+HRC=0; HO=$(printf 'A=1\nB=secretpw x\n' | bash "$S" hosts set lap --stdin 2>&1) || HRC=$?
+[ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [[ $HO != *secretpw* ]] || { echo "FAIL: one bad line on stdin fails the whole set --stdin, nothing written: rc=$HRC $HO"; exit 1; }
+# A change that is already so writes nothing: the line keeps its bytes (h2's two spaces) and the file its inode.
+hc set h2 A=1; A=$HRC$HO; hc laptop h2 off
+[ "$A$HRC$HO" = "0claude-discord: hosts: h2 is already so in $MR/mgr/hosts0claude-discord: hosts: h2 is already so in $MR/mgr/hosts" ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [ "$(stat -c %i "$MR/mgr/hosts")" = "$li" ] ||
+  { echo "FAIL: a change that is already so is said and writes nothing: $A / rc=$HRC $HO / $HE"; exit 1; }
+# laptop: the second word, on and off; a changed CRLF line keeps its CRLF; local is a host like any other here.
+hc laptop local off
+[ "$HRC" = 0 ] && [ "$(sed -n 3p "$MR/mgr/hosts")" = "$(printf 'local name=람다 HTTPS_PROXY=http://u:secretpw@127.0.0.1:8118\r')" ] || { echo "FAIL: laptop off removes the second word and keeps the line's CRLF: rc=$HRC $(sed -n 3p "$MR/mgr/hosts" | od -c | tail -3)"; exit 1; }
+hc laptop local on; hc laptop h2 on
+[ "$HRC" = 0 ] && [ "$(sed -n 3p "$MR/mgr/hosts")" = "$(printf "${LOCAL%'\\n'}")" ] && [ "$(sed -n 7p "$MR/mgr/hosts")" = "h2 laptop A=1" ] || { echo "FAIL: laptop on makes laptop the second word: rc=$HRC $(<"$MR/mgr/hosts")"; exit 1; }
+# rm removes every line of the alias and nothing else; local stays; an alias that is not there is exit 3 for all three.
+hc rm --no-probe h1
+[ "$HRC" = 0 ] && ledger_is "$HEAD$LOCAL-oProxyCommand=x\nlap name=랩 HTTPS_PROXY=http://u:pw2@h:1\nh2 laptop A=1" && grep -q "^claude-discord: hosts: removed h1 from $MR/mgr/hosts" <<<"$HO" ||
+  { echo "FAIL: rm removes both lines of h1 and keeps every other byte: rc=$HRC $HO / $HE / $(<"$MR/mgr/hosts")"; exit 1; }
+LEDGER=$(<"$MR/mgr/hosts")
+hc rm --no-probe local
+[ "$HRC" = 2 ] && grep -q 'local is this machine' <<<"$HE" && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] || { echo "FAIL: rm local is refused (exit 2): rc=$HRC $HE"; exit 1; }
+for cmd in "rm --no-probe h1" "set h1 X=1" "laptop h1 on"; do
+  hc $cmd
+  [ "$HRC" = 3 ] && grep -q "h1 is not in $MR/mgr/hosts" <<<"$HE" && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] || { echo "FAIL: 'hosts $cmd' on an alias that is not in the ledger is exit 3: rc=$HRC $HE"; exit 1; }
+done
+for cmd in "rm a b" "rm -oProxyCommand=x" "set lap" "set lap X=1 --stdin" "laptop lap maybe"; do
+  hc $cmd </dev/null
+  [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] || { echo "FAIL: 'hosts $cmd' is a usage error (exit 2), nothing written: rc=$HRC $HE"; exit 1; }
+done
+# The last hosts go: the ledger file stays (it is the monitor's switch), with local, the comment and the line that is no host.
+hc rm --no-probe lap; hc rm --no-probe h2
+[ "$HRC" = 0 ] && ledger_is "$HEAD$LOCAL-oProxyCommand=x" || { echo "FAIL: removing the last other host leaves the ledger in place with local: rc=$HRC $(<"$MR/mgr/hosts")"; exit 1; }
+echo "ok: hosts set replaces, adds or removes a KEY=VALUE or name= word on every line of the alias (values on stdin with --stdin, all changes in one write, none when a line is bad), laptop on|off sets the second word, rm removes the alias's lines; other lines and words keep their bytes, a change already so writes nothing, an alias not listed is exit 3, rm local is refused"
+
 # The monitor runs fast here: a 0.01 s tick, a 0.03 s cap per host, 0.1 s for the lock (one retry), and a 60 s pass interval, so
 # each start runs exactly its first pass (these blocks need no second one). Thresholds are tested by seeding
 # state.json with old `since` times, never by waiting. The local host's command is the shim, stubbed to print

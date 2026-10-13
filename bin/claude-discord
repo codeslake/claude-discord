@@ -60,6 +60,14 @@
 #   claude-discord hosts [--bot <name>] add [--no-probe] <alias> [laptop] [KEY=VALUE...]
 #                                        adds a host line (--no-probe: without
 #                                        asking the host who it is)
+#   claude-discord hosts [--bot <name>] set <alias> name=<display>|KEY=VALUE|KEY=...
+#                                        sets or (KEY=) removes words of a host's
+#                                        line; `set <alias> --stdin` reads them from
+#                                        stdin, one a line (a value then is in no
+#                                        argument list), `laptop on|off` too
+#   claude-discord hosts [--bot <name>] laptop <alias> on|off
+#   claude-discord hosts [--bot <name>] rm [--no-probe] <alias>
+#                                        stops checking a host (never `local`)
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
@@ -1941,16 +1949,17 @@ fi
 # (a proxy URL may hold a password): key names only.
 # Exit status: 0 done (a warning goes to stderr), 1 it could not (no manager bot with a ledger, a failed write, the
 # ledger locked by another writer for 5 s), 2 usage or a word that is not allowed, 3 the alias is already in the
-# ledger (add).
+# ledger (add) or is not in it (set, laptop, rm).
 if [ "${1:-}" = hosts ]; then
   shift
-  h_usage="usage: claude-discord hosts [--bot <manager>] list [--json] | add [--no-probe] <alias> [laptop] [KEY=VALUE...]"
-  hb="" h_json="" h_probe=yes hw=()
+  h_usage="usage: claude-discord hosts [--bot <manager>] list [--json] | add [--no-probe] <alias> [laptop] [KEY=VALUE...] | set <alias> name=<display>|KEY=VALUE|KEY=... | set <alias> --stdin | laptop <alias> on|off | rm [--no-probe] <alias>"
+  hb="" h_json="" h_probe=yes h_stdin="" hw=()
   while [ $# -gt 0 ]; do
     case $1 in
       --bot) [ $# -ge 2 ] || { echo "$h_usage" >&2; exit 2; }; hb=$2; shift;;
       --json) h_json=1;;
       --no-probe) h_probe="";;
+      --stdin) h_stdin=1;;
       -*) echo "$h_usage" >&2; exit 2;;   # an ssh alias never starts with "-": ssh would read it as an option
       *) hw+=("$1");;
     esac
@@ -2016,12 +2025,19 @@ if [ "${1:-}" = hosts ]; then
     perl -e 'open(my $l, ">&=", 7) or exit 1; for (1 .. 50) { exit 0 if flock($l, 6); select(undef, undef, undef, 0.1) } exit 1' ||
       { echo "claude-discord: hosts: $hf is being changed by another claude-discord hosts; nothing was changed" >&2; exit 1; }
   }
-  # h_edit <alias> add <word>...: the ledger read and written back under the lock, in one rename (ledger_write).
+  # h_edit <alias> add|set|rm <word>...: the ledger read and written back under the lock, in one rename (ledger_write).
   # A line that is not <alias>'s keeps its bytes, CRLF included. Sets h_changed to the number of lines it changed.
   # add: <alias> must not be there (exit 3); the new line is the last.
+  # set: on EVERY line of <alias> (two lines for one host: the monitor runs it twice and the second wins), each <word>
+  #   in turn: "laptop on" makes laptop the second word (the one place the monitor reads it) and "laptop off" removes
+  #   it from there; KEY=VALUE replaces the first KEY= word where it stands and drops any later one, or becomes the
+  #   last word; KEY= removes them (name= is one more key here). The other words keep their place, the ones the
+  #   monitor skips too. A changed line is written with one space between words and keeps its CRLF; a line that comes
+  #   out the same keeps its bytes, and when none changes nothing is written.
+  # rm: every line of <alias> goes. set and rm: exit 3 when <alias> has no line.
   h_edit() {
-    local alias=$1 how=$2 out="" line cr hit=0 changed=0
-    local -a words
+    local alias=$1 how=$2 out="" line cr hit=0 changed=0 op w k seen was i
+    local -a words nw
     shift 2
     h_lock
     while IFS= read -r line || [ -n "$line" ]; do
@@ -2030,8 +2046,33 @@ if [ "${1:-}" = hosts ]; then
       if [ "${words[0]:-}" != "$alias" ]; then out="$out$line$cr"$'\n'; continue; fi
       hit=$((hit + 1))
       [ "$how" != add ] || { echo "claude-discord: hosts: $alias is already in $hf" >&2; exit 3; }
+      if [ "$how" = rm ]; then changed=$((changed + 1)); continue; fi
+      was=${words[*]}
+      for op in "$@"; do
+        nw=("${words[0]}")
+        case $op in
+          "laptop on"|"laptop off")
+            i=1; [ "${words[1]:-}" != laptop ] || i=2
+            [ "$op" = "laptop off" ] || nw+=(laptop)
+            for w in "${words[@]:$i}"; do nw+=("$w"); done;;
+          *)
+            k=${op%%=*} seen=""
+            for w in "${words[@]:1}"; do
+              case $w in
+                "$k="*) [ -n "$seen" ] || [ "$op" = "$k=" ] || nw+=("$op"); seen=1;;
+                *) nw+=("$w");;
+              esac
+            done
+            [ -n "$seen" ] || [ "$op" = "$k=" ] || nw+=("$op");;
+        esac
+        words=("${nw[@]}")
+      done
+      if [ "${words[*]}" = "$was" ]; then out="$out$line$cr"$'\n'; else out="$out${words[*]}$cr"$'\n'; changed=$((changed + 1)); fi
     done < "$hf"
-    out="$out$alias${*:+ $*}"$'\n'; changed=1
+    case $how in
+      add) out="$out$alias${*:+ $*}"$'\n'; changed=1;;
+      *) [ "$hit" != 0 ] || { echo "claude-discord: hosts: $alias is not in $hf" >&2; exit 3; };;
+    esac
     [ "$changed" = 0 ] || ledger_write "$hf" "$out" || { echo "claude-discord: hosts: could not write $hf; it is as it was" >&2; exit 1; }
     exec 7>&-
     h_changed=$changed
@@ -2075,6 +2116,36 @@ if [ "${1:-}" = hosts ]; then
       done
       h_edit "$a" add "${hw[@]:2}"
       echo "claude-discord: hosts: added $a to $hf";;
+    set|laptop)
+      [ "${#hw[@]}" -ge 2 ] || { echo "$h_usage" >&2; exit 2; }
+      a=${hw[1]}; h_alias "$a"
+      ops=()
+      if [ "${hw[0]}" = laptop ]; then
+        [ "${#hw[@]}" = 3 ] && [ -z "$h_stdin" ] || { echo "$h_usage" >&2; exit 2; }
+        case ${hw[2]} in on|off) ops=("laptop ${hw[2]}");; *) echo "$h_usage" >&2; exit 2;; esac
+      elif [ -n "$h_stdin" ]; then
+        # One change a line; all of them are checked before the ledger is touched.
+        [ "${#hw[@]}" = 2 ] || { echo "$h_usage" >&2; exit 2; }
+        while IFS= read -r w || [ -n "$w" ]; do
+          w=${w%$'\r'}
+          [ -n "$w" ] || continue
+          case $w in "laptop on"|"laptop off") ;; *) h_word "$w";; esac
+          ops+=("$w")
+        done
+      else
+        for w in "${hw[@]:2}"; do h_word "$w"; ops+=("$w"); done
+      fi
+      [ "${#ops[@]}" != 0 ] || { echo "$h_usage" >&2; exit 2; }
+      h_edit "$a" set "${ops[@]}"
+      if [ "$h_changed" = 0 ]; then echo "claude-discord: hosts: $a is already so in $hf"
+      else echo "claude-discord: hosts: changed $a in $hf ($h_changed line$([ "$h_changed" = 1 ] || echo s))"; fi;;
+    rm)
+      [ "${#hw[@]}" = 2 ] && [ -z "$h_stdin" ] || { echo "$h_usage" >&2; exit 2; }
+      a=${hw[1]}; h_alias "$a"
+      # The monitor's own Discord calls take their environment from the local line, and the README promises it is there.
+      [ "$a" != local ] || { echo "claude-discord: hosts: local is this machine and stays in the ledger (to turn the monitor off: claude-discord monitor --stop $hb)" >&2; exit 2; }
+      h_edit "$a" rm
+      echo "claude-discord: hosts: removed $a from $hf (the monitor keeps it a day as 'left the ledger', then drops it)";;
     *) echo "$h_usage" >&2; exit 2;;
   esac
   exit 0
