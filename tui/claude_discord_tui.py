@@ -480,6 +480,42 @@ def alerts_items(state: dict, width: int, now: float) -> list[tuple]:
     return items
 
 
+def config_items(state: dict, names: dict, width: int) -> list[tuple]:
+    """The Configuration tab, read-only: the ledger's hosts as the last pass saw them, and the monitor's settings."""
+    wide = width >= WIDE
+    cols = ([("host", 12), ("ssh target", 0), ("kind", 7)] + ([("env", 16)] if wide else []) + [("reach", 14)]
+            + ([("claude-discord", 15)] if wide else []) + [("bots", 4)])
+    cols[1] = ("ssh target", max(10, width - 2 - sum(w for _, w in cols) - len(cols) + 1))
+    bots, m, mgr = state.get("bots") or {}, state.get("monitor") or {}, state.get("manager", "?")
+    hosts = sorted((state.get("hosts") or {}).items())
+    items: list[tuple] = [(None, [rule("Hosts", len(hosts), "", width), Text()]), (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))]
+    for key, h in hosts:
+        v = h.get("verdict", "")
+        reach = ("● ok", OK) if v == "ok" else ("○ unreachable", DIM) if v == "hostdown" else (f"▲ {v or '?'}", WARN)
+        if key == "local":
+            target = "this machine (local" + (f" name={h['display']}" if h.get("display") else "") + ")"
+        else:
+            target = key + (f" ({h['hostname']})" if h.get("hostname") and h.get("hostname") != key else "")
+        if h.get("left_s") is not None:   # out of the ledger, kept for a day so a brief removal does not post again
+            target += " (left the ledger)"
+        env = h.get("env")
+        up = h.get("reach") == "ok"
+        cell = {"host": [(host_label(state, key), "bold")], "ssh target": [(target, DIM)], "kind": [("laptop" if h.get("laptop") else "server", DIM)],
+                "env": [(DASH if env is None else " ".join(env) or DASH, WARN if env else DIM)], "reach": [reach],
+                "claude-discord": [(((h.get("version") or "").split(" ")[0] if up else "") or DASH, "")],
+                "bots": [(str(sum(1 for b in bots.values() if b.get("host") == key and b.get("bot"))) if up else DASH, "")]}
+        items.append((key, row_lines([(cell[n], w) for n, w in cols])))
+    owner = str(m.get("owner_id") or "")
+    keeper = any(h.get("kind") == "keeper" for h in m.get("holders") or [])
+    rows = [("alert language", m.get("lang") or DASH, [("ALERT_LANG in config.env", DIM)]),
+            ("mention on alert", ("@" + names.get(owner, owner)) if owner else "nobody" if "owner_id" in m else DASH, [("DISCORD_USER_ID in config.env", DIM)]),
+            ("check every", "5 min", [("fixed", DIM)]), ("alert channel", "#bot-health-check", [("fixed", DIM)]),
+            ("kept running by", "keeper" if keeper else "nothing", [("stop: ", DIM), (f"claude-discord monitor --stop {mgr}", BRAND)])]
+    items.append((None, [Text(), rule("Monitor", None, "config.env values change with setup; fixed ones do not", width), Text()]
+                  + [Text.assemble((fit(label, 18), DIM), value, "   ", *note) for label, value, note in rows]))
+    return items
+
+
 class Confirm(ModalScreen[bool]):
     """A yes/no question, No by default (focused, and Enter, n and Escape answer it)."""
     CSS = "Confirm { align: center middle; } #confirm { width: 70; height: auto; border: thick $error; padding: 1 2; }"
@@ -617,7 +653,7 @@ class MonitorTUI(App):
         w = self.width
         if self.tab == "bots":
             return bots_items(self.state, self.names, w, self.opened, now)
-        return alerts_items(self.state, w, now) if self.tab == "alerts" else []
+        return alerts_items(self.state, w, now) if self.tab == "alerts" else config_items(self.state, self.names, w)
 
     def show(self, wid: str, text: Text) -> bool:
         """Updates a widget only when its text changed: a repaint every 2 s would drop a mouse selection each time."""

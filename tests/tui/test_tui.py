@@ -219,6 +219,26 @@ def pure():
     print("ok: the Alerts tab: Open is what was posted and has not recovered, History the last 24 h newest first; kind, what and post per record; "
           "the host column folds below 110; the posted text, or why there is none")
 
+    # ---- configuration ----
+    items = tui.config_items(s, NAMES, 137)
+    rows = {k: lines[0].plain for k, lines in items if k}
+    assert list(rows) == ["local", "old", "wmac"]
+    assert rows["local"].split() == "lmd79 this machine (local name=lmd79) server HTTPS_PROXY ● ok 1.11.0 4".split(), rows["local"]
+    assert rows["wmac"].split() == "wmac wmac (SECA2033002083) laptop - ○ unreachable - -".split(), rows["wmac"]
+    assert rows["old"].split() == "old old server - ● ok 1.10.5 1".split(), rows["old"]   # no display/env/hostname in an older entry: dashes
+    plain = [l.plain for _, lines in items for l in lines]
+    assert plain[0].startswith("Hosts 3 ─") and "http" not in "\n".join(plain), "env shows key names only, never a value"
+    for want in ("alert language    en   ALERT_LANG in config.env", "mention on alert  @dongyong22   DISCORD_USER_ID in config.env", "check every       5 min   fixed",
+                 "alert channel     #bot-health-check   fixed", "kept running by   keeper   stop: claude-discord monitor --stop mgr"):
+        assert want in plain, (want, plain)
+    older = dict(s, monitor={"pid": 1, "holders": []})
+    plain = [l.plain for _, lines in tui.config_items(older, NAMES, 137) for l in lines]
+    assert "alert language    -   ALERT_LANG in config.env" in plain and "mention on alert  -   DISCORD_USER_ID in config.env" in plain, plain
+    narrow = {k: lines[0].plain for k, lines in tui.config_items(s, NAMES, 100) if k}
+    assert "HTTPS_PROXY" not in narrow["local"] and all(cell_len(l) <= 100 for l in narrow.values())
+    print("ok: the Configuration tab: one row per ledger host (display name, target, kind, env key names, reach, version, bots), dashes for what an "
+          "older state lacks, and the monitor's settings")
+
 
 FAKES = tempfile.TemporaryDirectory()
 
@@ -415,6 +435,17 @@ async def alerts(app, pilot):
     assert app.opened == set() and app.clipboard == "", "space and c are the Bots tab's"
 
 
+async def config(app, pilot):
+    await pilot.press("left")
+    assert body(app)[0].startswith("Hosts 3 ─") and app.cursor["config"] == "local"
+    assert "this machine (local name=lmd79)" in line_of(app, "lmd79") and "http" not in text(app, "#body")
+    await pilot.press("down", "down", "enter")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.Detail) and "ControlPath=none wmac 'echo up'" in str(app.screen.query_one("#fix").render())
+    raw = str(app.screen.query_one("#body-detail").render())
+    assert raw.startswith("wmac\n") and "hostname         SECA2033002083" in raw and "finding  hostdown  not_posted" in raw, raw
+
+
 async def stopped(app, pilot):
     assert text(app, "#title").endswith("○ not running") and f"monitor stopped at 2026-10-11T12:00:00Z" in text(app, "#bar")
 
@@ -449,6 +480,8 @@ async def post_failed(app, pilot):
 
 async def pass_failed(app, pilot):
     assert "the last pass failed: the reducer rejected its input" in text(app, "#bar"), text(app, "#bar")
+    await pilot.press("left")
+    assert "wmac (SECA2033002083) (left the ledger)" in line_of(app, "laptop"), line_of(app, "laptop")
 
 
 async def missing_wrapper(app, pilot):
@@ -471,6 +504,7 @@ async def main():
     await case("crashed_project", crashed_project)
     await case("markup", markup)
     await case("alerts", alerts, state="all_ok")
+    await case("config", config, state="all_ok")
     await case("stopped", stopped)
     await case("stopped_by_user", stopped_by_user)
     await case("overdue", overdue)

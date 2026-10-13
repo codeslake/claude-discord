@@ -1069,6 +1069,17 @@ the post (`✓ sent`, `✓ sent on retry`, `— not posted`). `Enter` shows the
 posted text. A record written by a monitor older than 1.11.0 has no reason
 and no text.
 
+*Configuration tab* (read-only). `Hosts`: one row per ledger host: its
+display name, the ssh name with the machine's own hostname (`this machine`
+for `local`), server or laptop, the key names of its env words (never a
+value), whether the last pass reached it, its claude-discord version and its
+bot count; `Enter` shows its raw fields and recovery command. A host taken
+out of the ledger is marked `(left the ledger)` for a day, then dropped.
+`Monitor`: the alert language (`ALERT_LANG`) and who is mentioned
+(`DISCORD_USER_ID`), both from the manager project's `config.env`, and the
+fixed parts: a check every 5 minutes, `#bot-health-check`, the keeper and
+the stop command.
+
 **Expected.** With the backend running (no TUI or session needed), stopping a
 bot by hand gives one `[down]` message within 10 minutes and one
 `[recovered]` line after it is started again. A pass that sees nothing new
