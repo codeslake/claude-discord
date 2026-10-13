@@ -141,7 +141,7 @@ if [ -n "$session_id" ]; then
   # everyone who has written here (user-names): an empty allowFrom lets the
   # whole channel in, so it alone would name nobody. A name only once that id
   # has written here.
-  people=$( { jq -r --arg ch "$bot_channel" '(.groups[$ch].allowFrom // [])[], (.allowFrom // [])[]' "$DISCORD_STATE_DIR/access.json" 2>/dev/null
+  people=$( { [ -z "$bot_access_ids" ] || printf '%s\n' "$bot_access_ids"
     sed -n "s/^DISCORD_USER_ID='\{0,1\}\([0-9]*\)'\{0,1\}$/\1/p" "$DISCORD_STATE_DIR/../config.env" 2>/dev/null
     cut -d' ' -f1 "$DISCORD_STATE_DIR/user-names" 2>/dev/null; } | awk -v f="$DISCORD_STATE_DIR/user-names" '
     BEGIN { while ((getline l < f) > 0) if ((i = index(l, " "))) n[substr(l, 1, i - 1)] = substr(l, i + 1) }

@@ -7,6 +7,7 @@
 
 bot_name=""
 bot_channel=""
+bot_access_ids=""
 bot_token=""
 bot_mode=""
 
@@ -18,7 +19,9 @@ bot_mode=""
 plugin_root=$(cd -P "${BASH_SOURCE[0]%/*}/../.." 2>/dev/null && pwd -P) || plugin_root=""   # ${..%/*}: sourced by path, one fork less than dirname
 thread_tool=$plugin_root/tools/thread
 
-# resolve_channel: sets bot_channel to the bot's channel. That is the single
+# resolve_channel: sets bot_channel to the bot's channel, and bot_access_ids to
+# the ids its access.json lets in there (that group's allowFrom, then the
+# top-level one; one a line). The channel is the single
 # group key in its access.json: the plugin reads that file on every message,
 # and moving a bot to another channel is an edit there, which config.env's
 # DISCORD_CHANNEL_ID (written once, at setup) does not follow. Without
@@ -26,8 +29,8 @@ thread_tool=$plugin_root/tools/thread
 # several) it is config.env's DISCORD_CHANNEL_ID. The start path in
 # claude-discord applies the same rule.
 resolve_channel() {
-  local config="$DISCORD_STATE_DIR/../config.env" groups line
-  bot_channel=""
+  local config="$DISCORD_STATE_DIR/../config.env" out line
+  bot_channel="" bot_access_ids=""
   if [ -f "$config" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       case $line in DISCORD_CHANNEL_ID=*) bot_channel=${line#DISCORD_CHANNEL_ID=}; break;; esac
@@ -35,11 +38,13 @@ resolve_channel() {
     bot_channel=${bot_channel#\'}
     bot_channel=${bot_channel%\'}
   fi
-  groups=$(jq -r '.groups | objects | keys[]' "$DISCORD_STATE_DIR/access.json" 2>/dev/null) || groups=""
-  case $groups in
-    ''|*[!0-9]*) ;;
-    *) bot_channel=$groups ;;
-  esac
+  # One jq for both answers (a jq start is 10 ms with jq 1.6, and every prompt asks): the channel on the first line,
+  # then the ids that channel's group and the top-level allowFrom name, one a line.
+  out=$(jq -r --arg fb "$bot_channel" '((.groups | objects | keys) // []) as $k
+    | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) as $ch
+    | $ch, (.groups[$ch].allowFrom // [])[], (.allowFrom // [])[]' "$DISCORD_STATE_DIR/access.json" 2>/dev/null) || return 0
+  bot_channel=${out%%$'\n'*}
+  case $out in *$'\n'*) bot_access_ids=${out#*$'\n'};; esac
 }
 
 # A bot is the session its state dir belongs to: a `claude -p` started from a

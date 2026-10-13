@@ -225,7 +225,17 @@ select_one() (
 # kind is kept as it is. Project scope loads only when ~/.claude.json trusts
 # that exact path; setup asks before writing it.
 has_path() { [ -e "$1" ] || [ -L "$1" ]; }   # a dangling link counts
-plugin_version() { jq -r '.version // "?"' "$1/.claude-plugin/plugin.json" 2>/dev/null || echo "?"; }
+# Read in the shell, not with jq: every start asks (sync_runtime), and one jq start is 10 ms with jq 1.6. The manifest is
+# ours and flat: its "version" line, a key at the start of a line; "?" when there is none.
+plugin_version() {
+  local l re='^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]*)"'
+  if [ -r "$1/.claude-plugin/plugin.json" ]; then
+    while IFS= read -r l || [ -n "$l" ]; do
+      if [[ $l =~ $re ]]; then echo "${BASH_REMATCH[1]}"; return 0; fi
+    done < "$1/.claude-plugin/plugin.json"
+  fi
+  echo "?"
+}
 head_sha() { git -C "$1" rev-parse HEAD 2>/dev/null || :; }   # compat/VERSION's stamp (empty with no git)
 # ver_ge <a> <b>: a >= b for x.y.z versions; anything else is not.
 ver_ge() {
@@ -2069,7 +2079,12 @@ resume_id=""
 # Code itself reads it from: ~/.claude/settings.json.
 bin=$(command -v claude) || { echo "claude-discord: claude is not on PATH" >&2; exit 127; }
 launcher=${CLAUDE_DISCORD_LAUNCHER:-${CLAUDE_CODE_PROCESS_WRAPPER:-}}
-[ -n "$launcher" ] || launcher=$(jq -r '.env.CLAUDE_CODE_PROCESS_WRAPPER // empty' "$HOME/.claude/settings.json" 2>/dev/null) || :
+# Asked of jq only when the file names it at all: every bot start comes through here, and one jq start is 10 ms with jq 1.6.
+if [ -z "$launcher" ] && [ -r "$HOME/.claude/settings.json" ]; then
+  case $(<"$HOME/.claude/settings.json") in
+    *CLAUDE_CODE_PROCESS_WRAPPER*) launcher=$(jq -r '.env.CLAUDE_CODE_PROCESS_WRAPPER // empty' "$HOME/.claude/settings.json" 2>/dev/null) || : ;;
+  esac
+fi
 run=("$bin")
 [ -n "$launcher" ] && run=("$launcher" "$bin")
 
