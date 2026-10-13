@@ -53,6 +53,10 @@
 #   claude-discord monitor --stop <name> stops the keeper and the monitor; nothing
 #                                        starts them again until:
 #   claude-discord monitor --start <name> starts the backend again, detached
+#   claude-discord hosts [--bot <name>] list [--json]
+#                                        a manager bot's hosts ledger: one line per
+#                                        host (alias, kind, display name, env key
+#                                        names; never a value)
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
@@ -745,7 +749,7 @@ if [ "${1:-}" = setup ]; then
   case $name in
     ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
     hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
-    setup|install|update|patch|compat|refresh|health|monitor|tui) echo "claude-discord: bot name '$name' is reserved: 'claude-discord $name' is a subcommand" >&2; exit 2;;
+    setup|install|update|patch|compat|refresh|health|monitor|tui|hosts) echo "claude-discord: bot name '$name' is reserved: 'claude-discord $name' is a subcommand" >&2; exit 2;;
   esac
   if [ "${3:-}" = --mode ]; then
     [ -z "$scope$method" ] || { echo "claude-discord: --mode changes only the mode and installs nothing; --scope and --method do not apply" >&2; exit 2; }
@@ -1921,6 +1925,86 @@ if [ "${1:-}" = update ]; then
     { echo "claude-discord: could not install the shim from $new" >&2; rc=1; }
   echo "claude-discord: run /reload-plugins in running sessions (a bot: the self-reload skill)"
   exit "$rc"
+fi
+
+# hosts: lists and edits a manager bot's hosts ledger (<bot dir>/hosts; write_hosts above has its format), for people,
+# scripts and the TUI, which changes the ledger through this verb only. It never prints the value of a KEY=VALUE word
+# (a proxy URL may hold a password): key names only.
+# Exit status: 0 done (a warning goes to stderr), 1 it could not (no manager bot with a ledger, a failed write),
+# 2 usage or a word that is not allowed.
+if [ "${1:-}" = hosts ]; then
+  shift
+  h_usage="usage: claude-discord hosts [--bot <manager>] list [--json]"
+  hb="" h_json="" hw=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --bot) [ $# -ge 2 ] || { echo "$h_usage" >&2; exit 2; }; hb=$2; shift;;
+      --json) h_json=1;;
+      -*) echo "$h_usage" >&2; exit 2;;   # an ssh alias never starts with "-": ssh would read it as an option
+      *) hw+=("$1");;
+    esac
+    shift
+  done
+  # Which manager. In the project above the cwd: its dev-manager bots that have a ledger (only the one named, with
+  # --bot); none there: the same among the recorded projects (records/projects), as `tui` and `monitor` find theirs.
+  # Exactly one must be left. This verb never asks (the TUI and scripts run it): it names the candidates and exits 2.
+  h_cands="" h_n=0
+  h_scan() {  # $1 = a project root: its manager bots with a ledger go into h_cands (one bot dir a line), each once
+    local d m
+    for d in "$1"/.claude/discord-agents/*/; do
+      d=${d%/}; m=""
+      [ -f "$d/hosts" ] || continue
+      { read -r m < "$d/mode"; } 2>/dev/null || :
+      [ "$m" = dev-manager ] || continue
+      [ -z "$hb" ] || [ "$hb" = "${d##*/}" ] || continue
+      case $'\n'$h_cands in *$'\n'"$d"$'\n'*) continue;; esac
+      h_cands=$h_cands$d$'\n'; h_n=$((h_n + 1))
+    done
+  }
+  hp=$(pwd -P)   # physical, as records/projects holds its paths
+  while [ ! -d "$hp/.claude/discord-agents" ] && [ -n "$hp" ]; do hp=${hp%/*}; done
+  h_scan "$hp"
+  if [ "$h_n" = 0 ] && [ -f "$helpers/records/projects" ]; then
+    while IFS= read -r p || [ -n "$p" ]; do
+      p=${p%$'\r'}
+      [ -z "$p" ] || h_scan "$p"
+    done < "$helpers/records/projects"
+  fi
+  [ "$h_n" != 0 ] || { echo "claude-discord: hosts: no dev-manager bot${hb:+ '$hb'} with a hosts ledger in the project above $PWD or in a recorded one (claude-discord setup <bot> --mode writes the ledger)" >&2; exit 1; }
+  [ "$h_n" = 1 ] || { echo "claude-discord: hosts: $h_n manager bots have a ledger; name one with --bot <manager>, in its project when two share a name:" >&2; printf '%s' "$h_cands" | sed 's/^/  /' >&2; exit 2; }
+  hd=${h_cands%$'\n'}; hb=${hd##*/}; hf=$hd/hosts
+  case ${hw[0]:-} in
+    list)
+      [ "${#hw[@]}" = 1 ] || { echo "$h_usage" >&2; exit 2; }
+      # Each line as the monitor's pass reads it (monitor/monitor.sh, run_pass), so this shows what the monitor will do.
+      rows="" ign=0
+      while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%$'\r'}
+        set -f; set -- $line; set +f
+        [ $# -gt 0 ] || continue
+        case $1 in '#'*) continue;; -*|*[!A-Za-z0-9._@-]*) ign=$((ign + 1)); continue;; esac
+        a=$1 lap=false nm="" keys="" skip=0; shift
+        [ "${1:-}" != laptop ] || { lap=true; shift; }
+        for w in "$@"; do
+          case $w in name=*) nm=${w#name=}; nm=${nm//[[:cntrl:]]/}; continue;; esac
+          if [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then keys="$keys${keys:+ }${w%%=*}"; else skip=$((skip + 1)); fi
+        done
+        rows="$rows$a"$'\x1f'"$lap"$'\x1f'"$nm"$'\x1f'"$keys"$'\x1f'"$skip"$'\n'
+      done < "$hf"
+      if [ -n "$h_json" ]; then
+        printf '%s' "$rows" | jq -Rn --arg m "$hb" --arg f "$hf" --argjson ign "$ign" '{manager: $m, ledger: $f, ignored: $ign,
+          hosts: [inputs | split("\u001f") | {alias: .[0], laptop: (.[1] == "true"), name: .[2], env: (.[3] | split(" ")), skipped: (.[4] | tonumber)}]}'
+      else
+        while IFS=$'\x1f' read -r a lap nm keys skip; do
+          [ -n "$a" ] || continue
+          kind=server; [ "$lap" != true ] || kind=laptop
+          keys=${keys// /,}; note=""; [ "$skip" = 0 ] || note=" ($skip words the monitor skips)"
+          printf '%-20s %-7s name=%s env=%s%s\n' "$a" "$kind" "${nm:--}" "${keys:--}" "$note"
+        done <<<"$rows"
+      fi;;
+    *) echo "$h_usage" >&2; exit 2;;
+  esac
+  exit 0
 fi
 
 # monitor: the backend health monitor of a manager bot (monitor/monitor.sh has

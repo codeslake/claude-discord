@@ -3577,6 +3577,46 @@ printf 'dev-manager\n\n\n' | bash "$S" setup mgr --mode >/dev/null 2>&1
 rm -rf "$HOME/lapbin"; rm -f "$HOME/ssh.log" "$MON"/*
 echo "ok: setup writes the hosts ledger in dev-manager mode only (local always, each new host probed with stdin closed, a Darwin laptop marked, an unanswered host written plain and said so, a bad name skipped, an empty answer keeps hand edits, written by temp file and mv, another mode removes it)"
 
+# --- hosts: the ledger's CLI (1.12.0) ---------------------------------------
+# hc <args>: `claude-discord hosts <args>` in the manager's project; stdout in HO, stderr in HE, the exit status in HRC.
+hc() { HRC=0; HO=$(bash "$S" hosts "$@" 2>"$HOME/hosts.err") || HRC=$?; HE=$(<"$HOME/hosts.err"); }
+# hosts list reads a line as the monitor's pass does: CRLF, a comment and a blank line skipped, a first word that is no
+# plain ssh name not a host (counted), laptop only as the second word, the last name= word (its control characters
+# gone), key names of KEY=VALUE words and a count of the words the monitor skips. Never a value.
+printf '# mine\r\n\r\nlocal laptop name=람다 HTTPS_PROXY=http://u:secretpw@127.0.0.1:8118\r\nh1 X=1 odd name=a name=bo\037x Y=2 laptop\n-oProxyCommand=x\nlap laptop\nh1 laptop' > "$MR/mgr/hosts"
+LEDGER=$(<"$MR/mgr/hosts")
+hc list
+[ "$HRC" = 0 ] && [ "$HO" = "$(printf 'local                laptop  name=람다 env=HTTPS_PROXY\nh1                   server  name=box env=X,Y (2 words the monitor skips)\nlap                  laptop  name=- env=-\nh1                   laptop  name=- env=-')" ] ||
+  { echo "FAIL: hosts list prints one line per host line of the ledger (alias, kind, name, env key names): rc=$HRC $HO / $HE"; exit 1; }
+hc list --json
+jq -e --arg f "$MR/mgr/hosts" '. == {manager: "mgr", ledger: $f, ignored: 1, hosts: [
+  {alias: "local", laptop: true, name: "람다", env: ["HTTPS_PROXY"], skipped: 0}, {alias: "h1", laptop: false, name: "box", env: ["X", "Y"], skipped: 2},
+  {alias: "lap", laptop: true, name: "", env: [], skipped: 0}, {alias: "h1", laptop: true, name: "", env: [], skipped: 0}]}' <<<"$HO" >/dev/null ||
+  { echo "FAIL: hosts list --json: the manager, the ledger's path, the lines that are no host (ignored) and per host alias, laptop, name, env key names and skipped words: $HO / $HE"; exit 1; }
+hc list; A=$HO; hc list --json
+case "$A$HO$HE" in *secretpw*|*8118*) echo "FAIL: hosts list must never print an env value: $A $HO $HE"; exit 1;; esac
+[ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] || { echo "FAIL: hosts list must not write the ledger"; exit 1; }
+# Which manager: the one dev-manager bot with a ledger in the project above the cwd, else in a recorded project
+# (setup recorded $MP); --bot names it; several and none named is exit 2 with their names; none is exit 1.
+mkdir -p "$MP/sub/dir"
+A=$(cd "$MP/sub/dir" && bash "$S" hosts list --json | jq -r .manager); B=$(cd "$HOME" && bash "$S" hosts --bot mgr list --json | jq -r .ledger)
+[ "$A" = mgr ] && [ "$B" = "$(cd "$MP" && pwd -P)/.claude/discord-agents/mgr/hosts" ] || { echo "FAIL: hosts finds the manager from below its project and, outside any, among the recorded projects: '$A' '$B'"; exit 1; }
+mkdir -p "$MR/mgr2" "$MR/plain"; echo dev-manager > "$MR/mgr2/mode"; echo 'local name=two' > "$MR/mgr2/hosts"; echo none > "$MR/plain/mode"; echo local > "$MR/plain/hosts"
+hc list
+[ "$HRC" = 2 ] && [ -z "$HO" ] && grep -q -- '--bot <manager>' <<<"$HE" && grep -q "/mgr2$" <<<"$HE" && ! grep -q '/plain$' <<<"$HE" || { echo "FAIL: two manager bots and none named is exit 2, naming them (a bot that is no dev-manager is none): rc=$HRC $HE"; exit 1; }
+hc --bot mgr2 list
+[ "$HRC" = 0 ] && [ "$HO" = "local                server  name=two env=-" ] || { echo "FAIL: --bot names the manager: rc=$HRC $HO / $HE"; exit 1; }
+hc --bot plain list
+[ "$HRC" = 1 ] && grep -q "no dev-manager bot 'plain' with a hosts ledger" <<<"$HE" || { echo "FAIL: a bot that is no dev-manager with a ledger is exit 1: rc=$HRC $HE"; exit 1; }
+rm -rf "$MR/mgr2" "$MR/plain" "$MP/sub"
+for bad in "" "nosuchverb" "list extra" "--bot" "list --frob"; do
+  hc $bad
+  [ "$HRC" = 2 ] && grep -q '^usage: claude-discord hosts ' <<<"$HE" || { echo "FAIL: 'hosts $bad' is a usage error (exit 2): rc=$HRC $HE"; exit 1; }
+done
+rc=0; out=$(printf '\n' | bash "$S" setup hosts 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -q "bot name 'hosts' is reserved" <<<"$out" || { echo "FAIL: 'hosts' is a subcommand now, so no bot may take the name: rc=$rc $out"; exit 1; }
+echo "ok: hosts list prints each host line as the monitor reads it (alias, kind, display name, env key names, skipped words; --json for the TUI) and never a value; the manager is the project's or a recorded project's one dev-manager bot with a ledger, or --bot's; 'hosts' is a reserved bot name"
+
 # The monitor runs fast here: a 0.01 s tick, a 0.03 s cap per host, 0.1 s for the lock (one retry), and a 60 s pass interval, so
 # each start runs exactly its first pass (these blocks need no second one). Thresholds are tested by seeding
 # state.json with old `since` times, never by waiting. The local host's command is the shim, stubbed to print
