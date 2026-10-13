@@ -85,6 +85,20 @@ def base(n=None):
                         "detail": "Discord is rate-limiting this bot (HTTP 429); nothing can be said about it this run"}]}
 
 
+def status_lines(items, key):
+    """What the status column holds on each line of a bot's row: the cells from the header's `status` to its `host`."""
+    head = next(l.plain for k, ls in items if k is None for l in ls if l.plain.split()[:2] == ["bot", "status"])
+    a, b = head.index("status"), head.index("host")
+    out = []
+    for line in next(ls for k, ls in items if k == key):
+        cell, got = 0, ""
+        for ch in line.plain:
+            got += ch if a <= cell < b else ""
+            cell += cell_len(ch)
+        out.append(got.strip())
+    return out
+
+
 # ---- pure functions --------------------------------------------------------
 def pure():
     T = tui.epoch("2026-10-13T17:49:00Z")
@@ -167,7 +181,7 @@ def pure():
         assert len({cell_len(l.plain) for l in lines}) == 1 and cell_len(lines[0].plain) <= width, "one width for every line, inside the terminal"
         assert not any("dev-manager" in l.plain or "none" in l.plain for l in lines if "plain" in l.plain), "mode none is not shown"
     long = [l.plain for k, ls in tui.bots_items(moded(mode="autoresearchclaw"), NAMES, 110, set(), T) if k == "k" for l in ls][0]
-    assert long.startswith(f"▸ {NAME16}  autoresear… ") and cell_len(long) <= 110, long
+    assert long.startswith(f"▸ {NAME16}  autoresearchclaw ") and cell_len(long) <= 110, long
     short = [l.plain for k, ls in tui.bots_items({"bots": {"k": dict(b[MGRBOT], mode="autoresearchclaw")}}, NAMES, 110, set(), T) if k for l in ls][0]
     assert short.startswith("▸ mgr  autoresearchclaw ") and cell_len(short) <= 110, short
     # A short name: after a 16-cell one the mode would be cut off at this width whether or not the row leaves it out.
@@ -182,6 +196,56 @@ def pure():
     assert "mode             dev-manager" in tui.entry_text("k", "k", tui.with_mode({"mode": "dev-manager"}), [])
     print("ok: a mode other than none follows the bot's name, dim, at 110 columns and more (the bot column grows, the table keeps its width); "
           "none, a missing one or another type shows nothing; the all-fields text has mode, a dash when unknown")
+
+    # 1.12.0: at 110 columns and more the status column is as wide as the widest status a closed row shows (15 cells at
+    # least, 25 at most), and what it leaves goes to the bot column first. In 1.11.1 a 118-column pane drew
+    # `StreamForQuestion  autoresea…` beside a status column of 25 cells holding `● ok`.
+    SFQ = "StreamForQuestion"   # 17 cells; 35 with its mode
+    ok = lambda key, **kw: dict(b[key], verdict="ok", **kw)
+
+    def table(state, width, opened=()):
+        items = tui.bots_items(state, NAMES, width, set(opened), T)
+        head = next(l.plain for k, ls in items if k is None for l in ls if l.plain.split()[:2] == ["bot", "status"])
+        lines = [l.plain for k, ls in items if k for l in ls]
+        assert len({cell_len(l) for l in lines + [head]}) == 1 and cell_len(head) <= width, (width, "one width for every line, inside the terminal")
+        return {k: ls[0].plain for k, ls in items if k}, head.index("host") - head.index("status") - 1, head
+
+    arc = {"bots": {"a": ok(MGRBOT, bot=SFQ, mode="autoresearchclaw"), "m": ok(MGRBOT, mode="dev-manager"), "h": ok(HBOT)}}
+    for width in (110, 118, 137, 200):
+        rows, sw, head = table(arc, width)
+        assert sw == 15, (width, sw, "`● ok` rows: the status column is its least width, not 25")
+        assert rows["a"].startswith(f"▸ {SFQ}  autoresearchclaw ● ok "), (width, rows["a"])
+        assert rows["h"].startswith(f"▸ {HANGUL} "), (width, "a 22-cell Hangul name is whole too", rows["h"])
+        if width >= 118:   # at 110 the bot column takes cells from these three, and what is cut there ends in an ellipsis
+            assert "#dev-bots " in rows["a"] and "@mention · 5 users " in rows["a"], (width, rows["a"])
+        assert all("#dev-bots " in r or "…" in r for r in (rows["a"], rows["m"])), (width, "nothing is cut without an ellipsis")
+        assert table(arc, width, {"a", "m", "h"})[2] == head, (width, "opening rows moves no column")
+    # A problem row: its status fits, and a longer one widens the column for every row (the bot column keeps its mode whole
+    # at 118 by taking cells from channel, receives and project, each cut with an ellipsis).
+    down = dict(arc, bots=dict(arc["bots"], d=dict(b[PHOTO], mode="none")))
+    unre = dict(arc, bots=dict(arc["bots"], d=dict(b[PHOTO], verdict="unreachable")))
+    odd = dict(arc, bots=dict(arc["bots"], d=dict(b[PHOTO], verdict="a-verdict-this-version-does-not-know")))
+    for width in (110, 118, 137, 200):
+        rows, sw, _ = table(down, width)
+        assert sw == 15 and "  ✕ DOWN 12m  " in rows["d"] and rows["a"].startswith(f"▸ {SFQ}  autoresearchclaw ● ok "), (width, sw, rows)
+        rows, sw, _ = table(unre, width)
+        assert sw == 19 and "  ✕ UNREACHABLE 12m  " in rows["d"] and rows["a"].startswith(f"▸ {SFQ}  autoresearchclaw ● ok "), (width, sw, rows)
+        rows, sw, _ = table(odd, width)
+        assert sw == 25 and "▲ a-verdict-this-version… " in rows["d"], (width, sw, rows["d"])
+    # A name and mode longer than the bot column may be (45 cells): cut with an ellipsis, at any width.
+    rows, _, _ = table({"bots": {"a": ok(MGRBOT, bot="n" * 30, mode="autoresearchclaw")}}, 200)
+    assert rows["a"].startswith("▸ " + "n" * 30 + "  autoresearch… ● ok"), rows["a"]
+    # An opened row: the reason and the note wrap inside the status column, as many more lines as it is narrower than 25.
+    quiet = {"bots": {"h": dict(b[HBOT], mode="none")}}
+    assert status_lines(tui.bots_items(quiet, NAMES, 118, {"h"}, T), "h") == ["▲ rate-limited", "Discord is", "rate-limiting", "this bot (HTTP", "429); nothing", "can be said ab…", "not posted", "(warning only)"]
+    # Below 110 columns nothing changes: the fixed columns of 1.11.0, a status of 25 (an opened row wraps in it), no mode.
+    assert status_lines(tui.bots_items(quiet, NAMES, 109, {"h"}, T), "h") == ["▲ rate-limited", "Discord is rate-limiting", "this bot (HTTP 429);", "nothing can be said abou…", "not posted (warning only)"]
+    rows, sw, head = table(arc, 109)
+    assert sw == 25 and tui.columns(109, 35, 15) == tui.columns(109) == [("bot", 16), ("status", 25), ("host", 9), ("channel", 47), ("last", 5)], (sw, tui.columns(109))
+    assert rows["a"].startswith("▸ StreamForQuesti… ● ok" + " " * 22 + "local"), rows["a"]
+    print("ok: at 110 columns and more the status column is as wide as the widest closed status (15 to 25 cells) and the bot column takes what it "
+          "leaves: a 17-cell name with autoresearchclaw and a Hangul name are whole at 110, 118, 137 and 200; a problem row's status fits; "
+          "opening a row moves no column; below 110 the table is as it was")
 
     for width in (137, 100):
         items = tui.bots_items(s, NAMES, width, {PHOTO, HBOT, MGRBOT, OLDBOT, NOTOK}, T)
@@ -199,13 +263,14 @@ def pure():
     assert all(len(v) == 1 for v in closed.values()) and closed[PHOTO][0].startswith("▸ photobot") and "✕ DOWN 12m" in closed[PHOTO][0]
     assert "12m" in closed[PHOTO][0].split("@mention · 5 users")[1] and closed[PHOTO][0].rstrip().endswith("rcps") and closed[NOTOK][0].rstrip().endswith("~")
     opened = [l.plain for k, lines in tui.bots_items(s, NAMES, 110, {PHOTO}, T) if k == PHOTO for l in lines]
-    assert opened[0].startswith("▾ photobot") and "no plugin server for this" in opened[1] and "posted 11m ago" in opened[3], opened
+    # The status column is as wide as the widest closed status here (15 cells at least): the reason wraps inside it.
+    assert opened[0].startswith("▾ photobot") and status_lines(tui.bots_items(s, NAMES, 110, {PHOTO}, T), PHOTO) == ["✕ DOWN 12m", "no plugin", "server for this", "bot", "posted 11m ago"], opened
     assert "from dongyong22," in opened[1] and "gpuvillain," in opened[2] and "junyong-dev-bot +2" in opened[3] and "DMs dongyong22" in opened[4], opened
     # Warning only is what the verdict is (the monitor's warn_only), not a not_posted record that 100 newer ones push out.
     for v, want in (("throttled", "not posted (warning only)"), ("apierror", "not posted (warning only)"), ("noreach", "not posted (warning only)"),
                     ("newverdict", "not posted (warning only)"), ("nostate", "not posted yet"), ("blind", "not posted yet"), ("stale", "not posted yet")):
         quiet = dict(s, alerts=[], bots={HBOT: dict(s["bots"][HBOT], verdict=v)})
-        assert want in "".join(l.plain for k, lines in tui.bots_items(quiet, NAMES, 137, {HBOT}, T) if k for l in lines), (v, want)
+        assert want in " ".join(status_lines(tui.bots_items(quiet, NAMES, 137, {HBOT}, T), HBOT)), (v, want)
     posted = lambda **kw: [l.plain.strip() for k, ls in tui.bots_items({"bots": {"k": dict({"bot": "b", "verdict": "down", "posted": "down"}, **kw)}}, {}, 137, {"k"}, T)
                            if k for l in ls][-1]
     assert (posted(posted_at=iso(T - 5)), posted(posted_at=iso(T - 120)), posted()) == ("posted just now", "posted 2m ago", "posted"), "no `posted now ago`, no `posted  ago`"
@@ -232,9 +297,10 @@ def pure():
         items = tui.bots_items(fz, NAMES, width, {WOK, WDN}, T)
         rows = {k: [l.plain for l in lines] for k, lines in items if k}
         assert len({cell_len(l) for lines in rows.values() for l in lines}) == 1
-        assert rows[WOK][0].split()[:5] == ["▾", "wbot", "○", "host", "unreachable"] and "last seen ok 4h ago" in rows[WOK][1], rows[WOK]
-        assert rows[WDN][0].split()[:5] == ["▾", "wdown", "○", "host", "unreachable"] and "last seen DOWN 4h ago" in rows[WDN][1], rows[WDN]
-        assert "posted 3h ago" in rows[WDN][2] and len(rows[WOK]) == 2 and "the last detail" not in "".join(rows[WOK] + rows[WDN]), (rows[WOK], rows[WDN])
+        # The status column is 18 cells at 137 (`○ host unreachable`) and 25 at 100: the lines under it wrap in the first.
+        assert rows[WOK][0].split()[:5] == ["▾", "wbot", "○", "host", "unreachable"] and " ".join(status_lines(items, WOK)[1:]) == "last seen ok 4h ago", rows[WOK]
+        assert rows[WDN][0].split()[:5] == ["▾", "wdown", "○", "host", "unreachable"], rows[WDN]
+        assert " ".join(status_lines(items, WDN)[1:]) == "last seen DOWN 4h ago posted 3h ago" and "the last detail" not in "".join(rows[WOK] + rows[WDN]), (rows[WOK], rows[WDN])
         assert rows[GHOST][0].split()[:4] == ["▸", "gbot", "●", "ok"], rows[GHOST]
         assert [lines[0].plain for k, lines in items if k is None and lines and lines[0].plain.lstrip().startswith("fix  ")] == [f"     fix  {FIX}   c copies it"]
     print("ok: bots of a host that cannot be reached are dim `host unreachable` rows between what needs a look and the healthy, in no count, "
@@ -243,7 +309,8 @@ def pure():
     # ---- the shell: the pane's renderer, title, tabs, footer, bar ----
     txt, y, h = tui.render(tui.bots_items(s, NAMES, 137, {HBOT}, T), HBOT, 137)
     lines = txt.plain.split("\n")
-    assert HANGUL[:6] in lines[y] and h == 5 and all(cell_len(l) == 137 for l in lines[y:y + h]), (y, h)
+    # 8 lines: the status, its reason over five lines of the 15-cell status column, `not posted` / `(warning only)`
+    assert HANGUL[:6] in lines[y] and h == 8 and all(cell_len(l) == 137 for l in lines[y:y + h]), (y, h)
     assert tui.render([], None, 80)[0].plain == "" and [a["key"] for a in tui.open_alerts(s)] == [PHOTO]
     mon = lambda **kw: {"manager": "mgr", "monitor": dict({"pid": 1, "last_pass": iso(T - 80), "next_pass": iso(T + 220), "holders": [{"kind": "keeper", "pid": 9}]}, **kw)}
     t = tui.title_line(mon(), 100, T, True, False).plain
@@ -603,7 +670,7 @@ async def bots(app, pilot):
     await pilot.press("space")
     assert row_of(app, "photobot").startswith("▾ photobot") and "posted 11m ago" in text(app, "#body") and "from dongyong22, gpuvillain," in text(app, "#body")
     await pilot.press("down", "space")   # several rows may be open
-    assert app.opened == {PHOTO, HBOT} and "not posted (warning only)" in text(app, "#body") and "DMs pairing" in text(app, "#body")
+    assert app.opened == {PHOTO, HBOT} and "(warning only)" in text(app, "#body") and "DMs pairing" in text(app, "#body")   # `not posted` is the line above it
     await pilot.press("c")   # a rate-limited row has a `fix` in the state (every finding has) and shows no fix line
     assert app.clipboard == "" and not list(app._notifications), "a row with no fix line copies nothing"
     await pilot.press("up", "c")
@@ -699,7 +766,7 @@ async def escapes(app, pilot):
         assert not [(c, l) for l in lines for c in ESCAPES + ("\n",) if c in l], (tab, [l for l in lines if any(c in l for c in ESCAPES + ("\n",))])
         drawn()
         await pilot.press("right")
-    assert row_of(app, "pho]52;c;aGFjaw…") and "#c]0;TITLE\\" in row_of(app, "pho") and row_of(app, "eviltxt.sh") and row_of(app, "kb x")
+    assert row_of(app, "pho]52;c;aGFjaw==\\to ") and "#c]0;TITLE\\" in row_of(app, "pho") and row_of(app, "eviltxt.sh") and row_of(app, "kb x")
     assert "local|/home/u/k[2J|kb x" in app.state["bots"], "keys are cleaned too"
     await pilot.press("space", "c")
     drawn()

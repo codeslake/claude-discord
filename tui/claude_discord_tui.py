@@ -40,6 +40,7 @@ BRAND, WARN, OK, ALERT, BAR, TAB, CURSOR = "#5fd7ff", "#ffaf00", "#87d787", "#ff
 DIM = "dim"    # the terminal's own dim, as the pane's dimColor
 DASH = "-"     # a value the state does not have: an older claude-discord on that host, or nothing to show
 WIDE = 110     # below it the KPI band is one line and the table's project, receives and env columns fold away
+STATUS_MIN, BOT_MAX = 15, 45   # at WIDE and above: the status column's least width (it holds `posted just now`) and the bot column's most
 TABS = ("bots", "alerts", "config")
 PROBLEM = ("down", "stale", "duplicate", "unreachable")
 # The findings the channel is told within 5 minutes of their appearing. Any other is a warning only (the reducer's
@@ -242,14 +243,15 @@ def kpi_lines(state: dict, width: int) -> list[Text]:
     return [top, mid, bot]
 
 
-def columns(width: int, bot: int = 16) -> list[tuple[str, int]]:
-    """The Bots table's columns and their widths in cells: 110 in all at WIDE (status holds `not posted (warning only)`),
+def columns(width: int, bot: int = 16, status: int = 25) -> list[tuple[str, int]]:
+    """The Bots table's columns and their widths in cells: 110 in all at WIDE with a 16-cell bot and a 25-cell status,
     the room past it shared by channel, receives and project; below WIDE project and receives fold away and channel
-    takes what is left. `bot` is the bot column's width at WIDE and above (wider when a mode follows a name): what it
-    takes past 16 comes out of that shared room, so the table is as wide as before."""
+    takes what is left. `bot` and `status` are those two columns' widths at WIDE and above (bots_items sizes both from
+    what the rows hold): what `bot` takes past 16 comes out of that shared room and what `status` leaves of its 25
+    goes into it, so the table is as wide as before."""
     if width >= WIDE:
-        extra = width - WIDE - (bot - 16)
-        return [("bot", bot), ("status", 25), ("host", 9), ("channel", 18 + extra // 3), ("receives", 20 + extra // 3),
+        extra = width - WIDE - (bot - 16) + (25 - status)
+        return [("bot", bot), ("status", status), ("host", 9), ("channel", 18 + extra // 3), ("receives", 20 + extra // 3),
                 ("last", 5), ("project", 9 + extra - 2 * (extra // 3))]
     return [("bot", 16), ("status", 25), ("host", 9), ("channel", max(8, width - 62)), ("last", 5)]
 
@@ -321,6 +323,13 @@ def fix_of(state: dict, b: dict) -> str:
     return txt(b.get("fix")) if rank(b.get("verdict")) == 0 and not cut_off(state, b) else ""
 
 
+def status_head(state: dict, b: dict, now: float) -> tuple[str, str]:
+    """A row's status as its closed row shows it, and its colour: symbol + word, a problem's with how long it has stood."""
+    cut = cut_off(state, b)
+    word, style = ("○ host unreachable", DIM) if cut else mark(txt(b.get("verdict")))
+    return (f" {word} {ago(b.get('since'), now)} " if rank(b.get("verdict")) == 0 and not cut else word), style
+
+
 def with_mode(entry: dict) -> dict:
     """A bot's entry for the all-fields screen: `mode` is always there, a dash when the host sent none (before 1.11.1)."""
     return dict(obj(entry), mode=txt(obj(entry).get("mode")) or DASH)
@@ -328,26 +337,36 @@ def with_mode(entry: dict) -> dict:
 
 def bots_items(state: dict, names: dict, width: int, opened: set, now: float) -> list[tuple]:
     """The Bots tab as (row key or None, [Text, ...]) items: a key makes its lines one row the cursor can sit on."""
-    # A mode other than `none` follows the bot's name at WIDE and above, and the bot column grows to hold the longest
-    # (29 cells at most: a 16-cell name, two spaces, `dev-manager`).
-    tags = {key: txt(b.get("mode")) for key, b in sorted_bots(state) if width >= WIDE and txt(b.get("mode")) not in ("", "none")}
-    cols = columns(width, min(29, max([16] + [cell_len(txt(b.get("bot")) or DASH) + 2 + cell_len(tags[key]) for key, b in sorted_bots(state) if key in tags])))
+    # A mode other than `none` follows the bot's name at WIDE and above. There the bot and status columns are sized
+    # from the rows: status as wide as the widest status a closed row shows (STATUS_MIN at least, its old 25 at most:
+    # `● ok` leaves most of 25 cells empty), and what that frees, with the terminal's cells past WIDE, goes to the bot
+    # column first, up to the longest name with its mode (BOT_MAX at most), then to channel, receives and project
+    # (columns). On top of what is free the bot column may take 13 cells from those three, as it could in 1.11.1 (29
+    # in all then). Only closed-row texts count, so opening a row moves no column; what an opened row adds to its
+    # status wraps inside it.
+    rows = sorted_bots(state)
+    heads = {key: status_head(state, b, now) for key, b in rows}
+    tags = {key: txt(b.get("mode")) for key, b in rows if width >= WIDE and txt(b.get("mode")) not in ("", "none")}
+    sw = min(25, max([STATUS_MIN] + [cell_len(h) for h, _ in heads.values()])) if width >= WIDE else 25
+    want = max([16] + [cell_len(txt(b.get("bot")) or DASH) + (2 + cell_len(tags[key]) if key in tags else 0) for key, b in rows])
+    cols = columns(width, min(want, BOT_MAX, 29 + width - WIDE + 25 - sw), sw)
+    # As much of a text as its lines held at 25 cells: a narrower column gets more lines, never less of the text.
+    lines = lambda s, n: wrap(s, sw, max(n, -(-25 * n // sw)))
     items: list[tuple] = [(None, kpi_lines(state, width) + [Text()]),
                          (None, row_lines([([(n, f"bold {DIM}")], w) for n, w in cols]))]
-    for key, b in sorted_bots(state):
+    for key, b in rows:
         o, v, r, cut = key in opened, txt(b.get("verdict")), rank(b.get("verdict")), cut_off(state, b)
-        word, style = ("○ host unreachable", DIM) if cut else mark(v)
-        status = [(f" {word} {ago(b.get('since'), now)} " if r == 0 and not cut else word, style)]
+        status = [heads[key]]
         if o and cut:   # not its reason, which is as old as the verdict: when the host stopped answering (its `since`)
             seen = since(obj(obj(state.get("hosts")).get(txt(b.get("host")))).get("since"), now)
-            status += [(s, "") for s in wrap(f"last seen {WORD.get(v, v or '?')}{seen}", dict(cols)["status"], 2)]
+            status += [(s, "") for s in lines(f"last seen {WORD.get(v, v or '?')}{seen}", 2)]
             if b.get("posted"):
                 status.append((f"posted{since(b.get('posted_at'), now)}", DIM))
         elif o:
-            status += [(s, "") for s in wrap(txt(b.get("detail")), dict(cols)["status"], 3)]
+            status += [(s, "") for s in lines(txt(b.get("detail")), 3)]
             if r < 2:   # from the verdict, not from its not_posted record in `alerts`: only the last 100 records are kept
-                status.append((f"posted{since(b.get('posted_at'), now)}" if b.get("posted") else
-                               "not posted yet" if v in LOUD else "not posted (warning only)", DIM))
+                status += [(s, DIM) for s in lines(f"posted{since(b.get('posted_at'), now)}" if b.get("posted") else
+                                                   "not posted yet" if v in LOUD else "not posted (warning only)", 1)]
         project = txt(b.get("project"))
         name = txt(b.get("bot")) or DASH
         cell = {"bot": [(Text.assemble((name, "bold"), ("  " + tags[key], DIM)) if key in tags else name, "bold")], "status": status, "host": [(host_label(state, b.get("host")), DIM)],
