@@ -1818,18 +1818,19 @@ def pty_runs():
         held = pty_py("bye\n", then="os.fork() or [w('x\\n') or time.sleep(0.01) for _ in iter(int, 1)]")
         held_end = later(lambda: (held.next()[1], time.monotonic() - t0))
         named = pty_py("hdr\n\x1b[1;31m  ! 333 (" + q, 0.15, f"\x1b[0m\n{mark}\n{q}")
-        nots = [pty_py(*parts, then="") for parts in ((f"{mark}\n    #x [y/N] ", 0.15), (q, 0.15), (f"{mark}\n{q}x", 0.15), (f"{mark}\n{q}", 0.02, "\nmore\n"))]
+        named_end = later(lambda: (named.next(), named.next(False)))
+        nots = [later(lambda r=pty_py(*parts, then=""): r.next()) for parts in
+                ((f"{mark}\n    #x [y/N] ", 0.15), (q, 0.15), (f"{mark}\n{q}x", 0.15), (f"{mark}\n{q}", 0.02, "\nmore\n"))]
         long = pty_py("".join(f"  ! #chan{i}: {'x' * 110}\n" for i in range(40)) + f"{mark}\n{q}")
         # The question is the CLI's whole line, after the CLI's marker line, and nothing after it for 0.1 s. A Discord
         # name can end in [y/N], or be the question's words, and reach the TUI with a pause after it (a far host chunks
         # its output): never the question. Neither is a question line with no marker before it, one with text after it
-        # on its line, or one followed by more output within 0.1 s.
-        text, what = named.next()
+        # on its line, or one followed by more output within 0.1 s. Each is read from its start, in a thread of its own.
+        (text, what), (end, rc) = named_end(3)
         assert what == "ask" and text.endswith(f"333 ({q}\x1b[0m\n{mark}\n{q}".replace("\n", "\r\n")), (what, text)
-        text, what = named.next(False)
-        assert what == 0 and text.replace("\r", "") == "n\n", (what, text)
-        for run in nots:
-            assert run.next()[1] == 0, run.p.args
+        assert rc == 0 and end.replace("\r", "") == "n\n", (rc, end)
+        for i, run in enumerate(nots):
+            assert run(3)[1] == 0, (i, run(0))
         # All it printed is kept from its start (the widenings come first), the long diff and the question both.
         text, what = long.next()
         assert what == "ask" and text.startswith("  ! #chan0: ") and text.endswith(q) and len(text) > 4600, (what, len(text))
@@ -1977,7 +1978,7 @@ async def access_answered(app, pilot):
     pty's echo of the answer left out) and where the bot's access.log has what it did."""
     ssh_home(app)
     scr = lambda sel: text(app.screen, sel)
-    fake_pty(app, [(ASK, "ask"), None], [(ASK, "ask"), None])
+    fake_pty(app, [(ASK, "ask"), None], [(ASK, "ask"), ("y\r\nclaude-discord: access: could not write /p/access.json; it is as it was\r\n", 1)], [(ASK, "ask"), None])
     await pilot.press("e")
     await settle(app, pilot)
     await pilot.press("m", "s")
@@ -1994,12 +1995,18 @@ async def access_answered(app, pilot):
     assert msg[0] == ("claude-discord access exited 1 after the answer y. The bot's access.log has a line for each thing it did "
                       "(access.json written; the mode set, or failed):") and msg[1:] == [f"l{i}" for i in range(3, 10)] + [
         "claude-discord: access: the mode was not changed (claude-discord setup photobot --mode, above); the changes to access.json stay"], msg
+    # A short end: all it said after the answer, the echoed y left out.
+    await pilot.press("s")
+    await settle(app, pilot)
+    await pilot.press("y")
+    await settle(app, pilot)
+    assert scr("#a-msg").split("\n")[1:] == ["claude-discord: access: could not write /p/access.json; it is as it was"], scr("#a-msg")
     # Taken down after a y (the TUI quitting): waited for, never killed.
     await pilot.press("s")
     await settle(app, pilot)
     await pilot.press("y")
     await pilot.pause()
-    run = app.runs[1]
+    run = app.runs[2]
     threading.Timer(0.1, run.finish, [("", 0)]).start()
     app.pop_screen()
     await settle(app, pilot)
