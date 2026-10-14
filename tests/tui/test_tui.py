@@ -590,7 +590,7 @@ def fake_monitor(bot):
     """A live process whose command line is a monitor's: `bash <root>/monitor/monitor.sh <wrapper> --locked <bot>`."""
     script = Path(FAKES.name) / "monitor" / "monitor.sh"
     script.parent.mkdir(exist_ok=True)
-    script.write_text("sleep 60\n")
+    script.write_text("kill -STOP $$\n")   # alive until killed, and no child that would outlive it holding this test's output open
     return subprocess.Popen(["bash", str(script), "/x/bin/claude-discord", "--locked", bot])
 
 
@@ -668,11 +668,13 @@ def text(app, sel):
 
 
 async def settle(app, pilot):
-    """Until the worker threads are done (a hosts CLI call) and what they handed back is drawn. Twice: what a worker
-    hands back may start another (a dialog's result, then the call that follows it)."""
-    for _ in range(2):
+    """Until the worker threads are done (a hosts CLI call) and what they handed back is drawn. Again while one runs:
+    what a worker hands back may start another (a dialog's result, then the call that follows it)."""
+    while True:
         await app.workers.wait_for_complete()
         await pilot.pause()
+        if all(w.is_finished for w in app.workers):
+            return
 
 
 def body(app):
@@ -763,12 +765,16 @@ async def narrow(app, pilot):
     assert head.split() == ["bot", "status", "host", "channel", "last"], head
     pane = app.query_one("#pane")
     assert pane.scroll_offset.y == 0 and pane.max_scroll_y > 0, "more rows than the terminal has lines"
-    await pilot.press(*["down"] * 30)   # past the last row: the cursor stops there
+    keys = [k for k, _ in app.items(time.time()) if k is not None]
+    assert len(keys) == 25 and keys[-1] == NOTOK
+    app.cursor["bots"] = keys[-2]       # set, not walked there (24 presses): the pane is still at the top
+    await pilot.press("down", "down")   # to the last row, then past it: the cursor stops there and the pane has followed
     await pilot.pause()
     assert app.cursor["bots"] == NOTOK
     _, y, h = tui.render(app.items(time.time()), NOTOK, 100)
-    assert pane.scroll_offset.y <= y and y + h <= pane.scroll_offset.y + pane.size.height, (pane.scroll_offset, y, h, pane.size)
-    await pilot.press(*["up"] * 30)
+    assert pane.scroll_offset.y > 0 and pane.scroll_offset.y <= y and y + h <= pane.scroll_offset.y + pane.size.height, (pane.scroll_offset, y, h, pane.size)
+    app.cursor["bots"] = keys[1]
+    await pilot.press("up", "up")
     await pilot.pause()
     assert app.cursor["bots"] == PHOTO and pane.scroll_offset.y <= tui.render(app.items(time.time()), PHOTO, 100)[1]
     await pilot.resize_terminal(120, 30)
@@ -1448,7 +1454,7 @@ async def main():
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "holders").mkdir()
             (Path(d) / "state.json").write_text(json.dumps(base()))
-            app = tui.MonitorTUI(Path(d), "mgr", stub(d, 'echo "$*" >> "$(dirname "$0")/args"; case "$*" in *--stop*) sleep 1;; esac'))
+            app = tui.MonitorTUI(Path(d), "mgr", stub(d, 'd=$(dirname "$0"); echo "$*" >> "$d/args"; case "$*" in *--stop*) n=0; while [ ! -e "$d/go" ] && [ $n -lt 300 ]; do sleep 0.01; n=$((n + 1)); done;; esac'))
             async with app.run_test() as pilot:
                 await pilot.pause()
                 await pilot.press("Q")
@@ -1456,8 +1462,9 @@ async def main():
                 assert isinstance(app.screen, tui.Confirm) and "keeper and monitor stop" in app.screen.text, app.screen
                 await pilot.press(answer)
                 if answer == "y":
-                    # The stub's --stop takes a second: the screen must stay alive meanwhile and say what it does.
+                    # The stub's --stop waits for this case: the screen must stay alive meanwhile and say what it does.
                     assert app.return_code is None and "stopping the backend of mgr" in text(app, "#bar"), (app.return_code, text(app, "#bar"))
+                    (Path(d) / "go").write_text("")
                     for _ in range(100):
                         if app.return_code is not None:
                             break
