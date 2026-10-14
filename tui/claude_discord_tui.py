@@ -17,9 +17,13 @@ and runs `ssh -G` for the one alias the user chose. Since 1.13.0 `e` on a bot
 row edits who may drive that bot (its channels, senders, DM policy and mode),
 read through `claude-discord access ... --json` and written by
 `claude-discord access ... set`, run on a pty the TUI holds (1.13.1): its
-question is shown in a popup and the answer written back. Nothing else:
-no restart, no post, no patch, and it never reads a .env or an access.json, so
-it cannot show a token.
+question is shown in a popup and the answer written back. Since 1.14.0 `n`
+renames a bot (on Discord and here, `=` takes Discord's name here), `t` replaces
+its token and `a` on the Bots tab adds a bot, each through `claude-discord bot`
+on such a pty; a token typed here is written to that pty when the CLI asks for
+it (its echo off), never to an argument, a file or the screen. Nothing else:
+no restart of its own, no post, no patch, and it never reads a .env or an
+access.json, so it cannot show a token.
 """
 from __future__ import annotations
 
@@ -345,6 +349,12 @@ def status_head(state: dict, b: dict, now: float) -> tuple[str, str]:
     return (f" {word} {ago(b.get('since'), now)} " if rank(b.get("verdict")) == 0 and not cut else word), style
 
 
+def discord_name(b: dict) -> str:
+    """Discord's name for the bot when it is not the bot's name here (health 1.14.0's discord_name), else ''."""
+    d = txt(b.get("discord_name"))
+    return d if d and d != txt(b.get("bot")) else ""
+
+
 def with_mode(entry: dict) -> dict:
     """A bot's entry for the all-fields screen: `mode` is always there, a dash when the host sent none (before 1.11.1)."""
     return dict(obj(entry), mode=txt(obj(entry).get("mode")) or DASH)
@@ -393,6 +403,10 @@ def bots_items(state: dict, names: dict, width: int, opened: set, now: float) ->
         items.append((key, row_lines([(cell[n], w) for n, w in cols], "▾ " if o else "▸ ")))
         if fix_of(state, b):   # one full-width line, never wrapped into a column, so it selects and copies whole
             items.append((None, [Text.assemble(("     fix  ", DIM), (fix_of(state, b), BRAND), ("   c copies it", DIM))]))
+        if discord_name(b):   # 1.14.0: a bot's name is its Discord username; the two differ here
+            items.append((None, [Text.assemble(("     name ", DIM), (f"≠ Discord: {discord_name(b)}", WARN), ("   = takes Discord's name here", DIM))]))
+        if o:   # what can be done to the bot, under an opened row (the foot has no room for all of it)
+            items.append((None, [Text("     keys  e access · n name · t token · enter all fields", DIM)]))
     return items
 
 
@@ -482,11 +496,12 @@ def tabs_lines(tab: str, n_open: int, width: int) -> Text:
 
 
 def foot_line(tab: str, width: int = WIDE) -> Text:
-    """The keys of a tab. The Bots tab's are 97 cells and the Configuration tab's 91: below WIDE the labels are
-    shorter, so every key fits in 80."""
-    fields, copy, edit, add = ("all fields", "copy fix", "settings", "add host") if width >= WIDE else ("all", "copy", "edit", "add")
+    """The keys of a tab. The Bots tab's are 110 cells and the Configuration tab's 91: below WIDE the labels are
+    shorter, and the Bots tab's enter is said under an opened row instead, so every key fits in 80 (n, t and = are
+    said under a row too)."""
+    fields, copy, edit, add, bot = ("all fields", "copy fix", "settings", "add host", "add bot") if width >= WIDE else ("all", "copy", "edit", "add", "add")
     select, expand, access = ("select", "expand", "access") if width >= WIDE else ("move", "open", "edit")
-    keys = {"bots": (("↑↓", select), ("space", expand), ("enter", fields), ("e", access), ("c", copy), ("←→", "tabs"), ("q", "quit")),
+    keys = {"bots": (("↑↓", select), ("space", expand)) + ((("enter", fields),) if width >= WIDE else ()) + (("e", access), ("a", bot), ("c", copy), ("←→", "tabs"), ("q", "quit")),
             "alerts": (("↑↓", "select"), ("enter", "the post's text"), ("←→", "tabs"), ("q", "quit")),
             "config": (("←→", "tabs"), ("↑↓", "select"), ("enter", edit), ("a", add), ("x", "remove"), ("l", "laptop"), ("q", "quit"))}[tab]
     out = Text(" ")
@@ -1458,6 +1473,11 @@ SGR = re.compile(r"\x1b\[([0-9;]*)m")
 # The CLI's question, the whole line: one form per count of changes and of widenings among them (bin/claude-discord).
 QUESTION = re.compile(r"Apply (this change|these [1-9][0-9]* changes|this widening change|these [1-9][0-9]* widening changes"
                       r"|[1-9][0-9]* changes, [1-9][0-9]* of them widening)\? \[y/N\] ")
+# 1.14.0, `claude-discord bot`: a bot's name (its Discord username, the CLI's b_name_re); the prompt `bot ... token|add`
+# reads the token with, its echo off; its questions, the whole line (BOT_Q takes the prompt too: asked for after the marker).
+BOT_NAME = re.compile(r"[A-Za-z0-9_-]{2,32}")
+TOKEN_Q = "Token (hidden): "
+BOT_Q = re.compile(r"(Replace the token|Rename it to [A-Za-z0-9_-]{2,32}|Add this bot)\? \[y/N\] |" + re.escape(TOKEN_Q))
 
 
 def ask_text(raw: str) -> Text:
@@ -1486,9 +1506,11 @@ class PtyRun:
     the CLI's terminal check holds and it prints its changes and asks its question itself, there; what it prints is
     read here, the answer written there. In a session of its own, so its whole process group (ssh -t, setup --mode)
     can be killed. next() blocks: it runs in a worker thread. The pty is read and closed only under `lock`: by next(),
-    or by kill() when nobody reads; a closed pty is a run that has ended."""
+    or by kill() when nobody reads; a closed pty is a run that has ended. `question` is the CLI's question line:
+    access set's (QUESTION), or the bot verbs' (BOT_Q, 1.14.0), which ask for a token too."""
 
-    def __init__(self, argv: list, master: int, slave: int) -> None:
+    def __init__(self, argv: list, master: int, slave: int, question: re.Pattern = None) -> None:
+        self.question = question or QUESTION
         self.fd, self.buf, self.rc, self.killed = master, b"", None, False
         self.end: float | None = time.monotonic() + A_CAP   # the cap, until the answer
         self.shown = 0      # how much of buf a popup has had
@@ -1501,13 +1523,13 @@ class PtyRun:
         os.close(slave)
 
     @classmethod
-    def start(cls, argv: list) -> "PtyRun | None":
+    def start(cls, argv: list, question: re.Pattern = None) -> "PtyRun | None":
         """None where no pty can be opened (no os.openpty, none left): the terminal is then handed over instead."""
         try:
             master, slave = os.openpty()
         except (AttributeError, OSError):
             return None
-        return cls(argv, master, slave)
+        return cls(argv, master, slave, question)
 
     def drain(self, wait: float) -> bool:
         """What the pty holds, read into buf (its first A_KEEP bytes), `wait` seconds for the first of it. False when
@@ -1525,16 +1547,26 @@ class PtyRun:
     def asks(self) -> bool:
         """Its last line is the CLI's question, whole, and the line before it the CLI's marker."""
         lines = self.buf.decode("utf-8", "replace").replace("\r", "").split("\n")
-        return len(lines) > 1 and lines[-2] == A_MARK and QUESTION.fullmatch(lines[-1]) is not None
+        return len(lines) > 1 and lines[-2] == A_MARK and self.question.fullmatch(lines[-1]) is not None
 
-    def next(self, answer: bool | None = None) -> tuple[str, str | int]:
+    def next(self, answer: bool | bytearray | None = None) -> tuple[str, str | int]:
         """The answer written (y or n; None: none), then what it printed, until: its question, the last line the CLI's
         and nothing after it for 0.1 s ("ask", with all it printed); A_QUIET s of silence after something else ("said",
         all it printed: a host's prompt is shown, never answered); or its end (its exit status, with what it printed
         after the answer; what is still in the pty is read first, for half a second at most). Until the answer it has
-        A_CAP s from its start: past that its process group is killed, 124. After a y there is no cap."""
+        A_CAP s from its start: past that its process group is killed, 124. After a y there is no cap. A bytearray is
+        a token, asked for by TOKEN_Q with the terminal's echo off: written with a line end, then zeroed; the cap
+        starts again, since the question is still to come."""
         with self.lock:
-            if answer is not None and self.fd >= 0 and not self.killed:
+            if isinstance(answer, bytearray):
+                try:
+                    if self.fd >= 0 and not self.killed:
+                        os.write(self.fd, bytes(answer) + b"\n")
+                except OSError:
+                    pass
+                answer[:] = bytes(len(answer))
+                self.end = time.monotonic() + A_CAP
+            elif answer is not None and self.fd >= 0 and not self.killed:
                 try:
                     os.write(self.fd, b"y\n" if answer else b"n\n")
                 except OSError:
@@ -1558,7 +1590,7 @@ class PtyRun:
                     quiet = time.monotonic()
                 elif self.end is None:   # answered: only its end is waited for
                     continue
-                elif self.asks():
+                elif len(self.buf) > self.shown and self.asks():   # a question it asked: not again the one answered (a token's)
                     self.shown = len(self.buf)
                     return self.buf.decode("utf-8", "replace"), "ask"
                 elif time.monotonic() - quiet >= A_QUIET and self.buf[self.shown:].strip():
@@ -1614,7 +1646,104 @@ A_RAN = {1: "not written (exit 1):", 2: "refused (exit 2):", 3: "no terminal for
          5: "the host did not answer, or its claude-discord is older than 1.13.0 (exit 5): nothing was changed"}
 
 
-class AccessEdit(ModalScreen):
+class Asking:
+    """The run of a command that asks on the TUI's pty (PtyRun), for a popup that has `say` and `ended(rc, said)`:
+    `access ... set` (1.13.1) and, since 1.14.0, `bot ...`. Each step is the run's next part in a worker thread; its
+    question is a popup (AccessAsk) whose answer is written to it; what it says and waits after that is no question of
+    the CLI's is shown as the host's (HostSays), never answered; a token it asks for (TOKEN_Q) is written from
+    `secret`, which is zeroed then; its end goes to ended() with the last of what it printed. esc stops it before a y,
+    never after one (it may be writing)."""
+    run = None                 # its PtyRun while it runs
+    asked = stopped = False    # it asked its question; esc (or Cancel) stopped it
+    yes: bool | None = None    # the answer written to it; None: none yet
+    says = None                # the HostSays popup while it is open
+    secret: bytearray | None = None   # the token to write when it asks for one: never a str, zeroed once written
+    YES_SAID = "answered y: it runs, and is waited for (esc does not stop it now)"
+    NO_SAID = "answered n; it ends"
+    HELD_SAID = "still running: it was answered y and may be writing; it is waited for"
+
+    def step(self, answer: bool | bytearray | None) -> None:
+        """The run's next part, in a worker thread: the answer written (y or n, or the token; None: none), then what it
+        prints until its question, something else it says and waits after (a host's prompt), or its end."""
+        run, app = self.run, self.app
+        if run is None:
+            return
+        if isinstance(answer, bool):
+            self.yes = answer
+            self.say(self.YES_SAID if answer else self.NO_SAID)
+
+        def work() -> None:
+            text, what = run.next(answer)
+            try:
+                app.call_from_thread(self.stepped, run, text, what)
+            except RuntimeError:   # the app has ended meanwhile
+                pass
+        app.run_worker(work, thread=True, exit_on_error=False)
+
+    def stepped(self, run, text: str, what: str | int) -> None:
+        if run is not self.run:
+            return
+        if what in ("ask", "said") and self.stopped:   # stopped meanwhile: its end is what comes next
+            return self.step(None)
+        if what == "said":   # no question of the CLI's (a ProxyCommand's code prompt, a slow host): shown, never answered
+            if self.says is not None and self.app.screen is self.says:
+                self.says.show(ask_text(text))
+            else:
+                self.says = HostSays(ask_text(text))
+                self.app.push_screen(self.says, self.waited)
+            return self.step(None)
+        self.unsay()
+        if what == "ask" and text.replace("\r", "").endswith("\n" + TOKEN_Q):   # the token, asked for with its echo off
+            secret, self.secret = self.secret or bytearray(), None
+            return self.step(secret)
+        if what == "ask":   # its question: a popup with all it printed, its answer the next step
+            self.asked = True
+            return self.app.push_screen(AccessAsk(ask_text(text)), self.step)
+        rc, self.run = what, None
+        self.forget()
+        lines = [l for l in ask_text(text).plain.split("\n") if l.strip()]
+        if self.yes is not None and lines and lines[0].strip() in ("y", "n"):
+            lines.pop(0)   # the pty's echo of the answer
+        said = "\n".join(lines[-8:])
+        self.ended(rc, f"\n{said}" if said else "")
+
+    def forget(self) -> None:
+        """The token zeroed, as far as Python lets a program forget: it never was a str here (the field it was typed in
+        is emptied when it is taken), and the bytes written to the pty are gone with their call."""
+        if self.secret is not None:
+            self.secret[:] = bytes(len(self.secret))
+            self.secret = None
+
+    def waited(self, wait: bool | None) -> None:
+        """The host's popup answered: Wait, or Cancel (the run stopped). None: taken down here."""
+        if wait is not None:
+            self.says = None
+            if not wait:
+                self.stop()
+
+    def unsay(self) -> None:
+        if self.says is not None:
+            says, self.says = self.says, None
+            if self.app.screen is says:
+                says.dismiss(None)
+
+    def stop(self) -> None:
+        """esc while it runs: its process group killed and its end said. Not after a y: it may be writing, and is
+        waited for."""
+        if self.yes:
+            return self.say(self.HELD_SAID, WARN)
+        self.stopped = True
+        self.run.kill()
+
+    def on_unmount(self) -> None:
+        """The popup taken down while it runs (the TUI quitting): killed, or, after a y, waited for."""
+        self.forget()
+        if self.run is not None:
+            self.run, run = None, self.run
+            run.wait() if self.yes else run.kill()
+
+
+class AccessEdit(Asking, ModalScreen):
     """`e` on a bot row: the channels the bot listens in, per channel whether an @mention is required and who may
     write, the DM policy with its allowlist, and the bot's mode. Read through `access ... --json` in a worker thread
     (for a bot on another host that is one capped ssh call); changed in memory only, until `s`: the change words go to
@@ -1839,47 +1968,11 @@ class AccessEdit(ModalScreen):
         else:
             self.say(A_SAID.get(rc, f"claude-discord access exited {rc}: what it said is above the TUI, on the terminal"), ALERT)
 
-    def step(self, answer: bool | None) -> None:
-        """The run's next part, in a worker thread: the answer written (y or n; None: none), then what it prints until
-        its question, something else it says and waits after (a host's prompt), or its end."""
-        run, app = self.run, self.app
-        if run is None:
-            return
-        if answer is not None:
-            self.yes = answer
-            self.say("answered y: claude-discord access ... set writes the changes, and is waited for (esc does not stop it now)" if answer else
-                     "answered n; claude-discord access ... set ends")
+    YES_SAID = "answered y: claude-discord access ... set writes the changes, and is waited for (esc does not stop it now)"
+    NO_SAID = "answered n; claude-discord access ... set ends"
+    HELD_SAID = "still running: it was answered y and may be writing access.json or setting the mode; it is waited for"
 
-        def work() -> None:
-            text, what = run.next(answer)
-            try:
-                app.call_from_thread(self.stepped, run, text, what)
-            except RuntimeError:   # the app has ended meanwhile
-                pass
-        app.run_worker(work, thread=True, exit_on_error=False)
-
-    def stepped(self, run, text: str, what: str | int) -> None:
-        if run is not self.run:
-            return
-        if what in ("ask", "said") and self.stopped:   # stopped meanwhile: its end is what comes next
-            return self.step(None)
-        if what == "said":   # no question of the CLI's (a ProxyCommand's code prompt, a slow host): shown, never answered
-            if self.says is not None and self.app.screen is self.says:
-                self.says.show(ask_text(text))
-            else:
-                self.says = HostSays(ask_text(text))
-                self.app.push_screen(self.says, self.waited)
-            return self.step(None)
-        self.unsay()
-        if what == "ask":   # its question: a popup with all it printed, its answer the next step
-            self.asked = True
-            return self.app.push_screen(AccessAsk(ask_text(text)), self.step)
-        rc, self.run = what, None
-        lines = [l for l in ask_text(text).plain.split("\n") if l.strip()]
-        if self.yes is not None and lines and lines[0].strip() in ("y", "n"):
-            lines.pop(0)   # the pty's echo of the answer
-        said = "\n".join(lines[-8:])
-        said = f"\n{said}" if said else ""
+    def ended(self, rc: int, said: str) -> None:
         if self.stopped:   # only ever before a y
             self.say("stopped: nothing was changed", ALERT)
         elif rc == 0 and not self.asked:
@@ -1896,33 +1989,6 @@ class AccessEdit(ModalScreen):
             self.say(f"claude-discord access asked no question this TUI answers within {A_CAP} s and was stopped: nothing was changed" + said, ALERT)
         else:
             self.say(A_RAN.get(rc, f"claude-discord access exited {rc}:") + said, ALERT)
-
-    def waited(self, wait: bool | None) -> None:
-        """The host's popup answered: Wait, or Cancel (the run stopped). None: taken down here."""
-        if wait is not None:
-            self.says = None
-            if not wait:
-                self.stop()
-
-    def unsay(self) -> None:
-        if self.says is not None:
-            says, self.says = self.says, None
-            if self.app.screen is says:
-                says.dismiss(None)
-
-    def stop(self) -> None:
-        """esc while it runs: its process group killed and its end said. Not after a y: it may be writing access.json
-        or setting the mode, and is waited for."""
-        if self.yes:
-            return self.say("still running: it was answered y and may be writing access.json or setting the mode; it is waited for", WARN)
-        self.stopped = True
-        self.run.kill()
-
-    def on_unmount(self) -> None:
-        """The editor taken down while it runs (the TUI quitting): killed, or, after a y, waited for."""
-        if self.run is not None:
-            self.run, run = None, self.run
-            run.wait() if self.yes else run.kill()
 
     def action_copy(self) -> None:
         if self.by_hand:
@@ -2061,6 +2127,270 @@ class HostSays(Scrolled):
         self.call_after_refresh(self.fit)
 
 
+# ---- bot: a bot's token, its name, a new bot (1.14.0) ------------------------
+# Through `claude-discord bot --host <host> --manager <this manager> --project <project> -- ...`, run on a pty of the
+# TUI's as access set is: the CLI shows what it will do and asks its one question there (AccessAsk). A token is typed
+# into a Secret field, taken out of it as a bytearray when the popup runs (the field emptied), and written to the pty
+# only when the CLI asks for it with its echo off; PtyRun zeroes it then.
+B_RAN = {1: "it could not:", 2: "refused (exit 2):", 3: "no terminal for its question (exit 3): nothing was changed",
+         4: "answered no: nothing was changed", 5: "the host did not answer, or its claude-discord is older than 1.14.0 (exit 5): nothing was changed"}
+
+
+class Secret(Input):
+    """The token field: drawn as dots, and never copied or cut (Input copies a password field's text to the clipboard)."""
+
+    def action_copy(self) -> None:
+        pass
+
+    def action_cut(self) -> None:
+        pass
+
+
+class Choice(Static, can_focus=True):
+    """A radio row of a popup, drawn `label  (●) a   ( ) b`: ← → or space move the choice while it has the focus.
+    `labels` are what is drawn for the options (a host's display name), when given."""
+    BINDINGS = [Binding("space", "turn(1)"), Binding("left", "turn(-1)"), Binding("right", "turn(1)")]
+
+    def __init__(self, label: str, options: list, labels: list | None = None, **kw) -> None:
+        super().__init__(**kw)
+        self.label, self.options, self.labels, self.at = label, list(options), labels, 0
+
+    @property
+    def value(self) -> str:
+        return self.options[self.at] if self.options else ""
+
+    def on_mount(self) -> None:
+        self.paint()
+
+    def paint(self) -> None:
+        shown = self.labels or self.options
+        self.update(Text.assemble((fit(self.label, 12), DIM), radios(tuple(shown), shown[self.at]) if shown else Text("none known", DIM)))
+
+    def action_turn(self, d: int) -> None:
+        if self.options:
+            self.at = (self.at + d) % len(self.options)
+            self.paint()
+            self.screen.changed(self)
+
+
+class Check(Static, can_focus=True):
+    """A checkbox of a popup, drawn `[✓] label`: space toggles it while it has the focus."""
+    BINDINGS = [Binding("space", "flip")]
+    on = True
+
+    def __init__(self, label: str, **kw) -> None:
+        super().__init__(**kw)
+        self.label = label
+
+    def on_mount(self) -> None:
+        self.update(Text.assemble((" " * 12), box(self.on), " ", self.label))
+
+    def action_flip(self) -> None:
+        self.on = not self.on
+        self.on_mount()
+
+
+class BotPopup(Asking, ModalScreen):
+    """What the three bot popups share: the frame, the message line, the buttons (← → between them, the safe one
+    first), the run of `claude-discord bot ...` on the TUI's pty and what its end says. Dismissed with what there is
+    to say (the monitor is then asked for a pass), or None."""
+    CSS = f"""BotPopup {{ align: center middle; }}
+    #bot {{ width: 104; max-width: 96%; height: auto; border: round {BRAND}; padding: 1 2; }}
+    #bot Horizontal {{ height: auto; }} #bot .lab {{ width: 12; color: $text-muted; }} #bot .hint {{ width: auto; padding-left: 2; color: $text-muted; }}
+    #b-field {{ width: 56; }} #b-buttons {{ margin-top: 1; }} #bot Button {{ margin-right: 2; }}
+    Choice:focus, Check:focus {{ background: {CURSOR}; }}"""
+    BINDINGS = [Binding("escape", "close", "close")]
+    GO = "Run"     # the label of the button that runs it
+    DONE = "done"  # what is said when it ran and said nothing
+
+    def __init__(self, entry: dict) -> None:
+        super().__init__()
+        self.entry = entry   # the bot's entry of the state (its host, project and name); {} for a new bot
+        self.by_hand = ""    # the command for a shell, where no pty can be opened
+
+    def body(self) -> ComposeResult:
+        yield from ()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="bot"):
+            yield Static("", id="b-title")
+            yield from self.body()
+            with Horizontal(id="b-buttons"):
+                yield Btn("Cancel", id="b-no")
+                yield Btn(self.GO, id="b-go", variant="error")
+            yield Static("", id="b-msg", markup=False)
+
+    def say(self, text: str, style: str = DIM) -> None:
+        self.query_one("#b-msg", Static).update(Text(text, style))
+
+    def changed(self, choice: "Choice") -> None:
+        pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "b-no":
+            self.action_close()
+        elif self.run is None:
+            self.go()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if self.run is None:
+            self.go()
+
+    def go(self) -> None:
+        pass
+
+    def start(self, argv: list) -> None:
+        """`argv` on a pty, its first step; where no pty can be opened, the command for a shell (c copies it)."""
+        run = self.app.pty(argv, BOT_Q)
+        if run is None:
+            self.forget()
+            self.by_hand = shlex.join(["claude-discord", *argv[1:]])
+            return self.say(f"no pseudo-terminal can be opened here: run it in a shell (c copies it), then esc:\n{self.by_hand}", WARN)
+        self.run, self.asked, self.yes, self.stopped, self.says = run, False, None, False, None
+        self.say("claude-discord bot is running; esc stops it until it is answered y")
+        self.step(None)
+
+    def ended(self, rc: int, said: str) -> None:
+        if self.stopped:   # only ever before a y
+            self.say("stopped: nothing was changed", ALERT)
+        elif rc == 0:
+            self.dismiss(said.strip() or self.DONE)
+        elif rc == 124:
+            self.say(f"claude-discord bot asked no question this TUI answers within {A_CAP} s and was stopped: nothing was changed" + said, ALERT)
+        else:
+            self.say(B_RAN.get(rc, f"claude-discord bot exited {rc}:") + said, ALERT)
+
+    def token_field(self) -> ComposeResult:
+        with Horizontal():
+            yield Static("token", classes="lab")
+            yield Secret(id="b-field", password=True, max_length=200, compact=True, placeholder="paste the bot's token: it is drawn as dots")
+
+    def take(self) -> bool:
+        """The token out of its field into self.secret (a bytearray), the field emptied; False when there is none."""
+        field = self.query_one("#b-field", Input)
+        if not field.value.strip():
+            return False
+        self.secret, field.value = bytearray(field.value.strip().encode()), ""
+        return True
+
+    def key_c(self) -> None:   # a key, not a binding: in a focused field c is text
+        if self.by_hand:
+            self.app.copy_to_clipboard(self.by_hand)
+
+    def action_close(self) -> None:
+        if self.run is not None:
+            self.stop()
+        else:
+            self.dismiss(None)
+
+
+class BotName(BotPopup):
+    """`n` on a bot row: its name, which is its Discord username, changed on Discord and here together (`bot <name>
+    rename <new>`); `=` on a row whose two names differ opens it with Discord's name and runs it at once (Discord is
+    then not asked to change anything)."""
+    GO = "Rename"
+
+    def __init__(self, entry: dict, preset: str = "") -> None:
+        super().__init__(entry)
+        self.preset, self.new = preset, ""
+
+    def body(self) -> ComposeResult:
+        e = self.entry
+        yield Static(Text.assemble((fit("Discord", 12), DIM), (discord_name(e) or txt(e.get("discord_name")) or "-", "bold"),
+                                   ("    its username there, which is its name here too", DIM)))
+        with Horizontal():
+            yield Static("new name", classes="lab")
+            yield Input(self.preset or txt(e.get("bot")), id="b-field", restrict=r"[A-Za-z0-9_-]*", max_length=32, compact=True)
+            yield Static("2 to 32 of A-Z a-z 0-9 _ -", classes="hint")
+
+    def on_mount(self) -> None:
+        e = self.entry
+        self.query_one("#b-title", Static).update(Text.assemble(("Name", f"bold {BRAND}"), (" · ", DIM), (txt(e.get("bot")), f"bold {BRAND}"),
+                                                                (f"    {host_label(self.app.state, e.get('host'))} · Discord allows about 2 changes an hour", DIM)))
+        self.query_one("#b-field", Input).focus()
+        self.say("enter renames: Discord first, then here (a running bot is stopped and started again) · esc closes")
+        if self.preset:
+            self.go()
+
+    def go(self) -> None:
+        new = self.query_one("#b-field", Input).value
+        if not BOT_NAME.fullmatch(new):
+            return self.say("a name is 2 to 32 of A-Z a-z 0-9 _ -", ALERT)
+        self.new = new
+        self.start(self.app.bot_argv(self.entry, txt(self.entry.get("bot")), "rename", new))
+
+    def ended(self, rc: int, said: str) -> None:
+        if rc == 0 and not self.stopped and txt(self.entry.get("bot")) == self.app.bot and self.entry.get("host") == "local":
+            self.app.retarget(self.new)   # the manager itself: its backend's state is the new name's now
+        super().ended(rc, said)
+
+
+class BotToken(BotPopup):
+    """`t` on a bot row: its token replaced (`bot <name> token`). The current token is never read or shown; the new
+    one is checked with Discord as that bot before it is saved, by the CLI on the bot's machine."""
+    GO = "Replace"
+
+    def body(self) -> ComposeResult:
+        yield Static(Text("Paste the bot's new token (Developer Portal, the bot's Bot tab, Reset Token). It is checked with Discord "
+                          "as that bot before it is saved; a token of another bot is refused. The current token is never read here.", DIM))
+        yield from self.token_field()
+
+    def on_mount(self) -> None:
+        e = self.entry
+        self.query_one("#b-title", Static).update(Text.assemble(("Token", f"bold {BRAND}"), (" · ", DIM), (txt(e.get("bot")), f"bold {BRAND}"),
+                                                                (f"    {host_label(self.app.state, e.get('host'))} · a running session logs in with it within 10 s", DIM)))
+        self.query_one("#b-field", Input).focus()
+        self.say("enter checks it with Discord, then asks · esc closes")
+
+    def go(self) -> None:
+        if not self.take():
+            return self.say("paste the token first", ALERT)
+        self.start(self.app.bot_argv(self.entry, txt(self.entry.get("bot")), "token"))
+
+
+class BotAdd(BotPopup):   # not a BotToken: Textual runs each class's on_mount
+    """`a` on the Bots tab: a new bot (`bot add`). Its host (this machine or a ledger host), its project (one a bot of
+    that host is in: the channel and the owner are that project's), its mode and whether it starts now are chosen
+    here; its name is not asked: it is its Discord username, which the CLI reads with its token. A username that is
+    no name here (a space, a letter outside A-Z) is refused by the CLI, which says to rename the bot on Discord first."""
+    GO = "Add"
+    DONE = "added"
+
+    def __init__(self, hosts: list, labels: list, projects: dict) -> None:
+        super().__init__({})
+        self.hosts, self.labels, self.projects = hosts, labels, projects
+
+    def body(self) -> ComposeResult:
+        yield Choice("host", self.hosts, self.labels, id="b-host")
+        yield Choice("project", self.projects.get(self.hosts[0] if self.hosts else "", []), id="b-project")
+        yield Choice("mode", list(MODES), id="b-mode")
+        yield Check("start it now", id="b-start")
+        yield from self.token_field()
+
+    def on_mount(self) -> None:
+        self.query_one("#b-title", Static).update(Text.assemble(("Add a bot", f"bold {BRAND}"),
+                                                                ("    its name is its Discord username, read with its token", DIM)))
+        self.query_one("#b-host", Choice).focus()
+        self.say("tab moves · ← → or space choose · enter in the token field adds · esc closes")
+
+    def changed(self, choice: Choice) -> None:
+        """Another host: the projects of that host's bots."""
+        if choice.id != "b-host":
+            return
+        project = self.query_one("#b-project", Choice)
+        project.options, project.at = self.projects.get(self.query_one("#b-host", Choice).value, []), 0
+        project.paint()
+
+    def go(self) -> None:
+        host, project = self.query_one("#b-host", Choice).value, self.query_one("#b-project", Choice).value
+        if not project:
+            return self.say("no project of this host has a bot yet: set up its first bot there with claude-discord setup", ALERT)
+        if not self.take():
+            return self.say("paste the token first", ALERT)
+        start = ["--start"] if self.query_one("#b-start", Check).on else []
+        self.start(self.app.bot_argv({"host": host, "project": project}, "add", "--mode", self.query_one("#b-mode", Choice).value, *start))
+
+
 class Pane(VerticalScroll, can_focus=False):
     """The tab's body. Never focused: the arrow keys move the row cursor (the app's bindings), not the scroll position."""
 
@@ -2076,7 +2406,7 @@ class MonitorTUI(App):
     BINDINGS = [Binding("q", "quit", "quit"), Binding("Q", "quit_stop", "quit + stop backend"),
                 Binding("up", "move(-1)"), Binding("down", "move(1)"), Binding("left", "tab(-1)"), Binding("right", "tab(1)"),
                 Binding("space", "toggle"), Binding("enter", "open"), Binding("c", "copy"), Binding("a", "add"), Binding("x", "remove"),
-                Binding("l", "laptop"), Binding("e", "edit")]
+                Binding("l", "laptop"), Binding("e", "edit"), Binding("n", "name"), Binding("t", "token"), Binding("equals_sign", "align")]
 
     def __init__(self, state_dir: Path, bot: str, wrapper: str | None) -> None:
         super().__init__()
@@ -2210,7 +2540,7 @@ class MonitorTUI(App):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         # The row keys belong to the main view: under a Detail or a dialog they do nothing.
-        return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy", "add", "remove", "laptop", "edit")
+        return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy", "add", "remove", "laptop", "edit", "name", "token", "align")
 
     def action_tab(self, d: int) -> None:
         self.tab = TABS[(TABS.index(self.tab) + d) % len(TABS)]
@@ -2312,15 +2642,50 @@ class MonitorTUI(App):
             self.hosts_do("laptop", key, "off" if obj(obj(self.state.get("hosts")).get(key)).get("laptop") else "on")
 
     def action_add(self) -> None:
+        listed = [k for k, h in obj(self.state.get("hosts")).items() if obj(h).get("left_s") is None]
         if self.tab == "config":
-            listed = {k for k, h in obj(self.state.get("hosts")).items() if obj(h).get("left_s") is None}
-            self.push_screen(AddHost(listed), self.wrote)
+            self.push_screen(AddHost(set(listed)), self.wrote)
+        elif self.tab == "bots":   # 1.14.0: a new bot, on this machine or a ledger host, in a project a bot of it is in
+            hosts = sorted((h for h in listed if ALIAS.fullmatch(h)), key=lambda h: (h != "local", h))
+            bots = [obj(b) for b in obj(self.state.get("bots")).values()]
+            projects = {h: sorted({txt(b.get("project")) for b in bots if b.get("host") == h and txt(b.get("bot")) and txt(b.get("project"))}) for h in hosts}
+            self.push_screen(BotAdd(hosts, [host_label(self.state, h) for h in hosts], projects), self.wrote)
+
+    def bot_row(self) -> dict:
+        """The bot of the Bots tab's cursor row, when it is one the CLI can reach: a bot (not a project whose health
+        crashed) of `local` or of a ledger alias. {} otherwise."""
+        b = obj(obj(self.state.get("bots")).get(self.cursor["bots"] or "")) if self.tab == "bots" else {}
+        return b if txt(b.get("bot")) and txt(b.get("project")) and ALIAS.fullmatch(txt(b.get("host"))) else {}
 
     def action_edit(self) -> None:
         """`e` on a bot row: its access editor. Not for a row that is no bot (a project whose health crashed)."""
-        b = obj(obj(self.state.get("bots")).get(self.cursor["bots"] or "")) if self.tab == "bots" else {}
-        if txt(b.get("bot")) and txt(b.get("project")) and ALIAS.fullmatch(txt(b.get("host"))):
-            self.push_screen(AccessEdit(b), self.wrote)
+        if self.bot_row():
+            self.push_screen(AccessEdit(self.bot_row()), self.wrote)
+
+    def action_name(self) -> None:
+        if self.bot_row():
+            self.push_screen(BotName(self.bot_row()), self.wrote)
+
+    def action_token(self) -> None:
+        if self.bot_row():
+            self.push_screen(BotToken(self.bot_row()), self.wrote)
+
+    def action_align(self) -> None:
+        """`=` on a row whose name is not Discord's: the name here becomes Discord's (Discord is not asked to change)."""
+        b = self.bot_row()
+        if b and discord_name(b):
+            self.push_screen(BotName(b, discord_name(b)), self.wrote)
+
+    def bot_argv(self, b: dict, *rest: str) -> list[str]:
+        """`claude-discord bot --host <the bot's host> --manager <this manager> --project <its project> -- ...`, as
+        access_argv: the CLI takes the ledger line's env words itself and sends names and paths over ssh as hex."""
+        return [self.wrapper or "claude-discord", "bot", "--host", txt(b.get("host")), "--manager", self.bot, "--project", txt(b.get("project")), "--", *rest]
+
+    def retarget(self, bot: str) -> None:
+        """The manager renamed (`bot rename` moved its backend's records): this TUI follows it, its holder record moved with them."""
+        self.bot, self.state_dir = bot, self.state_dir.parent / bot
+        self.holder, self.mtime = self.state_dir / "holders" / f"tui-{os.getpid()}", None
+        self.refresh_state()
 
     def access_argv(self, b: dict, *rest: str) -> list[str]:
         """`claude-discord access --host <the bot's host> --manager <this manager> --project <its project> -- <bot> ...`,
