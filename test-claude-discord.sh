@@ -4336,8 +4336,9 @@ echo "ok: monitor: a finding the channel is not told when it appears is one not_
 # Cadence and self-update, counted, never timed. date and sleep are stubs for this monitor: date reads $HOME/clock,
 # which each local health run moves 1000 s on, and logs D for a pass's start stamp (the %s call); sleep logs its
 # argument. Every sleep between two D lines is the monitor's own, in order, so their sum is the pass interval in the
-# monitor's units: PASS (0.05) exactly, with the hosts' steps inside it, not PASS plus them (two intervals: steps
-# that end mid-tick in at least one of them). A finding first seen in a
+# monitor's units: PASS (0.02: two ticks, so the dozen passes this block waits for are short) exactly, with the hosts'
+# steps inside it, not PASS plus them (two intervals: steps that end mid-tick in at least one of them; a local health
+# of 0.014 s takes six steps or so here, a tick being five and PASS ten). A finding first seen in a
 # pass carries that pass's start (the clock before health moved it). Then monitor.sh changes under the running
 # monitor: within a pass it execs the new file, same pid, the lock still on fd 9, and posts nothing again. A
 # monitor.sh with an mtime in the future (a clock stepped back, a copied file) is no change: it is compared with
@@ -4345,18 +4346,18 @@ echo "ok: monitor: a finding the channel is not told when it appears is one not_
 CK="$HOME/clockbin"; mkdir -p "$CK"; echo 2000000000 > "$HOME/clock"; : > "$HOME/clk.log"
 printf '#!/bin/bash\ncase $* in *%%s*) echo D >> "$HOME/clk.log";; esac\nexec %s -d "@$(<"$HOME/clock")" "$@"\n' "$(command -v date)" > "$CK/date"
 printf '#!/bin/sh\necho "$1" >> "$HOME/clk.log"\nexec /bin/sleep "$1"\n' > "$CK/sleep"; chmod +x "$CK/date" "$CK/sleep"   # /bin/sleep: steps and ticks, none a duration the sleep stub remaps
-printf 'local\n' > "$MR/mgr/hosts"; mdoc lambda 0 r1:stale > "$MON/local.out"; echo 0.02 > "$MON/local.sleep"
+printf 'local\n' > "$MR/mgr/hosts"; mdoc lambda 0 r1:stale > "$MON/local.out"; echo 0.014 > "$MON/local.sleep"
 mstate '.hosts = {} | .bots = {} | .monitor.error = "an earlier pass failed"'; printf '200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"
 want=$(( $(starts) + 2 )); np=$(passes); holder
-(cd "$MP" && PATH="$CK:$PATH" CLAUDE_DISCORD_MONITOR_PASS=0.05 CLAUDE_DISCORD_MONITOR_HOST_CAP=5 bash "$S" monitor --ensure mgr --holder tui "$HPID")
+(cd "$MP" && PATH="$CK:$PATH" CLAUDE_DISCORD_MONITOR_PASS=0.02 CLAUDE_DISCORD_MONITOR_HOST_CAP=5 bash "$S" monitor --ensure mgr --holder tui "$HPID")
 wait_log $(( np + 3 )) ' pass hosts='
 jq -e '.monitor | has("error") | not' "$MB/state.json" >/dev/null || { echo "FAIL: a pass that goes through clears monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
 [ "$(jq -r '.bots["local|/home/u/ws/p|r1"].since_s' "$MB/state.json")" = 2000000000 ] ||
   { echo "FAIL: a pass is stamped at its start, not after its hosts: $(jq -c '.bots["local|/home/u/ws/p|r1"]' "$MB/state.json")"; exit 1; }
 # Per interval: PASS, or (hosts slower than PASS on a loaded box) their steps alone, with no sleep after them.
-iv=$(awk '/^D$/ { if (d == 1 || d == 2) printf "%s ", ((s > 0.0499 && s < 0.0501) || (s > 0.05 && only) ? "ok" : "bad:" s); d++; s = 0; only = 1; next }
+iv=$(awk '/^D$/ { if (d == 1 || d == 2) printf "%s ", ((s > 0.0199 && s < 0.0201) || (s > 0.02 && only) ? "ok" : "bad:" s); d++; s = 0; only = 1; next }
   { s += $1; if ($1 != "0.002") only = 0 }' "$HOME/clk.log")
-[ "$iv" = "ok ok " ] || { echo "FAIL: pass starts must be PASS (0.05) apart in the monitor's own sleeps, the hosts' steps inside it, not after them: $iv"; exit 1; }
+[ "$iv" = "ok ok " ] || { echo "FAIL: pass starts must be PASS (0.02) apart in the monitor's own sleeps, the hosts' steps inside it, not after them: $iv"; exit 1; }
 rp=$(mpid); touch "$PC/monitor/monitor.sh"
 wait_log 1 'restart: monitor\.sh changed$'; wait_log "$want" 'Z start$'; next_pass
 [ "$(awk '/monitor\.sh changed: restart at the next pass/ { s = 1; next } s && / pass hosts=/ { p = 1 } s && /restart: monitor\.sh changed$/ { print p + 0; exit }' "$MB/monitor.log")" = 1 ] ||
@@ -4394,7 +4395,7 @@ n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; r
 # The same, but the file now names another pid (a successor that already started from state.json): this monitor still
 # ends before the next post, and writes nothing, so the post it did send is not in state.json (the successor owns it).
 mstop; mdoc lambda 0 r1:stale la:stale lb:stale > "$MON/local.out"; printf '200 {}\n' > "$CURL_REPLIES"; np=$(passes); holder
-(cd "$MP" && PATH="$CK:$PATH" CLAUDE_DISCORD_MONITOR_PASS=0.05 CLAUDE_DISCORD_MONITOR_HOST_CAP=5 bash "$S" monitor --ensure mgr --holder tui "$HPID")
+(cd "$MP" && PATH="$CK:$PATH" CLAUDE_DISCORD_MONITOR_PASS=0.02 CLAUDE_DISCORD_MONITOR_HOST_CAP=5 bash "$S" monitor --ensure mgr --holder tui "$HPID")
 wait_log $(( np + 1 )) ' pass hosts='; rp=$(mpid)
 mdoc lambda 0 r1:stale la:stale lb:stale lc:stale ld:stale > "$MON/local.out"; printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; echo 0.15 > "$HOME/curl.sleep"
 ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :
