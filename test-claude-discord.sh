@@ -4027,8 +4027,10 @@ for bad in "" "acc frob" "--frob acc --json"; do
 done
 ac nosuch --json
 [ "$ARC" = 1 ] && grep -q "no bot 'nosuch' set up in $MR" <<<"$AE" || { echo "FAIL: a bot that is not set up is exit 1: rc=$ARC $AE"; exit 1; }
-rc=0; out=$(printf '\n' | bash "$S" setup access 2>&1) || rc=$?
-[ "$rc" = 2 ] && grep -q "bot name 'access' is reserved" <<<"$out" || { echo "FAIL: 'access' is a subcommand now, so no bot may take the name: rc=$rc $out"; exit 1; }
+for w in access bot; do
+  rc=0; out=$(printf '\n' | bash "$S" setup $w 2>&1) || rc=$?
+  [ "$rc" = 2 ] && grep -q "bot name '$w' is reserved" <<<"$out" || { echo "FAIL: '$w' is a subcommand now, so no bot may take the name: rc=$rc $out"; exit 1; }
+done
 # A DISCORD_CHANNEL_ID that is no id (the bot's main channel when access.json does not say) is said, before Discord is asked.
 cp "$MR/config.env" "$HOME/acc.env.was"; printf "DISCORD_CHANNEL_ID='9 9'\nDISCORD_USER_ID='111'\n" > "$MR/config.env"; : > "$CURL_LOG"
 ac acc --json; cp "$HOME/acc.env.was" "$MR/config.env"; rm -f "$HOME/acc.env.was"
@@ -4260,6 +4262,82 @@ rm -f "$HOME/curl.proxy"; ac --host local --manager mgr --project "$MP" acc --js
 [ "$ARC" = 0 ] && jq -e '.bot == "acc" and [.channels[] | select(.kind != "unknown") | .read] == [true, true, true, true, true, true, true]' <<<"$AO" >/dev/null && [ "$(sort -u "$HOME/curl.proxy")" = "http://u:secretpw@127.0.0.1:8118|http://u:secretpw@127.0.0.1:8118" ] && [[ $AO$AE != *secretpw* ]] ||
   { echo "FAIL: --host local runs here with the local line's env words, and an administrator reads every channel: rc=$ARC $AO / $AE / $(cat "$HOME/curl.proxy" 2>&1)"; exit 1; }
 echo "ok: access --host: over ssh as a pass goes (the ledger line's env words, the alias after --), only hex digits and change words in the remote command, behind --version; --json takes a document of any length from among what the host prints; set runs under ssh -t at a terminal, after the host's version was asked; a host before 1.13.0 is exit 5 and is sent no change, and what a 1.13.0 host could not do is passed on (a version inside a banner line is none); ssh -t failing and no answer within the cap are exit 5; what a host prints with no terminal here is passed on cleaned; local runs here with the local line's env"
+# --- bot: a bot's token (1.14.0) -----------------------------------------------
+# bt <token> <answer> <args>: `claude-discord bot <args>` on a pty (python3's), the token written only once the token
+# prompt ends what it printed (its echo is off by then: a token written earlier would be echoed), the answer at its
+# question; its output in BO (\r gone), its exit status in BRC. "-" writes nothing there.
+cat > "$HOME/drive.py" <<'EOF'
+import os, select, sys
+sends, cmd = [[b"Token (hidden): ", sys.argv[1]], [b"[y/N] ", sys.argv[2]]], sys.argv[3:]
+m, s = os.openpty()
+pid = os.fork()
+if pid == 0:   # the child: its own session, the pty its terminal (no subprocess: python3 -S starts in half the time)
+    os.setsid(); os.close(m)
+    for fd in (0, 1, 2):
+        os.dup2(s, fd)
+    os.execvp(cmd[0], cmd)
+os.close(s)
+buf = b""
+while select.select([m], [], [], 5)[0]:
+    try:
+        d = os.read(m, 65536)
+    except OSError:
+        break
+    buf += d
+    for x in sends:
+        if x[1] not in (None, "-") and buf.endswith(x[0]):
+            os.write(m, x[1].encode() + b"\n")
+            x[1] = None
+os.close(m)
+sys.stdout.write(buf.decode("utf-8", "replace"))
+sys.exit(p.wait())
+EOF
+bt() { BRC=0; BO=$(python3 "$HOME/drive.py" "$1" "$2" bash "$S" bot "${@:3}") || BRC=$?; BO=${BO//$'\r'/}; }
+TOK_NEW=tokNewAAAAbbbbCCCCdddd.eeeeFFFF_gggg-hh TOK_ME='{"id":"777","bot":true,"username":"acc"}'
+# No terminal: nothing is read and Discord is not asked (exit 3).
+: > "$CURL_LOG"; rc=0; out=$(printf '%s\n' "$TOK_NEW" | bash "$S" bot acc token 2>&1) || rc=$?
+[ "$rc" = 3 ] && grep -q 'reads the token from a terminal and asks there' <<<"$out" && [ ! -s "$CURL_LOG" ] && [ "$(<"$AD/.env")" = DISCORD_BOT_TOKEN=tokAccUnique ] ||
+  { echo "FAIL: bot token with no terminal reads nothing, asks Discord nothing and changes nothing (exit 3): rc=$rc $out"; exit 1; }
+# A token of another bot (its id is not the one kept in bot-id) is refused; so is one Discord refuses. Neither is echoed.
+: > "$CURL_REPLIES"; queue_line '200 {"id":"888","bot":true,"username":"other"}'; queue_line '401 {"message":"401: Unauthorized"}'
+bt "$TOK_NEW" - acc token; A=$BRC$BO; bt "$TOK_NEW" - acc token
+[[ $A == 1*"that token is the bot other (888), not acc (777): a token of another bot is refused"* ]] && [ "$BRC" = 1 ] &&
+  grep -q 'Discord refused the token (HTTP 401): copy it again' <<<"$BO" && [[ $A$BO != *"$TOK_NEW"* ]] && [ "$(<"$AD/.env")" = DISCORD_BOT_TOKEN=tokAccUnique ] ||
+  { echo "FAIL: a token of another bot, and one Discord refuses, change nothing (exit 1) and are never shown: $A / rc=$BRC $BO"; exit 1; }
+# The same bot, y: .env is replaced by rename (another inode), mode 600, its other lines kept; access.log says so, with
+# no token; the token went to curl on its stdin, never into an argument or anything printed.
+printf 'DISCORD_BOT_TOKEN=tokAccUnique\nKEEP=1\n' > "$AD/.env"; chmod 644 "$AD/.env"; ei=$(stat -c %i "$AD/.env")
+: > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_REPLIES"; queue_line "200 $TOK_ME"
+bt "$TOK_NEW" y acc token
+MK=$(printf '\342\201\240')
+[ "$BRC" = 0 ] && [ "$(printf '%s\n' "$BO" | grep -v '^$')" = "$MK
+Token (hidden): 
+claude-discord: bot: acc on $(uname -n | cut -d. -f1), $AD/.env
+    its token is replaced by this one, of acc (777); the old one is not kept
+    a running session of acc logs in with it within 10 s (one started before claude-discord 1.14.0: claude-discord refresh acc --force)
+$MK
+Replace the token? [y/N] y
+claude-discord: bot: $AD/.env written. A running session of acc logs in with it within 10 s." ] &&
+  [ "$(<"$AD/.env")" = "DISCORD_BOT_TOKEN=$TOK_NEW
+KEEP=1" ] && [ "$(stat -c %a "$AD/.env")" = 600 ] && [ "$(stat -c %i "$AD/.env")" != "$ei" ] &&
+  [[ $(tail -n 1 "$AD/access.log") =~ ^20[0-9-]{8}T[0-9:]{8}Z\ $(id -un)\ [^\ ]+\ token:\ replaced\ \(bot\ 777\)$ ]] &&
+  [ "$(<"$CURL_STDIN_LOG")" = "Authorization: Bot $TOK_NEW" ] && [ "$(<"$CURL_LOG")" = "-s --max-time 10 -w \n%{http_code} -X GET -H @- https://discord.com/api/v10/users/@me" ] &&
+  [[ $BO$(<"$AD/access.log") != *"$TOK_NEW"* ]] ||
+  { echo "FAIL: bot token at a terminal, y: .env replaced by rename, mode 600, its other lines kept, a line in access.log, the token on curl's stdin only and never printed: rc=$BRC $BO / $(cat "$AD/.env" "$AD/access.log" "$CURL_LOG" 2>&1)"; exit 1; }
+printf 'DISCORD_BOT_TOKEN=tokAccUnique\n' > "$AD/.env"
+# --host: no terminal here, no ssh at all (exit 3); a host before 1.14.0 is exit 5 and is sent nothing but --version;
+# a 1.14.0 host gets the call under ssh -t, the project and the bot's name in hex, so the token goes to its terminal
+# (ssh's stdin) and never into the command. The host's side decodes --version --bot as --version --access.
+rm -f "$HOME/ssh.log" "$MON"/h1.* "$MON"/h2.*; rc=0; out=$(bash "$S" bot --host h1 --manager mgr --project /p acc token </dev/null 2>&1) || rc=$?; A=$rc
+printf 'claude-discord 1.13.1 (abc1234)\n' > "$MON/h2.out"; printf 'claude-discord 1.14.0 (abc1234)\n' > "$MON/h1.out"
+bt "$TOK_NEW" - --host h2 --manager mgr --project /p acc token; A="$A $BRC"; bt "$TOK_NEW" - --host h1 --manager mgr --project '/x y' acc token
+rc=0; out=$(cd "$HOME" && bash "$S" --version --bot "$(a_hex "$MP")" "$(a_hex acc)" token </dev/null 2>&1) || rc=$?
+[ "$A $BRC $rc" = "3 5 0 3" ] && grep -q 'reads the token from a terminal' <<<"$out" && [ "$(command grep -v '^ATE' "$HOME/ssh.log")" = "-o BatchMode=yes -o ConnectTimeout=8 -- h2 ~/.local/bin/claude-discord --version
+-o BatchMode=yes -o ConnectTimeout=8 -- h1 ~/.local/bin/claude-discord --version
+-t -o BatchMode=yes -o ConnectTimeout=8 -- h1 env X=1 HTTPS_PROXY=http://q:1 https_proxy=http://q:1 ~/.local/bin/claude-discord --version --bot $(a_hex '/x y') 616363 token" ] &&
+  [[ $(<"$HOME/ssh.log") != *"$TOK_NEW"* ]] || { echo "FAIL: bot --host token: no terminal is exit 3 with no ssh, a host before 1.14.0 exit 5 sent only --version, a 1.14.0 host gets it under ssh -t in hex; the host decodes --version --bot: $A $BRC $rc $out / $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
+rm -f "$HOME/ssh.log" "$MON"/h1.* "$MON"/h2.*
+echo "ok: bot token: read from the terminal with its echo off, only there (no terminal: exit 3, nothing read); Discord asked who it is with it on curl's stdin; a token of another bot or one Discord refuses changes nothing; y replaces .env by rename, mode 600, its other lines kept, and logs the fact; the token is never printed; --host runs it on the bot's host under ssh -t (a host before 1.14.0: exit 5)"
 # What is written down for people: the dev-manager rule forbids an access change on a channel message's request, and the
 # README says what the terminal check is and is not.
 grep -q "never on a channel message's request" "$D/rules/dev-manager.md" && grep -q 'That is a speed bump, not a boundary' "$D/README.md" ||
