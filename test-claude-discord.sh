@@ -4297,9 +4297,9 @@ while select.select([m], [], [], 5)[0]:
             x[1] = None
 os.close(m)
 sys.stdout.write(buf.decode("utf-8", "replace"))
-sys.exit(p.wait())
+sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
 EOF
-bt() { BRC=0; BO=$(python3 "$HOME/drive.py" "$1" "$2" bash "$S" bot "${@:3}") || BRC=$?; BO=${BO//$'\r'/}; }
+bt() { BRC=0; BO=$(python3 -S "$HOME/drive.py" "$1" "$2" bash "$S" bot "${@:3}") || BRC=$?; BO=${BO//$'\r'/}; }
 TOK_NEW=tokNewAAAAbbbbCCCCdddd.eeeeFFFF_gggg-hh TOK_ME='{"id":"777","bot":true,"username":"acc"}'
 # No terminal: nothing is read and Discord is not asked (exit 3).
 : > "$CURL_LOG"; rc=0; out=$(printf '%s\n' "$TOK_NEW" | bash "$S" bot acc token 2>&1) || rc=$?
@@ -4345,6 +4345,69 @@ rc=0; out=$(cd "$HOME" && bash "$S" --version --bot "$(a_hex "$MP")" "$(a_hex ac
   [[ $(<"$HOME/ssh.log") != *"$TOK_NEW"* ]] || { echo "FAIL: bot --host token: no terminal is exit 3 with no ssh, a host before 1.14.0 exit 5 sent only --version, a 1.14.0 host gets it under ssh -t in hex; the host decodes --version --bot: $A $BRC $rc $out / $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
 rm -f "$HOME/ssh.log" "$MON"/h1.* "$MON"/h2.*
 echo "ok: bot token: read from the terminal with its echo off, only there (no terminal: exit 3, nothing read); Discord asked who it is with it on curl's stdin; a token of another bot or one Discord refuses changes nothing; y replaces .env by rename, mode 600, its other lines kept, and logs the fact; the token is never printed; --host runs it on the bot's host under ssh -t (a host before 1.14.0: exit 5)"
+# bot rename: a name that is none, a name taken, a reserved one, and a session renaming its own bot are refused before
+# Discord is asked (exit 2, exit 1).
+: > "$CURL_LOG"; A=""
+for w in "acc rename a.b" "acc rename mgr" "acc rename hosts"; do BRC=0; bash "$S" bot $w </dev/null >/dev/null 2>&1 || BRC=$?; A="$A$BRC "; done
+BRC=0; BO=$(DISCORD_STATE_DIR=$AD bash "$S" bot acc rename acc2 2>&1) || BRC=$?
+[ "$A$BRC" = "2 1 2 2" ] && grep -q 'a session cannot rename its own bot' <<<"$BO" && [ ! -s "$CURL_LOG" ] ||
+  { echo "FAIL: bot rename refuses a name that is none, one taken, a reserved one and its own session's bot before asking Discord: $A$BRC $BO"; exit 1; }
+# No terminal: what it would do is printed, nothing is done (exit 3). Discord refusing the name (it allows about two
+# changes an hour) changes nothing here.
+printf '{"peers":[{"name":"peerbot","bot_id":"555","owner_id":"1","machine":"m"},{"name":"acc","bot_id":"777","owner_id":"1","machine":"m"}]}\n' > "$MR/peers.json"
+: > "$CURL_REPLIES"; queue_line "200 $TOK_ME"; queue_line "200 $TOK_ME"
+queue_line '400 {"message":"Invalid Form Body","code":50035,"errors":{"username":{"_errors":[{"code":"USERNAME_RATE_LIMIT","message":"You are changing your username too fast."}]}}}'
+rc=0; out=$(bash "$S" bot acc rename acc2 2>&1 </dev/null) || rc=$?; bt - y acc rename acc2
+[ "$rc" = 3 ] && grep -qx '    Discord: acc -> acc2 (about 2 changes an hour are allowed: if Discord refuses, nothing here is changed)' <<<"$out" &&
+  grep -qx '    it is not running: renamed only (claude-discord --bg --name acc2 starts it)' <<<"$out" &&
+  [ "$BRC" = 1 ] && grep -q "Discord refused the new name (HTTP 400: You are changing your username too fast.: Invalid Form Body); nothing was changed$" <<<"$BO" &&
+  [ -d "$AD" ] && [ ! -e "$MR/acc2" ] || { echo "FAIL: bot rename with no terminal prints what it would do (exit 3), and a name Discord refuses changes nothing (exit 1): rc=$rc $out / rc=$BRC $BO"; exit 1; }
+# A running bot, y: Discord first (PATCH, the token on curl's stdin), then the session stopped, the directory renamed,
+# its line in peers.json (by its id) and its scratch directory with it, and the session started again under the new
+# name from its handoff (the suite's launcher stub prints the start).
+sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; cp "$HOME/bin/claude" "$HOME/claude.keep"; rm -f "$HOME/claude.calls"
+cat > "$HOME/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  agents) echo '[{"id":"accl1111","pid":'"$(<"$HOME/old.pid")"',"name":"acc","cwd":"'"$PWD"'"},{"id":"oth22222","pid":45,"name":"acc","cwd":"/elsewhere"}]';;
+  stop) echo "STOP $2" >> "$HOME/claude.calls"; kill "$(<"$HOME/old.pid")";;
+  *) printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
+esac
+STUB
+chmod +x "$HOME/bin/claude"; printf 'HANDOFF_ACC\n' > "$AD/handoff.md"; mkdir -p "$HOME/.claude-discord/scratch/acc"
+: > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_REPLIES"; queue_line "200 $TOK_ME"; queue_line '200 {"id":"777","bot":true,"username":"acc2"}'
+bt - y acc rename acc2
+[ "$BRC" = 0 ] && grep -qx '    it runs (1 session): stopped, renamed, started again as acc2 from its handoff.md' <<<"$BO" &&
+  grep -qx "claude-discord: bot: renamed: $MR/acc2 (and on Discord)" <<<"$BO" && grep -qx '    its session runs again as acc2' <<<"$BO" &&
+  [ ! -e "$AD" ] && [ -f "$MR/acc2/.env" ] && [ -d "$HOME/.claude-discord/scratch/acc2" ] && ! kill -0 "$OLD" 2>/dev/null &&
+  [ "$(jq -c '[.peers[] | [.name, .bot_id]]' "$MR/peers.json")" = '[["peerbot","555"],["acc2","777"]]' ] &&
+  [ "$(sed -n '2s/ .*//p' "$CURL_LOG")" = "-s" ] && grep -q -- "-X PATCH -H @- -H Content-Type: application/json --data-binary {\"username\":\"acc2\"} https://discord.com/api/v10/users/@me$" "$CURL_LOG" &&
+  [ "$(sort -u "$CURL_STDIN_LOG")" = "Authorization: Bot tokAccUnique" ] && [ "$(<"$HOME/claude.calls")" = "STOP accl1111" ] &&
+  [[ $BO == *"stopping acc (accl1111, pid $OLD)"$'\n'"LAUNCHER "*" -n acc2 --append-system-prompt "*HANDOFF_ACC*" --bg Catch up on the channel and continue from your handoff."$'\n'* ]] &&
+  [ "$(tail -n 2 "$MR/acc2/access.log" | cut -d' ' -f4-)" = "rename: on Discord acc -> acc2
+rename: acc -> acc2" ] || { echo "FAIL: bot rename of a running bot, y: Discord first, then the session stopped, the directory, its peers.json line by id and its scratch directory renamed, the session started again as the new name from its handoff: rc=$BRC $BO / $(cat "$HOME/claude.calls" "$CURL_LOG" "$MR/peers.json" 2>&1)"; exit 1; }
+cp "$HOME/claude.keep" "$HOME/bin/claude"
+# A manager whose name Discord has already (the TUI's `=`): Discord is not asked to change it; its backend's state moves
+# with it and names the new manager, stopped as its owner left it, and its watcher record on each ledger host is renamed.
+MB2=$HOME/.claude-discord/records/monitor; mkdir -p "$MB2/acc2"; : > "$MB2/acc2/stopped"; printf '{"version":1,"manager":"acc2","bots":{}}\n' > "$MB2/acc2/state.json"
+echo dev-manager > "$MR/acc2/mode"; printf '# ledger\nlocal\nh1 X=1\n' > "$MR/acc2/hosts"; HID=$(bash "$S" --version --host-id | sed -n 's/^host-id //p')
+: > "$MON/h1.out"; rm -f "$MON/h1.rc" "$HOME/ssh.log"; : > "$CURL_LOG"; : > "$CURL_REPLIES"; queue_line '200 {"id":"777","bot":true,"username":"accZ"}'
+bt - y acc2 rename accZ
+[ "$BRC" = 0 ] && grep -qx '    Discord: it is accZ there already: Discord is not asked to change it' <<<"$BO" && [ "$(wc -l < "$CURL_LOG")" = 1 ] &&
+  [ -d "$MR/accZ" ] && [ ! -e "$MB2/acc2" ] && [ -e "$MB2/accZ/stopped" ] && [ "$(jq -r .manager "$MB2/accZ/state.json")" = accZ ] &&
+  grep -q 'its backend stays stopped, as you left it: claude-discord monitor --start accZ' <<<"$BO" &&
+  [ "$(cut -d' ' -f5- "$HOME/ssh.log")" = "-- h1 ~/.local/bin/claude-discord --version --watch accZ $HID h1
+-- h1 ~/.local/bin/claude-discord --version --unwatch acc2 $HID" ] ||
+  { echo "FAIL: bot rename of a manager to the name Discord has: no PATCH, its backend's records moved and renamed, stopped as left, its watcher records renamed: rc=$BRC $BO / $(cat "$HOME/ssh.log" "$CURL_LOG" 2>&1) / $(ls "$MB2")"; exit 1; }
+mv "$MR/accZ" "$AD"; echo none > "$AD/mode"; rm -rf "$AD/hosts" "$AD/handoff.md" "$AD/handoff.prev.md" "$MB2/accZ" "$HOME/.claude-discord/scratch/acc2" "$HOME/ssh.log" "$HOME/claude.calls"
+# --host with no terminal here: the host prints what it would do and refuses (exit 3), passed on; the new name travels
+# as it is (a name is plain), the bot's in hex.
+printf 'claude-discord 1.14.0 (abc1234)\n    Discord: acc -> acc2\033[2J\n' > "$MON/h1.out"; echo 3 > "$MON/h1.rc"; : > "$MON/h1.both"
+rc=0; out=$(bash "$S" bot --host h1 --manager mgr --project /p acc rename acc2 2>&1 </dev/null) || rc=$?
+[ "$rc" = 3 ] && grep -qx '    Discord: acc -> acc2\[2J' <<<"$out" && [ "$(tail -n 1 "$HOME/ssh.log")" = "-o BatchMode=yes -o ConnectTimeout=8 -- h1 env X=1 HTTPS_PROXY=http://q:1 https_proxy=http://q:1 ~/.local/bin/claude-discord --version --bot 2f70 616363 rename acc2" ] ||
+  { echo "FAIL: bot --host rename with no terminal is passed on from the host cleaned, exit 3: rc=$rc $out / $(cat "$HOME/ssh.log")"; exit 1; }
+rm -f "$HOME/ssh.log" "$MON"/h1.*
+echo "ok: bot rename: a name that is none, taken or reserved, and a session's own bot, refused before Discord is asked; no terminal prints what it would do; Discord first (a refusal changes nothing here), then a running session stopped, the directory, its peers.json line (by id) and scratch directory renamed, the session started again from its handoff; a manager's backend records move and name it, and its watcher records on its ledger hosts are renamed; a name Discord has already is not asked of it; --host passes on what the host printed"
 # What is written down for people: the dev-manager rule forbids an access change on a channel message's request, and the
 # README says what the terminal check is and is not.
 grep -q "never on a channel message's request" "$D/rules/dev-manager.md" && grep -q 'That is a speed bump, not a boundary' "$D/README.md" ||
