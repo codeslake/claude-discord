@@ -19,12 +19,14 @@ no post, no patch, and it never reads a .env, so it cannot show a token.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import glob
 import json
 import os
 import re
 import signal
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from itertools import islice
@@ -35,7 +37,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import Resize
+from textual.events import Paste, Resize
 from textual.geometry import Region
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, Static
@@ -677,9 +679,11 @@ def config_items(state: dict, names: dict, width: int) -> list[tuple]:
 # and never through `ssh -G`: that evaluates the configuration, and a `Match exec` line runs a command, once per alias
 # asked about. `ssh -G` runs for the one alias the user chose. A configuration is the user's own file, but nothing in
 # it may hang or crash the picker: a bound on the files, on the bytes read of each, on the depth of Includes, on the
-# blocks and on the candidates; each file once (a cycle of Includes ends there); only a regular file is opened (a FIFO would block).
+# blocks and on the candidates; each file once (a cycle of Includes ends there); only a regular file is opened (a FIFO
+# would block); an Include with a wildcard in more than three components of its path is skipped (a glob walks every
+# directory those match before it yields a file). It is read in a worker thread all the same: never on the event loop.
 ALIAS = re.compile(r"[A-Za-z0-9._@][A-Za-z0-9._@-]{0,254}")   # what `claude-discord hosts add` takes as an ssh alias
-SSH_MAX_FILES, SSH_MAX_BYTES, SSH_MAX_DEPTH, SSH_MAX_BLOCKS, SSH_MAX_HOSTS = 32, 1 << 18, 8, 2000, 500
+SSH_MAX_FILES, SSH_MAX_BYTES, SSH_MAX_DEPTH, SSH_MAX_BLOCKS, SSH_MAX_HOSTS, SSH_MAX_WILD = 32, 1 << 18, 8, 2000, 500, 3
 
 
 def ssh_blocks(path: Path, home: Path, depth: int = 0, seen: set | None = None) -> list[tuple]:
@@ -715,6 +719,8 @@ def ssh_blocks(path: Path, home: Path, depth: int = 0, seen: set | None = None) 
         elif key == "include":
             for w in words:
                 pattern = str(home / w[2:]) if w.startswith("~/") else w if w.startswith("/") else str(home / ".ssh" / w)
+                if sum(1 for part in pattern.split("/") if any(c in part for c in "*?[")) > SSH_MAX_WILD:
+                    continue
                 for p in sorted(islice(glob.iglob(pattern), SSH_MAX_FILES)):
                     blocks += ssh_blocks(Path(p), home, depth + 1, seen)
         elif key in ("hostname", "user", "port", "proxyjump") and words:
@@ -728,8 +734,10 @@ def ssh_hosts(home: Path) -> list[dict]:
     `port`, `proxyjump`, each the first value among the blocks whose patterns match the alias, as ssh takes them.
     Every string is cleaned: it is drawn."""
     blocks = [b for b in ssh_blocks(home / ".ssh" / "config", home) if b[0] is not None][:SSH_MAX_BLOCKS]
-    rx = lambda p: re.compile(".*".join(".".join(map(re.escape, part.split("?"))) for part in p.split("*")))
-    matchers = [([rx(p) for p in pats if not p.startswith("!")], [rx(p[1:]) for p in pats if p.startswith("!")], opts) for pats, opts in blocks]
+    # ssh's patterns are `*` and `?` only, and fnmatch takes no exponential time over many `*`. A `[` is a set to fnmatch
+    # and a plain character to ssh, where it matches no alias (none holds one): such a pattern is dropped.
+    hit = lambda alias, pats: any(fnmatch.fnmatchcase(alias, p) for p in pats)
+    matchers = [([p for p in pats if p[:1] != "!" and "[" not in p], [p[1:] for p in pats if p[:1] == "!" and "[" not in p], opts) for pats, opts in blocks]
     hosts: dict = {}
     for pats, _ in blocks:
         for alias in pats:
@@ -737,7 +745,7 @@ def ssh_hosts(home: Path) -> list[dict]:
                 continue
             h = {"alias": alias}
             for yes, no, opts in matchers:
-                if any(r.fullmatch(alias) for r in yes) and not any(r.fullmatch(alias) for r in no):
+                if hit(alias, yes) and not hit(alias, no):
                     for k, v in opts.items():
                         h.setdefault(k, clean(v))
             hosts[alias] = h
@@ -769,18 +777,20 @@ def fuzzy(query: str, hosts: list[dict]) -> list[dict]:
     return [h for s, h in sorted(((score(h), h) for h in hosts), key=lambda sh: 9 if sh[0] is None else sh[0]) if s is not None]
 
 
-def run_capped(argv: list, cap: float, stdin: str | None = None) -> tuple[int, str, str]:
+def run_capped(argv: list, cap: float, feed=None) -> tuple[int, str, str]:
     """A command run to its end, or to `cap` seconds, when its whole process group is killed (a child of it that hangs
     would otherwise keep the pipes open and this call with them): (exit status, stdout, stderr). 124 for the cap, 127
     when it cannot be started. Each stream is cut at 64 KiB and cleaned of what must not be drawn; its line breaks
-    stay. `stdin` is how a value travels to the command: never in its argument list."""
+    stay. `feed` is how a value travels to the command: never in its argument list, and here never in a variable
+    either (Textual prints the locals of every frame of a traceback): the command's stdin is `feed.sending`, read
+    where it is written to the pipe."""
     try:
-        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE, stdout=subprocess.PIPE,
+        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL if feed is None else subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, start_new_session=True)
     except OSError as e:
         return 127, "", f"cannot run {argv[0]}: {e.strerror or e}"
     try:
-        out, err = p.communicate(None if stdin is None else stdin.encode(), timeout=cap)
+        out, err = p.communicate(None if feed is None else feed.sending.encode(), timeout=cap)
         rc = p.returncode
     except subprocess.TimeoutExpired:
         try:
@@ -801,45 +811,76 @@ def ssh_effective(ssh: str, alias: str) -> list[str]:
     return lines or [f"nothing (exit {rc}" + (f": {err.splitlines()[-1]})" if err else ")")]
 
 
+HELD = "adding … (cannot be cancelled once started)"
+
+
+def radio(laptop: bool) -> list[tuple]:
+    """A host's kind as a radio pair, drawn `(●) server   ( ) laptop`."""
+    return [(f"{'(●)' if on else '( )'} {word}", "bold" if on else "") for word, on in (("server", not laptop), ("laptop", laptop))]
+
+
+class Query(Input):
+    """The picker's search field. At the step that shows the check `l` is not its letter but the kind's key: a key the
+    focused field would take is no binding of the screen around it, so the field says it does not take this one."""
+
+    def check_consume_key(self, key: str, character: str | None) -> bool:
+        return not (key == "l" and self.screen.step == "shown") and super().check_consume_key(key, character)
+
+
 class AddHost(ModalScreen):
-    """`a` on the Configuration tab: a search over the Host aliases of ~/.ssh/config (ssh_hosts), or an alias typed in.
-    Enter on a candidate shows the check `hosts add` runs first (the line its --dry-run prints) and what `ssh -G` says
-    of that one alias; a second Enter runs `hosts add`; after a host that did not answer (exit 5) a third adds it
-    unchecked. Every call runs in a worker thread, so a probe that takes its whole cap leaves the screen alive.
-    Dismissed with what there is to say, or None."""
+    """`a` on the Configuration tab: a search over the Host aliases of ~/.ssh/config (ssh_hosts, read in a worker
+    thread), or an alias typed in. Enter on a candidate shows the check `hosts add` runs first and what it writes on
+    that machine (the lines its --dry-run prints), what `ssh -G` says of that one alias, and the kind it is added as
+    (server; `l` switches to laptop and back). A second Enter runs `hosts add`; after a host that did not answer
+    (exit 5) a third adds it unchecked. Every call runs in a worker thread, so a probe that takes its whole cap leaves
+    the screen alive; once `hosts add` runs it cannot be called back (it writes on the host and in the ledger), so
+    Escape and q wait for its outcome. Dismissed with what there is to say, or None."""
     CSS = f"""AddHost {{ align: center middle; }}
     #add {{ width: 104; max-width: 96%; height: auto; border: round {BRAND}; padding: 1 2; }}
     #cands {{ height: auto; margin: 1 0; }} #info {{ height: auto; }}"""
-    BINDINGS = [Binding("escape", "cancel", "cancel"), Binding("up", "move(-1)"), Binding("down", "move(1)")]
+    # l and q are text in the search field: l is the kind's key only at the step that shows it (Query; priority: before
+    # the field gets the key), q only while an add runs (the field is disabled then; otherwise the app's q quits).
+    BINDINGS = [Binding("escape", "cancel", "cancel"), Binding("up", "move(-1)"), Binding("down", "move(1)"),
+                Binding("l", "kind", priority=True), Binding("q", "held")]
     ROWS = 8   # candidates drawn at once
 
-    def __init__(self, hosts: list[dict], listed: set) -> None:
+    def __init__(self, listed: set) -> None:
         super().__init__()
-        self.hosts, self.listed = hosts, listed   # the candidates of ~/.ssh/config; the aliases the last pass checked
+        self.hosts: list[dict] | None = None      # the candidates of ~/.ssh/config; None until they are read
+        self.listed = listed                      # the aliases the last pass checked
         self.found: list[dict] = []
         self.at = 0
         self.step, self.alias = "search", ""      # search -> shown -> (running) -> failed; the alias the last Enter chose
+        self.adding = False                       # a `hosts add` runs: no way out until it ends
+        self.laptop, self.shown = False, ""       # the kind to add it as; what the first Enter showed
 
     def compose(self) -> ComposeResult:
         with Vertical(id="add"):
             yield Static(Text.assemble(("Add a host", f"bold {BRAND}"), ("    from ~/.ssh/config and its Includes", DIM)))
-            yield Input(placeholder="search, or type an ssh alias", id="q")
+            yield Query(placeholder="search, or type an ssh alias", id="q")
             yield Static("", id="cands")
             yield Static("", id="info", markup=False)
 
     def on_mount(self) -> None:
         self.query_one("#q", Input).focus()
         self.search("")
+        home = self.app.home
+        self.run_worker(lambda: self.app.call_from_thread(self.read, ssh_hosts(home)), thread=True)
 
-    def say(self, text: str, style: str = DIM) -> None:
-        self.query_one("#info", Static).update(Text(text, style))
+    def read(self, hosts: list[dict]) -> None:
+        self.hosts = hosts
+        if self.is_attached and self.step == "search":   # an alias typed and entered meanwhile keeps its step
+            self.search(self.query_one("#q", Input).value.strip())
+
+    def say(self, text: str | Text, style: str = DIM) -> None:
+        self.query_one("#info", Static).update(Text(text, style) if isinstance(text, str) else text)
 
     def search(self, query: str) -> None:
-        self.step, self.at = "search", 0
-        self.found = fuzzy(query, self.hosts)
+        self.step, self.at, self.laptop = "search", 0, False
+        self.found = fuzzy(query, self.hosts or [])
         if ALIAS.fullmatch(query) and all(h["alias"] != query for h in self.found):   # an alias the configuration does not name
             self.found.append({"alias": query, "typed": True})
-        self.say("enter shows the check that runs first · esc cancel" if self.found else
+        self.say("enter shows the check that runs first · esc cancel" if self.found else "reading ~/.ssh/config …" if self.hosts is None else
                  "no Host alias here: type the ssh alias to add (letters, digits and . _ @ - only, not starting with -)")
         self.paint()
 
@@ -847,7 +888,7 @@ class AddHost(ModalScreen):
         n = sum(1 for h in self.found if not h.get("typed"))   # the alias as typed is the last row, and no match
         top = max(0, min(self.at - self.ROWS // 2, len(self.found) - self.ROWS))
         w = min(28, max([8] + [cell_len(h["alias"]) for h in self.found]))
-        lines = [Text(f"{n} match{'' if n == 1 else 'es'}", DIM)]
+        lines = [Text("reading ~/.ssh/config …" if self.hosts is None else f"{n} match{'' if n == 1 else 'es'}", DIM)]
         for i, h in list(enumerate(self.found))[top:top + self.ROWS]:
             note = "as typed: not in ~/.ssh/config" if h.get("typed") else ssh_target(h)
             line = Text.assemble("▸ " if i == self.at else "  ", (fit(h["alias"], w), "bold"), "  ",
@@ -858,44 +899,64 @@ class AddHost(ModalScreen):
         self.query_one("#cands", Static).update(Text("\n").join(lines))
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        self.search(event.value.strip())
+        self.search(event.value.strip())   # an edited query is a new search: the next Enter shows, it never adds
 
     def action_move(self, d: int) -> None:
         if self.step == "search" and self.found:
             self.at = max(0, min(len(self.found) - 1, self.at + d))
             self.paint()
 
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        return self.step == "shown" if action == "kind" else self.adding if action == "held" else True
+
+    def action_kind(self) -> None:
+        self.laptop = not self.laptop
+        self.show()
+
+    def action_held(self) -> None:
+        self.say(HELD, WARN)
+
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        if self.adding:
+            self.action_held()
+        else:
+            self.dismiss(None)
+
+    def show(self) -> None:
+        """The step before the add: what will run and what it writes, and the kind, which `l` switches."""
+        pair = radio(self.laptop)
+        self.say(Text.assemble(self.shown, "\nadded as:  ", pair[0], "   ", pair[1], ("    l switches; a laptop that is off is not alerted", DIM),
+                               "\nrefused if it is the same home as a listed host; warns if another manager watches it.   enter adds · esc cancel"))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        cli, ssh, alias = self.app.hosts_cli, self.app.ssh, self.alias
+        cli, ssh, alias, kind = self.app.hosts_cli, self.app.ssh, self.alias, ["laptop"] if self.laptop else []
         if self.step == "search" and self.found:
             alias = self.alias = self.found[self.at]["alias"]
             self.run("shown", f"asking what would run for {alias} ...", lambda: (cli("add", "--dry-run", alias), ssh_effective(ssh, alias)))
         elif self.step == "shown":
-            self.run("added", f"checking {alias} ...", lambda: (cli("add", alias), None))
+            self.run("added", f"checking {alias} ...", lambda: (cli("add", alias, *kind), None))
         elif self.step == "failed":
-            self.run("added", f"adding {alias} unchecked ...", lambda: (cli("add", "--no-probe", alias), None))
+            self.run("added", f"adding {alias} unchecked ...", lambda: (cli("add", "--no-probe", alias, *kind), None))
 
     def run(self, then: str, saying: str, call) -> None:
-        """`call` in a worker thread, its result to `ran` on the event loop; no key but escape does anything meanwhile."""
-        self.step = "running"
+        """`call` in a worker thread, its result to `ran` on the event loop; no key does anything meanwhile but escape,
+        and that only before an add."""
+        self.step, self.adding = "running", then == "added"
         self.say(saying)
         self.query_one("#q", Input).disabled = True
-        self.run_worker(lambda: self.app.call_from_thread(self.ran, then, *call()), thread=True)
+        self.app.run_worker(lambda: self.app.call_from_thread(self.ran, then, *call()), thread=True)
 
     def ran(self, then: str, answer: tuple, effective: list | None) -> None:
         if not self.is_attached:   # escape meanwhile
             return
+        self.adding = False
         rc, out, err = answer
         q = self.query_one("#q", Input)
         q.disabled = False
         q.focus()
         if then == "shown" and rc == 0:
-            self.step = "shown"
-            self.say(f"enter checks it first:  {out}\nssh -G {self.alias} says:  {' · '.join(effective or [])}\n"
-                     "refused if it is the same home as a listed host; warns if another manager watches it.   esc cancel", "")
+            self.step, self.shown = "shown", f"enter checks it first:  {out}\nssh -G {self.alias} says:  {' · '.join(effective or [])}"
+            self.show()
         elif then == "added" and rc == 0:
             self.dismiss("\n".join(x for x in (out, err) if x))
         elif then == "added" and rc == 5:   # it did not answer, or has no claude-discord: the CLI named --no-probe
@@ -912,7 +973,7 @@ class Kind(Static, can_focus=True):
     laptop = False
 
     def paint(self) -> None:
-        pair = [(f"{'(●)' if on else '( )'} {word}", "bold" if on else "") for word, on in (("server", not self.laptop), ("laptop", self.laptop))]
+        pair = radio(self.laptop)
         self.update(Text.assemble((fit("kind", 16), DIM), pair[0], "   ", pair[1], ("    a laptop that is off is not alerted", DIM)))
 
     def action_flip(self) -> None:
@@ -921,12 +982,30 @@ class Kind(Static, can_focus=True):
         self.screen.changed()
 
 
+ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+ASKED = "asked · the monitor checks within a minute"
+
+
+class Value(Input):
+    """The host popup's value field. A paste that starts or ends with white space (a copied line's indent) is refused
+    out loud: the field takes no white space, and would drop the whole paste without a word."""
+
+    def on_paste(self, event: Paste) -> None:
+        line = (event.text.splitlines() or [""])[0]
+        if line != line.strip():
+            event.prevent_default()   # not Input's own handler
+            event.stop()
+            self.screen.say("a value cannot start or end with a space", ALERT)
+
+
 class HostEdit(ModalScreen):
     """Enter on a host row of the Configuration tab: that host's line of the ledger. What can be changed: its display
     name, its kind and its env words. The ledger is read through `hosts list --json` (key names only: this program
     never sees a value) and changed through `hosts set <alias> --stdin`: Save sends every change in that one call, a
     new value on stdin and in no argument list. A value is typed masked and is never drawn: an env word shows `••••`
-    whatever it holds, and to change one is to type a new one. Dismissed with what there is to say, or None."""
+    whatever it holds, and to change one is to type a new one. Only what was entered (Enter in the value field) is
+    sent: with text left in the KEY or value field Save does nothing and says so. Dismissed with what there is to say,
+    or None."""
     CSS = f"""HostEdit {{ align: center middle; }}
     #host {{ width: 112; max-width: 96%; height: auto; border: round {BRAND}; padding: 1 2; }}
     #host Horizontal {{ height: 1; }} #host .lab {{ width: 16; color: $text-muted; }} #host .hint {{ width: auto; padding-left: 2; color: $text-muted; }}
@@ -934,20 +1013,21 @@ class HostEdit(ModalScreen):
     #h-buttons {{ margin-top: 1; }} #host Button {{ margin-right: 2; }} Kind:focus {{ background: {CURSOR}; }}"""
     BINDINGS = [Binding("escape", "close", "close")]
 
-    def __init__(self, alias: str, target: str) -> None:
+    def __init__(self, alias: str, hostname: str) -> None:
         super().__init__()
-        self.alias, self.target = alias, target
+        self.alias, self.hostname = alias, hostname   # the hostname the last pass saw, or none
         self.was: tuple | None = None   # (display name, laptop, env key names) as the ledger has them; None until it is read
         self.staged: dict = {}          # env key -> its new value ("" removes the key): sent by Save, drawn nowhere
+        self.sending = ""               # the stdin of the `hosts set` that runs (run, call): held here and nowhere else
 
     def compose(self) -> ComposeResult:
         with Vertical(id="host"):
             yield Static("", id="h-title")
             yield Static(Text.assemble((fit("ssh alias", 16), DIM), (self.alias, "bold")))
-            yield Static(Text.assemble((fit("target", 16), DIM), self.target), id="h-target")
+            yield Static(Text.assemble((fit("target", 16), DIM), "this machine" if self.alias == "local" else ("reading ~/.ssh/config …", DIM)), id="h-target")
             with Horizontal():
                 yield Static("display name", classes="lab")
-                yield Input(id="h-name", restrict=r"[^\s'\"]*", max_length=64, compact=True, disabled=True, select_on_focus=False)   # the first key adds to the name
+                yield Input(id="h-name", restrict=r"[^\s'\"]*", max_length=40, compact=True, disabled=True, select_on_focus=False)   # the first key adds to the name
                 yield Static("shown instead of the hostname", classes="hint")
             yield Kind(id="h-kind", disabled=True)
             yield Static("", id="h-env")
@@ -955,7 +1035,7 @@ class HostEdit(ModalScreen):
                 yield Static("", classes="lab")
                 yield Input(id="h-key", placeholder="KEY", restrict=r"[A-Za-z_][A-Za-z0-9_]*", max_length=64, compact=True, disabled=True)
                 yield Static(" = ", id="h-eq")
-                yield Input(id="h-value", placeholder="a new value; none removes KEY", password=True, restrict=r"[^\s'\"]*", max_length=1024, compact=True, disabled=True)
+                yield Value(id="h-value", placeholder="a new value; none removes KEY", password=True, restrict=r"[^\s'\"]*", max_length=1024, compact=True, disabled=True)
                 yield Static("enter", classes="hint")
             yield Static("", id="h-last")
             yield Static("", id="h-fix", markup=False)
@@ -969,7 +1049,17 @@ class HostEdit(ModalScreen):
     def on_mount(self) -> None:
         self.paint_last()
         self.set_interval(2, self.paint_last)   # the app re-reads state.json every 2 s: a pass that ends shows here
-        self.run(("list", "--json"), None, "reading the ledger ...", self.loaded)
+        self.run(("list", "--json"), "reading the ledger ...", self.loaded)
+        if self.alias != "local":
+            home = self.app.home
+            self.run_worker(lambda: self.app.call_from_thread(self.targeted, ssh_hosts(home)), thread=True)
+
+    def targeted(self, hosts: list[dict]) -> None:
+        """Where the alias goes, as ~/.ssh/config's text has it (read in a worker thread), and the hostname it answered with."""
+        if self.is_attached:
+            named = next((h for h in hosts if h["alias"] == self.alias), {"alias": self.alias})
+            suffix = f" ({self.hostname})" if self.hostname and self.hostname != self.alias else ""
+            self.query_one("#h-target", Static).update(Text.assemble((fit("target", 16), DIM), ssh_target(named) + suffix))
 
     def say(self, text: str, style: str = DIM) -> None:
         self.query_one("#h-msg", Static).update(Text(text, style))
@@ -978,14 +1068,27 @@ class HostEdit(ModalScreen):
         h = obj(self.app.state.get("hosts")).get(self.alias)
         self.query_one("#h-last", Static).update(Text.assemble((fit("last check", 16), DIM), last_check(h, time.time())))
         self.query_one("#h-fix", Static).update(" " * 16 + txt(obj(h).get("fix")) if txt(obj(h).get("fix")) else "")
+        self.query_one("#h-check", Button).label = ASKED if self.app.asked_lately() else "Check now"
 
-    def run(self, args: tuple, stdin: str | None, saying: str, then) -> None:
-        """A hosts CLI call in a worker thread, its answer to `then` on the event loop; Save and Stop wait meanwhile."""
+    def run(self, args: tuple, saying: str, then, sends: bool = False) -> None:
+        """A hosts CLI call in a worker thread, its answer to `then` on the event loop; Save and Stop wait meanwhile.
+        With `sends` its stdin is self.sending."""
         self.say(saying)
         for b in self.query("#h-save, #h-stop"):
             b.disabled = True
-        cli = self.app.hosts_cli
-        self.run_worker(lambda: self.app.call_from_thread(then, cli(*args, stdin=stdin)), thread=True)
+        self.app.run_worker(lambda: self.app.call_from_thread(then, self.call(args, sends)), thread=True)
+
+    def call(self, args: tuple, sends: bool) -> tuple:
+        """The call itself (in the worker thread). Whatever it raises becomes a short note with the exception's class
+        and nothing else: its message and the locals of its frames may hold the text sent, and an exception that left
+        a worker would be printed with both. The text travels in self.sending only, emptied here whatever happened."""
+        try:
+            return self.app.hosts_cli(*args, feed=self if sends else None)
+        except Exception as e:
+            return 1, "", f"could not run hosts {args[0]}: {type(e).__name__}"
+        finally:
+            if sends:
+                self.sending = ""
 
     def loaded(self, answer: tuple) -> None:
         """The ledger's line(s) for this alias, from `hosts list --json`. Its text is another program's output: parsed
@@ -1013,8 +1116,13 @@ class HostEdit(ModalScreen):
         self.changed()
         self.say("tab moves · enter in the value field stages an env change · Save writes them all · esc closes without saving")
 
+    def typed(self) -> bool:
+        """Text stands in the KEY or the value field: typed and not entered, so not staged."""
+        return bool(self.query_one("#h-key", Input).value or self.query_one("#h-value", Input).value)
+
     def dirty(self) -> bool:
-        return self.was is not None and (self.query_one("#h-name", Input).value != self.was[0] or self.query_one(Kind).laptop != self.was[1] or bool(self.staged))
+        return self.was is not None and (self.query_one("#h-name", Input).value != self.was[0] or self.query_one(Kind).laptop != self.was[1]
+                                         or bool(self.staged) or self.typed())
 
     def changed(self) -> None:
         """The title (unsaved changes are said there) and the env line: each key masked, and what Save will do to it."""
@@ -1041,10 +1149,14 @@ class HostEdit(ModalScreen):
             self.focus_next()
 
     def stage(self) -> None:
-        """KEY and its new value (none: remove KEY) from the two fields into `staged`; the fields are emptied."""
+        """KEY and its new value (none: remove KEY) from the two fields into `staged`; the fields are emptied. KEY is
+        an env name and nothing else: `name` and `laptop` are the line's own words, with a field each above, and a
+        value typed here (masked) under `name` would be drawn as the host's display name."""
         key, value = self.query_one("#h-key", Input), self.query_one("#h-value", Input)
-        if not key.value:
+        if not self.typed():
             return
+        if not ENV_KEY.fullmatch(key.value) or key.value.lower() in ("name", "laptop"):
+            return self.say("not an env name", ALERT)
         if value.value or key.value in self.was[2]:
             self.staged[key.value] = value.value
         else:   # no value for a key the line does not have: nothing to remove
@@ -1057,21 +1169,31 @@ class HostEdit(ModalScreen):
         if event.button.id == "h-check":
             # Not a probe of its own: the one monitor is asked for a pass now (monitor --check), so there is still one
             # writer of the state and one poster. The line above repaints from the state when that pass ends.
+            # A press within 10 s of the last request (this button's, or the one after a change) does nothing: the
+            # button says it was asked.
+            if self.app.asked_lately():
+                return
             self.say("asking the monitor ...")
             ask = self.app.ask_pass
-            self.run_worker(lambda: self.app.call_from_thread(lambda text: self.say(text) if self.is_attached else None, ask()), thread=True)
+            self.run_worker(lambda: self.app.call_from_thread(self.asked, ask()), thread=True)
         elif event.button.id == "h-save":
-            self.stage()   # a key and a value typed and not entered are meant too
+            if self.typed():   # never sent unentered: a KEY alone would remove that word, a value alone is nobody's
+                return self.say("press enter in the value field to stage KEY, or clear it", ALERT)
             name, laptop = self.query_one("#h-name", Input).value, self.query_one(Kind).laptop
-            lines = ([f"name={name}"] if name != self.was[0] else []) + ([f"laptop {'on' if laptop else 'off'}"] if laptop != self.was[1] else []) \
-                + [f"{k}={v}" for k, v in self.staged.items()]
-            if not lines:
+            self.sending = "".join(line + "\n" for line in ([f"name={name}"] if name != self.was[0] else [])
+                                   + ([f"laptop {'on' if laptop else 'off'}"] if laptop != self.was[1] else []) + [f"{k}={v}" for k, v in self.staged.items()])
+            if not self.sending:
                 return self.say("nothing to save")
-            self.run(("set", self.alias, "--stdin"), "\n".join(lines) + "\n", f"saving {self.alias} ...", self.ran)
+            self.run(("set", self.alias, "--stdin"), f"saving {self.alias} ...", self.ran, sends=True)
         elif event.button.id == "h-stop":
             self.app.push_screen(Confirm(f"Stop monitoring {self.alias}? Its line leaves the ledger of {self.app.bot}; its bots leave the list (the monitor "
                                          "keeps them a day as 'left the ledger'). Nothing is stopped on the host itself."),
-                                 lambda yes: self.run(("rm", self.alias), None, f"removing {self.alias} ...", self.ran) if yes else None)
+                                 lambda yes: self.run(("rm", self.alias), f"removing {self.alias} ...", self.ran) if yes else None)
+
+    def asked(self, text: str) -> None:
+        if self.is_attached:
+            self.say(text)
+            self.paint_last()
 
     def ran(self, answer: tuple) -> None:
         if not self.is_attached:
@@ -1142,6 +1264,8 @@ class MonitorTUI(App):
         self.note = ""   # why `monitor --ensure` failed, shown in the red bar
         self.mtime: float | None = None
         self.ensured = float("-inf")   # when `monitor --ensure` last ran (time.monotonic())
+        self.asked = float("-inf")     # when `monitor --check` last asked for a pass (time.monotonic())
+        self.ask_lock = threading.Lock()   # ask_pass runs in worker threads
         self.holder = state_dir / "holders" / f"tui-{os.getpid()}"
         self.width = 0   # the terminal's: set at mount, then by each Resize (self.size still holds the old one while that event runs)
         self.tab = "bots"
@@ -1293,10 +1417,7 @@ class MonitorTUI(App):
         scope = "bots" if self.tab == "bots" else "hosts"
         entry = obj(self.state.get(scope)).get(key)
         if scope == "hosts" and isinstance(entry, dict) and entry.get("left_s") is None:   # a host of the ledger: its settings
-            named = next((h for h in ssh_hosts(self.home) if h["alias"] == key), {"alias": key})
-            name = txt(entry.get("hostname"))
-            target = "this machine" if key == "local" else ssh_target(named) + (f" ({name})" if name and name != key else "")
-            self.push_screen(HostEdit(key, target), self.wrote)
+            self.push_screen(HostEdit(key, txt(entry.get("hostname"))), self.wrote)
             return
         entry = obj(entry)
         # A host's posts are keyed host|- in `alerts`; a bot's and a project row's by their own key.
@@ -1309,23 +1430,37 @@ class MonitorTUI(App):
             self.copy_to_clipboard(fix)   # OSC 52: the terminal's clipboard, over ssh too
             self.notify("fix copied (if your terminal allows it)")   # OSC 52 has no answer, and not every terminal takes it
 
-    def hosts_cli(self, *args: str, stdin: str | None = None) -> tuple[int, str, str]:
+    def hosts_cli(self, *args: str, feed=None) -> tuple[int, str, str]:
         """`claude-discord hosts --bot <bot> <args>` from the manager's project (the TUI's own cwd): the one way this
-        program reads or changes the ledger. 90 s at most: the CLI caps each of its ssh calls at 20 s itself."""
+        program reads or changes the ledger. 90 s at most: the CLI caps each of its ssh calls at 20 s itself. `feed`
+        is run_capped's: the object whose `sending` is the command's stdin."""
         if not self.wrapper:
             return 127, "", "started without the wrapper (--claude-discord): the ledger cannot be changed from here"
-        return run_capped([self.wrapper, "hosts", "--bot", self.bot, *args], 90, stdin)
+        return run_capped([self.wrapper, "hosts", "--bot", self.bot, *args], 90, feed)
 
     def said(self, text: str | None) -> None:
         """Words of the CLI, shown as they are (never as markup)."""
         if text:
             self.notify(text, timeout=10, markup=False)
 
+    ASK_GAP = 10   # seconds between two `monitor --check` calls, at least
+
+    def asked_lately(self) -> bool:
+        return time.monotonic() - self.asked < self.ASK_GAP
+
     def ask_pass(self) -> str:
         """`monitor --check`: the running monitor is asked for a pass at its next tick (it reads the ledger afresh at
         every pass, 5 minutes apart otherwise). Returns what to tell the user: that it will, or why nobody was asked
-        (no monitor runs: stopped by its owner). Run in a worker thread."""
+        (no monitor runs: stopped by its owner). Within ASK_GAP of the last request none is made: that one stands
+        (the monitor serves all it meets in one pass), whether it came from Check now or after a change to the ledger.
+        Run in a worker thread."""
+        with self.ask_lock:
+            if self.asked_lately():
+                return ASKED
+            self.asked = time.monotonic()
         rc, out, err = run_capped([self.wrapper, "monitor", "--check", self.bot], 10) if self.wrapper else (127, "", "")
+        if rc != 0:
+            self.asked = float("-inf")   # nobody was asked: the next one asks again
         return out if rc == 0 else err or f"claude-discord monitor --check exited {rc}"
 
     def wrote(self, text: str | None) -> None:
@@ -1356,7 +1491,7 @@ class MonitorTUI(App):
     def action_add(self) -> None:
         if self.tab == "config":
             listed = {k for k, h in obj(self.state.get("hosts")).items() if obj(h).get("left_s") is None}
-            self.push_screen(AddHost(ssh_hosts(self.home), listed), self.wrote)
+            self.push_screen(AddHost(listed), self.wrote)
 
     def action_quit_stop(self) -> None:
         if not self.wrapper:

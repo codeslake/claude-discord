@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -464,6 +465,26 @@ def pure():
         t0 = time.time()
         big = tui.ssh_hosts(home)
         assert len(big) == tui.SSH_MAX_HOSTS == 500 and big[0] == {"alias": "big00000", "hostname": "h0"} and time.time() - t0 < 2, (len(big), time.time() - t0)
+        # the byte cap by itself: a Host line past the first 256 KiB of a file is not read
+        (ssh / "config").write_text("Host first\n" + "#" * tui.SSH_MAX_BYTES + "\nHost past-the-cap\n")
+        assert [h["alias"] for h in tui.ssh_hosts(home)] == ["first"], [h["alias"] for h in tui.ssh_hosts(home)][:3]
+        # a pattern of many stars against a long alias: matched as ssh does (`*` and `?`; a `[` is a plain character
+        # there, so `web[12]` is no pattern for web1), in no time
+        (ssh / "config").write_text(f"Host {'a' * 60} web1\nHost {'a*' * 16}b web[12]\n  User never\nHost a?*a w?b1\n  User u\n")
+        t0 = time.time()
+        assert tui.ssh_hosts(home) == [{"alias": "a" * 60, "user": "u"}, {"alias": "web1", "user": "u"}] and time.time() - t0 < 1, (tui.ssh_hosts(home), time.time() - t0)
+        # an Include with a wildcard in more than three components of its path is skipped before any directory is walked
+        (ssh / "w" / "x" / "y" / "z").mkdir(parents=True)
+        (ssh / "w" / "x" / "y" / "three.conf").write_text("Host three\n")
+        (ssh / "w" / "x" / "y" / "z" / "four.conf").write_text("Host four\n")
+        (ssh / "config").write_text("Include w/*/?/t*.conf\nInclude */*/*/*/four.conf w/x/y/z/four.con[f]\n")
+        walked, real = [], tui.glob.iglob
+        tui.glob.iglob = lambda pattern, **k: walked.append(pattern) or real(pattern, **k)
+        try:
+            assert [h["alias"] for h in tui.ssh_hosts(home)] == ["three", "four"], tui.ssh_hosts(home)
+        finally:
+            tui.glob.iglob = real
+        assert [w[len(str(ssh)) + 1:] for w in walked] == ["w/*/?/t*.conf", "w/x/y/z/four.con[f]"], walked
         # an Include of itself, a config that is a directory, one that cannot be read, none at all: no candidates, no error
         (ssh / "config").write_text("Include config\nInclude ~/.ssh/config\nHost only\n")
         assert [h["alias"] for h in tui.ssh_hosts(home)] == ["only"]
@@ -474,7 +495,8 @@ def pure():
         assert tui.ssh_hosts(home) == [] and tui.ssh_hosts(home / "nowhere") == []
     print("ok: ~/.ssh/config is read as text: Host aliases in file order through Includes (globs, ~/, relative to ~/.ssh, 8 levels, a cycle, each file "
           "once), patterns and Match blocks no candidates and never evaluated, HostName/User/Port/ProxyJump first value wins; CRLF, bytes that are no "
-          "UTF-8, a FIFO, a huge, unreadable or missing file neither hang nor raise")
+          "UTF-8, a FIFO, a huge, unreadable or missing file, a pattern of many stars neither hang nor raise; 256 KiB of a file are read; an Include "
+          "with more than three wildcard components is skipped unwalked")
 
     hs = [{"alias": "wmac", "hostname": "wmac.example"}, {"alias": "lmd-a100"}, {"alias": "lmd_dkim", "user": "dykim"}, {"alias": "almd"}, {"alias": "l-m-d"},
           {"alias": "bastion", "hostname": "gw.lmd.example"}]
@@ -490,7 +512,8 @@ def pure():
     rc, out, err = tui.run_capped(["sh", "-c", "echo started; sleep 30 & sleep 30"], 0.3)
     assert (rc, out) == (124, "started") and err == "no answer within 0.3 s" and time.time() - t0 < 2, (rc, out, err, time.time() - t0)
     assert tui.run_capped(["/nonexistent/claude-discord", "hosts"], 1)[::2] == (127, "cannot run /nonexistent/claude-discord: No such file or directory")
-    assert tui.run_capped(["sh", "-c", "cat; printf 'e\\033[2Jrr\\n' >&2; exit 3"], 5, "KEY=secret\n") == (3, "KEY=secret", "e[2Jrr")
+    feed = type("Feed", (), {"sending": "KEY=secret\n"})()   # the text is read from an attribute: it is no argument and no local
+    assert tui.run_capped(["sh", "-c", "cat; printf 'e\\033[2Jrr\\n' >&2; exit 3"], 5, feed) == (3, "KEY=secret", "e[2Jrr")
     assert len(tui.run_capped(["sh", "-c", "head -c 200000 /dev/zero | tr '\\0' x"], 5)[1]) == 65536
     with tempfile.TemporaryDirectory() as d:
         g = stub(d, 'echo "$*" > "$(dirname "$0")/g.args"; printf "user dykim\\nhostname h.example\\nidentityfile ~/.ssh/id\\nproxycommand ssh -W %%h:%%p \\033]0;T\\007gw\\n"')
@@ -859,10 +882,12 @@ SSH_CONFIG = ("Host lmd_dkim\n  HostName lmd-dkim.example\nHost lmd79-host lmd-a
 HOSTS_CLI = r'''d=$(dirname "$0"); echo "$*" >> "$d/args"
 case "$*" in
   *"add --dry-run wmac") echo "claude-discord: hosts: wmac is already in /p/hosts" >&2; exit 3;;
-  *"add --dry-run "*) for a; do :; done; echo "ssh -o BatchMode=yes -o ConnectTimeout=8 -- $a '~/.local/bin/claude-discord --version --host-id'";;
-  *"add lmd_dkim") sleep 0.2; echo "claude-discord: hosts: added lmd_dkim to /p/hosts"; echo "claude-discord: hosts: warning: lmd_dkim is already watched by [bold]other" >&2;;
-  *"add lmd-a100") printf 'claude-discord: hosts: lmd-a100 did not answer (ssh exit 255): \033[2Jtimed out. Not added\n' >&2; exit 5;;
-  *"add --no-probe lmd-a100") echo "claude-discord: hosts: added lmd-a100 to /p/hosts";;
+  *"add --dry-run "*) for a; do :; done; echo "ssh -o BatchMode=yes -o ConnectTimeout=8 -- $a '~/.local/bin/claude-discord --version --host-id'"
+    echo "checks it and writes ~/.claude-discord/host-id there if missing; adding it writes ~/.claude-discord/watchers/mgr";;
+  *"add lmd_dkim") n=0; while [ ! -e "$d/go" ] && [ $n -lt 300 ]; do sleep 0.01; n=$((n + 1)); done   # it ends when the case lets it (3 s at most): what is checked meanwhile needs no timing
+    echo "claude-discord: hosts: added lmd_dkim to /p/hosts"; echo "claude-discord: hosts: warning: lmd_dkim is already watched by [bold]other" >&2;;
+  *"add lmd-a100 laptop") printf 'claude-discord: hosts: lmd-a100 did not answer (ssh exit 255): \033[2Jtimed out. Not added\n' >&2; exit 5;;
+  *"add --no-probe lmd-a100 laptop") echo "claude-discord: hosts: added lmd-a100 to /p/hosts";;
   *"add newbox") echo "claude-discord: hosts: newbox is the same home as local" >&2; exit 4;;
 esac'''
 
@@ -877,6 +902,7 @@ def ssh_home(app, config=SSH_CONFIG):
     ssh.write_text('#!/bin/sh\necho "$*" >> "$(dirname "$0")/ssh.args"\nprintf "user dykim\\nhostname lmd-dkim.example\\nport 22\\nproxycommand ssh -W %%h:%%p \\033]0;T\\007gw\\n"\n')
     ssh.chmod(0o755)
     app.home, app.ssh = d / "home", str(ssh)
+    app.ASK_GAP = 0   # every change asks the monitor; the 10 s between two requests have their own checks
     app.said_all = []
     # What a dialog leaves to say, instead of a toast; said as markup it would not be the text it is.
     app.notify = lambda m, **k: app.said_all.append(m if k.get("markup") is False else ("markup", m))
@@ -907,9 +933,23 @@ async def add_host(app, pilot):
     assert len(app.screen_stack) == 1, "a is the Configuration tab's key"
     await pilot.press("left")
     assert "+ Add host" in body(app)[2] and " a  add host " in text(app, "#foot")
-    await pilot.press("a")
-    await pilot.pause()
-    assert isinstance(app.screen, tui.AddHost) and isinstance(app.focused, tui.Input)
+    # ~/.ssh/config is read in a worker thread, never on the event loop: the dialog is up at once and says so.
+    gate, on_loop, real = threading.Event(), [], tui.ssh_hosts
+
+    def slow(home):
+        on_loop.append(threading.current_thread() is threading.main_thread())
+        gate.wait(5)
+        return real(home)
+    tui.ssh_hosts = slow
+    try:
+        await pilot.press("a")
+        await pilot.pause()
+        assert isinstance(app.screen, tui.AddHost) and isinstance(app.focused, tui.Input)
+        assert cands() == ["reading ~/.ssh/config …"] and info() == "reading ~/.ssh/config …" and on_loop == [False], (cands(), info(), on_loop)
+        gate.set()
+        await settle(app, pilot)
+    finally:
+        tui.ssh_hosts = real
     assert cands()[0] == "5 matches" and cands()[1].split() == ["▸", "lmd_dkim", "dykim@lmd-dkim.example:22"], cands()
     assert cands()[5].split() == ["wmac", "dykim@wmac.example:22", "already", "checked"], cands()[5]
     await pilot.press("l", "m", "d", "q")   # a letter that is a key of the main view (q quits) is text here
@@ -921,33 +961,59 @@ async def add_host(app, pilot):
     assert cands()[3].startswith("▸ lmd-a100") and app.tab == "config", "the arrows move the candidate, not the row or the tab under the dialog"
     await pilot.press("up", "up", "enter")
     await settle(app, pilot)
-    # First Enter: nothing is added. The exact command the CLI will run, and what ssh -G says of this one alias, cleaned.
-    assert info().split("\n")[:2] == ["enter checks it first:  ssh -o BatchMode=yes -o ConnectTimeout=8 -- lmd_dkim '~/.local/bin/claude-discord --version --host-id'",
-                                      "ssh -G lmd_dkim says:  user dykim · hostname lmd-dkim.example · port 22 · proxycommand ssh -W %h:%p ]0;Tgw"], info()
+    # First Enter: nothing is added. The exact command the CLI will run and what the add writes on that machine (the
+    # two lines of --dry-run), what ssh -G says of this one alias, cleaned, and the kind it will be added as.
+    shown = ["enter checks it first:  ssh -o BatchMode=yes -o ConnectTimeout=8 -- lmd_dkim '~/.local/bin/claude-discord --version --host-id'",
+             "checks it and writes ~/.claude-discord/host-id there if missing; adding it writes ~/.claude-discord/watchers/mgr",
+             "ssh -G lmd_dkim says:  user dykim · hostname lmd-dkim.example · port 22 · proxycommand ssh -W %h:%p ]0;Tgw",
+             "added as:  (●) server   ( ) laptop    l switches; a laptop that is off is not alerted"]
+    assert info().split("\n")[:4] == shown, info()
     assert cli_calls(app) == ["hosts --bot mgr add --dry-run lmd_dkim"] and (Path(app.state_dir) / "ssh.args").read_text() == "-G -- lmd_dkim\n"
-    # Second Enter: the add, in a worker. Meanwhile the screen says so and a third Enter does nothing.
+    # Second Enter: the add, in a worker (the stub's waits for this case). Meanwhile the screen says so and a third
+    # Enter does nothing. It cannot be called back (it writes on the host and in the ledger): Escape and q say so,
+    # and the dialog stays for its outcome.
     await pilot.press("enter")
     assert info() == "checking lmd_dkim ..." and app.screen.query_one("#q").disabled, info()
-    await pilot.press("enter")
+    await pilot.press("enter", "escape")
+    assert isinstance(app.screen, tui.AddHost) and info() == "adding … (cannot be cancelled once started)", info()
+    app.screen.say("")
+    await pilot.press("q")
+    assert isinstance(app.screen, tui.AddHost) and app.return_code is None and info() == "adding … (cannot be cancelled once started)", (app.return_code, info())
+    (Path(app.state_dir) / "go").write_text("")
     await settle(app, pilot)
     assert len(app.screen_stack) == 1 and cli_calls(app)[1:] == ["hosts --bot mgr add lmd_dkim"], cli_calls(app)
     # The change is said with what the monitor answered to `monitor --check`: it is asked for a pass after every change.
     assert app.said_all == ["claude-discord: hosts: added lmd_dkim to /p/hosts\nclaude-discord: hosts: warning: lmd_dkim is already watched by [bold]other\n" + CHECKS], app.said_all
     assert checks(app) == 1
-    # A host that does not answer (exit 5): said, cleaned, and a third Enter adds it unchecked.
+    # A host that does not answer (exit 5): said, cleaned, and a third Enter adds it unchecked. Chosen as a laptop
+    # (l at the step that shows the check): both calls pass the word.
     await pilot.press("a")
-    app.screen.query_one("#q").value = "a100"
+    await settle(app, pilot)
+    q = app.screen.query_one("#q")
+    q.value = "a100"
     await pilot.press("enter")
     await settle(app, pilot)
+    # The query edited after the first Enter is a new search: the next Enter shows again, it never adds the alias of before.
+    q.value = "a10"
+    await pilot.pause()
+    assert app.screen.step == "search" and info() == "enter shows the check that runs first · esc cancel", (app.screen.step, info())
     await pilot.press("enter")
     await settle(app, pilot)
+    assert cli_calls(app)[-2:] == ["hosts --bot mgr add --dry-run lmd-a100"] * 2 and app.screen.step == "shown", cli_calls(app)
+    # l switches the kind at this step (in the search it is a letter of the query, as above).
+    await pilot.press("l")
+    assert info().split("\n")[3].startswith("added as:  ( ) server   (●) laptop") and q.value == "a10" and app.screen.step == "shown", info()
+    await pilot.press("enter")
+    await settle(app, pilot)
+    assert cli_calls(app)[-1] == "hosts --bot mgr add lmd-a100 laptop", cli_calls(app)[-1]
     assert isinstance(app.screen, tui.AddHost) and info() == ("claude-discord: hosts: lmd-a100 did not answer (ssh exit 255): [2Jtimed out. Not added\n"
                                                              "enter adds it unchecked (hosts add --no-probe) · esc cancel"), info()
     await pilot.press("enter")
     await settle(app, pilot)
-    assert len(app.screen_stack) == 1 and cli_calls(app)[-1] == "hosts --bot mgr add --no-probe lmd-a100" and app.said_all[-1] == "claude-discord: hosts: added lmd-a100 to /p/hosts\n" + CHECKS
+    assert len(app.screen_stack) == 1 and cli_calls(app)[-1] == "hosts --bot mgr add --no-probe lmd-a100 laptop" and app.said_all[-1] == "claude-discord: hosts: added lmd-a100 to /p/hosts\n" + CHECKS
     # An alias the configuration does not name can be typed; the same home (exit 4) is said and nothing is added.
     await pilot.press("a")
+    await settle(app, pilot)
     app.screen.query_one("#q").value = "newbox"
     await pilot.pause()
     assert cands() == ["0 matches", "▸ newbox    as typed: not in ~/.ssh/config"], cands()
@@ -979,7 +1045,7 @@ async def add_host(app, pilot):
 async def add_host_bare(app, pilot):
     ssh_home(app, None)   # no ~/.ssh/config at all, and no wrapper: the dialog still opens, and says why nothing can be added
     await pilot.press("left", "a")
-    await pilot.pause()
+    await settle(app, pilot)
     assert str(app.screen.query_one("#cands").render()) == "0 matches" and "type the ssh alias" in str(app.screen.query_one("#info").render())
     await pilot.press("b", "enter")
     await settle(app, pilot)
@@ -1040,14 +1106,44 @@ async def host_edit(app, pilot):
     await pilot.press("enter", "enter")
     key.value = "NOPE"                                                # no value for a key the line does not have: nothing
     await pilot.press("enter", "enter")
-    assert " ".join(scr("#h-env").split()) == "env HTTPS_PROXY (removed on save) NO_PROXY •••• EXTRA •••• FOO •••• (new)", scr("#h-env")
-    key.value, app.screen.query_one("#h-value").value = "NO_PROXY", "s3d"   # typed and not entered: Save takes it too
+    env = "env HTTPS_PROXY (removed on save) NO_PROXY •••• EXTRA •••• FOO •••• (new)"
+    assert " ".join(scr("#h-env").split()) == env, scr("#h-env")
+    value, save = app.screen.query_one("#h-value"), app.screen.query_one("#h-save")
+    # A paste with white space at an end is refused out loud (the field takes none and would drop it without a word);
+    # a clean one, its line end apart, is taken.
+    value.post_message(tui.Paste("  s3e \n"))
+    await pilot.pause()
+    assert scr("#h-msg") == "a value cannot start or end with a space" and value.value == "", (scr("#h-msg"), value.value)
+    value.post_message(tui.Paste("s3e\n"))
+    await pilot.pause()
+    assert value.value == "s3e"
+    # KEY is an env name only. `name` and `laptop`, in any case, are the line's own words: a value typed here (masked)
+    # under `name` would be drawn as the display name. Nothing is staged, and the fields keep what was typed.
+    value.focus()
+    for bad in ("name", "NAME", "laptop", "Laptop", "1K", ""):
+        key.value, value.value = bad, "TOPSECRET"
+        if bad == "name":
+            await pilot.press("enter")   # Enter in the value field
+        else:
+            app.screen.stage()           # what that Enter runs
+        assert scr("#h-msg") == "not an env name" and sorted(app.screen.staged) == ["FOO", "HTTPS_PROXY"] and (key.value, value.value) == (bad, "TOPSECRET"), (bad, scr("#h-msg"), app.screen.staged)
+        app.screen.say("")
+    assert " ".join(scr("#h-env").split()) == env and "TOPSECRET" not in drawn(app)
+    # Typed and not entered is never sent (a KEY alone would remove that word; a value alone is nobody's): with text in
+    # either field Save does nothing and says what to do.
+    for k, v in (("NO_PROXY", ""), ("", "s3d"), ("NO_PROXY", "s3d")):
+        key.value, value.value = k, v
+        save.press()
+        await settle(app, pilot)
+        assert isinstance(app.screen, tui.HostEdit) and scr("#h-msg") == "press enter in the value field to stage KEY, or clear it", (k, v)
+        assert len(cli_calls(app)) == 1 and not (d / "stdin").exists() and sorted(app.screen.staged) == ["FOO", "HTTPS_PROXY"], (k, v, cli_calls(app))
+    app.screen.stage()   # entered (what Enter in the value field runs): staged
     # Save: ONE call, `hosts set <alias> --stdin`, every change a line of its stdin. No value is in an argument list.
-    app.screen.query_one("#h-save").press()
+    save.press()
     await settle(app, pilot)
     assert len(app.screen_stack) == 1 and cli_calls(app)[1:] == ["hosts --bot mgr set wmac --stdin"], cli_calls(app)
     assert (d / "stdin").read_text() == "name=w[2Jmac2\nlaptop off\nFOO=s3c\nHTTPS_PROXY=\nNO_PROXY=s3d\n", (d / "stdin").read_text()
-    assert "s3" not in (d / "args").read_text() and app.said_all == ["claude-discord: hosts: changed wmac in /p/hosts (2 lines)\n" + CHECKS], app.said_all
+    assert "s3" not in (d / "args").read_text() and "TOPSECRET" not in (d / "args").read_text() and app.said_all == ["claude-discord: hosts: changed wmac in /p/hosts (2 lines)\n" + CHECKS], app.said_all
     # Escape with no change closes; with one it asks (No by default). Nothing is written either way.
     await pilot.press("enter")
     await settle(app, pilot)
@@ -1056,6 +1152,12 @@ async def host_edit(app, pilot):
     assert len(app.screen_stack) == 1, "no change, no question"
     await pilot.press("enter")
     await settle(app, pilot)
+    # Text typed in the KEY or the value field and not entered is a change too (Escape asks, as for the name below).
+    for field in ("#h-key", "#h-value"):
+        app.screen.query_one(field).value = "v"
+        assert app.screen.dirty(), field
+        app.screen.query_one(field).value = ""
+    assert not app.screen.dirty()
     await pilot.press("x", "escape")
     await pilot.pause()
     assert isinstance(app.screen, tui.Confirm) and "Close without saving the changes to wmac?" in app.screen.text
@@ -1082,10 +1184,25 @@ async def host_edit(app, pilot):
     # Check now asks the monitor that runs for a pass (monitor --check) and says what it answered: no ssh, no hosts
     # call, nothing written from here.
     n, c = len(cli_calls(app)), checks(app)
-    app.screen.query_one("#h-check").press()
+    app.ASK_GAP, app.asked = 10, float("-inf")   # as it is outside these cases, and the last request long ago
+    check = app.screen.query_one("#h-check")
+    assert str(check.label) == "Check now"
+    check.press()
     await settle(app, pilot)
     assert scr("#h-msg") == CHECKS and checks(app) == c + 1 and len(cli_calls(app)) == n and not (d / "ssh.args").exists(), scr("#h-msg")
+    # Within 10 s of a request another press does nothing (the monitor serves all it meets in one pass, and a pass per
+    # press would turn what is counted in passes into seconds): the button says it was asked.
+    assert str(check.label) == "asked · the monitor checks within a minute", check.label
+    for _ in range(5):
+        check.press()
+    await settle(app, pilot)
+    assert checks(app) == c + 1 and scr("#h-msg") == CHECKS, checks(app)
     await pilot.press("escape")
+    # So does the request after a change to the ledger: said as asked, and no second call.
+    await pilot.press("l")
+    await settle(app, pilot)
+    assert checks(app) == c + 1 and app.said_all[-1] == "claude-discord: hosts: changed local in /p/hosts (1 line)\nasked · the monitor checks within a minute", app.said_all[-1]
+    app.ASK_GAP = 0
     # A ledger entry of another shape (a name that is a number, env an object): read as empty, never raised on.
     await pilot.press("down", "enter")
     await settle(app, pilot)
@@ -1104,8 +1221,8 @@ async def host_edit(app, pilot):
     assert app.said_all[-2:] == ["claude-discord: hosts: changed old in /p/hosts (1 line)\n" + CHECKS, "claude-discord: hosts: changed wmac in /p/hosts (1 line)\n" + CHECKS], app.said_all
     await pilot.press("right", "x", "l")
     await settle(app, pilot)
-    assert len(app.screen_stack) == 1 and len(cli_calls(app)) == 10, "x and l are the Configuration tab's keys"
-    assert checks(app) == 6, "one pass asked for per change (a save, two removals, two kind flips) and one by Check now"
+    assert len(app.screen_stack) == 1 and len(cli_calls(app)) == 11, "x and l are the Configuration tab's keys"
+    assert checks(app) == 6, "one pass asked for per change (a save, two removals, two kind flips) and one by Check now; none within 10 s of another"
 
 
 async def host_edit_refused(app, pilot):
@@ -1127,6 +1244,25 @@ async def host_edit_refused(app, pilot):
     assert isinstance(app.screen, tui.HostEdit) and text(app.screen, "#h-msg") == "claude-discord: hosts: K: a value holds no space [/]", text(app.screen, "#h-msg")
     assert text(app.screen, "#h-title").endswith("● unsaved changes") and not app.screen.query_one("#h-save").disabled and app.said_all == []
     assert checks(app) == 0, "a refused change (the l key's, the save's) asks for no pass"
+    # The call itself fails (here the process's start, with the text it was handed in its message): a short note with
+    # the exception's class, the app up, and the value in no text of the screen. An exception that left the worker
+    # would end the app with a traceback that prints every frame's locals.
+    class Dies:
+        def __init__(self, *a, **k):
+            pass
+
+        def communicate(self, input=None, timeout=None):
+            raise RuntimeError(f"died with {input!r}")
+    app.screen.staged["TOKEN"] = "hunter2secret"
+    real, tui.subprocess.Popen = tui.subprocess.Popen, Dies
+    try:
+        app.screen.query_one("#h-save").press()
+        await settle(app, pilot)
+    finally:
+        tui.subprocess.Popen = real
+    assert isinstance(app.screen, tui.HostEdit) and app.return_code is None and text(app.screen, "#h-msg") == "could not run hosts set: RuntimeError", text(app.screen, "#h-msg")
+    assert "hunter2secret" not in drawn(app) and all("hunter2secret" not in repr(w) for w in [app.screen, *app.screen.walk_children()])
+    assert app.screen.sending == "" and not app.screen.query_one("#h-save").disabled
     # With no monitor running (stopped by its owner) Check now says so: it starts nothing.
     (d / "nomonitor").write_text("")
     app.screen.query_one("#h-check").press()

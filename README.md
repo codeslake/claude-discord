@@ -1231,21 +1231,26 @@ bot count. A host taken
 out of the ledger is marked `(left the ledger)` for a day, then dropped
 (`Enter` on it shows its raw fields). Every change below is one
 `claude-discord hosts` call, and after each the TUI asks the monitor for a
-pass (`monitor --check`), so the table follows within a tick and a pass; it
-says so, or that no monitor runs.
+pass (`monitor --check`; once per 10 s at most), so the table follows within
+a minute; it says so, or that no monitor runs.
 
 `a` (`+ Add host`) opens a search over the `Host` aliases of `~/.ssh/config`
-and the files it Includes, read as text: patterns (`*`, `?`, `!`) are no
+and the files it Includes, read as text (in the background: the dialog says
+`reading ~/.ssh/config …` meanwhile): patterns (`*`, `?`, `!`) are no
 candidates, `Match` blocks are never evaluated (`Match exec` runs commands),
-and `user@host:port` come from the `HostName`, `User`, `Port` and
+an `Include` with wildcards in more than three components of its path is
+skipped, and `user@host:port` come from the `HostName`, `User`, `Port` and
 `ProxyJump` lines that apply. An alias the configuration does not name can
 be typed. `Enter` on a candidate adds nothing yet: it shows the exact ssh
-command that checks the host first (`hosts add --dry-run`) and what `ssh -G`
-says of that one alias (where the connection goes, and through which
-ProxyJump or ProxyCommand). A second `Enter` runs `hosts add`: refused for
-the same home, a warning when another manager watches it. For a host that
-does not answer, a third `Enter` adds it unchecked. A host is added as a
-server.
+command that checks the host first and what the add writes on that machine
+(`hosts add --dry-run`), what `ssh -G` says of that one alias (where the
+connection goes, and through which ProxyJump or ProxyCommand), and the kind
+it will be added as: `(●) server   ( ) laptop`, which `l` switches (a laptop
+that is off is not alerted). Editing the search starts over. A second
+`Enter` runs `hosts add`: refused for the same home, a warning when another
+manager watches it. Once it runs it cannot be cancelled (it writes on the
+host and in the ledger): `esc` and `q` say so, and the dialog stays for the
+outcome. For a host that does not answer, a third `Enter` adds it unchecked.
 
 `Enter` on a host row opens its settings: the alias and target (not
 editable), the display name, the kind (`( ) server   (●) laptop`; space
@@ -1253,10 +1258,16 @@ flips it), the env words, and the last check with its reason and recovery
 command. An env word is always drawn `KEY ••••`: the TUI does not know the
 value and has no key to show one. To add or change one, type `KEY` and a new
 value (masked while typed) and press `Enter`; `KEY` with no value removes
-it. `Save` writes every change in one `hosts set <alias> --stdin` call (a
-value travels on stdin, never in an argument list); unsaved changes are said
-in the title, and `esc` asks before dropping them. `Check now` asks the
-running monitor for a pass (it probes nothing itself and starts nothing).
+it. `KEY` is an env name: `name` and `laptop` are refused there (`not an env
+name`; they have their own fields). `Save` writes every change in one
+`hosts set <alias> --stdin` call (a value travels on stdin, never in an
+argument list), and only what was entered: with text left in the `KEY` or
+the value field it does nothing and says `press enter in the value field to
+stage KEY, or clear it`. Unsaved changes, such text included, are said in
+the title, and `esc` asks before dropping them. `Check now` asks the
+running monitor for a pass (it probes nothing itself and starts nothing);
+for 10 s after a request, this one or the one that follows a change, the
+button reads `asked · the monitor checks within a minute` and does nothing.
 `Stop monitoring this host` asks, then runs `hosts rm`. On a row, `x` does
 the same and `l` flips server/laptop.
 `Monitor`: the alert language (`ALERT_LANG`) and who is mentioned
