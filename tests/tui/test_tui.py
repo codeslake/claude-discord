@@ -1437,15 +1437,70 @@ def access_calls(app):
 
 def hand_over(app, *codes):
     """The terminal can be handed over (as a real one can; the test driver cannot): what would run there is kept in
-    app.ran, and each run exits with the next of `codes`."""
+    app.ran, and each run exits with the next of `codes`. This is the fallback for where no pty can be opened."""
     app.ran, left = [], list(codes)
     app.suspend = contextlib.nullcontext
     app.runner = lambda argv: app.ran.append(argv) or left.pop(0)
 
 
+class FakeRun:
+    """A stand-in for the pty a `access ... set` runs on (tui.PtyRun): each next() is the next of `steps`, (what it
+    printed since the last answer, None when that ends with its question, else its exit status); what answer() would
+    write to the pty is kept in `written`. A step that is None waits until the run is killed, then is ("", 124)."""
+    def __init__(self, argv, steps):
+        self.argv, self.steps, self.written, self.killed = argv, list(steps), [], threading.Event()
+
+    def next(self, cap):
+        step = self.steps.pop(0)
+        if step is None:
+            self.killed.wait(5)
+            return "", 124
+        return step
+
+    def answer(self, yes):
+        self.written.append("y\n" if yes else "n\n")
+
+    def kill(self):
+        self.killed.set()
+
+
+def fake_pty(app, *runs):
+    """Each `access ... set` is run on the next of `runs` (a FakeRun's steps); app.runs keeps them. Nothing is run on a
+    handed-over terminal: app.ran stays empty."""
+    app.runs, left = [], list(runs)
+    hand_over(app)
+
+    def start(argv):
+        app.runs.append(FakeRun(argv, left.pop(0)))
+        return app.runs[-1]
+    app.pty = start
+
+
+# What `access ... set` prints on a terminal up to its question: the widenings first, red, a warning in yellow, the
+# pty's line ends, and an escape sequence of another kind that must not reach the screen.
+ASK = ("claude-discord: access: photobot on lmd79, /home/u/rcps/.claude/discord-agents/photobot/access.json\r\n"
+       "\x1b[1;31m  ! #dev-bots: an @mention required -> any message\x1b[0m\r\n"
+       "\x1b[1;31m  ! DMs: allowlist -> pairing: anyone who shares a server with the bot can DM it and is sent a pairing code\x1b[0m\r\n"
+       "    #general: + listens here: an @mention required, from dongyong22 (111)\x1b]0;TITLE\x07\r\n"
+       "\x1b[33mwarning: dongyong22 (111) is the owner of this bot and can no longer write to it in #general\x1b[0m\r\n"
+       "Apply 6 changes, 2 of them widening? [y/N] ")
+ASKED = ("claude-discord: access: photobot on lmd79, /home/u/rcps/.claude/discord-agents/photobot/access.json\n"
+         "  ! #dev-bots: an @mention required -> any message\n"
+         "  ! DMs: allowlist -> pairing: anyone who shares a server with the bot can DM it and is sent a pairing code\n"
+         "    #general: + listens here: an @mention required, from dongyong22 (111)]0;TITLE\n"
+         "warning: dongyong22 (111) is the owner of this bot and can no longer write to it in #general\n"
+         "Apply 6 changes, 2 of them widening? [y/N]")
+
+
+def red(t):
+    """The parts of a rich Text drawn in the alert colour."""
+    return [t.plain[s.start:s.end] for s in t.spans if str(s.style) == tui.ALERT]
+
+
 async def access_edit(app, pilot):
     ssh_home(app)
-    hand_over(app, 4, 0)
+    fake_pty(app, [(ASK, None), ("\r\nclaude-discord: access: answered no; nothing was changed\r\n", 4)],
+             [(ASK, None), ("\r\nclaude-discord: access: /p/access.json written. The plugin reads it at the next message: no restart.\r\n", 0)])
     scr, body = lambda sel: text(app.screen, sel), lambda: text(app.screen, "#a-body").split("\n")
     await pilot.press("right", "e", "left", "e")   # e is the Bots tab's key
     await settle(app, pilot)
@@ -1480,23 +1535,35 @@ async def access_edit(app, pilot):
     assert "(●) pairing" in body()[8] and app.screen.now["dm"] == "pairing", body()[8]
     await pilot.press("down", "space", "space")
     assert "(●) autoresearchclaw" in body()[9], body()[9]
-    # s hands the terminal to `access ... set <the change words>`. Exit 4 (a question answered no): nothing was changed,
-    # the editor and its changes stay.
-    await pilot.press("s")
-    words = ["mention:900=off", "channel+902", "allow:902+333", "allow:902-111", "dm=pairing", "mode=autoresearchclaw"]
-    assert app.ran == [[app.wrapper, "access", "--host", "local", "--manager", "mgr", "--project", "/home/u/rcps", "--", "photobot", "set", *words]], app.ran
-    assert isinstance(app.screen, tui.AccessEdit) and scr("#a-msg").startswith("answered no: nothing was changed") and app.screen.words() == words
-    # Exit 0: said, the editor closes, and the monitor is asked for a pass so the row shows the new policy.
+    # s runs `access ... set <the change words>` on a pty the TUI holds, and what it printed up to its question is the
+    # question of a popup: its red lines red, every other escape sequence and the pty's \r gone. Escape answers n:
+    # exit 4, nothing was changed, the editor and its changes stay.
     await pilot.press("s")
     await settle(app, pilot)
-    assert len(app.ran) == 2 and len(app.screen_stack) == 1 and checks(app) == 1, (app.ran, app.screen_stack)
+    words = ["mention:900=off", "channel+902", "allow:902+333", "allow:902-111", "dm=pairing", "mode=autoresearchclaw"]
+    assert [r.argv for r in app.runs] == [[app.wrapper, "access", "--host", "local", "--manager", "mgr", "--project", "/home/u/rcps", "--", "photobot", "set", *words]], app.runs
+    assert isinstance(app.screen, tui.AccessAsk) and app.screen.text.plain == ASKED, app.screen.text.plain
+    assert red(app.screen.text) == ["  ! #dev-bots: an @mention required -> any message",
+                                    "  ! DMs: allowlist -> pairing: anyone who shares a server with the bot can DM it and is sent a pairing code"], red(app.screen.text)
+    assert "TITLE" in drawn(app) and "\x1b]0;" not in drawn(app) and app.focused.id == "no"
+    await pilot.press("escape")
+    await settle(app, pilot)
+    assert app.runs[0].written == ["n\n"] and app.ran == []
+    assert isinstance(app.screen, tui.AccessEdit) and scr("#a-msg").startswith("answered no: nothing was changed") and app.screen.words() == words, scr("#a-msg")
+    # y: exit 0, said, the editor closes, and the monitor is asked for a pass so the row shows the new policy.
+    await pilot.press("s")
+    await settle(app, pilot)
+    assert isinstance(app.screen, tui.AccessAsk)
+    await pilot.press("y")
+    await settle(app, pilot)
+    assert app.runs[1].written == ["y\n"] and len(app.screen_stack) == 1 and checks(app) == 1 and app.ran == [], (app.runs, app.screen_stack)
     assert app.said_all == ["access saved: the plugin reads access.json at the next message, no restart; the hooks follow the new mode at once, the dev-manager rules at the "
                             f"session's next start, compact or clear\n{CHECKS}"], app.said_all
     # Nothing changed: s runs nothing, escape closes without a question.
     await pilot.press("e")
     await settle(app, pilot)
     await pilot.press("s")
-    assert scr("#a-msg") == "nothing to save" and len(app.ran) == 2
+    assert scr("#a-msg") == "nothing to save" and len(app.runs) == 2
     await pilot.press("escape")
     assert len(app.screen_stack) == 1
     # Changed: escape asks before it closes.
@@ -1505,12 +1572,13 @@ async def access_edit(app, pilot):
     await pilot.press("m", "escape")
     assert isinstance(app.screen, tui.Confirm) and "photobot" in app.screen.text
     await pilot.press("y")
-    assert len(app.screen_stack) == 1 and len(app.ran) == 2
+    assert len(app.screen_stack) == 1 and len(app.runs) == 2
 
 
 async def access_no_terminal(app, pilot):
-    """Where the terminal cannot be handed over (here: the test driver; in the field: Textual Web), s runs nothing and
-    shows the command to run in a shell; c copies it."""
+    """Where no pty can be opened and the terminal cannot be handed over either (here: the test driver; in the field:
+    Textual Web on a system without openpty), s runs nothing and shows the command to run in a shell; c copies it."""
+    app.pty = lambda argv: None
     await pilot.press("e")
     await settle(app, pilot)
     await pilot.press("m", "s")
@@ -1526,7 +1594,7 @@ async def access_refused(app, pilot):
     """A host whose claude-discord is older than 1.13.0 (the CLI's exit 5), a document of the wrong shape, a row that
     is no bot: said, nothing to edit, nothing run."""
     d = Path(app.state_dir)
-    hand_over(app)
+    fake_pty(app)
     (d / "access.err").write_text("claude-discord: access: old needs claude-discord 1.13.0 for this (it has 1.10.5; claude-discord update, there) [/]\n")
     app.cursor["bots"] = OLDBOT
     app.paint()
@@ -1535,7 +1603,7 @@ async def access_refused(app, pilot):
     assert access_calls(app) == ["access --host old --manager mgr --project /home/u/p -- oldbot --json"], access_calls(app)
     assert text(app.screen, "#a-msg") == "claude-discord: access: old needs claude-discord 1.13.0 for this (it has 1.10.5; claude-discord update, there) [/]"
     await pilot.press("space", "m", "a", "s", "tab", "down")
-    assert app.ran == [] and text(app.screen, "#a-body") == "" and isinstance(app.screen, tui.AccessEdit)
+    assert app.ran == app.runs == [] and text(app.screen, "#a-body") == "" and isinstance(app.screen, tui.AccessEdit)
     await pilot.press("escape")
     (d / "access.err").unlink()
     for doc in ('{"access": 2}', "not json", '{"access": 1, "policy": "x", "channels": [7, {"id": 5}, {"id": "9", "name": 3, "read": "y"}], "people": "no", "guild": 4, "errors": [3, "the server\'s channels: HTTP 403"]}'):
@@ -1549,7 +1617,7 @@ async def access_refused(app, pilot):
         else:
             assert text(app.screen, "#a-msg") == "claude-discord access gave no document (exit 0)" and text(app.screen, "#a-body") == ""
         await pilot.press("escape")
-        assert len(app.screen_stack) == 1 and app.ran == []
+        assert len(app.screen_stack) == 1 and app.ran == app.runs == []
     # e on a row that is no bot (a project whose health crashed) opens nothing.
     n = len(access_calls(app))
     app.state["bots"][CRASHED] = {"host": "wmac", "project": "/Users/u/q", "verdict": "blind", "since": iso(time.time() - 20), "detail": "x"}
@@ -1558,6 +1626,126 @@ async def access_refused(app, pilot):
     await pilot.press("e")
     await settle(app, pilot)
     assert len(app.screen_stack) == 1 and len(access_calls(app)) == n
+
+
+async def access_outcomes(app, pilot):
+    """What `access ... set` on the pty can come to besides yes and no: an exit with no question (refused, nothing to
+    change), n, no question within the cap, the editor closed while it runs (the run is killed), and where no pty can
+    be opened the terminal handed over as in 1.13.0."""
+    ssh_home(app)
+    scr = lambda sel: text(app.screen, sel)
+    fake_pty(app, [("claude-discord: access: allow:900: that would leave no sender\x1b[2J\r\n", 2)],
+             [(ASK, None), ("\r\nclaude-discord: access: answered no; nothing was changed\r\n", 4)],
+             [("\x1b[1;31m  ! #dev-bots: an @mention required -> any message\x1b[0m\r\n", 124)],
+             [None], [None],
+             [("claude-discord: access: photobot is already so; nothing to change\r\n", 0)])
+    await pilot.press("e")
+    await settle(app, pilot)
+    await pilot.press("m", "s")
+    await settle(app, pilot)
+    assert isinstance(app.screen, tui.AccessEdit) and scr("#a-msg") == "refused (exit 2):\nclaude-discord: access: allow:900: that would leave no sender[2J", scr("#a-msg")
+    await pilot.press("s")
+    await settle(app, pilot)
+    await pilot.press("n")
+    await settle(app, pilot)
+    assert app.runs[1].written == ["n\n"] and scr("#a-msg").startswith("answered no: nothing was changed"), scr("#a-msg")
+    await pilot.press("s")
+    await settle(app, pilot)
+    assert scr("#a-msg") == f"claude-discord access asked nothing within {tui.A_CAP} s and was stopped: nothing was changed\n  ! #dev-bots: an @mention required -> any message", scr("#a-msg")
+    # While it runs the editor takes no key but escape, which stops the run (its process group killed); the editor stays.
+    await pilot.press("s")
+    await pilot.pause()
+    assert app.screen.run is app.runs[3] and not app.runs[3].killed.is_set()
+    await pilot.press("m", "s")
+    assert len(app.runs) == 4 and app.screen.now["groups"]["900"]["mention"] is False
+    await pilot.press("escape")
+    await settle(app, pilot)
+    assert app.runs[3].killed.is_set() and isinstance(app.screen, tui.AccessEdit) and app.screen.run is None and app.runs[3].written == []
+    assert scr("#a-msg") == "stopped: nothing was changed", scr("#a-msg")
+    # The editor taken down while it runs (the TUI quitting): the run is killed too.
+    await pilot.press("s")
+    await pilot.pause()
+    app.pop_screen()
+    await settle(app, pilot)
+    assert app.runs[4].killed.is_set() and len(app.screen_stack) == 1
+    # Exit 0 with no question (the policy is already so): the CLI's words, and the editor closes.
+    await pilot.press("e")
+    await settle(app, pilot)
+    await pilot.press("m", "s")
+    await settle(app, pilot)
+    assert len(app.screen_stack) == 1 and app.said_all[-1] == "claude-discord: access: photobot is already so; nothing to change\n" + CHECKS, app.said_all
+    # No pty: the terminal is handed over (App.suspend), the 1.13.0 way.
+    app.pty = lambda argv: None
+    hand_over(app, 0)
+    await pilot.press("e")
+    await settle(app, pilot)
+    await pilot.press("m", "s")
+    await settle(app, pilot)
+    assert app.ran == [[app.wrapper, "access", "--host", "local", "--manager", "mgr", "--project", "/home/u/rcps", "--", "photobot", "set", "mention:900=off"]]
+    assert len(app.screen_stack) == 1 and len(app.runs) == 6
+
+
+# A wrapper whose `access ... set` is a real terminal program: it refuses without a terminal on stdin and stdout (exit
+# 3), prints a red widening and asks; y is exit 0, anything else exit 4. With a `hang` file it asks nothing and waits,
+# with a child, keeping their pids.
+PTY_CLI = r'''
+case "$*" in
+  access*" set "*)
+    [ -t 0 ] && [ -t 1 ] || { echo "claude-discord: access: not a terminal" >&2; exit 3; }
+    if [ -e "$d/hang" ]; then sleep 30 & echo "$$ $!" > "$d/pids"; wait; exit 9; fi
+    printf 'claude-discord: access: photobot on lmd79\n\033[1;31m  ! #dev-bots: an @mention required -> any message\033[0m\n'
+    sleep 0.05; printf 'Apply this widening change? [y/N] '
+    a=""; read -r a; case $a in y) echo "claude-discord: access: written"; exit 0;; esac
+    echo "claude-discord: access: answered no; nothing was changed" >&2; exit 4;;
+esac'''
+
+
+def gone(pid):
+    """The process is no more (or a zombie nobody reaped yet), within 3 s."""
+    for _ in range(60):
+        try:
+            os.kill(pid, 0)
+            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                return True
+        except (ProcessLookupError, FileNotFoundError):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+async def access_pty(app, pilot):
+    """The real thing: os.openpty, the stub CLI on it in a session of its own, its question found, y and n written to
+    it, and on the cap its whole process group killed."""
+    ssh_home(app)
+    d = Path(app.state_dir)
+    for key, rc in (("y", 0), ("n", 4)):
+        await pilot.press("e")
+        await settle(app, pilot)
+        await pilot.press("m", "s")
+        await settle(app, pilot)
+        assert isinstance(app.screen, tui.AccessAsk), text(app.screen, "#a-msg")
+        assert app.screen.text.plain == "claude-discord: access: photobot on lmd79\n  ! #dev-bots: an @mention required -> any message\nApply this widening change? [y/N]", app.screen.text.plain
+        assert red(app.screen.text) == ["  ! #dev-bots: an @mention required -> any message"]
+        await pilot.press(key)
+        await settle(app, pilot)
+        if rc == 0:
+            assert len(app.screen_stack) == 1 and app.said_all[-1].startswith("access saved"), app.said_all
+        else:
+            assert isinstance(app.screen, tui.AccessEdit) and text(app.screen, "#a-msg").startswith("answered no: nothing was changed"), text(app.screen, "#a-msg")
+            await pilot.press("escape", "y")
+    (d / "hang").write_text("")
+    tui.A_CAP, cap = 1, tui.A_CAP
+    try:
+        await pilot.press("e")
+        await settle(app, pilot)
+        t0 = time.monotonic()
+        await pilot.press("m", "s")
+        await settle(app, pilot)
+        assert 0.9 < time.monotonic() - t0 < 4 and "asked nothing within 1 s and was stopped" in text(app.screen, "#a-msg"), text(app.screen, "#a-msg")
+    finally:
+        tui.A_CAP = cap
+    sh, child = map(int, (d / "pids").read_text().split())
+    assert gone(sh) and gone(child), "the cap kills the run's whole process group"
 
 
 async def stopped(app, pilot):
@@ -1635,6 +1823,8 @@ async def main():
     await case("access_edit", access_edit, state="all_ok", wrapper=access_cli)
     await case("access_no_terminal", access_no_terminal, state="all_ok", wrapper=access_cli)
     await case("access_refused", access_refused, state="all_ok", wrapper=access_cli)
+    await case("access_outcomes", access_outcomes, state="all_ok", wrapper=access_cli)
+    await case("access_pty", access_pty, state="all_ok", wrapper=lambda d: access_cli(d) and stub(d, ACCESS_CLI + PTY_CLI + CHECK_STUB))
     await case("stopped", stopped)
     await case("stopped_by_user", stopped_by_user)
     await case("overdue", overdue)
