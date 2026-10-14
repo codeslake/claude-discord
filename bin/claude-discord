@@ -2853,9 +2853,17 @@ if [ "${1:-}" = access ]; then
   if [ "$a_nw" = 0 ]; then q="Apply $([ "$a_t" = 1 ] && echo "this change" || echo "these $a_t changes")?"
   elif [ "$a_nw" = "$a_t" ]; then q="Apply $([ "$a_t" = 1 ] && echo "this widening change" || echo "these $a_t widening changes")?"
   else q="Apply $a_t changes, $a_nw of them widening?"; fi
+  # Before it, on its own line, a marker: U+2060 alone (no control character, nothing on a terminal), which no Discord
+  # name can hold (safe, in a_defs, takes it out of every name). The TUI asks only after it (1.13.1): a name that ends
+  # in [y/N] can never pass for the question.
+  printf '\342\201\240\n' >&2
   a=""; read -r -p "$q [y/N] " a || a=""
   case $a in y|Y) ;; *) a_no;; esac
   a_file=""; case $'\n'$a_diff in *$'\n'[WC]$'\x1f'*) a_file=1;; esac   # a change of access.json itself, not of the mode alone
+  # access.log: when, who (the account here), on which machine, and what was done: a line for access.json (with the
+  # change words, ids only) right after its rename, before setup --mode runs, so a run stopped in setup still has its
+  # write logged; then a line for the mode, set or failed.
+  a_log() { (umask 077; printf '%s %s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$a_host_name" "$1" >> "$d/access.log") 2>/dev/null || :; }
   if [ -n "$a_file" ]; then
     # One writer of ours at a time (flock through perl on <file>.lock, as the ledger's: fd 7, never stale), and the
     # file replaced by rename, never written in place: the plugin reads it at every message, and one it cannot parse it
@@ -2869,24 +2877,21 @@ if [ "${1:-}" = access ]; then
       { echo "claude-discord: access: $f changed while you were answering (or is no longer valid JSON); nothing was changed, run it again" >&2; exit 1; }
     (umask 077; printf '%s\n' "$a_new" > "$f.cd.$$") && mv -f "$f.cd.$$" "$f" ||
       { rm -f "$f.cd.$$"; echo "claude-discord: access: could not write $f; it is as it was" >&2; exit 1; }
+    a_log "access.json:$a_words"
     exec 7>&-
   fi
-  # access.log: when, who (the account here), on which machine, and the change words (ids only) of what was done: written
-  # once it is done, so a mode setup did not set is not in it.
-  a_log() { (umask 077; printf '%s %s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$a_host_name" "$1" >> "$d/access.log") 2>/dev/null || :; }
   [ -z "$a_file" ] || echo "claude-discord: access: $f written. The plugin reads it at the next message: no restart."
   if [ "$newmode" != "$mode" ]; then
     # setup --mode, with the mode on its stdin and nothing after it: its peers and hosts questions read the end of
     # input, which keeps both lists (README, Modes).
     if ! printf '%s\n' "$newmode" | CLAUDE_DISCORD_ACCESS_PEERS=written "$self_path" setup "$bot" --mode; then
-      a_fw=""; for w in "$@"; do case $w in mode=*) ;; *) a_fw="$a_fw $w";; esac; done
-      [ -z "$a_file" ] || a_log "$a_fw"
+      a_log "mode: $mode -> $newmode failed (claude-discord setup $bn --mode)"
       echo "claude-discord: access: the mode was not changed (claude-discord setup $bn --mode, above)${a_file:+; the changes to access.json stay}" >&2; exit 1
     fi
     echo "claude-discord: access: the hooks follow the new mode from their next call; the dev-manager rules reach, or leave, a running session at its next start, compact or clear."
     [ "$newmode" != dev-manager ] || echo "claude-discord: access: its peers and the hosts it checks: claude-discord setup $bn --mode, and claude-discord hosts add"
+    a_log "mode: $mode -> $newmode"
   fi
-  a_log "$a_words"
   exit 0
 fi
 
