@@ -13,17 +13,23 @@ Since 1.12.0 the Configuration tab changes the manager's hosts ledger, always
 through `claude-discord hosts` (it never writes the ledger itself, and never
 reads it: the CLI gives it key names, no value), and asks the monitor for a
 pass with `claude-discord monitor --check`. It reads `~/.ssh/config` as text
-and runs `ssh -G` for the one alias the user chose. Nothing else: no restart,
-no post, no patch, and it never reads a .env, so it cannot show a token.
+and runs `ssh -G` for the one alias the user chose. Since 1.13.0 `e` on a bot
+row edits who may drive that bot (its channels, senders, DM policy and mode),
+read through `claude-discord access ... --json` and written by handing the
+terminal to `claude-discord access ... set`, which asks there. Nothing else:
+no restart, no post, no patch, and it never reads a .env or an access.json, so
+it cannot show a token.
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import fnmatch
 import glob
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import threading
@@ -34,7 +40,7 @@ from pathlib import Path
 
 from rich.cells import cell_len, set_cell_size
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Paste, Resize
@@ -474,10 +480,11 @@ def tabs_lines(tab: str, n_open: int, width: int) -> Text:
 
 
 def foot_line(tab: str, width: int = WIDE) -> Text:
-    """The keys of a tab. The Bots tab's are 85 cells and the Configuration tab's 91: below WIDE two labels of each are
+    """The keys of a tab. The Bots tab's are 97 cells and the Configuration tab's 91: below WIDE the labels are
     shorter, so every key fits in 80."""
-    fields, copy, edit, add = ("all fields", "copy fix", "settings", "add host") if width >= WIDE else ("fields", "copy", "edit", "add")
-    keys = {"bots": (("↑↓", "select"), ("space", "expand"), ("enter", fields), ("c", copy), ("←→", "tabs"), ("q", "quit")),
+    fields, copy, edit, add = ("all fields", "copy fix", "settings", "add host") if width >= WIDE else ("all", "copy", "edit", "add")
+    select, expand, access = ("select", "expand", "access") if width >= WIDE else ("move", "open", "edit")
+    keys = {"bots": (("↑↓", select), ("space", expand), ("enter", fields), ("e", access), ("c", copy), ("←→", "tabs"), ("q", "quit")),
             "alerts": (("↑↓", "select"), ("enter", "the post's text"), ("←→", "tabs"), ("q", "quit")),
             "config": (("←→", "tabs"), ("↑↓", "select"), ("enter", edit), ("a", add), ("x", "remove"), ("l", "laptop"), ("q", "quit"))}[tab]
     out = Text(" ")
@@ -777,10 +784,10 @@ def fuzzy(query: str, hosts: list[dict]) -> list[dict]:
     return [h for s, h in sorted(((score(h), h) for h in hosts), key=lambda sh: 9 if sh[0] is None else sh[0]) if s is not None]
 
 
-def run_capped(argv: list, cap: float, feed=None) -> tuple[int, str, str]:
+def run_capped(argv: list, cap: float, feed=None, limit: int = 65536) -> tuple[int, str, str]:
     """A command run to its end, or to `cap` seconds, when its whole process group is killed (a child of it that hangs
     would otherwise keep the pipes open and this call with them): (exit status, stdout, stderr). 124 for the cap, 127
-    when it cannot be started. Each stream is cut at 64 KiB and cleaned of what must not be drawn; its line breaks
+    when it cannot be started. Each stream is cut at `limit` bytes (64 KiB) and cleaned of what must not be drawn; its line breaks
     stay. `feed` is how a value travels to the command: never in its argument list, and here never in a variable
     either (Textual prints the locals of every frame of a traceback): the command's stdin is `feed.sending`, read
     where it is written to the pipe."""
@@ -799,7 +806,7 @@ def run_capped(argv: list, cap: float, feed=None) -> tuple[int, str, str]:
             pass
         out, err = p.communicate()
         rc, err = 124, err + f"\nno answer within {cap:g} s".encode()
-    return (rc, *(clean(b[:65536].decode("utf-8", "replace"), UNSAFE_NL).strip() for b in (out, err)))
+    return (rc, *(clean(b[:limit].decode("utf-8", "replace"), UNSAFE_NL).strip() for b in (out, err)))
 
 
 def ssh_effective(ssh: str, alias: str) -> list[str]:
@@ -1416,6 +1423,257 @@ def access_lines(doc: dict, was: dict, now: dict, at: int, side: str, prow: int,
     return out
 
 
+def in_terminal(argv: list) -> int:
+    """`argv` run on the terminal the TUI has let go of (App.suspend), then one line read, so what it printed stays
+    until it was read. Its exit status; 127 when it cannot be started, 130 after Ctrl-C."""
+    try:
+        rc = subprocess.call(argv)
+    except OSError:
+        rc = 127
+    except KeyboardInterrupt:
+        rc = 130
+    try:
+        input(f"\n[exit {rc}] enter goes back to the claude-discord tui ")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    return rc
+
+
+A_HINT = "↑↓ move · space toggle · m mention · tab people · a add · s save · esc close"
+A_SAID = {1: "not written (exit 1): what it said is above the TUI, on the terminal", 2: "refused (exit 2): what it said is above the TUI, on the terminal",
+          3: "no terminal for its questions (exit 3): nothing was changed", 4: "answered no: nothing was changed. The changes are still here: adjust them, or esc",
+          5: "the host did not answer, or its claude-discord is older than 1.13.0 (exit 5): nothing was changed"}
+
+
+class AccessEdit(ModalScreen):
+    """`e` on a bot row: the channels the bot listens in, per channel whether an @mention is required and who may
+    write, the DM policy with its allowlist, and the bot's mode. Read through `access ... --json` in a worker thread
+    (for a bot on another host that is one capped ssh call); changed in memory only, until `s`: the change words go to
+    `access ... set` with the terminal handed over (App.suspend), because that command shows the changes and asks its
+    questions there, each widening by itself. Its exit status decides what is said on return. Dismissed with what
+    there is to say after a save, or None."""
+    CSS = f"""AccessEdit {{ align: center middle; }}
+    #access {{ width: 118; max-width: 96%; height: auto; border: round {BRAND}; padding: 1 2; }}
+    #a-body {{ height: auto; margin: 1 0; text-wrap: nowrap; }} #a-add {{ width: 44; display: none; }} #a-add.shown {{ display: block; }}"""
+    AUTO_FOCUS = ""   # nothing is focused (None would mean the app's rule: the first field), so the keys are the screen's until a name is typed
+    # tab is the screen's too (priority: before the focus moves).
+    BINDINGS = [Binding("escape", "close", "close"), Binding("up", "move(-1)"), Binding("down", "move(1)"), Binding("left", "turn(-1)"), Binding("right", "turn(1)"),
+                Binding("tab", "side", priority=True), Binding("space", "toggle"), Binding("m", "mention"), Binding("a", "add"), Binding("s", "save"), Binding("c", "copy")]
+
+    def __init__(self, entry: dict) -> None:
+        super().__init__()
+        self.entry = entry                       # the bot's entry of the state: its host, project and name
+        self.doc: dict | None = None             # the document of `access --json`; None until it is read
+        self.was: dict = {}                      # the model as the document had it
+        self.now: dict = {}                      # the model as edited
+        self.at, self.side, self.prow = 0, "left", 0
+        self.kept: dict = {}                     # a channel id (or "dm") -> the list it had before `anyone` (or off) emptied it
+        self.typed: list = []                    # the ids added here by name or id: they stay listed whatever is unticked
+        self.by_hand = ""                        # the command for a shell, where this terminal cannot be handed over
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="access"):
+            yield Static("", id="a-title")
+            yield Static("", id="a-body")
+            yield Input(id="a-add", placeholder="a name or a numeric user id, then enter", max_length=64, compact=True)
+            yield Static("reading access.json and the server's channels ...", id="a-msg", markup=False)
+
+    def on_mount(self) -> None:
+        self.paint()
+        call, entry = self.app.access_cli, self.entry
+        self.app.run_worker(lambda: self.app.call_from_thread(self.loaded, call(entry, "--json")), thread=True)
+
+    def say(self, text: str, style: str = DIM) -> None:
+        self.query_one("#a-msg", Static).update(Text(text, style))
+
+    def loaded(self, answer: tuple) -> None:
+        """The document. Another program's output, from another machine for a remote bot: parsed as JSON, cleaned, read
+        through txt/obj/seq; a wrong shape is a refusal to edit, never a crash."""
+        if not self.is_attached:
+            return
+        rc, out, err = answer
+        try:
+            doc = clean(json.loads(out)) if rc == 0 else None
+        except ValueError:
+            doc = None
+        if not isinstance(doc, dict) or doc.get("access") != 1:
+            return self.say(err or f"claude-discord access gave no document (exit {rc})", ALERT)
+        self.doc, self.was = doc, access_model(doc)
+        self.now = copy.deepcopy(self.was)
+        left = self.left()
+        self.at = left.index(("ch", txt(doc.get("main")))) if ("ch", txt(doc.get("main"))) in left else 0
+        errors = [txt(e) for e in seq(doc.get("errors")) if txt(e)]
+        self.say("Discord did not answer everything (" + "; ".join(errors) + "): a channel it did not list can be named only by id, with the CLI" if errors else A_HINT, WARN if errors else DIM)
+        self.paint()
+
+    def left(self) -> list[tuple]:
+        return access_left(self.doc, self.was, self.now)
+
+    def right(self) -> list[tuple]:
+        return access_right(self.doc, self.was, self.now, self.left()[self.at], self.typed)
+
+    def words(self) -> list[str]:
+        return access_words(self.was, self.now, txt(self.doc.get("owner"))) if self.doc is not None else []
+
+    def paint(self) -> None:
+        e = self.entry
+        title = Text.assemble(("Access", f"bold {BRAND}"), (" · ", DIM), (txt(e.get("bot")), f"bold {BRAND}"),
+                              (f"    {host_label(self.app.state, e.get('host'))} · access.json · applies at the next message, no restart", DIM))
+        if self.words():
+            title.append("    ● unsaved changes", WARN)
+        self.query_one("#a-title", Static).update(title)
+        if self.doc is not None:
+            width = min(118, self.app.width * 96 // 100) - 6
+            self.prow = max(0, min(self.prow, len(self.right()) - 1))
+            self.query_one("#a-body", Static).update(Text("\n").join(access_lines(self.doc, self.was, self.now, self.at, self.side, self.prow, width, extra=self.typed)))
+
+    def adding(self) -> bool:
+        return self.query_one("#a-add", Input).has_class("shown")
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "close":
+            return True
+        return self.doc is not None and not self.adding()
+
+    def action_move(self, d: int) -> None:
+        if self.side == "left":
+            self.at, self.prow = max(0, min(len(self.left()) - 1, self.at + d)), 0
+        else:
+            self.prow = max(0, min(len(self.right()) - 1, self.prow + d))
+        self.paint()
+
+    def action_side(self) -> None:
+        self.side = "right" if self.side == "left" and self.right() else "left"
+        self.paint()
+
+    def radio(self, kind: str, d: int) -> None:
+        if kind == "mode":
+            opts = MODES + ((self.was["mode"],) if self.was["mode"] not in MODES else ())
+            self.now["mode"] = opts[(opts.index(self.now["mode"]) + d) % len(opts)]
+        else:
+            opts = DMS + (("disabled",) if self.was["dm"] == "disabled" else ())
+            cur = self.now["dm"]
+            new = opts[(opts.index(cur) + d) % len(opts)]
+            if new == "off":       # off is an allowlist with nobody on it: the list is put aside, and back when off is left
+                self.kept["dm"], self.now["dm_allow"] = self.now["dm_allow"], []
+            elif cur == "off":
+                self.now["dm_allow"] = self.kept.pop("dm", None) or list(self.was["dm_allow"])
+            self.now["dm"] = new
+        self.paint()
+
+    def action_turn(self, d: int) -> None:
+        row = self.left()[self.at]
+        if self.side == "left" and row[0] != "ch":
+            self.radio(row[0], d)
+        elif (self.side == "left") == (d > 0):
+            self.action_side()
+
+    def action_toggle(self) -> None:
+        row, owner = self.left()[self.at], txt(self.doc.get("owner"))
+        if self.side == "left" and row[0] != "ch":
+            return self.radio(row[0], 1)
+        if self.side == "left":
+            c = row[1]
+            if c in self.now["groups"]:
+                del self.now["groups"][c]
+            elif c in self.was["groups"]:
+                self.now["groups"][c] = copy.deepcopy(self.was["groups"][c])
+            elif owner:
+                self.now["groups"][c] = {"mention": True, "allow": [owner]}   # what the CLI makes of channel+
+            else:
+                return self.say("no owner id is known for this bot (DISCORD_USER_ID in its project's config.env): a channel cannot be added", ALERT)
+            return self.paint()
+        kind, u = self.right()[self.prow]
+        if row[0] == "dm":
+            allow = self.now["dm_allow"]
+            allow.remove(u) if u in allow else allow.append(u)
+            if self.now["dm"] == "off":
+                self.now["dm"] = "allowlist"
+        else:
+            g = self.now["groups"][row[1]]
+            if kind == "any" and g["allow"]:
+                self.kept[row[1]], g["allow"] = g["allow"], []
+            elif kind == "any":
+                back = self.kept.pop(row[1], None) or list(self.was["groups"].get(row[1], {}).get("allow", [])) or ([owner] if owner else [])
+                if not back:
+                    return self.say("nobody to go back to: add a person first (a)", ALERT)
+                g["allow"] = back
+            elif u not in g["allow"]:
+                g["allow"].append(u)
+            elif len(g["allow"]) == 1:
+                return self.say("the last sender stays: a list with nobody on it is everyone. Tick `anyone in the channel` to mean that, or leave the channel (space on it)", ALERT)
+            else:
+                g["allow"].remove(u)
+        self.say(A_HINT)
+        self.paint()
+
+    def action_mention(self) -> None:
+        row = self.left()[self.at]
+        if row[0] == "ch" and row[1] in self.now["groups"]:
+            g = self.now["groups"][row[1]]
+            g["mention"] = not g["mention"]
+            self.paint()
+
+    def action_add(self) -> None:
+        if not self.right():
+            return self.say("a person is added to a channel the bot listens in, or to the DMs: move there first", ALERT)
+        self.side = "right"
+        field = self.query_one("#a-add", Input)
+        field.add_class("shown")
+        field.focus()
+        self.paint()
+
+    def added(self) -> None:
+        field = self.query_one("#a-add", Input)
+        field.value = ""
+        field.remove_class("shown")
+        self.set_focus(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        u, why = find_person(event.value, self.doc)
+        if u is None:
+            return self.say(why, ALERT)
+        row = self.left()[self.at]
+        allow = self.now["dm_allow"] if row[0] == "dm" else self.now["groups"][row[1]]["allow"]
+        if u not in allow:
+            allow.append(u)
+        self.typed.append(u)
+        if row[0] == "dm" and self.now["dm"] == "off":
+            self.now["dm"] = "allowlist"
+        self.added()
+        self.prow = self.right().index(("u", u))
+        self.say(A_HINT)
+        self.paint()
+
+    def action_save(self) -> None:
+        words = self.words()
+        if not words:
+            return self.say("nothing to save")
+        argv = self.app.access_argv(self.entry, "set", *words)
+        rc = self.app.handover(argv)
+        if rc is None:   # no terminal to hand over (Textual cannot suspend here): the same command, for a shell
+            self.by_hand = f"cd {shlex.quote(os.getcwd())} && " + shlex.join(["claude-discord", *argv[1:]])
+            self.say(f"this terminal cannot be handed over for the questions. Run it in a shell (c copies it), then esc:\n{self.by_hand}", WARN)
+        elif rc == 0:
+            self.dismiss("access saved: the plugin reads access.json at the next message, no restart" + (
+                "; the hooks follow the new mode at once, the dev-manager rules at the session's next start, compact or clear" if self.now["mode"] != self.was["mode"] else ""))
+        else:
+            self.say(A_SAID.get(rc, f"claude-discord access exited {rc}: what it said is above the TUI, on the terminal"), ALERT)
+
+    def action_copy(self) -> None:
+        if self.by_hand:
+            self.app.copy_to_clipboard(self.by_hand)
+            self.say(f"copied (if your terminal allows it):\n{self.by_hand}", WARN)
+
+    def action_close(self) -> None:
+        if self.adding():
+            self.added()
+        elif self.words() and not self.by_hand:
+            self.app.push_screen(Confirm(f"Close without saving the changes to {txt(self.entry.get('bot'))}'s access?"), lambda yes: self.dismiss(None) if yes else None)
+        else:
+            self.dismiss(None)
+
+
 class Confirm(ModalScreen[bool]):
     """A yes/no question, No by default (focused, and Enter, n and Escape answer it)."""
     CSS = "Confirm { align: center middle; } #confirm { width: 70; height: auto; border: thick $error; padding: 1 2; }"
@@ -1457,7 +1715,7 @@ class MonitorTUI(App):
     BINDINGS = [Binding("q", "quit", "quit"), Binding("Q", "quit_stop", "quit + stop backend"),
                 Binding("up", "move(-1)"), Binding("down", "move(1)"), Binding("left", "tab(-1)"), Binding("right", "tab(1)"),
                 Binding("space", "toggle"), Binding("enter", "open"), Binding("c", "copy"), Binding("a", "add"), Binding("x", "remove"),
-                Binding("l", "laptop")]
+                Binding("l", "laptop"), Binding("e", "edit")]
 
     def __init__(self, state_dir: Path, bot: str, wrapper: str | None) -> None:
         super().__init__()
@@ -1591,7 +1849,7 @@ class MonitorTUI(App):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         # The row keys belong to the main view: under a Detail or a dialog they do nothing.
-        return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy", "add", "remove", "laptop")
+        return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy", "add", "remove", "laptop", "edit")
 
     def action_tab(self, d: int) -> None:
         self.tab = TABS[(TABS.index(self.tab) + d) % len(TABS)]
@@ -1696,6 +1954,36 @@ class MonitorTUI(App):
         if self.tab == "config":
             listed = {k for k, h in obj(self.state.get("hosts")).items() if obj(h).get("left_s") is None}
             self.push_screen(AddHost(listed), self.wrote)
+
+    def action_edit(self) -> None:
+        """`e` on a bot row: its access editor. Not for a row that is no bot (a project whose health crashed)."""
+        b = obj(obj(self.state.get("bots")).get(self.cursor["bots"] or "")) if self.tab == "bots" else {}
+        if txt(b.get("bot")) and txt(b.get("project")) and ALIAS.fullmatch(txt(b.get("host"))):
+            self.push_screen(AccessEdit(b), self.wrote)
+
+    def access_argv(self, b: dict, *rest: str) -> list[str]:
+        """`claude-discord access --host <the bot's host> --manager <this manager> --project <its project> -- <bot> ...`,
+        run from the manager's project (the TUI's own cwd). The host is `local` or an alias of the ledger; the CLI
+        takes that line's env words itself (this program never has an env value), and sends a project path and a
+        bot's name, which are another machine's text, over ssh as hex digits."""
+        return [self.wrapper, "access", "--host", txt(b.get("host")), "--manager", self.bot, "--project", txt(b.get("project")), "--", txt(b.get("bot")), *rest]
+
+    def access_cli(self, b: dict, *rest: str) -> tuple[int, str, str]:
+        """A read-only access call (`--json`), 60 s at most: the CLI caps its ssh call at 20 s and its Discord calls at 12."""
+        if not self.wrapper:
+            return 127, "", "started without the wrapper (--claude-discord): access cannot be read from here"
+        return run_capped(self.access_argv(b, *rest), 60, limit=1 << 22)
+
+    runner = staticmethod(in_terminal)   # what runs a command on the handed-over terminal (the tests set it)
+
+    def handover(self, argv: list) -> int | None:
+        """The terminal handed to `argv`, which asks its own questions there, until it ends: its exit status. None where
+        the terminal cannot be handed over (Textual's suspend is not supported: no real terminal, Textual Web)."""
+        try:
+            with self.suspend():
+                return self.runner(argv)
+        except SuspendNotSupported:
+            return None
 
     def action_quit_stop(self) -> None:
         if not self.wrapper:

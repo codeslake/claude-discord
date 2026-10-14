@@ -7,6 +7,7 @@ the 40 s stub suite (it needs uv and the Textual wheel):
     uv run --script tests/tui/test_tui.py
 Exit 0 and one "ok:" line per case, or the first failure."""
 import asyncio
+import contextlib
 import importlib.util
 import json
 import os
@@ -351,9 +352,8 @@ def pure():
     assert cut.startswith("○ stopped by you  start: claude-discord") and cut.endswith("…") and cell_len(cut) == 40, cut
     row, under = tui.tabs_lines("alerts", 2, 60).plain.split("\n")
     assert row.rstrip() == " Bots   Alerts 2   Configuration" and under == "─" * 7 + "━" * 10 + "─" * 43, (row, under)
-    assert tui.foot_line("bots").plain.split() == "↑↓ select space expand enter all fields c copy fix ←→ tabs q quit".split()
-    # Below 110 columns the Bots footer keeps every key and shortens two labels: all of it, `q quit` too, inside 80 columns.
-    assert tui.foot_line("bots", 109).plain.split() == "↑↓ select space expand enter fields c copy ←→ tabs q quit".split()
+    # Below 110 columns the Bots footer keeps every key and shortens its labels: all of it, `q quit` too, inside 80
+    # columns (the footer with the e key is asserted with the access editor, below).
     assert all(tui.foot_line(t, 80).plain.split()[-2:] == ["q", "quit"] and cell_len(tui.foot_line(t, 80).plain.rstrip()) <= 80 for t in tui.TABS)
     assert tui.foot_line("alerts").plain.split() == "↑↓ select enter the post's text ←→ tabs q quit".split()
     assert tui.foot_line("config").plain.split() == "←→ tabs ↑↓ select enter settings a add host x remove l laptop q quit".split()
@@ -633,6 +633,20 @@ def pure():
     assert len(far) == 17 and "▸ [ ] #c30" in "\n".join(far) and "31 of 40 channels" in "\n".join(far) and "#c00" not in "\n".join(far), far
     print("ok: the editor draws the server's channels ([✓] listened in, the mention rule, main, bot cannot read, ? when it cannot be told), the DM policy and the mode as radios, the senders beside the cursor's row, what widens in the alert colour, and a window over a long list")
 
+    assert tui.foot_line("bots").plain.split() == "↑↓ select space expand enter all fields e access c copy fix ←→ tabs q quit".split()
+    assert tui.foot_line("bots", 109).plain.split() == "↑↓ move space open enter all e edit c copy ←→ tabs q quit".split()
+    rc, out, err = tui.run_capped(["sh", "-c", "head -c 70000 /dev/zero | tr '\\0' a"], 5)
+    big = tui.run_capped(["sh", "-c", "head -c 70000 /dev/zero | tr '\\0' a"], 5, limit=1 << 22)
+    assert len(out) == 65536 and len(big[1]) == 70000, "access --json's document may be longer than the 64 KiB every other answer is cut at"
+    import builtins
+    asked, real = [], builtins.input
+    builtins.input = lambda prompt="": asked.append(prompt) or ""
+    try:
+        assert tui.in_terminal(["sh", "-c", "exit 4"]) == 4 and tui.in_terminal(["/nonexistent/x"]) == 127 and len(asked) == 2 and "[exit 4]" in asked[0], asked
+    finally:
+        builtins.input = real
+    print("ok: the Bots footer names e; a command run on the handed-over terminal returns its exit status after one line is read, so what it printed stays until then")
+
 
 def fuzz():
     """Every value of a small state replaced, one at a time, by a value of each other type: a host of another version
@@ -817,7 +831,7 @@ async def shell(app, pilot):
 
 async def small(app, pilot):
     foot = text(app, "#foot")
-    assert foot.split() == "↑↓ select space expand enter fields c copy ←→ tabs q quit".split() and cell_len(foot.rstrip()) <= app.size.width == 80, foot
+    assert foot.split() == "↑↓ move space open enter all e edit c copy ←→ tabs q quit".split() and cell_len(foot.rstrip()) <= app.size.width == 80, foot
     assert [app.query_one(w).size.height for w in ("#title", "#tabs", "#foot", "#pane")] == [1, 2, 1, 20]
     for tab in ("alerts", "config"):
         await pilot.press("right")
@@ -1398,6 +1412,147 @@ async def host_edit_refused(app, pilot):
         assert len(app.screen_stack) == 1
 
 
+# The wrapper for the access editor: `access ... --json` prints the document the case put in access.json (or what
+# access.err holds, exit 5); every call's arguments go to `args`.
+ACCESS_CLI = r'''d=$(dirname "$0"); echo "$*" >> "$d/args"
+case "$*" in
+  access*" --json") [ ! -e "$d/access.err" ] || { cat "$d/access.err" >&2; exit 5; }; cat "$d/access.json";;
+esac'''
+
+
+def access_cli(d):
+    """The document, longer than the 64 KiB every other answer of the CLI is cut at (a server with hundreds of channels)."""
+    (Path(d) / "access.json").write_text(json.dumps(dict(access_doc(), pad="x" * 70000)))
+    return stub(d, ACCESS_CLI + CHECK_STUB)
+
+
+def access_calls(app):
+    return [l for l in (Path(app.state_dir) / "args").read_text().splitlines() if l.startswith("access ")]
+
+
+def hand_over(app, *codes):
+    """The terminal can be handed over (as a real one can; the test driver cannot): what would run there is kept in
+    app.ran, and each run exits with the next of `codes`."""
+    app.ran, left = [], list(codes)
+    app.suspend = contextlib.nullcontext
+    app.runner = lambda argv: app.ran.append(argv) or left.pop(0)
+
+
+async def access_edit(app, pilot):
+    ssh_home(app)
+    hand_over(app, 4, 0)
+    scr, body = lambda sel: text(app.screen, sel), lambda: text(app.screen, "#a-body").split("\n")
+    await pilot.press("right", "e", "left", "e")   # e is the Bots tab's key
+    await settle(app, pilot)
+    base = "access --host local --manager mgr --project /home/u/rcps -- photobot"
+    assert isinstance(app.screen, tui.AccessEdit) and access_calls(app) == [base + " --json"], access_calls(app)
+    assert scr("#a-title") == "Access · photobot    lmd79 · access.json · applies at the next message, no restart" and scr("#a-msg") == tui.A_HINT
+    # The cursor starts on the bot's main channel; a name another machine wrote is drawn without its escape sequence.
+    assert body()[2].split() == "▸ [✓] #dev-bots main required [✓] gpuvillain".split() and "\x1b[2J" not in drawn(app), body()
+    await pilot.press("m")
+    assert body()[2].split()[:5] == "▸ [✓] #dev-bots main any".split() and scr("#a-title").endswith("● unsaved changes"), body()[2]
+    # A channel the bot does not listen in: space adds it for the owner alone; tab goes to its senders; `a` takes a name.
+    await pilot.press("down", "down", "m", "space")
+    assert body()[4].split() == "▸ [✓] #general bot cannot read required a adds a person by name or id".split() and "[✓] dongyong22  owner" in body()[1], body()
+    await pilot.press("tab", "a", *"junyong", "enter")
+    assert "▸ [✓] junyong-dev-bot  bot" in "\n".join(body()) and not app.screen.adding() and app.focused is None, body()
+    # A name nobody has, then one several have: said, and the field stays for another try; escape leaves the field, not the editor.
+    await pilot.press("a", *"zzz", "enter")
+    assert "numeric user id" in scr("#a-msg") and app.screen.adding()
+    await pilot.press("escape")
+    assert isinstance(app.screen, tui.AccessEdit) and not app.screen.adding()
+    # The last sender cannot be unticked (an empty list is everyone); `anyone` says that on purpose, and gives the list back.
+    await pilot.press("up", "up", "space", "down", "down", "space")
+    assert "the last sender stays" in scr("#a-msg") and "▸ [✓] junyong-dev-bot" in "\n".join(body()), (scr("#a-msg"), body())
+    await pilot.press("down", "space")
+    assert "▸ [✓] anyone in the channel" in "\n".join(body()) and app.screen.now["groups"]["902"]["allow"] == []
+    await pilot.press("space")
+    assert app.screen.now["groups"]["902"]["allow"] == ["333"], app.screen.now
+    # The DM policy and the mode are radios: an arrow or space moves the choice.
+    await pilot.press("tab", "down", "down", "down", "right", "right")
+    assert "(●) pairing" in body()[8] and app.screen.now["dm"] == "pairing", body()[8]
+    await pilot.press("down", "space", "space")
+    assert "(●) autoresearchclaw" in body()[9], body()[9]
+    # s hands the terminal to `access ... set <the change words>`. Exit 4 (a question answered no): nothing was changed,
+    # the editor and its changes stay.
+    await pilot.press("s")
+    words = ["mention:900=off", "channel+902", "allow:902+333", "allow:902-111", "dm=pairing", "mode=autoresearchclaw"]
+    assert app.ran == [[app.wrapper, "access", "--host", "local", "--manager", "mgr", "--project", "/home/u/rcps", "--", "photobot", "set", *words]], app.ran
+    assert isinstance(app.screen, tui.AccessEdit) and scr("#a-msg").startswith("answered no: nothing was changed") and app.screen.words() == words
+    # Exit 0: said, the editor closes, and the monitor is asked for a pass so the row shows the new policy.
+    await pilot.press("s")
+    await settle(app, pilot)
+    assert len(app.ran) == 2 and len(app.screen_stack) == 1 and checks(app) == 1, (app.ran, app.screen_stack)
+    assert app.said_all == ["access saved: the plugin reads access.json at the next message, no restart; the hooks follow the new mode at once, the dev-manager rules at the "
+                            f"session's next start, compact or clear\n{CHECKS}"], app.said_all
+    # Nothing changed: s runs nothing, escape closes without a question.
+    await pilot.press("e")
+    await settle(app, pilot)
+    await pilot.press("s")
+    assert scr("#a-msg") == "nothing to save" and len(app.ran) == 2
+    await pilot.press("escape")
+    assert len(app.screen_stack) == 1
+    # Changed: escape asks before it closes.
+    await pilot.press("e")
+    await settle(app, pilot)
+    await pilot.press("m", "escape")
+    assert isinstance(app.screen, tui.Confirm) and "photobot" in app.screen.text
+    await pilot.press("y")
+    assert len(app.screen_stack) == 1 and len(app.ran) == 2
+
+
+async def access_no_terminal(app, pilot):
+    """Where the terminal cannot be handed over (here: the test driver; in the field: Textual Web), s runs nothing and
+    shows the command to run in a shell; c copies it."""
+    await pilot.press("e")
+    await settle(app, pilot)
+    await pilot.press("m", "s")
+    cmd = f"cd {os.getcwd()} && claude-discord access --host local --manager mgr --project /home/u/rcps -- photobot set mention:900=off"
+    assert cmd in text(app.screen, "#a-msg") and "cannot be handed over" in text(app.screen, "#a-msg"), text(app.screen, "#a-msg")
+    await pilot.press("c")
+    assert app.clipboard == cmd, app.clipboard
+    await pilot.press("escape")
+    assert len(app.screen_stack) == 1, "the command was given: escape closes without asking again"
+
+
+async def access_refused(app, pilot):
+    """A host whose claude-discord is older than 1.13.0 (the CLI's exit 5), a document of the wrong shape, a row that
+    is no bot: said, nothing to edit, nothing run."""
+    d = Path(app.state_dir)
+    hand_over(app)
+    (d / "access.err").write_text("claude-discord: access: old needs claude-discord 1.13.0 for this (it has 1.10.5; claude-discord update, there) [/]\n")
+    app.cursor["bots"] = OLDBOT
+    app.paint()
+    await pilot.press("e")
+    await settle(app, pilot)
+    assert access_calls(app) == ["access --host old --manager mgr --project /home/u/p -- oldbot --json"], access_calls(app)
+    assert text(app.screen, "#a-msg") == "claude-discord: access: old needs claude-discord 1.13.0 for this (it has 1.10.5; claude-discord update, there) [/]"
+    await pilot.press("space", "m", "a", "s", "tab", "down")
+    assert app.ran == [] and text(app.screen, "#a-body") == "" and isinstance(app.screen, tui.AccessEdit)
+    await pilot.press("escape")
+    (d / "access.err").unlink()
+    for doc in ('{"access": 2}', "not json", '{"access": 1, "policy": "x", "channels": [7, {"id": 5}, {"id": "9", "name": 3, "read": "y"}], "people": "no", "guild": 4, "errors": [3, "the server\'s channels: HTTP 403"]}'):
+        (d / "access.json").write_text(doc)
+        await pilot.press("e")
+        await settle(app, pilot)
+        if doc.startswith('{"access": 1'):   # the shape is wrong everywhere but the marker: a list with one channel, and what Discord did not answer is said
+            assert "▸ [ ] #9" in text(app.screen, "#a-body") and "the server's channels: HTTP 403" in text(app.screen, "#a-msg"), text(app.screen, "#a-body")
+            await pilot.press("space", "tab", "s")
+            assert "no owner id is known" in text(app.screen, "#a-msg") or text(app.screen, "#a-msg") == "nothing to save"
+        else:
+            assert text(app.screen, "#a-msg") == "claude-discord access gave no document (exit 0)" and text(app.screen, "#a-body") == ""
+        await pilot.press("escape")
+        assert len(app.screen_stack) == 1 and app.ran == []
+    # e on a row that is no bot (a project whose health crashed) opens nothing.
+    n = len(access_calls(app))
+    app.state["bots"][CRASHED] = {"host": "wmac", "project": "/Users/u/q", "verdict": "blind", "since": iso(time.time() - 20), "detail": "x"}
+    app.cursor["bots"] = CRASHED
+    app.paint()
+    await pilot.press("e")
+    await settle(app, pilot)
+    assert len(app.screen_stack) == 1 and len(access_calls(app)) == n
+
+
 async def stopped(app, pilot):
     assert text(app, "#title").endswith("○ not running") and f"monitor stopped at 2026-10-11T12:00:00Z" in text(app, "#bar")
 
@@ -1470,6 +1625,9 @@ async def main():
     await case("add_host_bare", add_host_bare, state="all_ok")
     await case("host_edit", host_edit, state="all_ok", wrapper=edit_cli)
     await case("host_edit_refused", host_edit_refused, state="all_ok", wrapper=edit_cli)
+    await case("access_edit", access_edit, state="all_ok", wrapper=access_cli)
+    await case("access_no_terminal", access_no_terminal, state="all_ok", wrapper=access_cli)
+    await case("access_refused", access_refused, state="all_ok", wrapper=access_cli)
     await case("stopped", stopped)
     await case("stopped_by_user", stopped_by_user)
     await case("overdue", overdue)
