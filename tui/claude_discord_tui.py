@@ -1049,9 +1049,9 @@ class HostEdit(ModalScreen):
             yield Static("", id="h-last")
             yield Static("", id="h-fix", markup=False)
             with Horizontal(id="h-buttons"):
-                yield Button("Check now", id="h-check", compact=True)
-                yield Button("Save", id="h-save", compact=True, disabled=True)
-                yield Button("Stop monitoring this host", id="h-stop", variant="error", compact=True, disabled=True)
+                yield Btn("Check now", id="h-check", compact=True)
+                yield Btn("Save", id="h-save", compact=True, disabled=True)
+                yield Btn("Stop monitoring this host", id="h-stop", variant="error", compact=True, disabled=True)
                 yield Static("asks first; its bots leave the list", classes="hint")
             yield Static("reading the ledger ...", id="h-msg", markup=False)
 
@@ -1940,8 +1940,19 @@ class AccessEdit(ModalScreen):
             self.dismiss(None)
 
 
+class Btn(Button):
+    """A button of a popup's row: ← and → move the focus to the one before or after it in that row (around at the
+    ends), Enter presses it."""
+    BINDINGS = [Binding("left", "row(-1)", show=False), Binding("right", "row(1)", show=False)]
+
+    def action_row(self, d: int) -> None:
+        row = [b for b in self.parent.children if isinstance(b, Button) and b.focusable]
+        if self in row:
+            row[(row.index(self) + d) % len(row)].focus()
+
+
 class Confirm(ModalScreen[bool]):
-    """A yes/no question, No by default (focused, and Enter, n and Escape answer it)."""
+    """A yes/no question, No by default (focused, and Enter, n and Escape answer it; ← → move between the buttons)."""
     CSS = "Confirm { align: center middle; } #confirm { width: 70; height: auto; border: thick $error; padding: 1 2; }"
     BINDINGS = [Binding("y", "answer(True)", "yes"), Binding("n", "answer(False)", "no"), Binding("escape", "answer(False)", "no")]
     LABELS = ("No", "Yes")
@@ -1957,8 +1968,8 @@ class Confirm(ModalScreen[bool]):
                 yield from self.buttons()
 
     def buttons(self) -> ComposeResult:
-        yield Button(self.LABELS[0], id="no")
-        yield Button(self.LABELS[1], id="yes", variant="error")
+        yield Btn(self.LABELS[0], id="no")
+        yield Btn(self.LABELS[1], id="yes", variant="error")
 
     def on_mount(self) -> None:
         self.query_one("#no", Button).focus()
@@ -2030,7 +2041,7 @@ class Scrolled(Confirm):
 class AccessAsk(Scrolled):
     """The question of `access ... set`, run on the TUI's pty: all it printed up to it (the changes, the widenings
     first and red, the warnings) and, always in view under them, the question with its counts; Yes / No. No is the
-    default (focused, and Enter on it, n and Escape answer it): `n` is written to it; y, or Yes, writes `y`."""
+    default (focused, and Enter on it, n and Escape answer it): `n` is written to it; y, or Enter on Yes, writes `y`."""
 
 
 class HostSays(Scrolled):

@@ -1317,6 +1317,13 @@ async def host_edit(app, pilot):
     await settle(app, pilot)
     assert scr("#h-title") == "Host · local" and scr("#h-target") == "target          this machine" and app.screen.query_one("#h-stop").disabled and not app.screen.query_one("#h-save").disabled
     assert scr("#h-env").split() == "env HTTPS_PROXY ••••".split() and scr("#h-last").startswith("last check      ● ok   checked 1m ago")
+    # ← → move the focus along the row of buttons, around at its ends, past one that is disabled.
+    app.screen.query_one("#h-check").focus()
+    focus = []
+    for key in ("right", "right", "left"):
+        await pilot.press(key)
+        focus.append(app.focused.id)
+    assert focus == ["h-save", "h-check", "h-save"], focus
     # Check now asks the monitor that runs for a pass (monitor --check) and says what it answered: no ssh, no hosts
     # call, nothing written from here.
     n, c = len(cli_calls(app)), checks(app)
@@ -1564,11 +1571,17 @@ async def access_edit(app, pilot):
     await settle(app, pilot)
     assert app.runs[0].written == ["n\n"] and app.ran == []
     assert isinstance(app.screen, tui.AccessEdit) and scr("#a-msg").startswith("answered no: nothing was changed") and app.screen.words() == words, scr("#a-msg")
-    # y: exit 0, said, the editor closes, and the monitor is asked for a pass so the row shows the new policy.
+    # Yes (→ moves the focus to it, ← back, around at the ends; Enter presses the focused one): exit 0, said, the
+    # editor closes, and the monitor is asked for a pass so the row shows the new policy.
     await pilot.press("s")
     await settle(app, pilot)
     assert isinstance(app.screen, tui.AccessAsk) and app.focused.id == "no"
-    await pilot.press("y")
+    focus = []
+    for key in ("right", "right", "left", "left"):
+        await pilot.press(key)
+        focus.append(app.focused.id)
+    assert focus == ["yes", "no", "yes", "no"] and app.runs[1].written == [], focus
+    await pilot.press("right", "enter")
     await settle(app, pilot)
     assert app.runs[1].written == ["y\n"] and len(app.screen_stack) == 1 and checks(app) == 1 and app.ran == [], (app.runs, app.screen_stack)
     assert app.said_all == ["access saved: the plugin reads access.json at the next message, no restart; the hooks follow the new mode at once, the dev-manager rules at the "
@@ -1585,6 +1598,10 @@ async def access_edit(app, pilot):
     await settle(app, pilot)
     await pilot.press("m", "escape")
     assert isinstance(app.screen, tui.Confirm) and "photobot" in app.screen.text and app.focused.id == "no"
+    await pilot.press("left")
+    assert app.focused.id == "yes"
+    await pilot.press("right")
+    assert app.focused.id == "no"
     await pilot.press("y")
     assert len(app.screen_stack) == 1 and len(app.runs) == 2
 
@@ -1923,13 +1940,18 @@ async def access_host(app, pilot):
     await pilot.pause()
     assert isinstance(app.screen, tui.HostSays) and scr("#ask-body") == "the host says:\nVerification code: ]0;T" and app.focused.id == "no", scr("#ask-body")
     assert str(app.focused.label) == "Cancel" and "\x1b]0;" not in drawn(app)
+    focus = []
+    for key in ("right", "right", "left"):
+        await pilot.press(key)
+        focus.append(str(app.focused.label))
+    assert focus == ["Wait", "Cancel", "Wait"], focus
     await pilot.press("escape")
     await settle(app, pilot)
     assert app.runs[0].killed.is_set() and app.runs[0].written == [] and isinstance(app.screen, tui.AccessEdit) and scr("#a-msg") == "stopped: nothing was changed", scr("#a-msg")
     # Wait: the popup goes, the run goes on; esc in the editor still stops it (no answer was given).
     await pilot.press("s")
     await pilot.pause()
-    app.screen.query_one("#yes").press()
+    await pilot.press("right", "enter")
     await pilot.pause()
     assert isinstance(app.screen, tui.AccessEdit) and not app.runs[1].killed.is_set() and app.screen.run is app.runs[1]
     await pilot.press("escape")
