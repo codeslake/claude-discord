@@ -3570,21 +3570,22 @@ cd "$P"
 # --- backend monitor ------------------------------------------------------
 # ssh, stubbed for setup's host probe and the monitor's passes: argv to ssh.log; per host, $HOME/mon/<host>.out is
 # printed, .rc is the exit status (.rc2 instead on the ControlPath=none retry; .out is printed with a non-zero one only
-# when .both exists), .sleep delays it, .hold leaves a detached child behind that keeps the output open so long; a byte left on
+# when .both exists; .trc instead for a call under -t), .sleep delays it, .hold leaves a detached child behind that keeps the output open so long; a byte left on
 # stdin is reported as "ATE" (a probe must never eat setup's piped answers).
 MON="$HOME/mon"; mkdir -p "$MON"
 cat > "$HOME/bin/ssh" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "$HOME/ssh.log"
 IFS= read -r -t 0.05 l && printf 'ATE %s\n' "$l" >> "$HOME/ssh.log"
-host="" none=""
+host="" none="" tty=""
 for a in "$@"; do [ "$a" != ControlPath=none ] || none=1; done
-while [ $# -gt 0 ]; do case $1 in -o) shift 2;; --|-t) shift;; *) host=$1; break;; esac; done
+while [ $# -gt 0 ]; do case $1 in -o) shift 2;; --) shift;; -t) tty=1; shift;; *) host=$1; break;; esac; done
 d=$HOME/mon
 [ ! -f "$d/$host.hold" ] || setsid /bin/sleep "$(<"$d/$host.hold")" &
 if [ -f "$d/$host.sleep" ]; then echo $$ > "$d/$host.pid"; /bin/sleep "$(<"$d/$host.sleep")"; fi
 rc=0; [ ! -f "$d/$host.rc" ] || rc=$(<"$d/$host.rc")
 [ -z "$none" ] || [ ! -f "$d/$host.rc2" ] || rc=$(<"$d/$host.rc2")
+[ -z "$tty" ] || [ ! -f "$d/$host.trc" ] || rc=$(<"$d/$host.trc")
 [ "$rc" != 0 ] && [ ! -f "$d/$host.both" ] || cat "$d/$host.out" 2>/dev/null
 exit "$rc"
 STUB
@@ -3986,10 +3987,11 @@ printf '{"peers":[{"name":"peerbot","bot_id":"555","owner_id":"1","machine":"m"}
 # READ_MESSAGE_HISTORY (65536) after the roles and the channel's overwrites: 900 plain; 901 denied to @everyone and
 # given back to a role of the bot; 902 denied to @everyone; 903 its history denied to the bot itself; 904 a voice
 # channel (not listed); 905 an overwrite that is no number (not known, never a guess); 906 a forum, denied to a role
-# the bot has not, its name with an escape sequence and a zero-width space in it.
-A_CH='[{"id":"900","type":0,"name":"dev-bots","position":1,"permission_overwrites":[]},{"id":"901","type":0,"name":"bot-health","position":2,"permission_overwrites":[{"id":"5","type":0,"allow":"0","deny":"1024"},{"id":"70","type":0,"allow":"1024","deny":"0"}]},{"id":"902","type":0,"name":"general","position":3,"permission_overwrites":[{"id":"5","type":0,"allow":"0","deny":"1024"}]},{"id":"903","type":0,"name":"hist","position":4,"permission_overwrites":[{"id":"777","type":1,"allow":"0","deny":"65536"}]},{"id":"904","type":2,"name":"voice","position":5},{"id":"905","type":0,"name":"odd","position":6,"permission_overwrites":[{"id":"5","type":0,"allow":"x","deny":"0"}]},{"id":"906","type":15,"name":"fo\u001b[2Jrum\u200b","position":0,"permission_overwrites":[{"id":"71","type":0,"allow":"0","deny":"1024"}]}]'
-A_G='{"id":"5","name":"Tor-AIC","owner_id":"1","roles":[{"id":"5","permissions":"66560"},{"id":"70","permissions":"0"},{"id":"71","permissions":"8"}]}'
-A_M='{"user":{"id":"777"},"roles":["70"]}'
+# the bot has not, its name with an escape sequence, a bidi override and a zero-width space in it; 907 allowed to one
+# role of the bot and denied to another (within one level the allow wins). 905's name is cut at 40 characters.
+A_CH='[{"id":"900","type":0,"name":"dev-bots","position":1,"permission_overwrites":[]},{"id":"901","type":0,"name":"bot-health","position":2,"permission_overwrites":[{"id":"5","type":0,"allow":"0","deny":"1024"},{"id":"70","type":0,"allow":"1024","deny":"0"}]},{"id":"902","type":0,"name":"general","position":3,"permission_overwrites":[{"id":"5","type":0,"allow":"0","deny":"1024"}]},{"id":"903","type":0,"name":"hist","position":4,"permission_overwrites":[{"id":"777","type":1,"allow":"0","deny":"65536"}]},{"id":"904","type":2,"name":"voice","position":5},{"id":"905","type":0,"name":"abcdefghijabcdefghijabcdefghijabcdefghijabcde","position":6,"permission_overwrites":[{"id":"5","type":0,"allow":"x","deny":"0"}]},{"id":"906","type":15,"name":"fo\u001b[2J\u202erum\u200b","position":0,"permission_overwrites":[{"id":"71","type":0,"allow":"0","deny":"1024"}]},{"id":"907","type":0,"name":"split","position":7,"permission_overwrites":[{"id":"70","type":0,"allow":"1024","deny":"0"},{"id":"72","type":0,"allow":"0","deny":"1024"}]}]'
+A_G='{"id":"5","name":"Tor-AIC","owner_id":"1","roles":[{"id":"5","permissions":"66560"},{"id":"70","permissions":"0"},{"id":"71","permissions":"8"},{"id":"72","permissions":"0"}]}'
+A_M='{"user":{"id":"777"},"roles":["70","72"]}'
 A_MM='[{"user":{"id":"111","username":"dy","global_name":"dongyong22"},"nick":null},{"user":{"id":"333","username":"jbot","bot":true},"nick":"junyong-dev-bot"}]'
 : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_REPLIES"
 queue_line "200 $A_CH"; queue_line "200 $A_G"; queue_line "200 $A_M"; queue_line "200 $A_MM"
@@ -3998,7 +4000,7 @@ ac acc --json
   and .peers == ["555"] and .guild == {id: "5", name: "Tor-AIC"} and .members == "api" and .errors == []
   and .policy == {dm: "allowlist", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: ["111", "222"]}, {id: "901", mention: false, allow: []}]}
   and ([.channels[] | [.id, .name, .kind, .read]] == [["906", "fo[2Jrum", "forum", true], ["900", "dev-bots", "text", true], ["901", "bot-health", "text", true],
-       ["902", "general", "text", false], ["903", "hist", "text", false], ["905", "odd", "text", null]])
+       ["902", "general", "text", false], ["903", "hist", "text", false], ["905", "abcdefghijabcdefghijabcdefghijabcdefghij", "text", null], ["907", "split", "text", true]])
   and .people == [{id: "111", name: "dongyong22", kept: "dongyong22", bot: false}, {id: "222", name: "gpu villain", kept: "gpu villain", bot: false},
                   {id: "333", name: "junyong-dev-bot", kept: "", bot: true}, {id: "555", name: "peerbot", kept: "peerbot", bot: true}, {id: "777", name: "ACC", kept: "ACC", bot: true}]' <<<"$AO" >/dev/null &&
   [ "$(<"$AD/member-names")" = "$(printf '111 dongyong22\n333 junyong-dev-bot')" ] && [ "$(stat -c %a "$AD/member-names")" = 600 ] ||
@@ -4011,8 +4013,13 @@ ac acc --json
 # names kept here, and that is no error.
 : > "$CURL_REPLIES"; queue_line "200 $A_CH"; queue_line '200 {"id":"5","name":"Tor-AIC","owner_id":"1","roles":[{"id":"70","permissions":"66560"}]}'; queue_line "200 $A_M"; queue_line '403 {"message":"Missing Access"}'
 ac acc --json
-[ "$ARC" = 0 ] && jq -e '([.channels[].read] | unique) == [null] and (.channels | length) == 6 and .members == "names" and .errors == [] and [.people[].id] == ["111", "222", "555", "777"]' <<<"$AO" >/dev/null ||
+[ "$ARC" = 0 ] && jq -e '([.channels[].read] | unique) == [null] and (.channels | length) == 7 and .members == "names" and .errors == [] and [.people[].id] == ["111", "222", "555", "777"]' <<<"$AO" >/dev/null ||
   { echo "FAIL: roles that do not say what @everyone may do leave every channel not known (null), never readable; no member list is no error: rc=$ARC $AO / $AE"; exit 1; }
+# The server's owner reads every channel, whatever its overwrites (an administrator too: --host local, below).
+: > "$CURL_REPLIES"; queue_line "200 $A_CH"; queue_line "200 $(jq -c '.owner_id = "777"' <<<"$A_G")"; queue_line "200 $A_M"; queue_line '403 {}'
+ac acc --json
+[ "$ARC" = 0 ] && jq -e '[.channels[] | select(.kind != "unknown") | .read] == [true, true, true, true, true, true, true]' <<<"$AO" >/dev/null ||
+  { echo "FAIL: the server's owner reads every channel: rc=$ARC $AO / $AE"; exit 1; }
 # Usage, a bot that is not set up, and the verb's name as a bot's.
 for bad in "" "acc frob" "--frob acc --json"; do
   ac $bad
@@ -4027,7 +4034,7 @@ cp "$MR/config.env" "$HOME/acc.env.was"; printf "DISCORD_CHANNEL_ID='9 9'\nDISCO
 ac acc --json; cp "$HOME/acc.env.was" "$MR/config.env"; rm -f "$HOME/acc.env.was"
 [ "$ARC" = 1 ] && [ -z "$AO" ] && grep -q "^claude-discord: access: DISCORD_CHANNEL_ID in $MR/config.env is not a channel id" <<<"$AE" && [ ! -s "$CURL_LOG" ] ||
   { echo "FAIL: a DISCORD_CHANNEL_ID that is no id is exit 1 with a reason, not an empty answer: rc=$ARC $AO / $AE"; exit 1; }
-echo "ok: access --json: one line with the policy, the server's channels and whether the bot can read each (roles, then the channel's overwrites for @everyone, the bot's roles and the bot; not known is null, never a guess), the people (the member list when Discord gives it, the names kept here when it does not) and the peers; four calls, the token on curl's stdin only; 'access' is a reserved bot name"
+echo "ok: access --json: one line with the policy, the server's channels and whether the bot can read each (roles, then the channel's overwrites for @everyone, the bot's roles, allow over deny within one level, and the bot; the server's owner and an administrator read all; not known is null, never a guess), names without controls, bidi or zero-width characters and cut at 40, the people (the member list when Discord gives it, the names kept here when it does not) and the peers; four calls, the token on curl's stdin only; a DISCORD_CHANNEL_ID that is no id is exit 1; 'access' is a reserved bot name"
 # access set, with no terminal: the changes are printed and nothing is written (exit 3), so what a set of words would do
 # can be read by anyone. A change that widens who can drive the bot is marked "!": an @mention no longer required, a
 # channel opened to anyone, DMs to pairing, a person added to the DM allowlist, a person the bot listed nowhere
@@ -4103,6 +4110,10 @@ at 'y\ny\ny\n' acc set mention:900=off allow:900-222 channel+902 dm=pairing
   { echo "FAIL: the new access.json holds the changes and every other key as it was, is mode 600 and was moved in (access.json, its .lock and access.log are all there is): $(jq -c . "$AD/access.json") $(ls -l "$AD")"; exit 1; }
 [[ $(<"$AD/access.log") =~ ^20[0-9-]{8}T[0-9:]{8}Z\ $(id -un)\ $(uname -n | cut -d. -f1)\ mention:900=off\ allow:900-222\ channel\+902\ dm=pairing$ ]] && [ "$(stat -c %a "$AD/access.log")" = 600 ] ||
   { echo "FAIL: access.log has one line for the write: time, account, machine, the change words: $(cat "$AD/access.log" 2>&1)"; exit 1; }
+# A terminal on stdout with stdin from elsewhere is no terminal: nothing is asked, nothing written (exit 3).
+A=$(<"$AD/access.json"); ARC=0; AO=$(python3 -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' bash -c 'exec bash "$0" access acc set mention:901=on </dev/null' "$S" 2>&1) || ARC=$?
+[ "$ARC" = 3 ] && grep -q 'not a terminal (stdin and stdout), so nothing was changed' <<<"$AO" && [ "$(<"$AD/access.json")" = "$A" ] ||
+  { echo "FAIL: stdin that is no terminal is refused even with stdout one (exit 3): rc=$ARC $AO"; exit 1; }
 # One no, anywhere, writes nothing (exit 4): the file is what was shown and agreed to, or as it was. Here both
 # widenings are agreed to and the last question, for the rest, is not.
 printf '%s\n' "$A_FILE" > "$AD/access.json"; A_LOG=$(<"$AD/access.log")
@@ -4188,6 +4199,19 @@ at '' --host h1 --manager mgr --project '/x y/한' acc set dm=pairing mention:90
 [ "$ARC" = 4 ] && [ "$(command grep -v '^ATE' "$HOME/ssh.log")" = "-o BatchMode=yes -o ConnectTimeout=8 -- h1 ~/.local/bin/claude-discord --version
 -t -o BatchMode=yes -o ConnectTimeout=8 $A_REMOTE set dm=pairing mention:900=off" ] ||
   { echo "FAIL: access --host set at a terminal asks the host's version, then runs the change there under ssh -t and exits as it did: rc=$ARC $AO / $(<"$HOME/ssh.log")"; exit 1; }
+# ssh -t itself failing (255) is no answer from the host (exit 5), not the host's own status.
+rm -f "$MON/h1.rc"; echo 255 > "$MON/h1.trc"
+at '' --host h1 --manager mgr --project '/x y/한' acc set dm=pairing
+[ "$ARC" = 5 ] && grep -q '^claude-discord: access: ssh to h1 failed (exit 255)' <<<"$AO" || { echo "FAIL: ssh -t failing is exit 5: rc=$ARC $AO"; exit 1; }
+# With no terminal here the host prints the changes and refuses (exit 3): what it printed is another machine's text,
+# passed on without its control characters.
+rm -f "$MON/h1.trc"; printf 'claude-discord 1.13.0 (abc1234)\n  ! DMs: allowlist -> pairing\033[2J\n' > "$MON/h1.out"; echo 3 > "$MON/h1.rc"
+ac --host h1 --manager mgr --project '/x y/한' acc set dm=pairing
+[ "$ARC" = 3 ] && grep -qx '  ! DMs: allowlist -> pairing\[2J' <<<"$AO" || { echo "FAIL: what the host prints for a set with no terminal is passed on cleaned, with its exit status: rc=$ARC $(printf '%q' "$AO")"; exit 1; }
+# A host that does not answer within the cap is exit 5.
+rm -f "$MON/h1.rc"; echo 5 > "$MON/h1.sleep"
+CLAUDE_DISCORD_PROBE_CAP_TENTHS=1 ac --host h1 --manager mgr --project '/x y/한' acc --json; rm -f "$MON/h1.sleep" "$MON/h1.pid"
+[ "$ARC" = 5 ] && [ "$AE" = "claude-discord: access: h1 gave no answer within 0.1s" ] || { echo "FAIL: a host that does not answer within the cap is exit 5: rc=$ARC $AE"; exit 1; }
 # A 1.13.0 host that could not do it (no such bot there) prints no version line and says why: that is passed on (exit 1).
 printf "motd: release notes of claude-discord 1.12.0 (old)\\nclaude-discord: access: no bot 'acc'\\007 set up in /x y/.claude/discord-agents (claude-discord setup <bot>)\\n\\n" > "$MON/h1.out"; echo 1 > "$MON/h1.rc"
 ac --host h1 --manager mgr --project '/x y/한' acc --json
@@ -4220,11 +4244,13 @@ for bad in "zz 616363" "2f7 616363"; do
   rc=0; out=$(cd "$HOME" && bash "$S" --version --access $bad --json 2>&1) || rc=$?
   [ "$rc" = 2 ] && [ -z "$out" ] || { echo "FAIL: --version --access '$bad' is exit 2 with no output: rc=$rc $out"; exit 1; }
 done
-# --host local: here, with the env words of the ledger's local line (the monitor's Discord calls use the same).
+# --host local: here, with the env words of the ledger's local line (the monitor's Discord calls use the same). The bot
+# is an administrator here (its role 71): it reads every channel, whatever the overwrites.
+: > "$CURL_REPLIES"; queue_line "200 $A_CH"; queue_line "200 $A_G"; queue_line '200 {"user":{"id":"777"},"roles":["71"]}'; queue_line '403 {}'
 rm -f "$HOME/curl.proxy"; ac --host local --manager mgr --project "$MP" acc --json
-[ "$ARC" = 0 ] && jq -e '.bot == "acc"' <<<"$AO" >/dev/null && [ "$(sort -u "$HOME/curl.proxy")" = "http://u:secretpw@127.0.0.1:8118|http://u:secretpw@127.0.0.1:8118" ] && [[ $AO$AE != *secretpw* ]] ||
-  { echo "FAIL: --host local runs here with the local line's env words: rc=$ARC $AO / $AE / $(cat "$HOME/curl.proxy" 2>&1)"; exit 1; }
-echo "ok: access --host: over ssh as a pass goes (the ledger line's env words, the alias after --), only hex digits and change words in the remote command, behind --version; --json takes a document of any length from among what the host prints; set runs under ssh -t at a terminal, after the host's version was asked; a host before 1.13.0 is exit 5 and is sent no change, and what a 1.13.0 host could not do is passed on; local runs here with the local line's env"
+[ "$ARC" = 0 ] && jq -e '.bot == "acc" and [.channels[] | select(.kind != "unknown") | .read] == [true, true, true, true, true, true, true]' <<<"$AO" >/dev/null && [ "$(sort -u "$HOME/curl.proxy")" = "http://u:secretpw@127.0.0.1:8118|http://u:secretpw@127.0.0.1:8118" ] && [[ $AO$AE != *secretpw* ]] ||
+  { echo "FAIL: --host local runs here with the local line's env words, and an administrator reads every channel: rc=$ARC $AO / $AE / $(cat "$HOME/curl.proxy" 2>&1)"; exit 1; }
+echo "ok: access --host: over ssh as a pass goes (the ledger line's env words, the alias after --), only hex digits and change words in the remote command, behind --version; --json takes a document of any length from among what the host prints; set runs under ssh -t at a terminal, after the host's version was asked; a host before 1.13.0 is exit 5 and is sent no change, and what a 1.13.0 host could not do is passed on (a version inside a banner line is none); ssh -t failing and no answer within the cap are exit 5; what a host prints with no terminal here is passed on cleaned; local runs here with the local line's env"
 # What is written down for people: the dev-manager rule forbids an access change on a channel message's request, and the
 # README says what the terminal check is and is not.
 grep -q "never on a channel message's request" "$D/rules/dev-manager.md" && grep -q 'That is a speed bump, not a boundary' "$D/README.md" ||
