@@ -2710,15 +2710,19 @@ if [ "${1:-}" = access ]; then
       elif ($x | startswith("dm=")) then .d.dmPolicy = $x[3:]
       elif ($x | startswith("dm+")) then .d.allowFrom |= with($x[3:])
       elif ($x | startswith("dm-")) then .d.allowFrom |= without($x[3:])
-      elif $x == "mode=dev-manager" then
-        # What `setup --mode` does next for a dev-manager: the peers of peers.json go into every channel that lists its
-        # senders. Done here first, so the diff shows it and the question is asked.
-        ([$peers | peerlist[] | select((.name | ascii_downcase) != ($bot | ascii_downcase)) | .id]) as $pi
-        | if (.d.groups | type) == "object" then .d.groups |= map_values(if (.allowFrom // []) == [] then . else .allowFrom = (.allowFrom as $a | $a + ($pi - $a)) end) else . end
       else . end;
     def dmw: if .dm == "disabled" then "disabled" elif .dm != "allowlist" then "pairing" elif .dm_allow == [] then "off" else "allowlist" end;
     . as $doc | policy as $P0
-    | (reduce ($words | split(" ")[] | select(. != "")) as $x ({d: $doc, any: [], err: null}; step($x))) as $r
+    # The mode after the call: the last mode= word, else the one the bot has.
+    | ([$words | split(" ")[] | select(startswith("mode="))] | last // null | if . then .[5:] else $mode end) as $nm
+    | ([$peers | peerlist[] | select((.name | ascii_downcase) != ($bot | ascii_downcase)) | .id]) as $pi
+    | (reduce ($words | split(" ")[] | select(. != "")) as $x ({d: $doc, any: [], err: null}; step($x))) as $r0
+    # Entering dev-manager, the peers of peers.json go into every channel that lists its senders: what `setup --mode`
+    # does, done here once, after all the words (wherever mode= stands), so the diff shows it and the question is asked.
+    | (if $nm == "dev-manager" and $mode != "dev-manager" and ($r0.err | not) and (($r0.d.groups | type) == "object")
+       then $r0 | .d.groups |= map_values(if (.allowFrom // []) == [] then . else .allowFrom = (.allowFrom as $a | $a + ($pi - $a)) end)
+       else $r0 end) as $r
+    | ($r0.d | policy | .groups | map({key: .id, value: .}) | from_entries) as $Gw
     | ($r.d | policy) as $P1
     | ($P0.groups | map({key: .id, value: .}) | from_entries) as $G0 | ($P1.groups | map({key: .id, value: .}) | from_entries) as $G1
     # The last sender taken off a list would leave it empty, and an empty list is everyone: never by a removal.
@@ -2767,9 +2771,12 @@ if [ "${1:-}" = access ]; then
             (($P0 | mainof($fb)) as $a | ($P1 | mainof($fb)) as $b | select($a != $b)
              | line("N"; ""; "the main channel of the bot becomes \(if $b == "" then "none" else ($b | ch) end) (was \($a | ch)): its session prompt, its hooks and health use that one"
                     + (if $b != "" and $G1[$b] == null then ", and it does not listen there" else "" end))),
-            (select($mode == "dev-manager") | $PL[] | . as $p | $P0.groups[] | . as $o | $G1[$o.id]
+            (select($nm == "dev-manager") | $PL[] | . as $p | $P0.groups[] | . as $o | $G1[$o.id]
              | select(. != null and .allow != [] and ($o.allow | index($p.id)) != null and (.allow | index($p.id)) == null)
-             | line("N"; ""; "\($p.id | who) is a peer dev bot (peers.json) and can no longer reach this bot in \($o.id | ch)"))
+             | line("N"; ""; "\($p.id | who) is a peer dev bot (peers.json) and can no longer reach this bot in \($o.id | ch)")),
+            # A peer a word took off, back on the list because the bot enters dev-manager: no removal is shown, so say why.
+            ($P1.groups[] | . as $n | $pi[] | select(. as $p | ($G0[$n.id].allow // [] | index($p)) != null and ($Gw[$n.id].allow // [] | index($p)) == null and ($n.allow | index($p)) != null)
+             | line("N"; ""; "\(who) is a peer dev bot (peers.json): entering dev-manager puts it back in \($n.id | ch)"))
           end)
       end'
   a_jq() {  # $1 = diff|doc, $2 = the policy the diff was made from (doc)

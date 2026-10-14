@@ -4118,11 +4118,25 @@ at 'y\n' acc set mode=autoresearchclaw
   grep -q 'the hooks follow the new mode from their next call; the dev-manager rules reach, or leave, a running session at its next start, compact or clear' <<<"$AO" &&
   ! grep -q 'access.json written' <<<"$AO" && [ "$(stat -c %i "$AD/access.json")" = "$ai" ] && [ "$(tail -n 1 "$AD/access.log" | cut -d' ' -f4-)" = "mode=autoresearchclaw" ] ||
   { echo "FAIL: mode=<mode> is asked about, set through setup --mode, logged, and leaves access.json alone: rc=$ARC $AO / $(cat "$AD/mode" "$AD/access.log")"; exit 1; }
-# Into dev-manager: setup then adds the peers of peers.json to every channel that lists its senders, so the changes
-# shown say so first (555 is new to this bot: a widening; 777 is this bot itself, skipped by name as setup skips it).
-ac acc set mode=dev-manager
-[ "$ARC" = 3 ] && [ "$(sed 1d <<<"$AO")" = "  ! peerbot (555): new to this bot: may write to it in #dev-bots
-    mode: autoresearchclaw -> dev-manager: it gets a hosts ledger (this machine) and its monitor starts, which posts in #bot-health-check" ] || { echo "FAIL: mode=dev-manager shows the peers setup will add: rc=$ARC $AO / $AE"; exit 1; }
+# Into dev-manager: the peers of peers.json go into every channel that lists its senders, once, after all the other
+# words, wherever mode= stands; the changes shown say so (555 is new to this bot: a widening, here on the channel
+# added in the same call too; 777 is this bot itself, skipped by name as setup skips it).
+echo none > "$AD/mode"
+ac acc set mode=dev-manager channel+902; A=$ARC$AO; ac acc set channel+902 mode=dev-manager
+[ "$ARC$AO" = "$A" ] && [ "$ARC" = 3 ] && [ "$(sed 1d <<<"$AO")" = "    #902: + listens here: an @mention required, from dongyong22 (111), peerbot (555)
+  ! peerbot (555): new to this bot: may write to it in #dev-bots, #902
+    mode: none -> dev-manager: it gets a hosts ledger (this machine) and its monitor starts, which posts in #bot-health-check" ] || { echo "FAIL: mode=dev-manager shows the peers it adds, to a channel added in the same call too, whatever the order of the words: $A / rc=$ARC $AO / $AE"; exit 1; }
+# A peer the bot already lists is known: put on one more channel it is no widening. Taken off in the same call that
+# enters dev-manager, it is put back (so no removal is shown) and that is said; the order of the words does not matter.
+jq '.groups["900"].allowFrom += ["555"] | .groups["903"] = {requireMention: true, allowFrom: ["111"]}' <<<"$ACC" > "$AD/access.json"
+ac acc set mode=dev-manager allow:900-555; A=$ARC$AO; ac acc set allow:900-555 mode=dev-manager
+[ "$ARC$AO" = "$A" ] && [ "$ARC" = 3 ] && [ "$(sed 1d <<<"$AO")" = "    #903: + peerbot (555) may write to it there
+    mode: none -> dev-manager: it gets a hosts ledger (this machine) and its monitor starts, which posts in #bot-health-check
+warning: peerbot (555) is a peer dev bot (peers.json): entering dev-manager puts it back in #dev-bots" ] || { echo "FAIL: a peer taken off as the bot enters dev-manager is put back and said so, a known peer on one more channel is no widening, in either order: $A / rc=$ARC $AO / $AE"; exit 1; }
+# A peer taken off is warned of only when the bot stays a dev-manager: the mode after the call counts.
+echo dev-manager > "$AD/mode"; ac acc set allow:900-555 mode=none; echo none > "$AD/mode"; printf '%s\n' "$A_FILE" > "$AD/access.json"
+[ "$ARC" = 3 ] && grep -qx '    #dev-bots: - peerbot (555) may no longer write to it there' <<<"$AO" && ! grep -q 'peer dev bot' <<<"$AO" ||
+  { echo "FAIL: a peer taken off by a call that also leaves dev-manager is no warning: rc=$ARC $AO / $AE"; exit 1; }
 # Out of dev-manager with a ledger: setup deletes the ledger, which stops the monitor and its keeper. That has its own
 # question; no keeps the ledger and the mode.
 mkdir -p "$MR/dm1"; cp "$AD/access.json" "$AD/.env" "$MR/dm1/"; echo dev-manager > "$MR/dm1/mode"; printf 'local\nh9\n' > "$MR/dm1/hosts"
