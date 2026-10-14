@@ -639,8 +639,17 @@ def pure():
     assert len(far) == 17 and "▸ [ ] #c30" in "\n".join(far) and "31 of 40 channels" in "\n".join(far) and "#c00" not in "\n".join(far), far
     print("ok: the editor draws the server's channels ([✓] listened in, the mention rule, main, bot cannot read, ? when it cannot be told), the DM policy and the mode as radios, the senders beside the cursor's row, what widens in the alert colour, and a window over a long list")
 
-    assert tui.foot_line("bots").plain.split() == "↑↓ select space expand enter all fields e access c copy fix ←→ tabs q quit".split()
-    assert tui.foot_line("bots", 109).plain.split() == "↑↓ move space open enter all e edit c copy ←→ tabs q quit".split()
+    assert tui.foot_line("bots").plain.split() == "↑↓ select space expand enter all fields e access a add bot c copy fix ←→ tabs q quit".split()
+    assert tui.foot_line("bots", 109).plain.split() == "↑↓ move space open e edit a add c copy ←→ tabs q quit".split()
+    # 1.14.0: a bot whose Discord username is not its name here has a line saying so, with the key that aligns it; an
+    # opened row lists the keys of the bot popups. The same name, or none known (a host before 1.14.0), adds nothing.
+    s = base()
+    s["bots"][PHOTO]["discord_name"], s["bots"][MGRBOT]["discord_name"] = "photo_x", "mgr"
+    got = [l.plain.rstrip() for k, ls in tui.bots_items(s, NAMES, 137, {MGRBOT}, time.time()) if k is None for l in ls]
+    assert "     name ≠ Discord: photo_x   = takes Discord's name here" in got and sum("≠ Discord" in l for l in got) == 1, got
+    assert got.count("     keys  e access · n name · t token · enter all fields") == 1, got
+    assert tui.discord_name(s["bots"][PHOTO]) == "photo_x" and tui.discord_name(s["bots"][MGRBOT]) == tui.discord_name(s["bots"][OLDBOT]) == ""
+    print("ok: a name that is not Discord's is shown with = to align it; an opened row names the bot keys")
     rc, out, err = tui.run_capped(["sh", "-c", "head -c 70000 /dev/zero | tr '\\0' a"], 5)
     big = tui.run_capped(["sh", "-c", "head -c 70000 /dev/zero | tr '\\0' a"], 5, limit=1 << 22)
     assert len(out) == 65536 and len(big[1]) == 70000, "access --json's document may be longer than the 64 KiB every other answer is cut at"
@@ -758,6 +767,8 @@ def variant(name):
     elif name == "many":   # more rows than a 20-line terminal shows
         for i in range(20):
             s["bots"][f"local|/home/u/m|m{i:02}"] = dict(s["bots"][OLDBOT], host="local", project="/home/u/m", bot=f"m{i:02}")
+    elif name == "renamed":   # 1.14.0: Discord has another name for photobot
+        s["bots"][PHOTO]["discord_name"] = "photo_x"
     elif name == "stopped":
         s["monitor"].update(pid=None, stopped_at="2026-10-11T12:00:00Z", holders=[])
     elif name == "stopped_by_user":
@@ -837,7 +848,7 @@ async def shell(app, pilot):
 
 async def small(app, pilot):
     foot = text(app, "#foot")
-    assert foot.split() == "↑↓ move space open enter all e edit c copy ←→ tabs q quit".split() and cell_len(foot.rstrip()) <= app.size.width == 80, foot
+    assert foot.split() == "↑↓ move space open e edit a add c copy ←→ tabs q quit".split() and cell_len(foot.rstrip()) <= app.size.width == 80, foot
     assert [app.query_one(w).size.height for w in ("#title", "#tabs", "#foot", "#pane")] == [1, 2, 1, 20]
     for tab in ("alerts", "config"):
         await pilot.press("right")
@@ -1065,9 +1076,10 @@ async def add_host(app, pilot):
     ssh_home(app)
     cands = lambda: str(app.screen.query_one("#cands").render()).split("\n")
     info = lambda: str(app.screen.query_one("#info").render())
-    await pilot.press("a")
-    assert len(app.screen_stack) == 1, "a is the Configuration tab's key"
-    await pilot.press("left")
+    await pilot.press("a")   # on the Bots tab (1.14.0) a adds a bot; esc closes that popup
+    assert isinstance(app.screen, tui.BotAdd), app.screen
+    await pilot.press("escape", "left")
+    assert len(app.screen_stack) == 1
     assert "+ Add host" in body(app)[2] and " a  add host " in text(app, "#foot")
     # ~/.ssh/config is read in a worker thread, never on the event loop: the dialog is up at once and says so.
     gate, on_loop, real = threading.Event(), [], tui.ssh_hosts
@@ -1459,9 +1471,13 @@ class FakeRun:
     def __init__(self, argv, steps):
         self.argv, self.steps, self.written, self.killed = argv, list(steps), [], threading.Event()
         self.go, self.ended, self.then, self.waited = threading.Event(), threading.Event(), ("", -9), False
+        self.secrets = []
 
     def next(self, answer=None):
-        if answer is not None:
+        if isinstance(answer, bytearray):   # a token: what was written, and the buffer itself (zeroed after)
+            self.written.append(bytes(answer) + b"\n")
+            self.secrets.append(answer)
+        elif answer is not None:
             self.written.append("y\n" if answer else "n\n")
         step = self.steps.pop(0)
         if step is None:
@@ -1490,7 +1506,7 @@ def fake_pty(app, *runs):
     app.runs, left = [], list(runs)
     hand_over(app)
 
-    def start(argv):
+    def start(argv, question=None):
         app.runs.append(FakeRun(argv, left.pop(0)))
         return app.runs[-1]
     app.pty = start
@@ -1779,11 +1795,11 @@ async def access_pty(app, pilot):
     assert gone(sh) and gone(child), "the cap kills the run's whole process group"
 
 
-def pty_py(*parts, then="sys.stdin.readline()", cap=3):
+def pty_py(*parts, then="sys.stdin.readline()", cap=3, question=None):
     """tui.PtyRun on a python3 that writes each str of `parts` and sleeps each float (one exec, so its pauses are its
     own), then runs `then`; capped at `cap` s from now."""
     code = "\n".join(f"time.sleep({p})" if isinstance(p, float) else f"w({p!r})" for p in parts)
-    run = tui.PtyRun.start([sys.executable, "-c", f"import os, sys, time\nw = lambda s: os.write(1, s.encode())\n{code}\n{then}\n"])
+    run = tui.PtyRun.start([sys.executable, "-c", f"import os, sys, time\nw = lambda s: os.write(1, s.encode())\n{code}\n{then}\n"], question)
     run.end = time.monotonic() + cap
     return run
 
@@ -1870,6 +1886,13 @@ def pty_runs():
     assert time.monotonic() - t0 < 1 and run.fd == -1, time.monotonic() - t0
     run.p.wait = wait
     run.p.wait()
+    # A token (1.14.0): asked for by TOKEN_Q after the marker, written with a line end only when given as a bytearray,
+    # which is zeroed then; what the child read is what was given.
+    tok = pty_py(f"{mark}\n{tui.TOKEN_Q}", then="w('same\\n' if sys.stdin.readline() == 'FAKE.t0ken\\n' else 'other\\n')", question=tui.BOT_Q)
+    secret = bytearray(b"FAKE.t0ken")
+    assert tok.next()[1] == "ask"
+    text, rc = tok.next(secret)
+    assert rc == 0 and text.replace("\r", "").endswith("same\n") and secret == bytearray(10), (rc, text, secret)
     # Colour: SGR 31 is red, any other SGR back to plain (bold off, yellow, a reset).
     t = tui.ask_text("\x1b[1;31mred\x1b[22mplain \x1b[31mred2\x1b[33m yellow\x1b[1;31mred3\x1b[0m end")
     assert red(t) == ["red", "red2", "red3"], red(t)
@@ -2010,6 +2033,111 @@ async def access_answered(app, pilot):
     assert run.waited and run.ended.is_set() and not run.killed.is_set() and len(app.screen_stack) == 1
 
 
+# 1.14.0: the bot popups. What `bot ...` prints on a terminal up to each question (its marker line first). A run's
+# text is all it printed from its start (PtyRun keeps it), so the question after the token still holds the token prompt.
+BOT_HEAD = "claude-discord: bot: photobot on lmd79, /home/u/rcps/.claude/discord-agents/photobot\r\n"
+TOKEN_ASK = BOT_HEAD + f"{tui.A_MARK}\r\n{tui.TOKEN_Q}"
+FAKE_TOKEN = "FAKE0token.for-tests_only0123456789"
+BOT_ARGV = ["--host", "local", "--manager", "mgr", "--project", "/home/u/rcps", "--"]
+
+
+def bot_cli(d):
+    return stub(d, 'echo "$*" >> "$(dirname "$0")/args"')
+
+
+def notes(app):
+    return "\n".join(n.message for n in app._notifications)
+
+
+async def bot_name(app, pilot):
+    """n on a bot row: the name field holds its name; a name the CLI would refuse is refused here; enter runs
+    `bot ... photobot rename <new>` on the pty, its question is a popup, y is written, and its end closes the popup."""
+    fake_pty(app, [(BOT_HEAD + "  Discord: photobot -> photo2\r\n" + f"{tui.A_MARK}\r\nRename it to photo2? [y/N] ", "ask"),
+                   ("y\r\nclaude-discord: bot: photobot is now photo2 (Discord and here); it was not running\r\n", 0)])
+    await pilot.press("n")
+    await settle(app, pilot)
+    pop = app.screen
+    assert isinstance(pop, tui.BotName) and pop.query_one("#b-field").value == "photobot" and text(pop, "#b-title").startswith("Name · photobot"), text(pop, "#b-title")
+    assert app.focused.id == "b-field"
+    pop.query_one("#b-field").value = "p"
+    await pilot.press("enter")
+    assert "2 to 32" in text(pop, "#b-msg") and app.runs == [], text(pop, "#b-msg")
+    pop.query_one("#b-field").value = "photo2"
+    await pilot.press("enter")
+    await settle(app, pilot)
+    assert app.runs[0].argv == [app.wrapper, "bot", *BOT_ARGV, "photobot", "rename", "photo2"], app.runs[0].argv
+    assert isinstance(app.screen, tui.AccessAsk) and "Rename it to photo2? [y/N]" in app.screen.text.plain and app.focused.id == "no"
+    await pilot.press("y")
+    await settle(app, pilot)
+    assert app.runs[0].written == ["y\n"] and len(app.screen_stack) == 1, app.screen_stack
+    assert "photobot is now photo2" in notes(app), notes(app)
+
+
+async def bot_align(app, pilot):
+    """= on a row whose name is not Discord's: the name popup opens with Discord's name and runs at once."""
+    fake_pty(app, [(BOT_HEAD + f"{tui.A_MARK}\r\nRename it to photo_x? [y/N] ", "ask"), ("n\r\nclaude-discord: bot: answered no; nothing was changed\r\n", 4)])
+    assert "     name ≠ Discord: photo_x   = takes Discord's name here" in body(app), body(app)
+    await pilot.press("=")
+    await settle(app, pilot)
+    assert app.runs[0].argv[-3:] == ["photobot", "rename", "photo_x"] and isinstance(app.screen, tui.AccessAsk), app.runs
+    await pilot.press("n")
+    await settle(app, pilot)
+    assert isinstance(app.screen, tui.BotName) and text(app.screen, "#b-msg").startswith("answered no: nothing was changed"), text(app.screen, "#b-msg")
+
+
+async def bot_token(app, pilot):
+    """t on a bot row: the token field draws dots, is never copied, and is emptied when enter takes it; the token is
+    written to the pty only when the CLI asks for it (TOKEN_Q), never put in the argv, and never drawn."""
+    fake_pty(app, [(TOKEN_ASK, "ask"), (TOKEN_ASK + "\r\n" + BOT_HEAD + f"  bot 777 photobot\r\n{tui.A_MARK}\r\nReplace the token? [y/N] ", "ask"),
+                   ("y\r\nclaude-discord: bot: /home/u/rcps/.claude/discord-agents/photobot/.env written. A running session of photobot logs in with it within 10 s.\r\n", 0)])
+    await pilot.press("t")
+    await settle(app, pilot)
+    pop = app.screen
+    assert isinstance(pop, tui.BotToken) and app.focused.id == "b-field" and app.focused.password, app.focused
+    await pilot.press("enter")
+    assert "paste the token first" in text(pop, "#b-msg") and app.runs == []
+    await pilot.press(*[{".": "full_stop", "-": "minus", "_": "underscore"}.get(c, c) for c in FAKE_TOKEN])
+    assert pop.query_one("#b-field").value == FAKE_TOKEN and FAKE_TOKEN not in drawn(app), (pop.query_one("#b-field").value, FAKE_TOKEN in drawn(app))
+    app.copy_to_clipboard("")
+    await pilot.press("shift+home", "ctrl+c", "ctrl+x")   # all of it selected: Input copies and cuts only a selection
+    assert app.clipboard == "" and pop.query_one("#b-field").value == FAKE_TOKEN, app.clipboard
+    await pilot.press("enter")
+    await settle(app, pilot)
+    run = app.runs[0]
+    assert run.argv == [app.wrapper, "bot", *BOT_ARGV, "photobot", "token"] and pop.query_one("#b-field").value == "" and pop.secret is None, run.argv
+    assert run.written == [FAKE_TOKEN.encode() + b"\n"] and isinstance(app.screen, tui.AccessAsk) and FAKE_TOKEN not in drawn(app), run.written
+    await pilot.press("y")
+    await settle(app, pilot)
+    assert run.written[1:] == ["y\n"] and len(app.screen_stack) == 1 and "logs in with it within 10 s" in notes(app), notes(app)
+    assert FAKE_TOKEN not in drawn(app) and FAKE_TOKEN not in repr(app.__dict__)
+
+
+async def bot_add(app, pilot):
+    """a on the Bots tab: the host, a project of that host's bots, the mode, start now [✓] and the token; enter in
+    the token field runs `bot ... add --mode <m> --start`, the token written when it is asked for."""
+    fake_pty(app, [(TOKEN_ASK, "ask"), (TOKEN_ASK + "\r\n  bot 888 newbot\r\n" + f"{tui.A_MARK}\r\nAdd this bot? [y/N] ", "ask"),
+                   ("y\r\nclaude-discord: bot: newbot added (bot 888, mode dev-manager) and started\r\n", 0)])
+    await pilot.press("a")
+    await settle(app, pilot)
+    pop = app.screen
+    assert isinstance(pop, tui.BotAdd) and app.focused.id == "b-host", app.focused
+    assert [c.value for c in pop.query(tui.Choice)] == ["local", "/home/u", "none"], [c.value for c in pop.query(tui.Choice)]
+    await pilot.press("right")   # another host: the projects of its bots
+    assert [c.value for c in pop.query(tui.Choice)][:2] == ["old", "/home/u/p"], [c.value for c in pop.query(tui.Choice)]
+    await pilot.press("left")
+    await pilot.press("tab", "right", "tab", "right", "tab", "tab")   # the second project of local, dev-manager, start stays [✓]
+    assert app.focused.id == "b-field" and pop.query_one("#b-project").value == "/home/u/cd" and pop.query_one("#b-mode").value == "dev-manager", (app.focused, [c.value for c in pop.query(tui.Choice)])
+    pop.query_one("#b-field").value = FAKE_TOKEN
+    await pilot.press("enter")
+    await settle(app, pilot)
+    run = app.runs[0]
+    assert run.argv == [app.wrapper, "bot", "--host", "local", "--manager", "mgr", "--project", "/home/u/cd", "--", "add", "--mode", "dev-manager", "--start"], run.argv
+    assert run.written == [FAKE_TOKEN.encode() + b"\n"] and isinstance(app.screen, tui.AccessAsk)
+    await pilot.press("y")
+    await settle(app, pilot)
+    assert len(app.screen_stack) == 1 and "newbot added" in notes(app), notes(app)
+
+
 async def stopped(app, pilot):
     assert text(app, "#title").endswith("○ not running") and f"monitor stopped at 2026-10-11T12:00:00Z" in text(app, "#bar")
 
@@ -2088,6 +2216,10 @@ async def main():
     await case("access_outcomes", access_outcomes, state="all_ok", wrapper=access_cli)
     await case("access_pty", access_pty, state="all_ok", wrapper=lambda d: access_cli(d) and stub(d, ACCESS_CLI + PTY_CLI + CHECK_STUB))
     pty_runs()
+    await case("bot_name", bot_name, state="all_ok", wrapper=bot_cli)
+    await case("bot_align", bot_align, state="renamed", wrapper=bot_cli)
+    await case("bot_token", bot_token, state="all_ok", wrapper=bot_cli)
+    await case("bot_add", bot_add, state="all_ok", wrapper=bot_cli)
     await case("access_long_host_answered", access_long_host_answered, state="all_ok", wrapper=access_cli)
     await case("stopped", stopped)
     await case("stopped_by_user", stopped_by_user)
