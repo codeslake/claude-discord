@@ -4408,6 +4408,30 @@ rc=0; out=$(bash "$S" bot --host h1 --manager mgr --project /p acc rename acc2 2
   { echo "FAIL: bot --host rename with no terminal is passed on from the host cleaned, exit 3: rc=$rc $out / $(cat "$HOME/ssh.log")"; exit 1; }
 rm -f "$HOME/ssh.log" "$MON"/h1.*
 echo "ok: bot rename: a name that is none, taken or reserved, and a session's own bot, refused before Discord is asked; no terminal prints what it would do; Discord first (a refusal changes nothing here), then a running session stopped, the directory, its peers.json line (by id) and scratch directory renamed, the session started again from its handoff; a manager's backend records move and name it, and its watcher records on its ledger hosts are renamed; a name Discord has already is not asked of it; --host passes on what the host printed"
+# bot add: no terminal, nothing is read (exit 3). A bot whose Discord name is no name here (it is renamed on Discord
+# first), and one set up here already (its id in a bot-id: one token, one session), are refused; nothing is written.
+was=$(ls "$MR"); rc=0; out=$(bash "$S" bot add </dev/null 2>&1) || rc=$?
+: > "$CURL_REPLIES"; queue_line '200 {"id":"999","bot":true,"username":"New Bot"}'; queue_line '200 {"id":"777","bot":true,"username":"acc9"}'
+bt "$TOK_NEW" - add; A=$BRC$BO; bt "$TOK_NEW" - add
+[ "$rc" = 3 ] && [[ $A == 1*"Discord calls this bot 'New Bot', and a bot's name here is its Discord username"*"Rename it in the Developer Portal first"* ]] &&
+  [ "$BRC" = 1 ] && grep -q "that token's bot (777) is set up in $AD already" <<<"$BO" && [ "$(ls "$MR")" = "$was" ] ||
+  { echo "FAIL: bot add reads nothing without a terminal (exit 3), and refuses a bot whose Discord name is no name here and one set up already: rc=$rc $out / $A / rc=$BRC $BO"; exit 1; }
+# y, a mode, --start: setup writes it as at a terminal (the token in .env, the project's channel with an @mention
+# required, the mode), its id is kept, access.log says so, and it is started; the token is never printed.
+: > "$CURL_REPLIES"; queue_line '200 {"id":"999","bot":true,"username":"newbot"}'
+bt "$TOK_NEW" y add --mode autoresearchclaw --start
+[ "$BRC" = 0 ] && [ "$(<"$MR/newbot/.env")" = "DISCORD_BOT_TOKEN=$TOK_NEW" ] && [ "$(<"$MR/newbot/mode")" = autoresearchclaw ] && [ "$(<"$MR/newbot/bot-id")" = 999 ] &&
+  jq -e '[.groups[]] | length == 1 and .[0].requireMention == true' "$MR/newbot/access.json" >/dev/null && grep -q '^LAUNCHER .* -n newbot ' <<<"$BO" &&
+  [ "$(tail -n 1 "$MR/newbot/access.log" | cut -d' ' -f4-)" = "added (bot 999, mode autoresearchclaw)" ] && [ "${BO##*$'\n'}" = "claude-discord: bot: newbot added and started" ] &&
+  [[ $BO != *"$TOK_NEW"* ]] || { echo "FAIL: bot add, y: setup writes the bot (token, channel, mention, mode), its id kept and logged, started; the token never printed: rc=$BRC $BO / $(ls "$MR/newbot" 2>&1)"; exit 1; }
+rm -rf "$MR/newbot"
+# --host at a terminal: run there under ssh -t, the word add in hex, the mode and --start as they are.
+printf 'claude-discord 1.14.0 (abc1234)\n' > "$MON/h1.out"
+bt "$TOK_NEW" - --host h1 --manager mgr --project /p add --mode dev-manager --start
+[ "$BRC" = 0 ] && [ "$(tail -n 1 "$HOME/ssh.log")" = "-t -o BatchMode=yes -o ConnectTimeout=8 -- h1 env X=1 HTTPS_PROXY=http://q:1 https_proxy=http://q:1 ~/.local/bin/claude-discord --version --bot 2f70 616464 --mode dev-manager --start" ] && [ "$(grep -c -- "^-t " "$HOME/ssh.log")" = 1 ] ||
+  { echo "FAIL: bot --host add runs on the host under ssh -t: rc=$BRC $BO / $(cat "$HOME/ssh.log")"; exit 1; }
+rm -f "$HOME/ssh.log" "$MON"/h1.*
+echo "ok: bot add: no terminal reads nothing; its Discord username is its name (one that is no name here is renamed on Discord first), a bot set up already is refused; y runs setup with its answers on stdin, keeps its id, logs it, and --start starts it; the token is never printed; --host runs it on the host under ssh -t"
 # What is written down for people: the dev-manager rule forbids an access change on a channel message's request, and the
 # README says what the terminal check is and is not.
 grep -q "never on a channel message's request" "$D/rules/dev-manager.md" && grep -q 'That is a speed bump, not a boundary' "$D/README.md" ||
