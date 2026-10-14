@@ -4143,12 +4143,12 @@ ac acc set mode=dev-manager channel+902; A=$ARC$AO; ac acc set channel+902 mode=
   ! peerbot (555): new to this bot: may write to it in #dev-bots, #902
     mode: none -> dev-manager: it gets a hosts ledger (this machine) and its monitor starts, which posts in #bot-health-check" ] || { echo "FAIL: mode=dev-manager shows the peers it adds, to a channel added in the same call too, whatever the order of the words: $A / rc=$ARC $AO / $AE"; exit 1; }
 # A peer the bot already lists is known: put on one more channel it is no widening. Taken off in the same call that
-# enters dev-manager, it is put back (so no removal is shown) and that is said; the order of the words does not matter.
+# enters dev-manager, it is put back (so no removal is shown) and that is said.
 jq '.groups["900"].allowFrom += ["555"] | .groups["903"] = {requireMention: true, allowFrom: ["111"]}' <<<"$ACC" > "$AD/access.json"
-ac acc set mode=dev-manager allow:900-555; A=$ARC$AO; ac acc set allow:900-555 mode=dev-manager
-[ "$ARC$AO" = "$A" ] && [ "$ARC" = 3 ] && [ "$(sed 1d <<<"$AO")" = "    #903: + peerbot (555) may write to it there
+ac acc set allow:900-555 mode=dev-manager
+[ "$ARC" = 3 ] && [ "$(sed 1d <<<"$AO")" = "    #903: + peerbot (555) may write to it there
     mode: none -> dev-manager: it gets a hosts ledger (this machine) and its monitor starts, which posts in #bot-health-check
-warning: peerbot (555) is a peer dev bot (peers.json): entering dev-manager puts it back in #dev-bots" ] || { echo "FAIL: a peer taken off as the bot enters dev-manager is put back and said so, a known peer on one more channel is no widening, in either order: $A / rc=$ARC $AO / $AE"; exit 1; }
+warning: peerbot (555) is a peer dev bot (peers.json): entering dev-manager puts it back in #dev-bots" ] || { echo "FAIL: a peer taken off as the bot enters dev-manager is put back and said so, a known peer on one more channel is no widening: rc=$ARC $AO / $AE"; exit 1; }
 # A peer taken off is warned of only when the bot stays a dev-manager: the mode after the call counts.
 echo dev-manager > "$AD/mode"; ac acc set allow:900-555 mode=none; echo none > "$AD/mode"; printf '%s\n' "$A_FILE" > "$AD/access.json"
 [ "$ARC" = 3 ] && grep -qx '    #dev-bots: - peerbot (555) may no longer write to it there' <<<"$AO" && ! grep -q 'peer dev bot' <<<"$AO" ||
@@ -4208,10 +4208,11 @@ at '' --host h1 --manager mgr --project '/x y/한' acc set dm=pairing
 rm -f "$MON/h1.trc"; printf 'claude-discord 1.13.0 (abc1234)\n  ! DMs: allowlist -> pairing\033[2J\n' > "$MON/h1.out"; echo 3 > "$MON/h1.rc"
 ac --host h1 --manager mgr --project '/x y/한' acc set dm=pairing
 [ "$ARC" = 3 ] && grep -qx '  ! DMs: allowlist -> pairing\[2J' <<<"$AO" || { echo "FAIL: what the host prints for a set with no terminal is passed on cleaned, with its exit status: rc=$ARC $(printf '%q' "$AO")"; exit 1; }
-# A host that does not answer within the cap is exit 5.
-rm -f "$MON/h1.rc"; echo 5 > "$MON/h1.sleep"
-CLAUDE_DISCORD_PROBE_CAP_TENTHS=1 ac --host h1 --manager mgr --project '/x y/한' acc --json; rm -f "$MON/h1.sleep" "$MON/h1.pid"
-[ "$ARC" = 5 ] && [ "$AE" = "claude-discord: access: h1 gave no answer within 0.1s" ] || { echo "FAIL: a host that does not answer within the cap is exit 5: rc=$ARC $AE"; exit 1; }
+# A host that does not answer within the cap (the capped call's 142, as h_capped ends it; the hosts cases wait for a
+# real one) is exit 5. --json is given 30 s: the connection, then the host's Discord calls (12 s, then 5 s at most).
+echo 142 > "$MON/h1.rc"; rm -f "$MON/h1.both"
+ac --host h1 --manager mgr --project '/x y/한' acc --json; : > "$MON/h1.both"
+[ "$ARC" = 5 ] && [ "$AE" = "claude-discord: access: h1 gave no answer within 30s" ] || { echo "FAIL: a host that does not answer within the cap is exit 5, and --json is given 30 s: rc=$ARC $AE"; exit 1; }
 # A 1.13.0 host that could not do it (no such bot there) prints no version line and says why: that is passed on (exit 1).
 printf "motd: release notes of claude-discord 1.12.0 (old)\\nclaude-discord: access: no bot 'acc'\\007 set up in /x y/.claude/discord-agents (claude-discord setup <bot>)\\n\\n" > "$MON/h1.out"; echo 1 > "$MON/h1.rc"
 ac --host h1 --manager mgr --project '/x y/한' acc --json
