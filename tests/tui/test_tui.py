@@ -1811,6 +1811,9 @@ def pty_runs():
         code_end = later(lambda: (code.next(), code.next()))
         capped = pty_py("code: ", then="time.sleep(30)", cap=1)
         capped_end = later(lambda: (capped.next(), capped.next(), time.monotonic() - t0))
+        # After a y there is no cap: it may be writing access.json or setting the mode, and is read to its end.
+        answered = pty_py(f"{mark}\n{q}", then="sys.stdin.readline(); time.sleep(0.9); w('written\\n')", cap=0.6)
+        answered_end = later(lambda: (answered.next()[1], answered.next(True)))
         # Its end is read for half a second at most: a child left holding the pty and writing never keeps it.
         held = pty_py("bye\n", then="os.fork() or [w('x\\n') or time.sleep(0.01) for _ in iter(int, 1)]")
         held_end = later(lambda: (held.next()[1], time.monotonic() - t0))
@@ -1838,6 +1841,8 @@ def pty_runs():
         assert (said, end) == (("code: ", "said"), ("code: ", 124)) and took < 2 and capped.fd == -1 and capped.p.poll() is not None, (said, end, took)
         rc, took = held_end(3)
         assert rc == 0 and took < 1.5, ("the end is read for a bounded time", rc, took)
+        asked, (text, rc) = answered_end(3)
+        assert asked == "ask" and rc == 0 and text.replace("\r", "") == "y\nwritten\n", (asked, rc, text)
     finally:
         tui.A_QUIET = quiet
         with contextlib.suppress(ProcessLookupError):
