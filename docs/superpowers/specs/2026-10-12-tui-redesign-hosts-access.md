@@ -1,4 +1,4 @@
-# claude-discord TUI redesign, hosts and access editing (1.11.0 - 1.13.0)
+# claude-discord TUI redesign, hosts and access editing (1.11.0 - 1.13.1)
 
 Status: approved by dongyong22 2026-10-12 20:00Z and the owner (gpuvillain) 20:01Z,
 thread 1559286847446982770. Mock: `mock.py` + `render.sh` beside this file
@@ -9,6 +9,12 @@ and restarts).
 Changed 2026-10-14 by the owner: 1.13.0 edits a bot's receive channels, receive
 rules and mode, for bots on ledger hosts too; the token field and a bot's
 rename move to 1.14.0. Plan: `docs/superpowers/plans/2026-10-14-access-1.13.0.md`.
+
+Changed 2026-10-14 by the owner (1.13.1): `access set` asks one question for the
+whole change set, naming how many of them widen (`Apply 3 changes, 2 of them
+widening? [y/N]`), the widenings shown first, red, marked `!`; and the TUI's `s`
+runs it on a pty the TUI holds and asks that question in a popup, instead of
+handing the terminal over (kept only where no pty can be opened).
 
 ## Owners' requirements (quoted)
 
@@ -123,7 +129,8 @@ symbol + word + colour.
   subcommand: refuses without a TTY on stdin and stdout (a speed bump, not a
   boundary; README says so), remote via `ssh -t`, shows the diff and asks, no
   skip flag. Widening changes (mention → any message, people → anyone,
-  allowlist → pairing) shown red and each needs its own `y`. Warn on removing
+  allowlist → pairing) shown first and red; since 1.13.1 one `y` for the whole
+  change set, the question naming how many widen. Warn on removing
   the owner, the main channel, or a dev-manager's peer bot ids. `access.log`
   in the bot dir: time, local user, host, change (token: the fact only).
 - dev-manager rule: never run access or token commands on a channel

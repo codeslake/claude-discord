@@ -365,7 +365,7 @@ changes nothing any other way.
 
 ```sh
 claude-discord access <bot> --json            # the policy, the server's channels, the people known: one line of JSON
-claude-discord access <bot> set <change>...   # shows what would change, asks, writes
+claude-discord access <bot> set <change>...   # shows what would change, asks once, writes
 ```
 
 | change | does |
@@ -390,18 +390,20 @@ server's member list gave at the bot's last `--json` (`<bot dir>/member-names`):
 that name is whatever the person chose, so read the id.
 
 - **a change that widens who can drive the bot** is marked `!`, red at a
-  terminal, and is asked about by itself: an @mention no longer required; a
+  terminal, and shown before the others: an @mention no longer required; a
   channel opened to anyone; DMs to `pairing`, or back from `disabled`; a
   person added to the DM allowlist; a person the bot listed nowhere until now;
   leaving dev-manager when that deletes a hosts ledger (its monitor stops);
-- **the other changes** are confirmed together, once;
-- **one no, anywhere, writes nothing** (exit 4): the file is what was shown and
-  agreed to, or as it was;
+- **one question for the whole change set** (1.13.1), naming the count and
+  the widenings among it: `Apply 3 changes, 2 of them widening? [y/N]`
+  (`Apply this change?`, `Apply these 2 widening changes?`, ...);
+- **anything but `y` writes nothing** (exit 4): `n`, the end of input, any
+  other answer. The file is what was shown and agreed to, or as it was;
 - warnings, which ask nothing more: the owner taken off a list, the bot's main
   channel changing, a dev-manager's peer bot taken off a channel.
 
 `set` refuses to write unless stdin and stdout are a terminal, and has no flag
-to skip its questions. That is a speed bump, not a boundary: whoever can run
+to skip its question. That is a speed bump, not a boundary: whoever can run
 it can edit `access.json` with an editor. It is there so that no script and no
 session writes a bot's access without a person reading the change. Without a
 terminal it prints the changes and exits 3, which is also how to see what a
@@ -415,7 +417,7 @@ replaces with its defaults (pairing, no channel), which is why the file is
 never written in place. The plugin rewrites the file itself, with no lock,
 when a DM asks for a pairing code or a code expires: the new file is made from
 the file as it is at the moment of the write, and the write is given up (exit
-1) when the policy changed while the questions were open. Each write adds a
+1) when the policy changed while the question was open. Each write adds a
 line to `<bot dir>/access.log`: the time, the local account, the machine and
 the change words. A mode change reaches the hooks at their next call; the
 dev-manager rule text reaches, or leaves, a running session at its next start,
@@ -447,8 +449,8 @@ claude-discord access --host <alias> [--manager <bot>] --project <dir> <bot> --j
 `<alias>` is a line of the manager's hosts ledger (`local` too: then it runs
 here, with that line's env words, as the monitor's own Discord calls do).
 Over ssh the call goes as a pass does (`BatchMode`, `ConnectTimeout=8`, the
-line's env words); `set` at a terminal runs under `ssh -t`, so the questions
-are asked on the bot's machine, of your terminal. Into the remote command go
+line's env words); `set` at a terminal runs under `ssh -t`, so the question
+is asked on the bot's machine, of your terminal. Into the remote command go
 only hex digits (the project and the bot's name), the action and the change
 words. The remote host needs claude-discord 1.13.0: an older one is said so
 (exit 5) and is never sent a change. `--json` over ssh is given 30 s (the
@@ -1330,12 +1332,22 @@ channel`; `a` adds a person by numeric id, or by a name this machine keeps
 the whole name first, any case, then the one name it starts. A name only the
 server's member list gave is never taken: anyone can choose that one); below, the DM policy and
 the mode as radios. A change that widens who can drive the bot is drawn in the
-alert colour. Nothing is written while editing: `s` hands the terminal to
-`claude-discord access ... set <the changes>`, which prints them, asks (each
-widening by itself) and writes; Enter then returns to the TUI, which says what
-came of it and asks the monitor for a pass. Where the terminal cannot be
-handed over, the editor shows that command for a shell instead (`c` copies
-it). The editor reads through `access ... --json`, run on the bot's own
+alert colour. Nothing is written while editing: `s` runs
+`claude-discord access ... set <the changes>` (with `--host`, so `ssh -t` for a
+remote bot) on a pseudo-terminal the TUI holds (1.13.1), so the command's
+terminal check holds and it prints the changes and asks its one question
+itself. What it printed up to the question is shown in a popup, its red
+widenings red and every other escape sequence and control character removed;
+`y` writes `y` to it, `n`, Enter or `esc` writes `n`. The TUI then says what came
+of it: saved (it asks the monitor for a pass and closes the editor), answered
+no (the edits stay), or the command's own words and exit status when it
+stopped without asking (nothing to change, refused, no terminal, no answer
+from the host). The command is given 40 s to reach its question, and again
+after the answer; past that, or on `esc` while it runs, or when the editor
+closes, its whole process group is killed. Where no pseudo-terminal can be
+opened the TUI hands its terminal to the command instead (Enter returns to
+the TUI), and where that is not possible either it shows the command for a
+shell (`c` copies it). The editor reads through `access ... --json`, run on the bot's own
 machine, so the TUI still never reads a `.env` and never holds a token; a host
 whose claude-discord is older than 1.13.0 says so in the editor and is not
 edited.
