@@ -4853,20 +4853,20 @@ gpass
 
 # monitor --check (the TUI's Check now, and what it runs after it changed the ledger): the running monitor starts a pass
 # at a tick instead of waiting out the interval (60 s here), and that pass reads the ledger as it is on disk then. With
-# no monitor running nobody is asked: exit 1, no marker left. A requested pass comes CHECK_GAP (60 s; 0.1 s here, ten ticks) after
+# no monitor running nobody is asked: exit 1, no marker left. A requested pass comes CHECK_GAP (60 s; 0.2 s here: not less, a pass asked with no gap at all is logged ~0.16 s after the start) after
 # the last pass began at the earliest, and several requests met before then are one pass: health counts runs and the
 # reducer passes, so a pass per request would turn their minutes into seconds.
 printf 'h1\n' > "$MR/mgr/hosts"; gdoc g1:ok; : > "$CURL_REPLIES"; : > "$CURL_LOG"; mstate '.hosts = {} | .bots = {} | .alerts = []'
 rc=0; out=$(cd "$MP" && bash "$S" monitor --check mgr 2>&1) || rc=$?
 [ "$rc" = 1 ] && [ ! -e "$MB/pass-now" ] && grep -q 'no monitor of mgr runs here, so nothing was asked' <<<"$out" || { echo "FAIL: monitor --check with no monitor running is exit 1 and leaves no marker: rc=$rc $out"; exit 1; }
-t0=$(date +%s%N); CLAUDE_DISCORD_MONITOR_CHECK_GAP=0.1 mstart; p=$(passes)
+t0=$(date +%s%N); CLAUDE_DISCORD_MONITOR_CHECK_GAP=0.2 mstart; p=$(passes)
 printf 'h1\nhnew\n' > "$MR/mgr/hosts"
 rc=0; out=$(cd "$MP" && bash "$S" monitor --check mgr 2>&1) || rc=$?
 : > "$MB/pass-now"; : > "$MB/pass-now"   # two more requests before the first is served
 wait_log $((p + 1)) ' pass hosts='; t1=$(( ($(date +%s%N) - t0) / 1000000 )); nap 0.05
 [ "$rc" = 0 ] && [ "$(passes)" = $((p + 1)) ] && [ ! -e "$MB/pass-now" ] && grep -q 'check requested: a pass now$' "$MB/monitor.log" && jq -e '.hosts | has("hnew")' "$MB/state.json" >/dev/null && [ -z "$(posts)" ] ||
   { echo "FAIL: monitor --check makes the running monitor run ONE pass for all the requests it meets, over the ledger as it is then, and posts nothing itself: rc=$rc $out passes=$(passes) (was $p) $(tail -3 "$MB/monitor.log")"; exit 1; }
-[ "$t1" -ge 100 ] || { echo "FAIL: a requested pass must wait until CHECK_GAP (0.1 s here) after the last pass began: it was logged $t1 ms after the monitor was started"; exit 1; }
+[ "$t1" -ge 200 ] || { echo "FAIL: a requested pass must wait until CHECK_GAP (0.2 s here) after the last pass began: it was logged $t1 ms after the monitor was started"; exit 1; }
 mstop
 # A marker that cannot be removed (here a directory that is not empty) would be a pass every tick: said once, and no
 # request is served until the monitor is started again. Met at the start, where the first pass runs anyway.
