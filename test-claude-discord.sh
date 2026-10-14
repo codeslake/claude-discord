@@ -3966,6 +3966,60 @@ rm -f "$HOME/ssh.log"; hc rm --no-probe w4; mv "$HID" "$HID.off"; hc rm w5; mv "
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -f "$HOME/ssh.log" "$MON"/*
 echo "ok: watchers: --version --watch/--unwatch write and remove watchers/<manager> on the checked host (words of the wrong shape write nothing, a home removes only its own record) and --host-id lists them; hosts add warns of another manager's record, refuses a home this manager already checks under a listed alias (exit 4), then records itself there (a failure is a warning); hosts rm removes the line first and the record after, also when the host is unreachable"
 
+# --- access: who may drive a bot (1.13.0) ------------------------------------
+# ac <args>: `claude-discord access <args>` in the manager's project; stdout in AO, stderr in AE, the exit status in ARC.
+ac() { ARC=0; AO=$(bash "$S" access "$@" 2>"$HOME/access.err") || ARC=$?; AE=$(<"$HOME/access.err"); }
+# The bot these cases drive: made by hand (setup is asserted above; each run of it costs 0.2 s). Its access.json holds
+# what the plugin and an owner may have put there besides the policy: a pending pairing, a key nobody here knows.
+cd "$MP"; AD="$MR/acc"; mkdir -p "$AD"; echo none > "$AD/mode"; printf 'DISCORD_BOT_TOKEN=tokAccUnique\n' > "$AD/.env"
+ACC='{"dmPolicy":"allowlist","allowFrom":["111"],"ackReaction":"👀","groups":{"900":{"requireMention":true,"allowFrom":["111","222"]},"901":{"requireMention":false,"allowFrom":[]}},"pending":{"abc123":{"senderId":"999","chatId":"5","createdAt":1,"expiresAt":99999999999999}},"custom":{"keep":[1,2]}}'
+jq . <<<"$ACC" > "$AD/access.json"; printf '777\n' > "$AD/bot-id"; printf '900 5 dev-bots %s\n' "$(date +%s)" > "$AD/channel-guild"
+printf '900 dev-bots\n901 bot-health\n' > "$AD/channel-names"; printf '111 dongyong22\n222 gpu villain\n' > "$AD/user-names"
+printf '{"peers":[{"name":"peerbot","bot_id":"555","owner_id":"1","machine":"m"},{"name":"ACC","bot_id":"777","owner_id":"1","machine":"m"}]}\n' > "$MR/peers.json"
+# access --json asks Discord four things with the bot's token: the server's channels, the server (its roles), the bot's
+# membership (its roles) and the members. Whether the bot can read a channel is VIEW_CHANNEL (1024) and
+# READ_MESSAGE_HISTORY (65536) after the roles and the channel's overwrites: 900 plain; 901 denied to @everyone and
+# given back to a role of the bot; 902 denied to @everyone; 903 its history denied to the bot itself; 904 a voice
+# channel (not listed); 905 an overwrite that is no number (not known, never a guess); 906 a forum, denied to a role
+# the bot has not, its name with an escape sequence in it.
+A_CH='[{"id":"900","type":0,"name":"dev-bots","position":1,"permission_overwrites":[]},{"id":"901","type":0,"name":"bot-health","position":2,"permission_overwrites":[{"id":"5","type":0,"allow":"0","deny":"1024"},{"id":"70","type":0,"allow":"1024","deny":"0"}]},{"id":"902","type":0,"name":"general","position":3,"permission_overwrites":[{"id":"5","type":0,"allow":"0","deny":"1024"}]},{"id":"903","type":0,"name":"hist","position":4,"permission_overwrites":[{"id":"777","type":1,"allow":"0","deny":"65536"}]},{"id":"904","type":2,"name":"voice","position":5},{"id":"905","type":0,"name":"odd","position":6,"permission_overwrites":[{"id":"5","type":0,"allow":"x","deny":"0"}]},{"id":"906","type":15,"name":"fo\u001b[2Jrum","position":0,"permission_overwrites":[{"id":"71","type":0,"allow":"0","deny":"1024"}]}]'
+A_G='{"id":"5","name":"Tor-AIC","owner_id":"1","roles":[{"id":"5","permissions":"66560"},{"id":"70","permissions":"0"},{"id":"71","permissions":"8"}]}'
+A_M='{"user":{"id":"777"},"roles":["70"]}'
+A_MM='[{"user":{"id":"111","username":"dy","global_name":"dongyong22"},"nick":null},{"user":{"id":"333","username":"jbot","bot":true},"nick":"junyong-dev-bot"}]'
+: > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_REPLIES"
+queue_line "200 $A_CH"; queue_line "200 $A_G"; queue_line "200 $A_M"; queue_line "200 $A_MM"
+ac acc --json
+[ "$ARC" = 0 ] && [ -z "$AE" ] && [ "$(wc -l <<<"$AO")" = 1 ] && jq -e --arg p "$(pwd -P)" '.access == 1 and .bot == "acc" and .bot_id == "777" and .project == $p and .mode == "none" and .owner == "111" and .main == "900"
+  and .peers == ["555"] and .guild == {id: "5", name: "Tor-AIC"} and .members == "api" and .errors == []
+  and .policy == {dm: "allowlist", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: ["111", "222"]}, {id: "901", mention: false, allow: []}]}
+  and ([.channels[] | [.id, .name, .kind, .read]] == [["906", "fo[2Jrum", "forum", true], ["900", "dev-bots", "text", true], ["901", "bot-health", "text", true],
+       ["902", "general", "text", false], ["903", "hist", "text", false], ["905", "odd", "text", null]])
+  and .people == [{id: "111", name: "dongyong22", bot: false}, {id: "222", name: "gpu villain", bot: false}, {id: "333", name: "junyong-dev-bot", bot: true},
+                  {id: "555", name: "peerbot", bot: true}, {id: "777", name: "ACC", bot: true}]' <<<"$AO" >/dev/null ||
+  { echo "FAIL: access --json is one line: the policy, the server's text and forum channels with whether the bot can read each (true, false, or null when it cannot be told), the people (the members, then the names kept here), the peers: rc=$ARC $AO / $AE"; exit 1; }
+[ "$(<"$CURL_LOG")" = "$(printf '%s\n' "-s --max-time 5 -w \n%{http_code} -H @- https://discord.com/api/v10/guilds/5/"{channels,,members/777,members?limit=1000} | sed 's#/$##')" ] &&
+  [ "$(sort -u "$CURL_STDIN_LOG")" = "Authorization: Bot tokAccUnique" ] && [[ $AO$AE$(<"$CURL_LOG") != *tokAcc* ]] ||
+  { echo "FAIL: access --json makes four calls, the token on curl's stdin and nowhere else: $(<"$CURL_LOG") / $(<"$CURL_STDIN_LOG")"; exit 1; }
+# What cannot be told is not guessed: with no @everyone role among the server's roles no channel is readable or
+# unreadable, only not known; with the member list refused (the Server Members Intent is off) the people are the
+# names kept here, and that is no error.
+: > "$CURL_REPLIES"; queue_line "200 $A_CH"; queue_line '200 {"id":"5","name":"Tor-AIC","owner_id":"1","roles":[{"id":"70","permissions":"66560"}]}'; queue_line "200 $A_M"; queue_line '403 {"message":"Missing Access"}'
+ac acc --json
+[ "$ARC" = 0 ] && jq -e '([.channels[].read] | unique) == [null] and (.channels | length) == 6 and .members == "names" and .errors == [] and [.people[].id] == ["111", "222", "555", "777"]' <<<"$AO" >/dev/null ||
+  { echo "FAIL: roles that do not say what @everyone may do leave every channel not known (null), never readable; no member list is no error: rc=$ARC $AO / $AE"; exit 1; }
+# Usage, a bot that is not set up, and the verb's name as a bot's.
+for bad in "" "acc frob" "--frob acc --json"; do
+  ac $bad
+  [ "$ARC" = 2 ] && grep -q '^usage: claude-discord access ' <<<"$AE" || { echo "FAIL: 'access $bad' is a usage error (exit 2): rc=$ARC $AE"; exit 1; }
+done
+ac nosuch --json
+[ "$ARC" = 1 ] && grep -q "no bot 'nosuch' set up in $MR" <<<"$AE" || { echo "FAIL: a bot that is not set up is exit 1: rc=$ARC $AE"; exit 1; }
+rc=0; out=$(printf '\n' | bash "$S" setup access 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -q "bot name 'access' is reserved" <<<"$out" || { echo "FAIL: 'access' is a subcommand now, so no bot may take the name: rc=$rc $out"; exit 1; }
+echo "ok: access --json: one line with the policy, the server's channels and whether the bot can read each (roles, then the channel's overwrites for @everyone, the bot's roles and the bot; not known is null, never a guess), the people (the member list when Discord gives it, the names kept here when it does not) and the peers; four calls, the token on curl's stdin only; 'access' is a reserved bot name"
+# The monitor cases below find the ledger, the logs and the project as the hosts cases left them.
+printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -rf "$AD" "$MR/peers.json" "$HOME/ssh.log" "$HOME/curl.proxy" "$HOME/access.err" "$MON"/*; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
+
 # The monitor runs fast here: a 0.01 s tick, a 0.03 s cap per host, 0.1 s for the lock (one retry; written 0.10, which
 # the sleep stub leaves alone: a keeper's second look at an unseen lock waits it for real), and a 60 s pass interval, so
 # each start runs exactly its first pass (these blocks need no second one). Thresholds are tested by seeding

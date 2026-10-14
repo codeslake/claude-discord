@@ -768,7 +768,7 @@ if [ "${1:-}" = setup ]; then
   case $name in
     ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
     hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
-    setup|install|update|patch|compat|refresh|health|monitor|tui|hosts) echo "claude-discord: bot name '$name' is reserved: 'claude-discord $name' is a subcommand" >&2; exit 2;;
+    setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access) echo "claude-discord: bot name '$name' is reserved: 'claude-discord $name' is a subcommand" >&2; exit 2;;
   esac
   if [ "${3:-}" = --mode ]; then
     [ -z "$scope$method" ] || { echo "claude-discord: --mode changes only the mode and installs nothing; --scope and --method do not apply" >&2; exit 2; }
@@ -2385,6 +2385,200 @@ if [ "${1:-}" = hosts ]; then
     *) echo "$h_usage" >&2; exit 2;;
   esac
   exit 0
+fi
+
+# access: reads and changes who may drive a bot, for people, scripts and the TUI, which changes a bot's access.json and
+# mode through this verb only: the channels it listens in (access.json's groups), per channel whether an @mention is
+# required and who may write, the DM policy with its allowlist, and the bot's mode.
+#   access <bot> --json          one line of JSON: the policy, the guild's channels with whether the bot can read each
+#                                (asked of Discord with the bot's own token, here on the bot's machine), the people
+#                                known, the mode. Read-only; needs no terminal.
+#   access <bot> set <change>... prints what would change, asks, writes. A change is a word a person can type, made of
+#                                lower-case letters, digits and : + = - only (a_word_re), so it travels over ssh as it is:
+#     channel+<channel id>  channel-<channel id>          listen there (an @mention required, from the owner alone) / stop
+#     mention:<channel id>=on|off                         an @mention is required / every message is answered
+#     allow:<channel id>+<user id>  allow:<channel id>-<user id>  allow:<channel id>=any    who may write there
+#     dm=allowlist|pairing|off  dm+<user id>  dm-<user id>          DMs: off is an allowlist with nobody on it
+#     mode=none|dev-manager|autoresearchclaw              through `setup <bot> --mode`, its questions answered by Enter
+# A change that widens who can drive the bot (marked "!", red at a terminal) is asked about by itself; the others are
+# confirmed together, once. Any "no" writes nothing: the file is what was shown and agreed to, or as it was.
+# It refuses to write unless stdin and stdout are a terminal, and has no flag to skip the questions. That is a speed
+# bump, not a boundary: whoever can run this can also edit the file. Without a terminal it prints the changes and exits 3.
+# --project <dir>: the bot's project (default: the one above the cwd that has the bot).
+# --host <alias>: the bot lives on a host of a manager's ledger (--manager <bot> when the project has several): `local`
+# runs it here with that line's env words, any other alias over ssh with them (a question needs `ssh -t`, so a terminal
+# here). Only hex digits, ids and change words go into the remote command; no name does.
+# Exit status: 0 done, or nothing to change; 1 it could not (no such bot, access.json unreadable or changed meanwhile, a
+# failed write, the lock held 5 s, no manager's ledger for --host); 2 usage, a word that is not a change, or a change
+# that cannot be made; 3 no terminal: nothing written; 4 answered no: nothing written; 5 --host: no answer from the
+# host, or its claude-discord is older than 1.13.0.
+if [ "${1:-}" = access ]; then
+  shift
+  a_usage="usage: claude-discord access [--project <dir>] <bot> --json"
+  a_proj=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --project)
+        [ $# -ge 2 ] || { echo "$a_usage" >&2; exit 2; }
+        a_proj=$2; shift 2;;
+      --) shift; break;;
+      -*) echo "$a_usage" >&2; exit 2;;
+      *) break;;
+    esac
+  done
+  [ $# -ge 2 ] || { echo "$a_usage" >&2; exit 2; }
+  bot=$1 act=$2; shift 2
+  case $bot in ''|.|..|*/*) echo "claude-discord: access: the bot's name must be a plain directory name" >&2; exit 2;; esac
+  case $act in
+    --json) [ $# = 0 ] || { echo "$a_usage" >&2; exit 2; };;
+    *) echo "$a_usage" >&2; exit 2;;
+  esac
+
+  if [ -n "$a_proj" ]; then
+    cd "$a_proj" 2>/dev/null || { echo "claude-discord: access: no such project directory (--project)" >&2; exit 1; }
+  else
+    ap=$PWD
+    while [ ! -d "$ap/.claude/discord-agents/$bot" ] && [ -n "$ap" ]; do ap=${ap%/*}; done
+    [ -z "$ap" ] || cd "$ap"
+  fi
+  root=$PWD/.claude/discord-agents; d=$root/$bot; f=$d/access.json
+  bn=${bot//[[:cntrl:]]/}   # the name as it is printed
+  [ -f "$f" ] || { echo "claude-discord: access: no bot '$bn' set up in $root (claude-discord setup <bot>)" >&2; exit 1; }
+  command -v jq >/dev/null 2>&1 || { echo "claude-discord: access needs jq" >&2; exit 1; }
+  DISCORD_CHANNEL_ID="" DISCORD_USER_ID=""
+  [ ! -f "$root/config.env" ] || . "$root/config.env"
+  # What names this machine keeps: the channels' (health writes channel-names), the people's (on-prompt writes
+  # user-names) and the peer bots' (peers.json). They are for reading: every argument and every stored value is an id.
+  a_cn="" a_un="" a_peers="" mode=""
+  { a_cn=$(<"$d/channel-names"); } 2>/dev/null || :
+  { a_un=$(<"$d/user-names"); } 2>/dev/null || :
+  { a_peers=$(<"$root/peers.json"); } 2>/dev/null || :
+  { read -r mode < "$d/mode"; } 2>/dev/null || :
+  mode=${mode//[[:cntrl:]]/}; mode=${mode:-none}
+  a_host_name=$(uname -n); a_host_name=${a_host_name%%.*}
+  # What every jq program below starts with. An id is digits and nothing else, to the end of the string (\z: Oniguruma's
+  # $ also matches before a last newline). `policy` is the part of access.json this verb is about, as health --json
+  # gives it (dm, dm_allow, groups: id, mention, allow), with the plugin's own defaults: no dmPolicy is pairing, no
+  # requireMention is true, no allowFrom is everyone. A name is shown, never trusted: no control character, no bidi
+  # override, 40 characters.
+  a_defs='
+    def isid: type == "string" and test("\\A[0-9]{1,20}\\z");
+    def ids: [arrays[] | tostring | select(isid)] | unique;
+    def policy: {dm: (.dmPolicy | if type == "string" then . else "pairing" end), dm_allow: (.allowFrom | ids),
+                 groups: [(.groups | if type == "object" then . else {} end) | to_entries[] | select((.key | isid) and (.value | type) == "object")
+                          | {id: .key, mention: (.value.requireMention != false), allow: (.value.allowFrom | ids)}]};
+    def safe: tostring | gsub("[[:cntrl:]‪-‮⁦-⁩]"; "") | .[0:40];
+    def named: split("\n") | map(select(test("^[0-9]+ .")) | {key: (split(" ")[0]), value: (sub("^[0-9]+ "; "") | safe)}) | from_entries;
+    def peerlist: (try fromjson catch null) | [objects | .peers | arrays | .[] | objects | {id: (.bot_id // "" | tostring), name: (.name // "" | safe)} | select(.id | isid)];
+    def mainof($fb): if (.groups | length) == 1 then .groups[0].id else $fb end;'
+
+  if [ "$act" = --json ]; then
+    a_p=$(jq -r --arg fb "$DISCORD_CHANNEL_ID" "$a_defs"'policy | [mainof($fb), tojson] | join(" ")' "$f" 2>/dev/null) && [ -n "$a_p" ] ||
+      { echo "claude-discord: access: $f is not valid JSON" >&2; exit 1; }
+    main=${a_p%% *} a_p=${a_p#* }
+    # Discord is asked as health asks it (the token on curl's stdin, never in an argument), five calls at most, each
+    # 5 s at most and none started past 12 s: the answer must arrive inside the cap of the ssh call that may carry it.
+    a_t0=$SECONDS status=000 resp=""
+    a_api() {  # $1 = path; sets $status and $resp
+      local out=""
+      [ $((SECONDS - a_t0)) -lt 12 ] && out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 5 -w '\n%{http_code}' -H @- "https://discord.com/api/v10/$1" 2>/dev/null) || out=""
+      status=${out##*$'\n'} resp=${out%$'\n'*}
+      case $status in ''|*[!0-9]*) status=000;; esac
+    }
+    tok="" me="" gid="" cch="" errs="" a_g=null a_m=null a_c=null a_mm=null
+    { while IFS= read -r l || [ -n "$l" ]; do case $l in DISCORD_BOT_TOKEN=*) tok=${l#DISCORD_BOT_TOKEN=};; esac; done < "$d/.env"; } 2>/dev/null || :
+    { read -r me < "$d/bot-id"; } 2>/dev/null || :
+    { read -r cch gid l < "$d/channel-guild"; } 2>/dev/null || :
+    [ "$cch" = "$main" ] && c_match "$gid" '^[0-9]{1,20}$' || gid=""
+    if [ -z "$tok" ]; then
+      errs="no token in $d/.env: Discord was not asked for the channels"
+    elif ! command -v curl >/dev/null 2>&1; then
+      errs="no curl here: Discord was not asked for the channels"
+    else
+      if ! c_match "$me" '^[0-9]{1,20}$'; then
+        a_api users/@me; me=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null) || me=""
+        c_match "$me" '^[0-9]{1,20}$' || me=""
+      fi
+      if [ -z "$gid" ] && [ -n "$main" ]; then
+        a_api "channels/$main"; gid=$(printf '%s' "$resp" | jq -r '.guild_id // empty' 2>/dev/null) || gid=""
+        c_match "$gid" '^[0-9]{1,20}$' || gid=""
+      fi
+      if [ -z "$me" ] || [ -z "$gid" ]; then
+        errs="Discord did not say who this bot is or which server its channel is in (HTTP $status)"
+      else
+        a_api "guilds/$gid/channels"; case $status in 2*) a_c=$resp;; *) errs="the server's channels: HTTP $status";; esac
+        a_api "guilds/$gid"; case $status in 2*) a_g=$resp;; *) errs="$errs${errs:+$'\n'}the server's roles: HTTP $status";; esac
+        a_api "guilds/$gid/members/$me"; case $status in 2*) a_m=$resp;; *) errs="$errs${errs:+$'\n'}the bot's roles: HTTP $status";; esac
+        # The member list answers only when the Server Members Intent is on for this bot. Off is no error and nothing
+        # to turn on: the people are then the ones this machine has names for.
+        a_api "guilds/$gid/members?limit=1000"; case $status in 2*) a_mm=$resp;; esac
+      fi
+    fi
+    # Can the bot read a channel: VIEW_CHANNEL (1 << 10) and READ_MESSAGE_HISTORY (1 << 16) after Discord's own order:
+    # @everyone's and the bot's roles' permissions together; then the channel's overwrites, @everyone's first, the
+    # roles' next (their denies, then their allows), the bot's own last. An administrator (1 << 3) and the server's
+    # owner read everything. jq only picks the numbers out, as text: its numbers are doubles and a permission set is
+    # past 2^53 one day; the arithmetic is bash's (64 bits). A number that is none, or longer than 18 digits, a call
+    # that failed, an answer with no @everyone role in it (jq then prints no line): not known ("?" in the TUI), never a guess.
+    a_reads=""
+    a_lines=$(printf '%s\n%s\n%s\n' "$a_g" "$a_m" "$a_c" | jq -rn --arg me "$me" '
+      [inputs] as [$g, $m, $c]
+      | ($g | objects | .id | tostring) as $gid | ($m | objects | [.roles | arrays | .[] | tostring]) as $mr
+      | [$g.roles | arrays | .[] | objects] as $roles | select(any($roles[]; (.id | tostring) == $gid))
+      | def ow($o): [$o[] | objects | "\(.allow // "0")/\(.deny // "0")"] | join(",") | if . == "" then "-" else . end;
+        "B " + ([$roles[] | (.id | tostring) as $i | select($i == $gid or any($mr[]; . == $i)) | .permissions | tostring] | join(" ")),
+        "O " + (if ($g.owner_id // "" | tostring) == $me then "1" else "0" end),
+        ($c | arrays | .[] | objects | select(.type == 0 or .type == 5 or .type == 15)
+         | [.permission_overwrites | arrays | .[] | objects] as $o
+         | "C \(.id) \(ow([$o[] | select((.id | tostring) == $gid)])) \(ow([$o[] | (.id | tostring) as $i | select((.type == 0 or .type == "role") and $i != $gid and any($mr[]; . == $i))])) \(ow([$o[] | select((.id | tostring) == $me)]))")' 2>/dev/null) || a_lines=""
+    a_num() { c_match "$1" '^[0-9]{1,18}$'; }
+    a_ow() {  # $1 = "allow/deny,..." or "-": folded into p (the denies of all of them, then their allows); unsure=1 for a number that is none
+      local x al=0 dn=0
+      [ "$1" != - ] || return 0
+      for x in ${1//,/ }; do
+        if a_num "${x%/*}" && a_num "${x#*/}"; then al=$((al | 10#${x%/*})) dn=$((dn | 10#${x#*/})); else unsure=1; fi
+      done
+      p=$(( (p & ~dn) | al ))
+    }
+    base=0 sure=yes all=0
+    while read -r t a b c e; do
+      case $t in
+        B) for x in $a $b $c $e; do if a_num "$x"; then base=$((base | 10#$x)); else sure=no; fi; done;;
+        O) [ "$a" != 1 ] || all=1;;
+        C) p=$base unsure=0; a_ow "$b"; a_ow "$c"; a_ow "$e"
+           if [ "$sure" != yes ] || ! c_match "$a" '^[0-9]{1,20}$'; then :
+           elif [ "$all" = 1 ] || [ $((base & 8)) != 0 ]; then a_reads="$a_reads$a 1"$'\n'
+           elif [ "$unsure" = 1 ]; then :
+           elif [ $((p & 1024)) != 0 ] && [ $((p & 65536)) != 0 ]; then a_reads="$a_reads$a 1"$'\n'
+           else a_reads="$a_reads$a 0"$'\n'; fi;;
+      esac
+    done <<<"$a_lines"
+    a_doc() {  # the document, from the three answers on stdin (null for one that did not come)
+      jq -cn --arg bot "$bot" --arg me "$me" --arg host "$a_host_name" --arg project "$PWD" --arg mode "$mode" --arg owner "$DISCORD_USER_ID" \
+        --arg main "$main" --arg ver "$(plugin_version "$self_root")" --arg cn "$a_cn" --arg un "$a_un" --arg peers "$a_peers" \
+        --arg reads "$a_reads" --arg errs "$errs" --argjson policy "$a_p" "$a_defs"'
+        [inputs] as [$g, $c, $mm]
+        | ($cn | named) as $CN | ($un | named) as $UN | ($peers | peerlist) as $PL
+        | ($reads | split("\n") | map(select(. != "") | split(" ") | {key: .[0], value: (.[1] == "1")}) | from_entries) as $R
+        | [$c | arrays | .[] | objects | select(.type == 0 or .type == 5 or .type == 15) | . + {id: (.id | tostring)}] as $gc
+        | ([$mm | arrays | .[] | objects | select(.user | type == "object")
+            | {id: (.user.id | tostring), name: (.nick // .user.global_name // .user.username // "" | safe), bot: (.user.bot == true)}]) as $api
+        | ([$PL[] | . + {bot: true}] + [$UN | to_entries[] | {id: .key, name: .value, bot: false}]) as $kept
+        | {access: 1, version: $ver, bot: $bot, bot_id: $me, host: $host, project: $project, mode: $mode,
+           owner: (if ($owner | isid) then $owner else "" end), main: $main, peers: [$PL[] | select((.name | ascii_downcase) != ($bot | ascii_downcase)) | .id],
+           guild: (if ($g | type) == "object" then {id: ($g.id | tostring), name: ($g.name // "" | safe)} else null end),
+           policy: $policy,
+           channels: ([$gc | sort_by(.position // 0)[] | {id, name: (.name // "" | safe), kind: (if .type == 15 then "forum" elif .type == 5 then "news" else "text" end), read: $R[.id]}]
+                      + [$policy.groups[] | .id as $i | select(all($gc[]; .id != $i)) | {id: $i, name: ($CN[$i] // ""), kind: "unknown", read: null}]),
+           people: (($api + $kept + [($policy.dm_allow + [$policy.groups[].allow[]])[] | {id: ., name: "", bot: false}])
+                    | map(select(.id | isid)) | group_by(.id) | map(.[0] + {name: (map(.name | select(. != ""))[0] // ""), bot: any(.[]; .bot)})),
+           members: (if ($mm | type) == "array" then "api" else "names" end),
+           errors: ($errs | split("\n") | map(select(. != "")))}'
+    }
+    printf '%s\n%s\n%s\n' "$a_g" "$a_c" "$a_mm" | a_doc 2>/dev/null ||
+      { errs="$errs${errs:+$'\n'}Discord's answer could not be read"; a_reads=""; printf 'null\nnull\nnull\n' | a_doc; }
+    exit 0
+  fi
 fi
 
 # monitor: the backend health monitor of a manager bot (monitor/monitor.sh has
