@@ -95,12 +95,14 @@ grep() {
        case $pat in *'$') eol=1; pat=${pat%?};; esac
        case $pat in ''|*[\\.\[*^$]*) command grep "${args[@]}"; return;; esac ;;
   esac
+  # Read in chunks of a fixed size (-N): bash reads a pipe (a here-string) a byte per syscall to find a delimiter, but not
+  # for -N; a NUL byte is dropped (text only here).
   if [ -n "$file" ]; then
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then printf 'grep: %s: No such file or directory\n' "$file" >&2; return 2; fi
     { [ -f "$file" ] && [ -r "$file" ]; } || { command grep "${args[@]}"; return; }
-    while IFS= read -r l; do data+=$l$nl; done < "$file"; data+=$l   # by line: bash reads a file in blocks that way, a byte per syscall with -d ''
+    while IFS= read -r -N 65536 l; do data+=$l; done < "$file"; data+=$l
   else
-    IFS= read -rd '' data || :
+    while IFS= read -r -N 65536 l; do data+=$l; done; data+=$l
   fi
   need=$pat; hay=$nl$data$nl
   [ $bol = 0 ] || need=$nl$need
