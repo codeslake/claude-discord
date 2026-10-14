@@ -264,11 +264,13 @@ chmod +x "$HOME/bin/curl"
 #   0.5  refresh's wait for the old session to exit (20 rounds): 0.01 s.
 #   3    refresh's pause for the old gateway to let go: not slept.
 #   0.05 on-session-start's wait for a held pins.json.lock (4 rounds): 0.01 s.
+#   0.1  monitor --stop's poll for the keeper, then the monitor, to be gone (50 rounds each): 0.01 s. The monitor's
+#        lock wait is a real 0.1 s here and goes through this stub too, so the suite writes that one 0.10.
 # sh, not bash: the monitor sleeps a step at a time through it, and dash starts in a third of bash's time.
 cat > "$HOME/bin/sleep" <<'EOF'
 #!/bin/sh
 case $* in
-  0.5|0.05) exec /bin/sleep 0.01 ;;
+  0.5|0.05|0.1) exec /bin/sleep 0.01 ;;
   3) exit 0 ;;
   *) exec /bin/sleep "$@" ;;
 esac
@@ -3928,11 +3930,12 @@ rm -f "$HOME/ssh.log"; hc rm --no-probe w4; mv "$HID" "$HID.off"; hc rm w5; mv "
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -f "$HOME/ssh.log" "$MON"/*
 echo "ok: watchers: --version --watch/--unwatch write and remove watchers/<manager> on the checked host (words of the wrong shape write nothing, a home removes only its own record) and --host-id lists them; hosts add warns of another manager's record, refuses a home this manager already checks under a listed alias (exit 4), then records itself there (a failure is a warning); hosts rm removes the line first and the record after, also when the host is unreachable"
 
-# The monitor runs fast here: a 0.01 s tick, a 0.03 s cap per host, 0.1 s for the lock (one retry), and a 60 s pass interval, so
+# The monitor runs fast here: a 0.01 s tick, a 0.03 s cap per host, 0.1 s for the lock (one retry; written 0.10, which
+# the sleep stub leaves alone: a keeper's second look at an unseen lock waits it for real), and a 60 s pass interval, so
 # each start runs exactly its first pass (these blocks need no second one). Thresholds are tested by seeding
 # state.json with old `since` times, never by waiting. The local host's command is the shim, stubbed to print
 # $HOME/mon/local.out; ssh is the stub above. MB is the monitor's state dir.
-export CLAUDE_DISCORD_MONITOR_TICK=0.01 CLAUDE_DISCORD_MONITOR_PASS=60 CLAUDE_DISCORD_MONITOR_HOST_CAP=0.03 CLAUDE_DISCORD_MONITOR_LOCK_WAIT=0.1
+export CLAUDE_DISCORD_MONITOR_TICK=0.01 CLAUDE_DISCORD_MONITOR_PASS=60 CLAUDE_DISCORD_MONITOR_HOST_CAP=0.03 CLAUDE_DISCORD_MONITOR_LOCK_WAIT=0.10
 MB="$HOME/.claude-discord/records/monitor/mgr"
 mv "$HOME/.local/bin/claude-discord" "$HOME/shim.real"
 # $HOME/mon/local.sleep delays it and local.rc is its exit status, as for the ssh stub.
@@ -3983,6 +3986,16 @@ mstop() {  # the holder goes and the monitor is TERMed (it does not end for want
   [ -z "$p" ] || kill "$p" 2>/dev/null || :
   while [ -n "$p" ] && running "$p" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
   [ -z "$p" ] || ! running "$p" || { echo "FAIL: the monitor must exit on a TERM: $(tail -3 "$MB/monitor.log")"; exit 1; }
+}
+# backend_gone, after a --stop and before its marker is removed: no process of this bot's backend is left. --stop TERMs
+# the keeper and the monitor it can name; a monitor the keeper's last --ensure was still starting (the lock waiter, or
+# one that has not written its pid yet) leaves on the marker by itself a moment later, and stays for good when the
+# marker goes first (it then starts keepers on its own clock under the cases that follow). All of them carry the
+# installed monitor.sh's path in argv, the waiter too. 3 s at most.
+backend_gone() {
+  local n=0
+  while pgrep -f "$PC/monitor/monitor\.sh .* mgr( |\$)" >/dev/null && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); done
+  [ "$n" -lt 300 ] || { echo "FAIL: a keeper, monitor or lock waiter of mgr is still there 3 s after --stop: $(pgrep -af "$PC/monitor/monitor\.sh")"; exit 1; }
 }
 mstart() {  # a holder, then --ensure; returns after the first pass of this start
   local want=$(( $(passes) + 1 ))
@@ -4409,13 +4422,14 @@ echo none > "$MR/mgr/mode"; rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr
 perl -MFcntl=:flock -e 'open(my $l, ">>", $ARGV[0]) or die; flock($l, LOCK_EX) or die; open(my $w, ">", $ARGV[0]) or die; print $w "$$\n"; close $w; sleep 30' "$MB/lock" & LP=$!
 KILL_AT_EXIT="$KILL_AT_EXIT $LP"; n=0; l=""
 until [ "$l" = "$LP" ] || [ "$n" -ge 200 ]; do nap 0.01; n=$((n + 1)); { read -r l < "$MB/lock"; } 2>/dev/null || :; done
-rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?
+# (The holder wrote its pid before these two calls, so their second look reads what the first did: the lock wait between them is cut.)
+rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_MONITOR_LOCK_WAIT=0.01 bash "$S" monitor --keep mgr 2>&1) || rc=$?
 # An automatic (detached) start that is refused leaves this side's marker (refused.<pid namespace id>, plain `refused` where
 # /proc has none), and keeper_alive then reads the backend as handled, so a hook does not fork the same refusal on every
 # prompt; the foreground refusal above leaves none. A marker another namespace wrote is that side's: it stops nothing here.
 rf=refused; [ ! -L /proc/self/ns/pid ] || { rf=$(readlink /proc/self/ns/pid); rf=refused.${rf//[!0-9]/}; }
 [ -z "$(ls "$MB" | command grep '^refused')" ] || { echo "FAIL: a foreground refusal must leave no refused marker: $(ls "$MB")"; exit 1; }
-rc2=0; (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" monitor --keep mgr --detach >/dev/null 2>&1) || rc2=$?
+rc2=0; (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_DISCORD_MONITOR_LOCK_WAIT=0.01 bash "$S" monitor --keep mgr --detach >/dev/null 2>&1) || rc2=$?
 [ "$rc2" = 1 ] && [ "$(ls "$MB" | command grep '^refused')" = "$rf" ] && bash -c '. "$1"; bot_name=mgr; keeper_alive' x "$D/hooks/lib/discord.sh" ||
   { echo "FAIL: a detached start refused for an unseen lock must leave $rf, which keeper_alive honours (rc=$rc2): $(ls "$MB")"; exit 1; }
 rm -f "$MB/$rf"; : > "$MB/refused.1"
@@ -4529,7 +4543,7 @@ out=$(printf 'dev-manager\n\n\n' | env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" 
 KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
 [ -n "$KP" ] && [ "$(grep -c 'started the backend of mgr' <<<"$out")" = 1 ] && grep -q 'stop it with: claude-discord monitor --stop mgr' <<<"$out" ||
   { echo "FAIL: setup of a dev-manager with a ledger must start the backend and say so once: '$KP' $out"; exit 1; }
-(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null); rm -f "$MB/stopped"
+(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null); backend_gone; rm -f "$MB/stopped"
 n=0; while running "$KP" && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
 unset CLAUDE_DISCORD_KEEP_INTERVAL; rm -f "$HOME/keep.out"
 echo "ok: monitor --keep refuses no ledger, a non-manager and a lock held by a monitor this side cannot see; registers a keeper holder with its start time, brings a killed monitor back, is one per bot, ends on TERM with its record, runs a changed monitor.sh as the same process, leaves with its ledger; --stop ends keeper and monitor and marks the bot stopped (--keep, --ensure and setup start nothing) until --start; setup starts the backend"
@@ -4569,9 +4583,9 @@ hook on-prompt up.json; nap 0.05; [ -z "$(ls "$MB/holders")" ] || { echo "FAIL: 
 # and the dead manager's keeper once it is gone.
 plain() { env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$P" DISCORD_STATE_DIR="$R/alpha" bash "$PC/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1; }
 plain; nap 0.05; [ -z "$(ls "$MB/holders")" ] || { echo "FAIL: a plain bot's prompt must not start a backend its owner stopped: $(ls "$MB/holders")"; exit 1; }
-rm -f "$MB/stopped" "$MB"/last-start*; old=$KP; plain; newkeeper "$old"
+backend_gone; rm -f "$MB/stopped" "$MB"/last-start*; old=$KP; plain; newkeeper "$old"
 [ -n "$KP" ] || { echo "FAIL: a plain bot's prompt must start a dead manager's keeper: $(ls "$MB/holders")"; exit 1; }
-(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null); rm -f "$MB/stopped" "$HOME/ss.json" "$HOME/up.json"; unset CLAUDE_DISCORD_KEEP_INTERVAL
+(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null); backend_gone; rm -f "$MB/stopped" "$HOME/ss.json" "$HOME/up.json"; unset CLAUDE_DISCORD_KEEP_INTERVAL
 n=0; while running "$KP" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
 # Decoys under a monitor/monitor.sh of their own (a sleep), each waited for until ps shows its command line. A decoy's
 # sleep is a child of its bash: the TERM trap takes it down too, set before the fork.
@@ -4660,7 +4674,7 @@ echo "ok: a dev-manager's SessionStart returns at once with only its context on 
 kp() { local f; for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || { echo "${f##*-}"; return 0; }; done; }
 wait_keeper() { local n=0; K=$(kp); while { [ -z "$K" ] || [ "$K" = "${1:-}" ] || ! running "$K"; } && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); K=$(kp); done; [ -n "$K" ] && [ "$K" != "${1:-}" ] && running "$K"; }
 wait_monitor() { local n=0; Mp=$(mpid); while { [ -z "$Mp" ] || [ "$Mp" = "${1:-}" ] || [ "$(cat "$MB/lock" 2>/dev/null)" != "$Mp" ] || ! running "$Mp"; } && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); Mp=$(mpid); done; [ -n "$Mp" ] && [ "$Mp" != "${1:-}" ] && running "$Mp"; }
-(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null 2>&1; env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_DISCORD_KEEP_INTERVAL=0.05 bash "$S" monitor --start mgr >/dev/null 2>&1)
+(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null 2>&1; backend_gone; env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_DISCORD_KEEP_INTERVAL=0.05 bash "$S" monitor --start mgr >/dev/null 2>&1)
 wait_keeper && wait_monitor || { echo "FAIL: monitor --start must bring up a keeper and a monitor: $(ls "$MB/holders") $(tail -3 "$MB/monitor.log")"; exit 1; }
 k1=$K m1=$Mp
 # A keeper killed without its trap: the monitor goes on (it used to leave at its next holder check) and starts one again
@@ -4699,7 +4713,7 @@ c=$(command grep -c 'exit reason=stopped$' "$MB/monitor.log") || :; kill -STOP "
 wait_log $(( c + 1 )) 'exit reason=stopped$'; kill -CONT "$k3"; wait "$sp"; out=$(<"$HOME/stop.out"); rm -f "$HOME/stop.out"
 ! running "$k3" && ! running "$m2" && [ -z "$(ls "$MB/holders")" ] && grep -q "stopped keeper $k3$" <<<"$out" && grep -q "stopped monitor $m2$" <<<"$out" && [ "$(mpid)" != "$m2" ] ||
   { echo "FAIL: --stop must end the keeper and the monitor for good: $out $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
-rm -f "$MB/stopped" "$MB"/last-start*
+backend_gone; rm -f "$MB/stopped" "$MB"/last-start*
 echo "ok: monitor: it outlives its holders and starts a killed keeper again within a tick (once a minute, never past a refused marker, no lock of its own handed on, keeper.lock deciding for a lost record); --stop ends both for good"
 
 # claude-discord tui: the project's one dev-manager bot with a ledger unless named; it hands the bot, the monitor's
@@ -4756,7 +4770,7 @@ printf '%s\n' "$PFB" > "$HOME/.claude-discord/records/projects"
 # Stopped by its owner: tui starts nothing itself (the TUI asks, and shows the stop in its bar).
 (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui </dev/null 2>/dev/null); nap 0.1
 [ -z "$(ls "$MB/holders")" ] || { echo "FAIL: tui must not start a backend its owner stopped without a yes: $(ls "$MB/holders")"; exit 1; }
-rm -f "$MB/stopped"
+backend_gone; rm -f "$MB/stopped"
 rm -rf "$HOME/bin/uv" "$HOME/uv.args" "$HOME/uv.cwd" "$TP" "$MP/sub" "$NP" "$HOME/tuiproj2"
 echo "ok: tui runs the script through uv for the project's one manager bot (or the named one, from a subdirectory too), says when uv is missing, refuses a bot without a ledger, and asks for the name when it cannot tell, and outside a project picks among the recorded managers (cwd = its project); it starts a detached keeper when none lives, and none when one does"
 
