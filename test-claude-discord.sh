@@ -1211,8 +1211,9 @@ echo "ok: both patches are idempotent, and the channel tag's meta is left alone"
 # late-token: no token waits instead of exiting, and login polls .env; once, both anchors gone, the login's .catch kept.
 [ "$(grep -c 'no token yet; waiting for it' "$HOME/fakeplugin/server.ts")" = 1 ] && [ "$(grep -c 'setInterval' "$HOME/fakeplugin/server.ts")" = 1 ] &&
   [ "$(grep -c 'process.exit(1)' "$HOME/fakeplugin/server.ts")" = 1 ] && ! grep -qF 'client.login(TOKEN).catch(' "$HOME/fakeplugin/server.ts" &&
-  grep -q '^;(async () => {' "$HOME/fakeplugin/server.ts" && grep -qF '})().catch(err => {' "$HOME/fakeplugin/server.ts" && grep -qF 'code !== "TokenInvalid"' "$HOME/fakeplugin/server.ts" || { echo "FAIL: late-token must replace the exit and the login once: $(<"$HOME/fakeplugin/server.ts")"; exit 1; }
-echo "ok: late-token replaces the no-token exit and the login once"
+  grep -q '^;(async () => {' "$HOME/fakeplugin/server.ts" && grep -qF '})().catch(err => {' "$HOME/fakeplugin/server.ts" && grep -qF 'code !== "TokenInvalid"' "$HOME/fakeplugin/server.ts" &&
+  [ "$(grep -c 'client.on("shardDisconnect", f)' "$HOME/fakeplugin/server.ts")" = 1 ] || { echo "FAIL: late-token must replace the exit and the login once, the login waiting out a 4004 too: $(<"$HOME/fakeplugin/server.ts")"; exit 1; }
+echo "ok: late-token replaces the no-token exit and the login once (a token refused at the login or by the gateway after it is waited out)"
 
 CALL='const chunks = chunk(text, limit, mode)'
 PATCHED="const chunks = (await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chunk(text, limit, mode)"
@@ -1288,16 +1289,22 @@ grep -qF "(await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chu
 out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch after the rewrite must change nothing: $out"; exit 1; }
 echo "ok: patch rewrites a chunk import and a proxy preload left at the old paths to runtime/, and a second run is silent"
 # A server.ts 1.9.3 patched (its guard line in, its login giving up on a refused token): only the login is replaced, once.
+# So is the login of one patched by 1.9.4 to 1.13.x (0.0.2), which waited out a refused token only at the login.
 OLD193='new Promise<string>(ok => { if (TOKEN) return ok(TOKEN); const t = setInterval(() => { let m; try { m = readFileSync(ENV_FILE, "utf8").match(/^DISCORD_BOT_TOKEN=(.+)$/m) } catch {} if (m?.[1].trim()) { clearInterval(t); ok(m[1].trim()) } }, 10000) }).then(t => client.login(t)).catch('
 mkdir -p "$PCACHE/0.0.3"
 CD_OLD=$OLD193 perl -0777 -pe 's/^  process\.exit\(1\)\n\}\n/  process.stderr.write("discord channel: no token yet; waiting for it (re-read every 10 s)\\n")\n}\n/m; s/^client\.login\(TOKEN\)\.catch\(/$ENV{CD_OLD}/m' "$HOME/server.ts.pristine" > "$PCACHE/0.0.3/server.ts"
 grep -qF "$OLD193" "$PCACHE/0.0.3/server.ts" && [ "$(grep -c 'process.exit(1)' "$PCACHE/0.0.3/server.ts")" = 1 ] || { echo "FAIL: the 1.9.3-patched fixture was not planted: $(<"$PCACHE/0.0.3/server.ts")"; exit 1; }
+OLD194=';(async () => { let bad = ""; const read = () => { let m; try { m = readFileSync(ENV_FILE, "utf8").match(/^DISCORD_BOT_TOKEN=(.+)$/m) } catch {} return m?.[1].trim() || "" }; const pick = () => { const v = bad ? read() : (TOKEN || read()); return v && v !== bad ? v : "" }; for (;;) { const t = await new Promise<string>(ok => { const v = pick(); if (v) return ok(v); const i = setInterval(() => { const w = pick(); if (w) { clearInterval(i); ok(w) } }, 10000) }); try { return await client.login(t) } catch (e) { if ((e as any)?.code !== "TokenInvalid") throw e; bad = t; process.stderr.write("discord channel: the token was refused; waiting for a new one in .env (re-read every 10 s)\n") } } })().catch('
+mkdir -p "$PCACHE/0.0.2"
+CD_OLD=$OLD194 perl -0777 -pe 's/^  process\.exit\(1\)\n\}\n/  process.stderr.write("discord channel: no token yet; waiting for it (re-read every 10 s)\\n")\n}\n/m; s/^client\.login\(TOKEN\)\.catch\(/$ENV{CD_OLD}/m' "$HOME/server.ts.pristine" > "$PCACHE/0.0.2/server.ts"
 out=$(bash "$S" patch 2>&1) && grep -qF "$PCACHE/0.0.3/server.ts" <<<"$out" && ! grep -qF '.then(t => client.login(t))' "$PCACHE/0.0.3/server.ts" &&
   [ "$(grep -c 'code !== "TokenInvalid"' "$PCACHE/0.0.3/server.ts")" = 1 ] && grep -qF '})().catch(err => {' "$PCACHE/0.0.3/server.ts" &&
   [ "$(grep -c 'no token yet; waiting for it' "$PCACHE/0.0.3/server.ts")" = 1 ] && [ "$(grep -c 'process.exit(1)' "$PCACHE/0.0.3/server.ts")" = 1 ] || { echo "FAIL: patch must upgrade a 1.9.3 login to the refused-token loop: $out $(<"$PCACHE/0.0.3/server.ts")"; exit 1; }
-out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch after the 1.9.3 upgrade must change nothing: $out"; exit 1; }
-rm -rf "$PCACHE/0.0.3"
-echo "ok: patch upgrades a server.ts 1.9.3 patched to wait out a refused token, and a second run is silent"
+grep -qF "$PCACHE/0.0.2/server.ts" <<<"$out" && ! grep -qF 'return await client.login(t)' "$PCACHE/0.0.2/server.ts" && [ "$(grep -c 'client.on("shardDisconnect", f)' "$PCACHE/0.0.2/server.ts")" = 1 ] &&
+  [ "$(grep -c 'code !== "TokenInvalid"' "$PCACHE/0.0.2/server.ts")" = 1 ] && grep -qF '})().catch(err => {' "$PCACHE/0.0.2/server.ts" || { echo "FAIL: patch must upgrade a 1.9.4 login to the one that waits out a 4004 too: $out $(<"$PCACHE/0.0.2/server.ts")"; exit 1; }
+out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch after the 1.9.3 and 1.9.4 upgrades must change nothing: $out"; exit 1; }
+rm -rf "$PCACHE/0.0.3" "$PCACHE/0.0.2"
+echo "ok: patch upgrades a server.ts 1.9.3 patched to wait out a refused token, and one 1.9.4 to 1.13.x patched to wait out a 4004 after the login too; a second run is silent"
 # A moved pattern: exit 1 naming file and patch, the other patches still applied.
 mkdir -p "$PCACHE/0.0.7"
 printf 'client.on(x, msg => {\n  if (msg.author.isBot()) return\n})\nif (!TOKEN) {\n  process.exit(1)\n}\nclient.connect(TOKEN).catch(err => {})\n' > "$PCACHE/0.0.7/server.ts"
