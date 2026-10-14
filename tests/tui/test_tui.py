@@ -86,6 +86,22 @@ def base(n=None):
                         "detail": "Discord is rate-limiting this bot (HTTP 429); nothing can be said about it this run"}]}
 
 
+def access_doc():
+    """What `claude-discord access ... photobot --json` prints (1.13.0), with what another machine may put in it: an
+    escape sequence in a name, a channel Discord did not list, a readability that is not known."""
+    return {"access": 1, "version": "1.13.0", "bot": "photobot", "bot_id": "777", "host": "lmd79", "project": "/home/u/rcps", "mode": "none", "owner": "111",
+            "main": "900", "peers": ["555"], "guild": {"id": "5", "name": "Tor-AIC"},
+            "policy": {"dm": "allowlist", "dm_allow": ["111"],
+                       "groups": [{"id": "900", "mention": True, "allow": ["111", "222"]}, {"id": "901", "mention": False, "allow": []},
+                                  {"id": "1234", "mention": False, "allow": []}]},
+            "channels": [{"id": "906", "name": "fo\x1b[2Jrum", "kind": "forum", "read": True}, {"id": "900", "name": "dev-bots", "kind": "text", "read": True},
+                         {"id": "901", "name": "bot-health", "kind": "text", "read": True}, {"id": "902", "name": "general", "kind": "text", "read": False},
+                         {"id": "905", "name": "odd", "kind": "text", "read": None}, {"id": "1234", "name": "", "kind": "unknown", "read": None}],
+            "people": [{"id": "111", "name": "dongyong22", "bot": False}, {"id": "222", "name": "gpuvillain", "bot": False},
+                       {"id": "333", "name": "junyong-dev-bot", "bot": True}, {"id": "444", "name": "pho\x1b[2Jto", "bot": False}, {"id": "555", "name": "peerbot", "bot": True}],
+            "members": "api", "errors": []}
+
+
 def status_lines(items, key):
     """What the status column holds on each line of a bot's row: the cells from the header's `status` to its `host`."""
     head = next(l.plain for k, ls in items if k is None for l in ls if l.plain.split()[:2] == ["bot", "status"])
@@ -522,6 +538,100 @@ def pure():
         assert tui.ssh_effective(stub(d, 'echo "ssh: Could not resolve hostname" >&2; exit 255'), "x") == ["nothing (exit 255: ssh: Could not resolve hostname)"]
     print("ok: a command the TUI runs is killed with its children at its cap, takes a value on stdin, and its output is cut and cleaned; "
           "ssh -G is asked with -- before the alias and gives the lines that say where a connection goes")
+
+    # ---- access (1.13.0): the editor's model, its change words, what widens, the people, the drawing ----
+    DOC = tui.clean(access_doc())
+    was = tui.access_model(DOC)
+    assert was == {"groups": {"900": {"mention": True, "allow": ["111", "222"]}, "901": {"mention": False, "allow": []},
+                              "1234": {"mention": False, "allow": []}}, "dm": "allowlist", "dm_allow": ["111"], "mode": "none"}, was
+    # off is an allowlist with nobody on it; the plugin's own `disabled` and any word it does not know (pairing to it) are told apart.
+    dm = lambda p, a: tui.access_model({"policy": {"dm": p, "dm_allow": a}})["dm"]
+    assert [dm("allowlist", []), dm("allowlist", ["1"]), dm("pairing", ["1"]), dm("disabled", ["1"]), dm("odd", []), dm(None, [])] == ["off", "allowlist", "pairing", "disabled", "pairing", "pairing"]
+    # Another program's document: a wrong type anywhere reads as missing, an id that is not digits is none; nothing raises.
+    for junk in ({}, [], None, "x", {"policy": 7, "mode": 7}, {"policy": {"groups": [7, {"id": 5}, {"id": "9x"}, {"id": "9", "allow": "111", "mention": "no"}], "dm_allow": [7, "1\n", "22"]}}):
+        m = tui.access_model(junk)
+        assert set(m) == {"groups", "dm", "dm_allow", "mode"} and all(g["allow"] == [] and g["mention"] for g in m["groups"].values()) and set(m["groups"]) <= {"9"}, (junk, m)
+        tui.access_lines(junk, m, m, 0, "left", 0, 100), tui.access_people(junk, m, m), tui.find_person("x", junk), tui.access_left(junk, m, m)
+    assert tui.access_model({"policy": {"dm_allow": [7, "1\n", "22"]}})["dm_allow"] == ["22"]
+    print("ok: the access model is the policy and the mode of access --json's document (off is an allowlist with nobody), and a document of the wrong shape raises nothing")
+
+    def edit(**kw):
+        now = json.loads(json.dumps(was))
+        for path, v in kw.items():
+            keys = path.split("__")
+            at = now
+            for k in keys[:-1]:
+                at = at.setdefault(k, {})
+            if v is None:
+                at.pop(keys[-1])
+            else:
+                at[keys[-1]] = v
+        return now
+    words = lambda now, owner="111": tui.access_words(was, now, owner)
+    assert words(edit()) == [] and tui.access_wide(was, edit()) == set()
+    assert words(edit(groups__900__mention=False)) == ["mention:900=off"] and tui.access_wide(was, edit(groups__900__mention=False)) == {"mention:900"}
+    assert words(edit(groups__901__mention=True)) == ["mention:901=on"] and tui.access_wide(was, edit(groups__901__mention=True)) == set()
+    assert words(edit(groups__900__allow=[])) == ["allow:900=any"] and tui.access_wide(was, edit(groups__900__allow=[])) == {"any:900"}
+    # The additions before the removals: the list is never empty on the way (the CLI refuses a removal that empties one).
+    assert words(edit(groups__900__allow=["333"])) == ["allow:900+333", "allow:900-111", "allow:900-222"] and tui.access_wide(was, edit(groups__900__allow=["333"])) == {"new:333"}
+    # A sender put on a channel that took anyone narrows it: no widening, whoever it is.
+    assert words(edit(groups__901__allow=["333"])) == ["allow:901+333"] and tui.access_wide(was, edit(groups__901__allow=["333"])) == set()
+    assert words(edit(groups__901=None)) == ["channel-901"]
+    # A new channel: the CLI starts it with an @mention required and the owner alone; the words say what differs from that.
+    assert words(edit(groups__902={"mention": True, "allow": ["111"]})) == ["channel+902"]
+    new = edit(groups__902={"mention": False, "allow": ["222", "444"]})
+    assert words(new) == ["channel+902", "mention:902=off", "allow:902+222", "allow:902+444", "allow:902-111"] and tui.access_wide(was, new) == {"mention:902", "new:444"}
+    assert words(edit(groups__902={"mention": True, "allow": []})) == ["channel+902", "allow:902=any"]
+    assert words(edit(dm="pairing")) == ["dm=pairing"] and tui.access_wide(was, edit(dm="pairing")) == {"dm"}
+    assert words(edit(dm="off", dm_allow=[])) == ["dm=off"] and words(edit(dm_allow=[])) == ["dm=off"] and tui.access_wide(was, edit(dm="off", dm_allow=[])) == set()
+    assert words(edit(dm_allow=["111", "222"])) == ["dm+222"] and tui.access_wide(was, edit(dm_allow=["111", "222"])) == {"dm:222"}
+    assert words(edit(dm_allow=["222"])) == ["dm+222", "dm-111"]
+    assert words(edit(mode="dev-manager")) == ["mode=dev-manager"]
+    off = tui.access_model({"policy": {"dm": "allowlist", "dm_allow": []}})
+    assert tui.access_words(off, dict(off, dm="allowlist", dm_allow=["5"]), "") == ["dm+5"], "from off to an allowlist is one more person, no policy word"
+    assert tui.access_words(off, dict(off, dm="pairing"), "") == ["dm=pairing"]
+    dis = tui.access_model({"policy": {"dm": "disabled", "dm_allow": ["5"]}})
+    assert tui.access_words(dis, dict(dis, dm="allowlist"), "") == ["dm=allowlist"] and tui.access_wide(dis, dict(dis, dm="allowlist")) == {"dm"} and tui.access_words(dis, dict(dis), "") == []
+    for now in (new, edit(dm="pairing", dm_allow=["222"]), edit(groups__900=None, mode="autoresearchclaw")):
+        assert all(tui.re.fullmatch(r"[a-z0-9:+=-]+", w) for w in words(now)), words(now)
+    print("ok: the change words turn the model as read into the model as edited (a new channel from the CLI's own start, additions before removals, off as one word), and what widens is told from what does not")
+
+    people = tui.access_people(DOC, was, was)
+    assert [(p["name"], p["tag"]) for p in people] == [("dongyong22", "owner"), ("gpuvillain", "")], people
+    assert [p["name"] for p in tui.access_people(DOC, was, edit(groups__900__allow=["111", "555", "9999"]))] == ["9999", "dongyong22", "gpuvillain", "peerbot"], "a person with no name is the id; bots last"
+    find = lambda t: tui.find_person(t, DOC)
+    assert find("12345") == ("12345", "") and find(" @GPUvillain ") == ("222", "") and find("junyong") == ("333", "") and find("peer") == ("555", "")
+    assert find("nobody")[0] is None and "numeric user id" in find("nobody")[1] and find("")[0] is None
+    assert find("o") == (None, "4 people match: dongyong22, junyong-dev-bot, peerbot, pho[2Jto"), find("o")
+    assert find("x" * 30)[0] is None and find("12345678901234567890123")[0] is None, "more than 20 digits is no id"
+    print("ok: the people listed are those on a list before or now; a typed name is the one known person it names, digits are an id, and several matches are named")
+
+    def lines(now, at=0, side="left", prow=0, width=112):
+        return [l.plain.rstrip() for l in tui.access_lines(DOC, was, now, at, side, prow, width)]
+    got = lines(was, at=1)
+    assert got[0].split() == "channels in Tor-AIC @mention who may write to it in #dev-bots".split(), got[0]
+    assert got[1].split() == "[ ] #fo[2Jrum forum [✓] dongyong22 owner".split() and got[2].split() == "▸ [✓] #dev-bots main required [✓] gpuvillain".split(), got[1:3]
+    assert got[3].split() == "[✓] #bot-health any message [ ] anyone in the channel".split(), got[3]
+    assert got[4].split() == "[ ] #general bot cannot read a adds a person by name or id".split() and got[5].split() == "[ ] #odd ? not known if readable".split(), got[4:6]
+    assert got[6].split() == "[✓] #1234 not in this server's list any message".split(), got[6]
+    assert got[8].split() == "DMs (●) allowlist ( ) off ( ) pairing from dongyong22".split() and got[9].split() == "mode (●) none ( ) dev-manager ( ) autoresearchclaw".split(), got[8:]
+    assert all(cell_len(l) <= 112 for l in got) and all(cell_len(l) <= 70 for l in lines(was, width=70))
+    # The right pane follows the left cursor: a channel the bot does not listen in, the DMs, the mode.
+    assert "the bot does not listen here: space adds the channel" in lines(was, at=0)[1] and "who may DM it, and answers its permission prompts" in lines(was, at=6)[0]
+    assert "[✓] anyone in the channel" in "\n".join(lines(was, at=2)) and "▸ [✓] anyone" in "\n".join(lines(was, at=2, side="right", prow=2))
+    # What widens is drawn in the alert colour: the mention rule, `anyone`, a new person, pairing.
+    def styled(now, text, **kw):
+        return [str(sp.style) for l in tui.access_lines(DOC, was, now, kw.pop("at", 1), "left", 0, 112) for sp in l.spans if text in l.plain[sp.start:sp.end]]
+    assert tui.ALERT in " ".join(styled(edit(groups__900__mention=False), "any message")) and tui.ALERT not in " ".join(styled(was, "required"))
+    assert tui.ALERT in " ".join(styled(edit(groups__900__allow=["111", "222", "333"]), "junyong-dev-bot")) and tui.ALERT in " ".join(styled(edit(dm="pairing"), "pairing"))
+    disabled = tui.access_model(dict(DOC, policy=dict(DOC["policy"], dm="disabled")))
+    assert "(●) disabled" in tui.access_lines(DOC, disabled, disabled, 6, "left", 0, 112)[8].plain and "disabled" not in got[8]
+    # More channels than the list shows: a window around the cursor, and where it is.
+    many = dict(DOC, channels=[{"id": str(1000 + i), "name": f"c{i:02}", "kind": "text", "read": True} for i in range(40)])
+    mm = tui.access_model(many)
+    far = [l.plain for l in tui.access_lines(many, mm, mm, 30, "left", 0, 112)]
+    assert len(far) == 17 and "▸ [ ] #c30" in "\n".join(far) and "31 of 40 channels" in "\n".join(far) and "#c00" not in "\n".join(far), far
+    print("ok: the editor draws the server's channels ([✓] listened in, the mention rule, main, bot cannot read, ? when it cannot be told), the DM policy and the mode as radios, the senders beside the cursor's row, what widens in the alert colour, and a window over a long list")
 
 
 def fuzz():

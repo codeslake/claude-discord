@@ -1212,6 +1212,210 @@ class HostEdit(ModalScreen):
             self.dismiss(None)
 
 
+# ---- access: who may drive a bot (1.13.0) -----------------------------------
+# `e` on a bot row. What the editor shows comes from `claude-discord access ... <bot> --json`, run on the bot's own
+# machine (the token never leaves it); what it changes goes back as change words to `claude-discord access ... <bot>
+# set`, which shows the changes on the terminal, asks, and writes. This program never reads or writes access.json.
+MODES = ("none", "dev-manager", "autoresearchclaw")
+DMS = ("allowlist", "off", "pairing")
+DIGITS = re.compile(r"[0-9]{1,20}")
+
+
+def access_model(doc: dict) -> dict:
+    """What the editor changes, from the document's policy and mode: {"groups": {channel id: {"mention": bool, "allow":
+    [user ids]}} in the document's order, "dm": allowlist | off | pairing | disabled, "dm_allow": [user ids], "mode"}.
+    `off` is an allowlist with nobody on it (the plugin's own `disabled` drops every message, in the channels too). A
+    value of the wrong type reads as missing; an id that is not digits is none."""
+    pol = obj(obj(doc).get("policy"))
+    digits = lambda v: [i for i in ids(v) if DIGITS.fullmatch(i)]
+    dm, dm_allow = txt(pol.get("dm")), digits(pol.get("dm_allow"))
+    return {"groups": {g["id"]: {"mention": g.get("mention") is not False, "allow": digits(g.get("allow"))} for g in groups(pol) if DIGITS.fullmatch(g["id"])},
+            "dm": "disabled" if dm == "disabled" else "pairing" if dm != "allowlist" else "allowlist" if dm_allow else "off",
+            "dm_allow": dm_allow, "mode": txt(obj(doc).get("mode")) or "none"}
+
+
+def dm_word(m: dict) -> str:
+    """The DM policy as it works: an allowlist with nobody on it is off."""
+    return "off" if m["dm"] == "allowlist" and not m["dm_allow"] else m["dm"]
+
+
+def access_words(was: dict, now: dict, owner: str) -> list[str]:
+    """The change words (`claude-discord access <bot> set <word>...`) that turn the model `was` into `now`. A channel
+    the CLI adds starts with an @mention required and the owner alone, so a new channel's words are what differs from
+    that. Every word is made of an id and fixed text."""
+    out = [f"channel-{c}" for c in was["groups"] if c not in now["groups"]]
+    for c, g in now["groups"].items():
+        old = was["groups"].get(c)
+        if old is None:
+            out.append(f"channel+{c}")
+            old = {"mention": True, "allow": [owner] if owner else []}
+        if g["mention"] != old["mention"]:
+            out.append(f"mention:{c}={'on' if g['mention'] else 'off'}")
+        if not g["allow"]:
+            out += [f"allow:{c}=any"] if old["allow"] else []
+        else:   # the additions first: a list is never empty on the way
+            out += [f"allow:{c}+{u}" for u in g["allow"] if u not in old["allow"]] + [f"allow:{c}-{u}" for u in old["allow"] if u not in g["allow"]]
+    a, b = dm_word(was), dm_word(now)
+    if b == "off":
+        out += ["dm=off"] if a != "off" else []
+    else:
+        out += [f"dm={b}"] if b != a and b != "disabled" and not (a == "off" and b == "allowlist") else []
+        out += [f"dm+{u}" for u in now["dm_allow"] if u not in was["dm_allow"]] + [f"dm-{u}" for u in was["dm_allow"] if u not in now["dm_allow"]]
+    return out + ([f"mode={now['mode']}"] if now["mode"] != was["mode"] else [])
+
+
+def access_wide(was: dict, now: dict) -> set:
+    """What of `now` widens who can drive the bot, drawn in the alert colour: `mention:<channel>` (an @mention no longer
+    required), `any:<channel>` (anyone may write), `new:<user>` (a person the bot listed nowhere), `dm` (to pairing, or
+    back from disabled), `dm:<user>` (added to the DM allowlist). The CLI decides the same on its own and asks about
+    each; this is only what the screen shows before."""
+    known = {u for g in was["groups"].values() for u in g["allow"]} | set(was["dm_allow"])
+    out = set()
+    for c, g in now["groups"].items():
+        old = was["groups"].get(c)
+        if not g["mention"] and (old is None or old["mention"]):
+            out.add(f"mention:{c}")
+        if not g["allow"] and (old is None or old["allow"]):
+            out.add(f"any:{c}")
+        if old is None or old["allow"]:
+            out |= {f"new:{u}" for u in g["allow"] if u not in known}
+    a, b = dm_word(was), dm_word(now)
+    if a != b and (b == "pairing" or a == "disabled"):
+        out.add("dm")
+    return out | ({f"dm:{u}" for u in now["dm_allow"] if u not in was["dm_allow"]} if b != "off" else set())
+
+
+def access_people(doc: dict, was: dict, now: dict, extra=()) -> list[dict]:
+    """The people the right pane lists: everyone on a list of the bot, before or now, and `extra` (the ids typed into
+    this editor), so one just added or just taken off stays in sight. Each is {"id", "name", "bot", "tag"}: people
+    first, then bots, by name; no name is the id."""
+    listed = {u for m in (was, now) for g in m["groups"].values() for u in g["allow"]} | set(was["dm_allow"]) | set(now["dm_allow"]) | set(extra)
+    known = {p["id"]: p for p in seq(obj(doc).get("people")) if isinstance(p, dict) and isinstance(p.get("id"), str)}
+    owner, peers = txt(obj(doc).get("owner")), ids(obj(doc).get("peers"))
+    rows = [{"id": u, "name": txt(known.get(u, {}).get("name")) or u, "bot": known.get(u, {}).get("bot") is True,
+             "tag": "owner" if u == owner else "peer bot" if u in peers else "bot" if known.get(u, {}).get("bot") is True else ""} for u in listed]
+    return sorted(rows, key=lambda p: (p["bot"], p["name"].lower(), p["id"]))
+
+
+def find_person(text: str, doc: dict) -> tuple[str | None, str]:
+    """A typed name or id as a user id: (id, "") for digits, or for the one known person of that name (the whole name
+    first, then a part of it; a leading @ is dropped); (None, why) for no one or for several."""
+    t = text.strip().lstrip("@")
+    if DIGITS.fullmatch(t):
+        return t, ""
+    people = [p for p in seq(obj(doc).get("people")) if isinstance(p, dict) and DIGITS.fullmatch(txt(p.get("id"))) and txt(p.get("name"))]
+    hits = [p for p in people if p["name"].lower() == t.lower()] or [p for p in people if t and t.lower() in p["name"].lower()]
+    if len(hits) == 1:
+        return hits[0]["id"], ""
+    if not hits:
+        return None, "no one of that name is known here: type the numeric user id"
+    return None, f"{len(hits)} people match: " + ", ".join(sorted(p["name"] for p in hits)[:5]) + (" …" if len(hits) > 5 else "")
+
+
+def box(on: bool) -> str:
+    return "[✓]" if on else "[ ]"
+
+
+def radios(options: tuple, on: str, wide: bool = False) -> Text:
+    """Radio choices on one line, drawn `(●) a   ( ) b`; the chosen one bold, in the alert colour when it widens."""
+    out = Text()
+    for o in options:
+        out.append(f"{'(●)' if o == on else '( )'} {o}   ", (f"bold {ALERT}" if wide else "bold") if o == on else "")
+    return out
+
+
+def window(n: int, at: int, rows: int) -> range:
+    """The `rows` indexes of `n` drawn around the cursor `at`."""
+    top = max(0, min(at - rows // 2, n - rows))
+    return range(top, min(n, top + rows))
+
+
+def access_left(doc: dict, was: dict, now: dict) -> list[tuple]:
+    """The left list's rows: ("ch", channel id) for each channel of the document, then ("dm", ""), ("mode", "")."""
+    return [("ch", c["id"]) for c in seq(obj(doc).get("channels")) if isinstance(c, dict) and DIGITS.fullmatch(txt(c.get("id")))] + [("dm", ""), ("mode", "")]
+
+
+def access_right(doc: dict, was: dict, now: dict, row: tuple, extra=()) -> list[tuple]:
+    """The right list's rows for the left row the cursor is on: for a channel the bot listens in, ("u", user id) for
+    each person and ("any", "") last; for the DMs row the people; nothing for a channel it does not listen in or the mode."""
+    people = [("u", p["id"]) for p in access_people(doc, was, now, extra)]
+    if row[0] == "ch" and row[1] in now["groups"]:
+        return people + [("any", "")]
+    return people if row[0] == "dm" else []
+
+
+def access_lines(doc: dict, was: dict, now: dict, at: int, side: str, prow: int, width: int, rows: int = 12, extra=()) -> list[Text]:
+    """The editor's body: on the left the server's channels (`[✓]` the bot listens there; its mention rule; `bot cannot
+    read` and `?` from the document's `read`); on the right who may write in the channel under the cursor, or who may
+    DM; below both the DM policy and the mode as radios. What widens is in the alert colour. `at` is the cursor of
+    the left list (the channels, then DMs, then mode), `prow` of the right one, `side` which of the two has the keys;
+    `extra` is access_people's."""
+    doc = obj(doc)
+    left, wide = access_left(doc, was, now), access_wide(was, now)
+    chans = {c["id"]: c for c in seq(doc.get("channels")) if isinstance(c, dict) and isinstance(c.get("id"), str)}
+    lw = max(34, min(58, width * 11 // 20))
+    name = lambda c: "#" + (txt(chans.get(c, {}).get("name")) or c)
+    guild = txt(obj(doc.get("guild")).get("name"))
+    L = [Text.assemble((fit("  channels" + (f" in {guild}" if guild else ""), lw - 14), f"bold {DIM}"), (fit("@mention", 14), f"bold {DIM}"))]
+    nch = len(left) - 2
+    for i in window(nch, min(at, nch - 1), rows) if nch else []:
+        c = left[i][1]
+        g, info = now["groups"].get(c), chans.get(c, {})
+        note = ([("main", DIM)] if c == txt(doc.get("main")) else []) + ([(txt(info.get("kind")), DIM)] if info.get("kind") in ("forum", "news") else [])
+        note += [("not in this server's list", DIM)] if info.get("kind") == "unknown" else []
+        note += [("bot cannot read", WARN)] if info.get("read") is False else [("? not known if readable", DIM)] if info.get("read") is None and info.get("kind") != "unknown" else []
+        head = Text.assemble("▸ " if i == at and side == "left" else "  ", (box(g is not None), BRAND if g else DIM), " ", (name(c), "" if g else DIM))
+        for s, style in note:
+            head.append("  " + s, style)
+        head.truncate(lw - 14, overflow="ellipsis", pad=True)
+        head.append(fit("" if g is None else "required" if g["mention"] else "any message", 14), ALERT if f"mention:{c}" in wide else "")
+        L.append(head)
+    if nch > rows:
+        L.append(Text(f"  {min(at, nch - 1) + 1} of {nch} channels", DIM))
+    dm = dm_word(now)
+    who = ", ".join(p["name"] for p in access_people(doc, was, now, extra) if p["id"] in now["dm_allow"])
+    dms = radios(DMS + (("disabled",) if was["dm"] == "disabled" else ()), "allowlist" if dm == "off" and now["dm"] == "allowlist" else dm, "dm" in wide)
+    below = [Text(), Text.assemble("▸ " if left[at][0] == "dm" and side == "left" else "  ", (fit("DMs", 6), DIM), dms,
+                                   (("from " + who if who else "nobody yet: tab, then a adds") if now["dm"] == "allowlist" else
+                                    "drops every message, in the channels too" if dm == "disabled" else "", DIM)),
+             Text.assemble("▸ " if left[at][0] == "mode" and side == "left" else "  ", (fit("mode", 6), DIM), radios(MODES + ((now["mode"],) if now["mode"] not in MODES else ()), now["mode"]))]
+    # the right pane, beside the lines above
+    row, people = left[at], {p["id"]: p for p in access_people(doc, was, now, extra)}
+    right = access_right(doc, was, now, row, extra)
+    if row[0] == "ch":
+        R = [Text(f"who may write to it in {name(row[1])}", f"bold {DIM}")]
+        allow = now["groups"].get(row[1], {}).get("allow")
+        if allow is None:
+            R.append(Text("the bot does not listen here: space adds the channel", DIM))
+    elif row[0] == "dm":
+        R, allow = [Text("who may DM it, and answers its permission prompts", f"bold {DIM}")], now["dm_allow"]
+    else:
+        R, allow = [Text("a mode gives a session its rules and hooks", f"bold {DIM}"), Text("applies at once to the hooks; the rules at the", DIM), Text("session's next start, compact or clear", DIM)], None
+    for i in window(len(right), prow, rows):
+        kind, u = right[i]
+        mark = "▸ " if i == prow and side == "right" else "  "
+        if kind == "any":
+            R.append(Text.assemble(mark, (box(allow == []), BRAND if allow == [] else DIM), " anyone in the channel", style=ALERT if f"any:{row[1]}" in wide else ""))
+        else:
+            on = u in (allow or [])
+            new = on and (f"new:{u}" in wide if row[0] == "ch" else f"dm:{u}" in wide)
+            R.append(Text.assemble(mark, (box(on), BRAND if on else DIM), " ", (people[u]["name"], ALERT if new else "" if on else DIM), ("  " + people[u]["tag"], DIM)))
+    if right:
+        R.append(Text("  a  adds a person by name or id", DIM))
+    out = []
+    for i in range(max(len(L), len(R))):
+        line = L[i].copy() if i < len(L) else Text()
+        line.truncate(lw, overflow="ellipsis", pad=True)
+        if i < len(R):
+            line.append("  ")
+            line.append_text(R[i])
+        out.append(line)
+    out += below   # the DM policy and the mode take the whole width
+    for line in out:
+        line.truncate(width, overflow="ellipsis")
+    return out
+
+
 class Confirm(ModalScreen[bool]):
     """A yes/no question, No by default (focused, and Enter, n and Escape answer it)."""
     CSS = "Confirm { align: center middle; } #confirm { width: 70; height: auto; border: thick $error; padding: 1 2; }"
