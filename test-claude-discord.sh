@@ -4190,6 +4190,11 @@ rm -f "$HOME/curl.proxy"; ac --host local --manager mgr --project "$MP" acc --js
 [ "$ARC" = 0 ] && jq -e '.bot == "acc"' <<<"$AO" >/dev/null && [ "$(sort -u "$HOME/curl.proxy")" = "http://u:secretpw@127.0.0.1:8118|http://u:secretpw@127.0.0.1:8118" ] && [[ $AO$AE != *secretpw* ]] ||
   { echo "FAIL: --host local runs here with the local line's env words: rc=$ARC $AO / $AE / $(cat "$HOME/curl.proxy" 2>&1)"; exit 1; }
 echo "ok: access --host: over ssh as a pass goes (the ledger line's env words, the alias after --), only hex digits and change words in the remote command, behind --version; --json takes a document of any length from among what the host prints; set runs under ssh -t at a terminal, after the host's version was asked; a host before 1.13.0 is exit 5 and is sent no change, and what a 1.13.0 host could not do is passed on; local runs here with the local line's env"
+# What is written down for people: the dev-manager rule forbids an access change on a channel message's request, and the
+# README says what the terminal check is and is not.
+grep -q "never on a channel message's request" "$D/rules/dev-manager.md" && grep -q 'That is a speed bump, not a boundary' "$D/README.md" ||
+  { echo "FAIL: the dev-manager rule must forbid access changes on a channel message's request, and the README must call the terminal check a speed bump"; exit 1; }
+echo "ok: the dev-manager rule forbids access changes on a channel message's request; the README calls the terminal check a speed bump, not a boundary"
 # The monitor cases below find the ledger, the logs and the project as the hosts cases left them.
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -rf "$AD" "$MR/peers.json" "$HOME/ssh.log" "$HOME/curl.proxy" "$HOME/access.err" "$MON"/*; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
 

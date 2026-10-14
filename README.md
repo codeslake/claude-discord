@@ -37,7 +37,8 @@ enables it per session with `--settings`.
 - **channel**: one Discord text channel shared by all your bots. Its snowflake
   ID is asked once and reused.
 - **access.json**: the plugin's allowlist. Written at setup time; the plugin
-  re-reads it on every inbound message, so hand edits apply without a restart.
+  re-reads it on every inbound message, so a change applies without a restart.
+  Changed with `claude-discord access` (Who may drive a bot), or by hand.
 - **`$CLAUDE_DISCORD_TOOLS`**: the plugin's `tools/` directory (`thread`,
   `local-bots`, `arc-events`). Not a shell variable: the plugin's SessionStart
   hook states `CLAUDE_DISCORD_TOOLS=<path>` in a bot session's context, and the
@@ -235,7 +236,8 @@ claude-discord setup alpha --reset    # forget alpha's token and policy AND the 
 claude-discord setup alpha --mode     # change only alpha's mode (and, for dev-manager, its peers); needs alpha already set up
 claude-discord refresh alpha          # replace the running session with a fresh one, from its handoff
 claude-discord health                 # is every bot in this project still answering? see below
-claude-discord tui [<manager>]        # a read-only view of the manager bot's monitor, from any directory; see The monitor and the TUI
+claude-discord tui [<manager>]        # the manager bot's monitor, its hosts and its bots' access, from any directory; see The monitor and the TUI
+claude-discord access <bot> --json | set <change>...   # who may drive a bot: its channels, senders, DM policy and mode; see Who may drive a bot
 claude-discord monitor --stop <manager>   # stop the manager's backend (keeper and monitor) until --start <manager>
 claude-discord update [--all]         # see Install
 ```
@@ -353,6 +355,106 @@ the state, since a live bot can show `done`) filtered to
 a session whose project has a `.claude/discord-agents/<name>` directory,
 this bot's own session excluded by state dir; it prints nothing, never
 fails, and is never registered as a hook.
+
+## Who may drive a bot: `access`
+
+Which channels a bot listens in, who may write to it there, whether it needs an
+@mention, who may DM it, and its mode are read and changed with one verb
+(1.13.0). The TUI's access editor (`e` on a bot row) is a front for it and
+changes nothing any other way.
+
+```sh
+claude-discord access <bot> --json            # the policy, the server's channels, the people known: one line of JSON
+claude-discord access <bot> set <change>...   # shows what would change, asks, writes
+```
+
+| change | does |
+|---|---|
+| `channel+<channel id>` | the bot listens there: an @mention required, from the owner (`DISCORD_USER_ID`) alone |
+| `channel-<channel id>` | it stops listening there |
+| `mention:<channel id>=on\|off` | an @mention is required / every message is answered |
+| `allow:<channel id>+<user id>`, `allow:<channel id>-<user id>` | a sender is added to, or taken off, that channel's list |
+| `allow:<channel id>=any` | anyone in the channel may write to it (an empty `allowFrom`) |
+| `dm=allowlist\|pairing\|off` | the DM policy. `off` is an allowlist with nobody on it; the plugin's own `disabled` is not offered, because it drops every message, in the channels too |
+| `dm+<user id>`, `dm-<user id>` | the DM allowlist: whoever is on it also answers the bot's permission prompts |
+| `mode=none\|dev-manager\|autoresearchclaw` | the bot's mode, through `setup <bot> --mode` with its questions answered by Enter (peers and hosts kept) |
+
+A change is a word of lower-case letters, digits and `: + = -`; ids, never
+names. The words are applied in order to the file as it is, so every key the
+verb does not know (the plugin's `pending` pairings, `ackReaction`, anything
+else) stays. `set` prints each change, names resolved from what this machine
+keeps (`channel-names`, `user-names`, `peers.json`; a person is shown with the
+id, since a display name is the sender's to choose), then asks:
+
+- **a change that widens who can drive the bot** is marked `!`, red at a
+  terminal, and is asked about by itself: an @mention no longer required; a
+  channel opened to anyone; DMs to `pairing`, or back from `disabled`; a
+  person added to the DM allowlist; a person the bot listed nowhere until now;
+  leaving dev-manager when that deletes a hosts ledger (its monitor stops);
+- **the other changes** are confirmed together, once;
+- **one no, anywhere, writes nothing** (exit 4): the file is what was shown and
+  agreed to, or as it was;
+- warnings, which ask nothing more: the owner taken off a list, the bot's main
+  channel changing, a dev-manager's peer bot taken off a channel.
+
+`set` refuses to write unless stdin and stdout are a terminal, and has no flag
+to skip its questions. That is a speed bump, not a boundary: whoever can run
+it can edit `access.json` with an editor. It is there so that no script and no
+session writes a bot's access without a person reading the change. Without a
+terminal it prints the changes and exits 3, which is also how to see what a
+set of words would do. A removal never empties a sender list (an empty list is
+everyone): say `allow:<id>=any` to mean that.
+
+The write is by rename under a lock (`access.json.lock`), mode 600. The
+official plugin reads `access.json` at every message, so **a change applies at
+the next message, with no restart**; a file it cannot parse it moves aside and
+replaces with its defaults (pairing, no channel), which is why the file is
+never written in place. The plugin rewrites the file itself, with no lock,
+when a DM asks for a pairing code or a code expires: the new file is made from
+the file as it is at the moment of the write, and the write is given up (exit
+1) when the policy changed while the questions were open. Each write adds a
+line to `<bot dir>/access.log`: the time, the local account, the machine and
+the change words. A mode change reaches the hooks at their next call; the
+dev-manager rule text reaches, or leaves, a running session at its next start,
+compact or clear.
+
+`--json` asks Discord, with the bot's own token and on the bot's own machine,
+for the server's channels, its roles, the bot's roles and the member list
+(four calls, five seconds each at most), and prints one line: `policy` (as
+`health --json`'s `access`), `channels` (text, announcement and forum
+channels: `id`, `name`, `kind`, `read`), `people` (`id`, `name`, `bot`),
+`members` (`api` when the member list answered, which it does only with the
+Server Members Intent already on; `names` otherwise: the people are then the
+ones this machine has names for), `owner`, `main`, `peers`, `mode`, `guild`
+and `errors`. `read` says whether the bot can read the channel: `VIEW_CHANNEL`
+and `READ_MESSAGE_HISTORY` after its roles and the channel's overwrites. It is
+`null` (the TUI's `?`) whenever that cannot be told: a call that failed, a
+permission that is no number. Never a guess. Only the server of the bot's main
+channel is asked.
+
+A bot on another machine, for a manager that checks that host:
+
+```sh
+claude-discord access --host <alias> [--manager <bot>] --project <dir> <bot> --json | set <change>...
+```
+
+`<alias>` is a line of the manager's hosts ledger (`local` too: then it runs
+here, with that line's env words, as the monitor's own Discord calls do).
+Over ssh the call goes as a pass does (`BatchMode`, `ConnectTimeout=8`, the
+line's env words); `set` at a terminal runs under `ssh -t`, so the questions
+are asked on the bot's machine, of your terminal. Into the remote command go
+only hex digits (the project and the bot's name), the action and the change
+words. The remote host needs claude-discord 1.13.0: an older one is said so
+(exit 5) and is never sent a change.
+
+| exit | means |
+|---|---|
+| 0 | done, or nothing to change |
+| 1 | it could not: no such bot, `access.json` unreadable or changed meanwhile, a failed write, the lock held 5 s, no manager's ledger for `--host` |
+| 2 | usage, a word that is not a change, a change that cannot be made |
+| 3 | no terminal: the changes were printed, nothing written |
+| 4 | answered no: nothing written |
+| 5 | `--host`: the host did not answer, or its claude-discord is older than 1.13.0 |
 
 ## AutoResearchClaw reports
 
@@ -1205,6 +1307,23 @@ may write (names from the `user-names` files of this machine's bots, ids
 otherwise, `+N` past three lines) and the DM policy. `Enter` shows every raw
 field of the row and the posts for it. Below 110 columns project and
 receives fold away.
+`e` on a bot row opens its access editor (1.13.0): on the left the channels of
+the bot's server, `[✓]` where it listens (`space` toggles), each with its
+mention rule (`m` toggles), `main` for the channel its prompt names, `bot
+cannot read` where its roles and the channel's overwrites keep it out, `?`
+where that could not be told; on the right who may write in the channel under
+the cursor (`tab` goes there; `space` ticks a person or `anyone in the
+channel`; `a` adds a person by name or numeric id); below, the DM policy and
+the mode as radios. A change that widens who can drive the bot is drawn in the
+alert colour. Nothing is written while editing: `s` hands the terminal to
+`claude-discord access ... set <the changes>`, which prints them, asks (each
+widening by itself) and writes; Enter then returns to the TUI, which says what
+came of it and asks the monitor for a pass. Where the terminal cannot be
+handed over, the editor shows that command for a shell instead (`c` copies
+it). The editor reads through `access ... --json`, run on the bot's own
+machine, so the TUI still never reads a `.env` and never holds a token; a host
+whose claude-discord is older than 1.13.0 says so in the editor and is not
+edited.
 A bot on a host whose claude-discord is older than 1.11.0 shows `-` for
 channel, receives and last (one older than 1.11.1 shows no mode, `-` on the
 `Enter` screen, and its other channels as `#<id>`), and so does any field a host sends in a shape
@@ -1375,7 +1494,8 @@ slower, same checks). With jq 1.6 the suite runs some 8 s longer than with 1.7 o
 newer: it starts jq about 2,400 times.
 
 `uv run --script tests/tui/test_tui.py` checks the TUI's pure functions (what
-each column shows, at which width; how `~/.ssh/config` is read) and then
+each column shows, at which width; how `~/.ssh/config` is read; the access
+editor's model and change words) and then
 drives it over fixture state files with a stub in place of the wrapper and
 of ssh (Textual's pilot). It needs uv and the Textual wheel, so it sits
 outside the stub suite and its 40 s budget; it takes about 23 s. Send its

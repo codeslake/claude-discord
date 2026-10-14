@@ -44,7 +44,8 @@
 #                                        scheduler is installed any more
 #   claude-discord tui [<name>]          a view of a manager bot's backend monitor
 #                                        (needs uv), where its hosts are added,
-#                                        set and removed (through `hosts`); starts
+#                                        set and removed (through `hosts`) and its
+#                                        bots' access is edited (through `access`); starts
 #                                        the monitor and its keeper if none runs
 #                                        (both outlive the TUI); outside a project
 #                                        it picks among the recorded projects
@@ -70,6 +71,14 @@
 #   claude-discord hosts [--bot <name>] laptop <alias> on|off
 #   claude-discord hosts [--bot <name>] rm [--no-probe] <alias>
 #                                        stops checking a host (never `local`)
+#   claude-discord access [--host <alias> [--manager <name>]] [--project <dir>] <name> --json
+#                                        who may drive a bot: the channels it listens in, per channel the
+#                                        mention rule and the senders, the DM policy, its mode; with the
+#                                        server's channels and whether the bot can read each (read-only)
+#   claude-discord access [...] <name> set <change>...
+#                                        shows the changes, asks at the terminal (each widening by itself)
+#                                        and writes access.json; refuses without a terminal. --host: a bot
+#                                        on a host of a manager's ledger, over ssh (-t for the questions)
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at

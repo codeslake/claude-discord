@@ -6,6 +6,10 @@ thread 1559286847446982770. Mock: `mock.py` + `render.sh` beside this file
 on its own until `monitor --stop`; TUI only views; manager session only checks
 and restarts).
 
+Changed 2026-10-14 by the owner: 1.13.0 edits a bot's receive channels, receive
+rules and mode, for bots on ledger hosts too; the token field and a bot's
+rename move to 1.14.0. Plan: `docs/superpowers/plans/2026-10-14-access-1.13.0.md`.
+
 ## Owners' requirements (quoted)
 
 - dongyong22: "UI가 너무 구리다", "`host` 제목 행이 왜 둘인지", "`for 63m`,
@@ -104,7 +108,7 @@ symbol + word + colour.
   buttons Check now, Save, Stop monitoring (asks). Every save goes through
   the hosts CLI.
 
-## 1.13.0: access and token editing (write)
+## 1.13.0: access editing (write); the token parts below are 1.14.0
 
 - `e` on a bot row: channels from GET /guilds/{gid}/channels (space toggles
   membership, m toggles requireMention, "bot cannot read" from permission
