@@ -3828,12 +3828,12 @@ hc add stale
 [ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = stale ] && [ "${HE%% (*}" = "claude-discord: hosts: warning: claude-discord 1.12.0 on stale answered but could not create its host-id" ] ||
   { echo "FAIL: a host that answers on the ControlPath=none retry is added; a 1.12.0 with no host-id with the warning that it could not create one: rc=$HRC $HE"; exit 1; }
 LEDGER=$(<"$MR/mgr/hosts")
-# A host that connects and never answers: the cap (1 s here) ends the whole call, the ssh process group killed. Also
+# A host that connects and never answers: the cap (0.2 s here, by the suite's own knob in tenths) ends the whole call, the ssh process group killed. Also
 # when a process ssh left behind outside its group still holds the output open (as a ControlPersist master does): it
 # is not waited for.
 ans hang 1.12.0 "$ID_B"; echo 4 > "$MON/hang.sleep"; echo 4 > "$MON/hang.hold"
-t0=$(date +%s%N); CLAUDE_DISCORD_PROBE_CAP=1 refused hang 5 'hang gave no answer within 1s\. Not added' "a probe that hangs is ended by the cap"
-[ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 3000 ] && ! kill -0 "$(<"$MON/hang.pid")" 2>/dev/null || { echo "FAIL: a hung probe must end at its cap (1 s; within 2 s more), its ssh killed, whatever still holds its output: $(( ($(date +%s%N) - t0) / 1000000 )) ms"; exit 1; }
+t0=$(date +%s%N); CLAUDE_DISCORD_PROBE_CAP_TENTHS=2 refused hang 5 'hang gave no answer within 0\.2s\. Not added' "a probe that hangs is ended by the cap"
+[ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 2200 ] && ! kill -0 "$(<"$MON/hang.pid")" 2>/dev/null || { echo "FAIL: a hung probe must end at its cap (0.2 s; within 2 s more), its ssh killed, whatever still holds its output: $(( ($(date +%s%N) - t0) / 1000000 )) ms"; exit 1; }
 # The cap is an integer from 1 to 300, else the default 20 (0 would be no cap at all); a HUP to the runner (a closed
 # terminal) ends ssh as the cap does. Seen through the one message that names the cap.
 rm -f "$MON/hang.pid" "$MON/hang.hold"
