@@ -11,6 +11,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1030,7 +1031,7 @@ esac'''
 def ssh_home(app, config=SSH_CONFIG):
     """Gives the app a home with that ~/.ssh/config (none for None) and an `ssh` that logs its arguments and answers -G."""
     d = Path(app.state_dir)
-    (d / "home" / ".ssh").mkdir(parents=True)
+    (d / "home" / ".ssh").mkdir(parents=True, exist_ok=True)   # again for a case made of several
     if config is not None:
         (d / "home" / ".ssh" / "config").write_text(config)
     ssh = d / "ssh-stub"
@@ -1444,24 +1445,36 @@ def hand_over(app, *codes):
 
 
 class FakeRun:
-    """A stand-in for the pty a `access ... set` runs on (tui.PtyRun): each next() is the next of `steps`, (what it
-    printed since the last answer, None when that ends with its question, else its exit status); what answer() would
-    write to the pty is kept in `written`. A step that is None waits until the run is killed, then is ("", 124)."""
+    """A stand-in for the pty a `access ... set` runs on (tui.PtyRun): each next() writes its answer (kept in
+    `written`) and is the next of `steps`, (what it printed, "ask" when that ends with its question, "said" for
+    something else it waits after, else its exit status). A step that is None waits until the run is killed (then it
+    is ("", -9)) or finish() gives the step it ends with."""
     def __init__(self, argv, steps):
         self.argv, self.steps, self.written, self.killed = argv, list(steps), [], threading.Event()
+        self.go, self.ended, self.then, self.waited = threading.Event(), threading.Event(), ("", -9), False
 
-    def next(self, cap):
+    def next(self, answer=None):
+        if answer is not None:
+            self.written.append("y\n" if answer else "n\n")
         step = self.steps.pop(0)
         if step is None:
-            self.killed.wait(5)
-            return "", 124
+            self.go.wait(5)
+            step = self.then
+        if isinstance(step[1], int):
+            self.ended.set()
         return step
-
-    def answer(self, yes):
-        self.written.append("y\n" if yes else "n\n")
 
     def kill(self):
         self.killed.set()
+        self.go.set()
+
+    def finish(self, step):
+        self.then = step
+        self.go.set()
+
+    def wait(self):
+        self.waited = True
+        self.ended.wait(5)
 
 
 def fake_pty(app, *runs):
@@ -1483,7 +1496,7 @@ ASK = ("claude-discord: access: photobot on lmd79, /home/u/rcps/.claude/discord-
        "\x1b[1;31m  ! DMs: allowlist -> pairing: anyone who shares a server with the bot can DM it and is sent a pairing code\x1b[0m\r\n"
        "    #general: + listens here: an @mention required, from dongyong22 (111)\x1b]0;TITLE\x07\r\n"
        "\x1b[33mwarning: dongyong22 (111) is the owner of this bot and can no longer write to it in #general\x1b[0m\r\n"
-       "Apply 6 changes, 2 of them widening? [y/N] ")
+       f"{tui.A_MARK}\r\nApply 6 changes, 2 of them widening? [y/N] ")
 ASKED = ("claude-discord: access: photobot on lmd79, /home/u/rcps/.claude/discord-agents/photobot/access.json\n"
          "  ! #dev-bots: an @mention required -> any message\n"
          "  ! DMs: allowlist -> pairing: anyone who shares a server with the bot can DM it and is sent a pairing code\n"
@@ -1499,8 +1512,8 @@ def red(t):
 
 async def access_edit(app, pilot):
     ssh_home(app)
-    fake_pty(app, [(ASK, None), ("\r\nclaude-discord: access: answered no; nothing was changed\r\n", 4)],
-             [(ASK, None), ("\r\nclaude-discord: access: /p/access.json written. The plugin reads it at the next message: no restart.\r\n", 0)])
+    fake_pty(app, [(ASK, "ask"), ("\r\nclaude-discord: access: answered no; nothing was changed\r\n", 4)],
+             [(ASK, "ask"), ("\r\nclaude-discord: access: /p/access.json written. The plugin reads it at the next message: no restart.\r\n", 0)])
     scr, body = lambda sel: text(app.screen, sel), lambda: text(app.screen, "#a-body").split("\n")
     await pilot.press("right", "e", "left", "e")   # e is the Bots tab's key
     await settle(app, pilot)
@@ -1536,8 +1549,8 @@ async def access_edit(app, pilot):
     await pilot.press("down", "space", "space")
     assert "(●) autoresearchclaw" in body()[9], body()[9]
     # s runs `access ... set <the change words>` on a pty the TUI holds, and what it printed up to its question is the
-    # question of a popup: its red lines red, every other escape sequence and the pty's \r gone. Escape answers n:
-    # exit 4, nothing was changed, the editor and its changes stay.
+    # text of a popup: its red lines red, every other escape sequence, the pty's \r and the CLI's marker line gone, the
+    # question under the text. Escape answers n: exit 4, nothing was changed, the editor and its changes stay.
     await pilot.press("s")
     await settle(app, pilot)
     words = ["mention:900=off", "channel+902", "allow:902+333", "allow:902-111", "dm=pairing", "mode=autoresearchclaw"]
@@ -1545,6 +1558,7 @@ async def access_edit(app, pilot):
     assert isinstance(app.screen, tui.AccessAsk) and app.screen.text.plain == ASKED, app.screen.text.plain
     assert red(app.screen.text) == ["  ! #dev-bots: an @mention required -> any message",
                                     "  ! DMs: allowlist -> pairing: anyone who shares a server with the bot can DM it and is sent a pairing code"], red(app.screen.text)
+    assert text(app.screen, "#ask-q") == "Apply 6 changes, 2 of them widening? [y/N]" and text(app.screen, "#ask-more") == ""
     assert "TITLE" in drawn(app) and "\x1b]0;" not in drawn(app) and app.focused.id == "no"
     await pilot.press("escape")
     await settle(app, pilot)
@@ -1553,7 +1567,7 @@ async def access_edit(app, pilot):
     # y: exit 0, said, the editor closes, and the monitor is asked for a pass so the row shows the new policy.
     await pilot.press("s")
     await settle(app, pilot)
-    assert isinstance(app.screen, tui.AccessAsk)
+    assert isinstance(app.screen, tui.AccessAsk) and app.focused.id == "no"
     await pilot.press("y")
     await settle(app, pilot)
     assert app.runs[1].written == ["y\n"] and len(app.screen_stack) == 1 and checks(app) == 1 and app.ran == [], (app.runs, app.screen_stack)
@@ -1570,7 +1584,7 @@ async def access_edit(app, pilot):
     await pilot.press("e")
     await settle(app, pilot)
     await pilot.press("m", "escape")
-    assert isinstance(app.screen, tui.Confirm) and "photobot" in app.screen.text
+    assert isinstance(app.screen, tui.Confirm) and "photobot" in app.screen.text and app.focused.id == "no"
     await pilot.press("y")
     assert len(app.screen_stack) == 1 and len(app.runs) == 2
 
@@ -1635,7 +1649,7 @@ async def access_outcomes(app, pilot):
     ssh_home(app)
     scr = lambda sel: text(app.screen, sel)
     fake_pty(app, [("claude-discord: access: allow:900: that would leave no sender\x1b[2J\r\n", 2)],
-             [(ASK, None), ("\r\nclaude-discord: access: answered no; nothing was changed\r\n", 4)],
+             [(ASK, "ask"), ("\r\nclaude-discord: access: answered no; nothing was changed\r\n", 4)],
              [("\x1b[1;31m  ! #dev-bots: an @mention required -> any message\x1b[0m\r\n", 124)],
              [None], [None],
              [("claude-discord: access: photobot is already so; nothing to change\r\n", 0)])
@@ -1651,7 +1665,7 @@ async def access_outcomes(app, pilot):
     assert app.runs[1].written == ["n\n"] and scr("#a-msg").startswith("answered no: nothing was changed"), scr("#a-msg")
     await pilot.press("s")
     await settle(app, pilot)
-    assert scr("#a-msg") == f"claude-discord access asked nothing within {tui.A_CAP} s and was stopped: nothing was changed\n  ! #dev-bots: an @mention required -> any message", scr("#a-msg")
+    assert scr("#a-msg") == f"claude-discord access asked no question this TUI answers within {tui.A_CAP} s and was stopped: nothing was changed\n  ! #dev-bots: an @mention required -> any message", scr("#a-msg")
     # While it runs the editor takes no key but escape, which stops the run (its process group killed); the editor stays.
     await pilot.press("s")
     await pilot.pause()
@@ -1694,7 +1708,7 @@ case "$*" in
     [ -t 0 ] && [ -t 1 ] || { echo "claude-discord: access: not a terminal" >&2; exit 3; }
     if [ -e "$d/hang" ]; then sleep 30 & echo "$$ $!" > "$d/pids"; wait; exit 9; fi
     printf 'claude-discord: access: photobot on lmd79\n\033[1;31m  ! #dev-bots: an @mention required -> any message\033[0m\n'
-    sleep 0.05; printf 'Apply this widening change? [y/N] '
+    sleep 0.05; printf '\342\201\240\nApply this widening change? [y/N] '
     a=""; read -r a; case $a in y) echo "claude-discord: access: written"; exit 0;; esac
     echo "claude-discord: access: answered no; nothing was changed" >&2; exit 4;;
 esac'''
@@ -1741,11 +1755,228 @@ async def access_pty(app, pilot):
         t0 = time.monotonic()
         await pilot.press("m", "s")
         await settle(app, pilot)
-        assert 0.9 < time.monotonic() - t0 < 4 and "asked nothing within 1 s and was stopped" in text(app.screen, "#a-msg"), text(app.screen, "#a-msg")
+        assert 0.9 < time.monotonic() - t0 < 4 and "asked no question this TUI answers within 1 s and was stopped" in text(app.screen, "#a-msg"), text(app.screen, "#a-msg")
     finally:
         tui.A_CAP = cap
     sh, child = map(int, (d / "pids").read_text().split())
     assert gone(sh) and gone(child), "the cap kills the run's whole process group"
+
+
+def pty_py(*parts, then="sys.stdin.readline()", cap=3):
+    """tui.PtyRun on a python3 that writes each str of `parts` and sleeps each float (one exec, so its pauses are its
+    own), then runs `then`; capped at `cap` s from now."""
+    code = "\n".join(f"time.sleep({p})" if isinstance(p, float) else f"w({p!r})" for p in parts)
+    run = tui.PtyRun.start([sys.executable, "-c", f"import os, sys, time\nw = lambda s: os.write(1, s.encode())\n{code}\n{then}\n"])
+    run.end = time.monotonic() + cap
+    return run
+
+
+def later(f):
+    """f() started in a thread: a function that gives what it returned, or "hung" when it has not within `limit` s."""
+    out = []
+    t = threading.Thread(target=lambda: out.append(f()), daemon=True)
+    t.start()
+    return lambda limit: out[0] if (t.join(limit) or out) else "hung"
+
+
+def pty_runs():
+    """tui.PtyRun on a real pty: what it takes for the CLI's question, what it shows of what else is printed, and how
+    it ends, is stopped and is closed."""
+    q, mark = "Apply this change? [y/N] ", tui.A_MARK
+    # The runs are started together, each its own process, so that their pauses overlap; the ones whose reading takes
+    # time are read in threads of their own.
+    tui.A_QUIET, quiet = 0.2, tui.A_QUIET
+    try:
+        t0 = time.monotonic()
+        # Something else printed and waited after (a ProxyCommand asking for a code) is "said" after A_QUIET s, never
+        # answered; the question after it comes with all that was printed. Past the cap with no question: killed, 124.
+        code = pty_py("Verification code: ", 0.3, f"\r\nhdr\n{mark}\n{q}")
+        code_end = later(lambda: (code.next(), code.next()))
+        capped = pty_py("code: ", then="time.sleep(30)", cap=1)
+        capped_end = later(lambda: (capped.next(), capped.next(), time.monotonic() - t0))
+        # Its end is read for half a second at most: a child left holding the pty and writing never keeps it.
+        held = pty_py("bye\n", then="os.fork() or [w('x\\n') or time.sleep(0.01) for _ in iter(int, 1)]")
+        held_end = later(lambda: (held.next()[1], time.monotonic() - t0))
+        named = pty_py("hdr\n\x1b[1;31m  ! 333 (" + q, 0.15, f"\x1b[0m\n{mark}\n{q}")
+        nots = [pty_py(*parts, then="") for parts in ((f"{mark}\n    #x [y/N] ", 0.15), (q, 0.15), (f"{mark}\n{q}x", 0.15), (f"{mark}\n{q}", 0.02, "\nmore\n"))]
+        long = pty_py("".join(f"  ! #chan{i}: {'x' * 110}\n" for i in range(40)) + f"{mark}\n{q}")
+        # The question is the CLI's whole line, after the CLI's marker line, and nothing after it for 0.1 s. A Discord
+        # name can end in [y/N], or be the question's words, and reach the TUI with a pause after it (a far host chunks
+        # its output): never the question. Neither is a question line with no marker before it, one with text after it
+        # on its line, or one followed by more output within 0.1 s.
+        text, what = named.next()
+        assert what == "ask" and text.endswith(f"333 ({q}\x1b[0m\n{mark}\n{q}".replace("\n", "\r\n")), (what, text)
+        text, what = named.next(False)
+        assert what == 0 and text.replace("\r", "") == "n\n", (what, text)
+        for run in nots:
+            assert run.next()[1] == 0, run.p.args
+        # All it printed is kept from its start (the widenings come first), the long diff and the question both.
+        text, what = long.next()
+        assert what == "ask" and text.startswith("  ! #chan0: ") and text.endswith(q) and len(text) > 4600, (what, len(text))
+        long.kill()
+        said, (text, what) = code_end(3)
+        assert said == ("Verification code: ", "said") and what == "ask" and text.startswith("Verification code: ") and text.endswith(q), (said, what, text)
+        code.kill()
+        said, end, took = capped_end(3)
+        assert (said, end) == (("code: ", "said"), ("code: ", 124)) and took < 2 and capped.fd == -1 and capped.p.poll() is not None, (said, end, took)
+        rc, took = held_end(3)
+        assert rc == 0 and took < 1.5, ("the end is read for a bounded time", rc, took)
+    finally:
+        tui.A_QUIET = quiet
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(held.p.pid, signal.SIGKILL)
+    # Stopped before its reader has started (esc and s in one burst): closed once, ended, nothing written to it later.
+    run = tui.PtyRun.start(["sleep", "5"])
+    run.kill()
+    assert run.fd == -1 and run.rc is not None and run.next(True)[1] == run.rc and run.fd == -1
+    # Stopped while it is read: the reader ends it within half a second and closes it.
+    run = tui.PtyRun.start(["sleep", "5"])
+    t0 = time.monotonic()
+    threading.Timer(0.1, run.kill).start()
+    assert later(run.next)(3)[1] == -signal.SIGKILL and time.monotonic() - t0 < 1 and run.fd == -1
+    # kill() never blocks the UI thread for long, even for a process that does not die at once (D state).
+    run = tui.PtyRun.start(["sleep", "5"])
+    wait = run.p.wait
+
+    def stuck(timeout=None):
+        time.sleep(timeout)
+        raise subprocess.TimeoutExpired("sleep", timeout)
+    run.p.wait = stuck
+    t0 = time.monotonic()
+    run.kill()
+    assert time.monotonic() - t0 < 1 and run.fd == -1, time.monotonic() - t0
+    run.p.wait = wait
+    run.p.wait()
+    # Colour: SGR 31 is red, any other SGR back to plain (bold off, yellow, a reset).
+    t = tui.ask_text("\x1b[1;31mred\x1b[22mplain \x1b[31mred2\x1b[33m yellow\x1b[1;31mred3\x1b[0m end")
+    assert red(t) == ["red", "red2", "red3"], red(t)
+    print("ok: access set on a pty: the question only as the CLI's whole line after its marker, and quiet; all it printed "
+          "kept from the top; another prompt said, never answered; the cap; a bounded end; stopped and closed once, never blocking")
+
+
+# 30 widenings and a change: taller than the screen at 137x40 and at 80x24 (where the lines wrap too).
+ASK31 = ("claude-discord: access: photobot on lmd79, /home/u/rcps/.claude/discord-agents/photobot/access.json\r\n"
+         + "".join(f"\x1b[1;31m  ! #chan{i}: + listens here: any message, from dongyong22 (111), gpu villain (222), 333 (junyong-dev-bot)\x1b[0m\r\n" for i in range(30))
+         + f"    #general: - stops listening here\r\n{tui.A_MARK}\r\nApply 31 changes, 30 of them widening? [y/N] ")
+
+
+async def access_long(app, pilot):
+    """A change set taller than the screen: the popup fits the screen, the question with its counts and the buttons
+    always in view under the text, which scrolls (the focus staying on No) and says what is above and below."""
+    ssh_home(app)
+    fake_pty(app, [(ASK31, "ask"), ("\r\nclaude-discord: access: answered no; nothing was changed\r\n", 4)])
+    await pilot.press("e")
+    await settle(app, pilot)
+    await pilot.press("m", "s")
+    await settle(app, pilot)
+    h, scr = app.size.height, lambda sel: text(app.screen, sel)
+    for _ in range(20):   # the popup is fitted to the screen after its first layout, the line under the text after that
+        if scr("#ask-more"):
+            break
+        await pilot.pause()
+    qline, no = app.screen.query_one("#ask-q"), app.screen.query_one("#no")
+    assert isinstance(app.screen, tui.AccessAsk) and qline.region.bottom <= h and no.region.bottom <= h and app.screen.query_one("#ask").region.y >= 0
+    assert "Apply 31 changes, 30 of them widening? [y/N]" in drawn(app) and "#chan0:" in drawn(app) and "photobot on lmd79" in drawn(app)
+    t = app.screen.query_one("#ask-text")
+    assert "stops listening" not in drawn(app) and "more line" in scr("#ask-more") and "below" in scr("#ask-more") and "above" not in scr("#ask-more"), (scr("#ask-more"), t.size, t.virtual_size, t.max_scroll_y, t.styles.max_height, "stops listening" in drawn(app))
+    await pilot.press("down")
+    assert "▲ 1 more line above" in scr("#ask-more") and "photobot on lmd79" not in drawn(app), scr("#ask-more")
+    for _ in range(30):
+        await pilot.press("pagedown")
+        if "below" not in scr("#ask-more"):
+            break
+    assert "stops listening" in drawn(app) and "above" in scr("#ask-more") and "below" not in scr("#ask-more"), scr("#ask-more")
+    assert "Apply 31 changes, 30 of them widening? [y/N]" in drawn(app) and app.focused.id == "no" and app.runs[0].written == []
+    await pilot.press("home")
+    assert "photobot on lmd79" in drawn(app) and "above" not in scr("#ask-more")
+    await pilot.press("n")
+    await settle(app, pilot)
+    assert app.runs[0].written == ["n\n"]
+
+
+async def access_long_host_answered(app, pilot):
+    """access_long at 137x40, access_host, access_answered, then access_long at 80x24, in one run of the app."""
+    for check, size in ((access_long, None), (access_host, None), (access_answered, None), (access_long, (80, 24))):
+        if size:
+            await pilot.resize_terminal(*size)
+            await pilot.pause()
+        await check(app, pilot)
+        if isinstance(app.screen, tui.AccessEdit):
+            await pilot.press("escape", "y")   # the editor, with its changes, closed
+            await settle(app, pilot)
+        assert len(app.screen_stack) == 1, (check, app.screen_stack)
+    assert app.size == (80, 24)
+
+
+async def access_host(app, pilot):
+    """What the run prints and waits after that is no question of the CLI's (a ProxyCommand asking for a code): a
+    popup, the host's words under "the host says:", never answered. Cancel (the default) stops the run; Wait waits on;
+    the CLI's question, when it comes, replaces it."""
+    ssh_home(app)
+    scr = lambda sel: text(app.screen, sel)
+    fake_pty(app, [("Verification code: \x1b]0;T\x07", "said"), None],
+             [("Verification code: ", "said"), None],
+             [("Verification code: ", "said"), ("Verification code: \r\nok\r\n" + ASK, "ask"), ("n\r\nclaude-discord: access: answered no; nothing was changed\r\n", 4)])
+    await pilot.press("e")
+    await settle(app, pilot)
+    await pilot.press("m", "s")
+    await pilot.pause()
+    assert isinstance(app.screen, tui.HostSays) and scr("#ask-body") == "the host says:\nVerification code: ]0;T" and app.focused.id == "no", scr("#ask-body")
+    assert str(app.focused.label) == "Cancel" and "\x1b]0;" not in drawn(app)
+    await pilot.press("escape")
+    await settle(app, pilot)
+    assert app.runs[0].killed.is_set() and app.runs[0].written == [] and isinstance(app.screen, tui.AccessEdit) and scr("#a-msg") == "stopped: nothing was changed", scr("#a-msg")
+    # Wait: the popup goes, the run goes on; esc in the editor still stops it (no answer was given).
+    await pilot.press("s")
+    await pilot.pause()
+    app.screen.query_one("#yes").press()
+    await pilot.pause()
+    assert isinstance(app.screen, tui.AccessEdit) and not app.runs[1].killed.is_set() and app.screen.run is app.runs[1]
+    await pilot.press("escape")
+    await settle(app, pilot)
+    assert app.runs[1].killed.is_set() and scr("#a-msg") == "stopped: nothing was changed"
+    # The question after it: the host's popup is replaced by the question's, with all that was printed.
+    await pilot.press("s")
+    await settle(app, pilot)
+    assert isinstance(app.screen, tui.AccessAsk) and len(app.screen_stack) == 3 and app.screen.text.plain.startswith("Verification code:\nok\nclaude-discord: access: photobot"), (app.screen_stack, app.screen.text.plain[:80])
+    await pilot.press("n")
+    await settle(app, pilot)
+    assert app.runs[2].written == ["n\n"] and scr("#a-msg").startswith("answered no: nothing was changed")
+
+
+async def access_answered(app, pilot):
+    """After a y the run may be writing (access.json, then setup --mode): no cap, esc does not stop it but says so, and
+    the editor taken down waits for it. Its end is said with what it printed after the answer (the last 8 lines, the
+    pty's echo of the answer left out) and where the bot's access.log has what it did."""
+    ssh_home(app)
+    scr = lambda sel: text(app.screen, sel)
+    fake_pty(app, [(ASK, "ask"), None], [(ASK, "ask"), None])
+    await pilot.press("e")
+    await settle(app, pilot)
+    await pilot.press("m", "s")
+    await settle(app, pilot)
+    await pilot.press("y")
+    await pilot.pause()
+    await pilot.press("escape")
+    await pilot.pause()
+    run = app.runs[0]
+    assert run.written == ["y\n"] and not run.killed.is_set() and app.screen.run is run and scr("#a-msg").startswith("still running: it was answered y"), scr("#a-msg")
+    run.finish(("y\r\n" + "".join(f"l{i}\r\n" for i in range(10)) + "claude-discord: access: the mode was not changed (claude-discord setup photobot --mode, above); the changes to access.json stay\r\n", 1))
+    await settle(app, pilot)
+    msg = scr("#a-msg").split("\n")
+    assert msg[0] == ("claude-discord access exited 1 after the answer y. The bot's access.log has a line for each thing it did "
+                      "(access.json written; the mode set, or failed):") and msg[1:] == [f"l{i}" for i in range(3, 10)] + [
+        "claude-discord: access: the mode was not changed (claude-discord setup photobot --mode, above); the changes to access.json stay"], msg
+    # Taken down after a y (the TUI quitting): waited for, never killed.
+    await pilot.press("s")
+    await settle(app, pilot)
+    await pilot.press("y")
+    await pilot.pause()
+    run = app.runs[1]
+    threading.Timer(0.1, run.finish, [("", 0)]).start()
+    app.pop_screen()
+    await settle(app, pilot)
+    assert run.waited and run.ended.is_set() and not run.killed.is_set() and len(app.screen_stack) == 1
 
 
 async def stopped(app, pilot):
@@ -1825,6 +2056,8 @@ async def main():
     await case("access_refused", access_refused, state="all_ok", wrapper=access_cli)
     await case("access_outcomes", access_outcomes, state="all_ok", wrapper=access_cli)
     await case("access_pty", access_pty, state="all_ok", wrapper=lambda d: access_cli(d) and stub(d, ACCESS_CLI + PTY_CLI + CHECK_STUB))
+    pty_runs()
+    await case("access_long_host_answered", access_long_host_answered, state="all_ok", wrapper=access_cli)
     await case("stopped", stopped)
     await case("stopped_by_user", stopped_by_user)
     await case("overdue", overdue)

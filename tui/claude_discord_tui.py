@@ -1450,20 +1450,25 @@ def in_terminal(argv: list) -> int:
     return rc
 
 
-A_CAP = 40   # seconds `access ... set` is given to reach its question, or its end after the answer: ssh's 30 s cap and a margin
+A_CAP = 40     # seconds `access ... set` is given to reach its question (ssh's 30 s cap and a margin); none after a y: it may be writing
+A_QUIET = 1    # seconds of silence, no question, after which what it printed is shown as the host's (a ProxyCommand's code prompt)
+A_MARK = "\u2060"   # the line `access ... set` prints just before its question (1.13.1): U+2060 alone, which no Discord name holds
+A_KEEP = 1 << 20    # bytes of what it prints that are kept: the first ones (the widenings come first)
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
-QUESTION = re.compile(r"\[y/N\] *$")
+# The CLI's question, the whole line: one form per count of changes and of widenings among them (bin/claude-discord).
+QUESTION = re.compile(r"Apply (this change|these [1-9][0-9]* changes|this widening change|these [1-9][0-9]* widening changes"
+                      r"|[1-9][0-9]* changes, [1-9][0-9]* of them widening)\? \[y/N\] ")
 
 
 def ask_text(raw: str) -> Text:
     """What `access ... set` printed on its terminal, for a popup or a message: its red (SGR 31, the widenings) drawn in
-    the alert colour, every other escape sequence and control character cleaned as all foreign text is (UNSAFE_NL),
-    the pty's \\r gone, and no blank line at either end."""
+    the alert colour, any other SGR back to plain, every other escape sequence and control character cleaned as all
+    foreign text is (UNSAFE_NL), the pty's \\r and the CLI's marker line gone, and no blank line at either end."""
+    raw = "\n".join(l for l in raw.replace("\r", "").split("\n") if l != A_MARK)
     out, style, at = Text(), "", 0
     for m in SGR.finditer(raw):
         out.append(clean(raw[at:m.start()], UNSAFE_NL), style)
-        codes = m.group(1).split(";")
-        style = ALERT if "31" in codes else "" if codes in ([""], ["0"]) or "39" in codes else style
+        style = ALERT if "31" in m.group(1).split(";") else ""
         at = m.end()
     out.append(clean(raw[at:], UNSAFE_NL), style)
     lines = out.split("\n", allow_blank=True)
@@ -1480,10 +1485,15 @@ class PtyRun:
     """`argv` on a pseudo-terminal this program holds (1.13.1): its stdin, stdout and stderr are the pty's other end, so
     the CLI's terminal check holds and it prints its changes and asks its question itself, there; what it prints is
     read here, the answer written there. In a session of its own, so its whole process group (ssh -t, setup --mode)
-    is killed at the cap or when the editor goes. next() blocks: it runs in a worker thread."""
+    can be killed. next() blocks: it runs in a worker thread. The pty is read and closed only under `lock`: by next(),
+    or by kill() when nobody reads; a closed pty is a run that has ended."""
 
     def __init__(self, argv: list, master: int, slave: int) -> None:
-        self.fd, self.buf, self.rc, self.reading = master, b"", None, False
+        self.fd, self.buf, self.rc, self.killed = master, b"", None, False
+        self.end: float | None = time.monotonic() + A_CAP   # the cap, until the answer
+        self.shown = 0      # how much of buf a popup has had
+        self.since = 0      # where what it printed after the answer starts
+        self.lock = threading.Lock()
         try:
             self.p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
         except OSError as e:
@@ -1500,8 +1510,8 @@ class PtyRun:
         return cls(argv, master, slave)
 
     def drain(self, wait: float) -> bool:
-        """What the pty holds, read into buf, `wait` seconds for the first of it. False when nothing came (or the
-        other end is closed)."""
+        """What the pty holds, read into buf (its first A_KEEP bytes), `wait` seconds for the first of it. False when
+        nothing came (or the other end is closed)."""
         r, _, _ = select.select([self.fd], [], [], wait)
         if not r:
             return False
@@ -1509,53 +1519,85 @@ class PtyRun:
             data = os.read(self.fd, 65536)
         except OSError:   # EIO: every holder of the other end has closed it
             return False
-        self.buf = (self.buf + data)[-(1 << 20):]
+        self.buf += data[:max(0, A_KEEP - len(self.buf))]
         return bool(data)
 
-    def next(self, cap: float) -> tuple[str, int | None]:
-        """What it printed since the last call, until it asks (the last line ends with `[y/N]` and nothing follows for
-        0.1 s: None) or exits (its exit status; what is still in the pty is read first, and whatever it left running
-        that holds the pty is not waited for), within `cap` seconds: past that its process group is killed, 124."""
-        end, self.reading = time.monotonic() + cap, True
-        try:
+    def asks(self) -> bool:
+        """Its last line is the CLI's question, whole, and the line before it the CLI's marker."""
+        lines = self.buf.decode("utf-8", "replace").replace("\r", "").split("\n")
+        return len(lines) > 1 and lines[-2] == A_MARK and QUESTION.fullmatch(lines[-1]) is not None
+
+    def next(self, answer: bool | None = None) -> tuple[str, str | int]:
+        """The answer written (y or n; None: none), then what it printed, until: its question, the last line the CLI's
+        and nothing after it for 0.1 s ("ask", with all it printed); A_QUIET s of silence after something else ("said",
+        all it printed: a host's prompt is shown, never answered); or its end (its exit status, with what it printed
+        after the answer; what is still in the pty is read first, for half a second at most). Until the answer it has
+        A_CAP s from its start: past that its process group is killed, 124. After a y there is no cap."""
+        with self.lock:
+            if answer is not None and self.fd >= 0 and not self.killed:
+                try:
+                    os.write(self.fd, b"y\n" if answer else b"n\n")
+                except OSError:
+                    pass
+                self.end, self.since = None, len(self.buf)
+            quiet = time.monotonic()
             while self.rc is None:
-                if self.drain(max(0, min(end - time.monotonic(), 0.1))):
-                    continue
-                if self.p.poll() is not None:
-                    while self.drain(0.05):
+                now = time.monotonic()
+                if self.killed:
+                    self.reap(0.5)
+                elif self.end is not None and now >= self.end:
+                    self.signal()
+                    self.reap(0.5)
+                    self.rc = 124
+                elif self.p.poll() is not None:   # before any read: what keeps printing never hides its end
+                    stop = time.monotonic() + 0.5   # whatever it left running that holds the pty is not waited for
+                    while time.monotonic() < stop and self.drain(0.05):
                         pass
                     self.rc = self.p.returncode
-                elif QUESTION.search(self.buf.decode("utf-8", "replace").rsplit("\n", 1)[-1]):
-                    text, self.buf = self.buf, b""
-                    return text.decode("utf-8", "replace"), None
-                elif time.monotonic() >= end:
-                    self.kill()
-                    self.rc = 124
-            text, self.buf = self.buf, b""
+                elif self.drain(0.1 if self.end is None else min(self.end - now, 0.1)):
+                    quiet = time.monotonic()
+                elif self.end is None:   # answered: only its end is waited for
+                    continue
+                elif self.asks():
+                    self.shown = len(self.buf)
+                    return self.buf.decode("utf-8", "replace"), "ask"
+                elif time.monotonic() - quiet >= A_QUIET and self.buf[self.shown:].strip():
+                    self.shown = len(self.buf)
+                    return self.buf.decode("utf-8", "replace"), "said"
             self.close()
-            return text.decode("utf-8", "replace"), self.rc
-        finally:
-            self.reading = False
+            return self.buf[self.since:].decode("utf-8", "replace"), self.rc
 
-    def answer(self, yes: bool) -> None:
-        try:
-            os.write(self.fd, b"y\n" if yes else b"n\n")
-        except OSError:
-            pass
+    def wait(self) -> None:
+        """Until it ends, read here when no worker reads it (the editor closed after a y: it may be writing)."""
+        while self.rc is None:
+            self.next()
 
-    def kill(self) -> None:
-        """Its process group killed. The pty is closed here unless next() reads it: it ends there, then closes it."""
+    def signal(self) -> None:
         if self.p is not None and self.p.poll() is None:
             try:
                 os.killpg(self.p.pid, signal.SIGKILL)
             except OSError:
                 pass
+
+    def reap(self, wait: float) -> None:
+        """Its exit status, `wait` seconds for it at most (a process in D state does not die at once); -9 past that."""
+        try:
+            self.rc = self.p.wait(wait) if self.p is not None else self.rc
+        except subprocess.TimeoutExpired:
+            self.rc = -signal.SIGKILL
+
+    def kill(self) -> None:
+        """Its process group killed. Whoever reads the pty ends there and closes it; when nobody does, it is closed
+        here. Never blocks for long: this runs on the UI thread."""
+        self.killed = True
+        self.signal()
+        if self.lock.acquire(blocking=False):
             try:
-                self.p.wait(5)
-            except subprocess.TimeoutExpired:
-                pass
-        if not self.reading:
-            self.close()
+                if self.rc is None:
+                    self.reap(0.2)
+                self.close()
+            finally:
+                self.lock.release()
 
     def close(self) -> None:
         if self.fd >= 0:
@@ -1564,7 +1606,7 @@ class PtyRun:
 
 
 A_HINT = "↑↓ move · space toggle · m mention · tab people · a add · s save · esc close"
-A_SAID = {1: "not written (exit 1): what it said is above the TUI, on the terminal", 2: "refused (exit 2): what it said is above the TUI, on the terminal",
+A_SAID = {1: "exit 1: what it said is above the TUI, on the terminal; the bot's access.log has a line for anything it wrote", 2: "refused (exit 2): what it said is above the TUI, on the terminal",
           3: "no terminal for its question (exit 3): nothing was changed", 4: "answered no: nothing was changed. The changes are still here: adjust them, or esc",
           5: "the host did not answer, or its claude-discord is older than 1.13.0 (exit 5): nothing was changed"}
 # The same, for a run on the TUI's pty, followed by what it said (A_SAID[4] alone).
@@ -1599,7 +1641,9 @@ class AccessEdit(ModalScreen):
         self.typed: list = []                    # the ids added here by name or id: they stay listed whatever is unticked
         self.by_hand = ""                        # the command for a shell, where this terminal cannot be handed over
         self.run = None                          # the PtyRun of `access ... set` while it runs
-        self.asked = self.stopped = False        # it asked its question; esc stopped it
+        self.asked = self.stopped = False        # it asked its question; esc (or Cancel) stopped it
+        self.yes: bool | None = None             # the answer written to it; None: none yet
+        self.says = None                         # the HostSays popup while it is open
 
     def compose(self) -> ComposeResult:
         with Vertical(id="access"):
@@ -1782,65 +1826,103 @@ class AccessEdit(ModalScreen):
         argv = self.app.access_argv(self.entry, "set", *words)
         run = self.app.pty(argv)
         if run is not None:
-            self.run, self.asked, self.stopped = run, False, False
+            self.run, self.asked, self.yes, self.stopped, self.says = run, False, None, False, None
             self.say("claude-discord access ... set is reading the changes; esc stops it")
             return self.step(None)
         rc = self.app.handover(argv)
         if rc is None:   # no terminal to hand over (Textual cannot suspend here): the same command, for a shell
             self.by_hand = f"cd {shlex.quote(os.getcwd())} && " + shlex.join(["claude-discord", *argv[1:]])
-            self.say(f"this terminal cannot be handed over for the questions. Run it in a shell (c copies it), then esc:\n{self.by_hand}", WARN)
+            self.say(f"this terminal cannot be handed over for its question. Run it in a shell (c copies it), then esc:\n{self.by_hand}", WARN)
         elif rc == 0:
             self.dismiss("access saved: the plugin reads access.json at the next message, no restart" + (
                 "; the hooks follow the new mode at once, the dev-manager rules at the session's next start, compact or clear" if self.now["mode"] != self.was["mode"] else ""))
         else:
             self.say(A_SAID.get(rc, f"claude-discord access exited {rc}: what it said is above the TUI, on the terminal"), ALERT)
 
-    def step(self, yes: bool | None) -> None:
-        """The run's next part, in a worker thread: the answer written (y or n; None: none yet), then what it prints
-        until its next question or its end."""
+    def step(self, answer: bool | None) -> None:
+        """The run's next part, in a worker thread: the answer written (y or n; None: none), then what it prints until
+        its question, something else it says and waits after (a host's prompt), or its end."""
         run, app = self.run, self.app
         if run is None:
             return
-        if yes is not None:
-            self.say("answered " + ("y" if yes else "n") + "; claude-discord access ... set goes on")
+        if answer is not None:
+            self.yes = answer
+            self.say("answered y: claude-discord access ... set writes the changes, and is waited for (esc does not stop it now)" if answer else
+                     "answered n; claude-discord access ... set ends")
 
         def work() -> None:
-            if yes is not None:
-                run.answer(yes)
-            text, rc = run.next(A_CAP)
-            app.call_from_thread(self.stepped, run, text, rc)
-        app.run_worker(work, thread=True)
+            text, what = run.next(answer)
+            try:
+                app.call_from_thread(self.stepped, run, text, what)
+            except RuntimeError:   # the app has ended meanwhile
+                pass
+        app.run_worker(work, thread=True, exit_on_error=False)
 
-    def stepped(self, run, text: str, rc: int | None) -> None:
+    def stepped(self, run, text: str, what: str | int) -> None:
         if run is not self.run:
             return
-        if rc is None:   # its question: a popup, its answer the next step
+        if what in ("ask", "said") and self.stopped:   # stopped meanwhile: its end is what comes next
+            return self.step(None)
+        if what == "said":   # no question of the CLI's (a ProxyCommand's code prompt, a slow host): shown, never answered
+            if self.says is not None and self.app.screen is self.says:
+                self.says.show(ask_text(text))
+            else:
+                self.says = HostSays(ask_text(text))
+                self.app.push_screen(self.says, self.waited)
+            return self.step(None)
+        self.unsay()
+        if what == "ask":   # its question: a popup with all it printed, its answer the next step
             self.asked = True
             return self.app.push_screen(AccessAsk(ask_text(text)), self.step)
-        self.run = None
+        rc, self.run = what, None
         lines = [l for l in ask_text(text).plain.split("\n") if l.strip()]
-        if self.asked and lines and lines[0].strip() in ("y", "n"):
+        if self.yes is not None and lines and lines[0].strip() in ("y", "n"):
             lines.pop(0)   # the pty's echo of the answer
         said = "\n".join(lines[-8:])
-        if self.stopped:
-            self.say("stopped: " + ("claude-discord access may have written already (its access.log says)" if self.asked else "nothing was changed"), ALERT)
+        said = f"\n{said}" if said else ""
+        if self.stopped:   # only ever before a y
+            self.say("stopped: nothing was changed", ALERT)
         elif rc == 0 and not self.asked:
-            self.dismiss(said or "nothing to change")
-        elif rc == 0:
+            self.dismiss(said.strip() or "nothing to change")
+        elif rc == 0 and self.yes:
             self.dismiss("access saved: the plugin reads access.json at the next message, no restart" + (
                 "; the hooks follow the new mode at once, the dev-manager rules at the session's next start, compact or clear" if self.now["mode"] != self.was["mode"] else ""))
+        elif self.yes:
+            self.say(f"claude-discord access exited {rc} after the answer y. The bot's access.log has a line for each thing it did "
+                     "(access.json written; the mode set, or failed):" + said, ALERT)
         elif rc == 4:
             self.say(A_SAID[4], ALERT)
         elif rc == 124:
-            self.say((f"claude-discord access asked nothing within {A_CAP} s and was stopped: nothing was changed" if not self.asked else
-                      f"claude-discord access did not end within {A_CAP} s of the answer and was stopped (its access.log says whether it wrote)") + (f"\n{said}" if said else ""), ALERT)
+            self.say(f"claude-discord access asked no question this TUI answers within {A_CAP} s and was stopped: nothing was changed" + said, ALERT)
         else:
-            self.say(A_RAN.get(rc, f"claude-discord access exited {rc}:") + (f"\n{said}" if said else ""), ALERT)
+            self.say(A_RAN.get(rc, f"claude-discord access exited {rc}:") + said, ALERT)
+
+    def waited(self, wait: bool | None) -> None:
+        """The host's popup answered: Wait, or Cancel (the run stopped). None: taken down here."""
+        if wait is not None:
+            self.says = None
+            if not wait:
+                self.stop()
+
+    def unsay(self) -> None:
+        if self.says is not None:
+            says, self.says = self.says, None
+            if self.app.screen is says:
+                says.dismiss(None)
+
+    def stop(self) -> None:
+        """esc while it runs: its process group killed and its end said. Not after a y: it may be writing access.json
+        or setting the mode, and is waited for."""
+        if self.yes:
+            return self.say("still running: it was answered y and may be writing access.json or setting the mode; it is waited for", WARN)
+        self.stopped = True
+        self.run.kill()
 
     def on_unmount(self) -> None:
+        """The editor taken down while it runs (the TUI quitting): killed, or, after a y, waited for."""
         if self.run is not None:
             self.run, run = None, self.run
-            run.kill()
+            run.wait() if self.yes else run.kill()
 
     def action_copy(self) -> None:
         if self.by_hand:
@@ -1848,9 +1930,8 @@ class AccessEdit(ModalScreen):
             self.say(f"copied (if your terminal allows it):\n{self.by_hand}", WARN)
 
     def action_close(self) -> None:
-        if self.run is not None:   # it runs: stopped, its process group killed; its end is said
-            self.stopped = True
-            self.run.kill()
+        if self.run is not None:
+            self.stop()
         elif self.adding():
             self.added()
         elif self.words() and not self.by_hand:
@@ -1863,8 +1944,9 @@ class Confirm(ModalScreen[bool]):
     """A yes/no question, No by default (focused, and Enter, n and Escape answer it)."""
     CSS = "Confirm { align: center middle; } #confirm { width: 70; height: auto; border: thick $error; padding: 1 2; }"
     BINDINGS = [Binding("y", "answer(True)", "yes"), Binding("n", "answer(False)", "no"), Binding("escape", "answer(False)", "no")]
+    LABELS = ("No", "Yes")
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text) -> None:
         super().__init__()
         self.text = text
 
@@ -1872,8 +1954,11 @@ class Confirm(ModalScreen[bool]):
         with Vertical(id="confirm"):
             yield Static(self.text, markup=False)
             with Horizontal():
-                yield Button("No", id="no")
-                yield Button("Yes", id="yes", variant="error")
+                yield from self.buttons()
+
+    def buttons(self) -> ComposeResult:
+        yield Button(self.LABELS[0], id="no")
+        yield Button(self.LABELS[1], id="yes", variant="error")
 
     def on_mount(self) -> None:
         self.query_one("#no", Button).focus()
@@ -1885,20 +1970,84 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(yes)
 
 
-class AccessAsk(Confirm):
-    """The question of `access ... set`, run on the TUI's pty: what it printed up to it (the changes, the widenings
-    first and red, the warnings, the question), and Yes / No. No is the default (focused, and Enter, n and Escape
-    answer it): `n` is written to it; Yes writes `y`."""
-    CSS = """AccessAsk { align: center middle; } #ask { width: 118; max-width: 96%; height: auto; border: thick $error; padding: 1 2; }
-    #ask-text { height: auto; max-height: 24; margin-bottom: 1; } #ask Horizontal { height: auto; }"""
+class Scrolled(Confirm):
+    """A popup for a text that may not fit the screen: the text scrolls (↑↓ PgUp PgDn Home End, the focus staying on
+    the buttons), a line under it says how much of it is above and below, and its last line stays in view, under that,
+    with the buttons. Sized to the screen whatever its size."""
+    CSS = """Scrolled { align: center middle; } #ask { width: 118; max-width: 96%; height: auto; max-height: 100%; border: thick $error; padding: 1 2; }
+    #ask-text { height: auto; } #ask-more { height: 1; color: $text-muted; } #ask Horizontal { height: auto; margin-top: 1; }"""
+    BINDINGS = [Binding("up", "scroll('up')", show=False), Binding("down", "scroll('down')", show=False), Binding("pageup", "scroll('page_up')", show=False),
+                Binding("pagedown", "scroll('page_down')", show=False), Binding("home", "scroll('home')", show=False), Binding("end", "scroll('end')", show=False)]
+
+    def parts(self) -> tuple:
+        """The text that scrolls and the last line, which does not."""
+        lines = self.text.split("\n")
+        return Text("\n").join(lines[:-1]), lines[-1]
 
     def compose(self) -> ComposeResult:
+        body, last = self.parts()
+        scroll = VerticalScroll(id="ask-text")
+        scroll.can_focus = False
         with Vertical(id="ask"):
-            with VerticalScroll(id="ask-text"):
-                yield Static(self.text, markup=False)
+            with scroll:
+                yield Static(body, id="ask-body", markup=False)
+            yield Static("", id="ask-more", markup=False)
+            yield Static(last, id="ask-q", markup=False)
             with Horizontal():
-                yield Button("No", id="no")
-                yield Button("Yes", id="yes", variant="error")
+                yield from self.buttons()
+
+    def on_mount(self) -> None:
+        super().on_mount()
+        for what in ("scroll_y", "virtual_size"):   # scrolled; laid out again (fitted, the scrollbar come or gone)
+            self.watch(self.query_one("#ask-text"), what, lambda *_: self.more(), init=False)
+        self.call_after_refresh(self.fit)
+
+    def on_resize(self, event: Resize) -> None:
+        self.call_after_refresh(self.fit)
+
+    def fit(self) -> None:
+        """The text as high as the screen leaves it: the screen less the frame, the line under it, the last line and
+        the buttons."""
+        if not self.query("#ask"):   # taken down meanwhile
+            return
+        ask = self.query_one("#ask")
+        rest = ask.gutter.height + sum(w.outer_size.height for w in ask.children if w.id != "ask-text")
+        self.query_one("#ask-text").styles.max_height = max(3, self.size.height - rest)
+        self.call_after_refresh(self.more)
+
+    def more(self) -> None:
+        if not self.query("#ask-text"):
+            return
+        t = self.query_one("#ask-text", VerticalScroll)
+        above, below = round(t.scroll_y), round(t.max_scroll_y - t.scroll_y)
+        said = [f"▲ {above} more line{'s' * (above != 1)} above"] * (above > 0) + [f"▼ {below} more line{'s' * (below != 1)} below"] * (below > 0)
+        self.query_one("#ask-more", Static).update(", ".join(said) + "  ·  ↑↓ PgUp PgDn scroll" if said else "")
+
+    def action_scroll(self, how: str) -> None:
+        getattr(self.query_one("#ask-text", VerticalScroll), f"scroll_{how}")(animate=False)
+
+
+class AccessAsk(Scrolled):
+    """The question of `access ... set`, run on the TUI's pty: all it printed up to it (the changes, the widenings
+    first and red, the warnings) and, always in view under them, the question with its counts; Yes / No. No is the
+    default (focused, and Enter on it, n and Escape answer it): `n` is written to it; y, or Yes, writes `y`."""
+
+
+class HostSays(Scrolled):
+    """What `access ... set` printed and waits after, which is no question of the CLI's (a ProxyCommand asking for a
+    code, a host slow to answer): shown as the host's, never answered. Cancel (the default, and Escape) stops the run;
+    Wait closes this and waits on, within the cap. Shown again with all it printed when it says more."""
+    LABELS = ("Cancel", "Wait")
+
+    def parts(self) -> tuple:
+        return (Text.assemble(("the host says:", "bold"), "\n", self.text),
+                Text(f"Not answered here, and nothing is written before claude-discord access asks its own question: Cancel stops it; "
+                     f"Wait waits for that question, up to {A_CAP} s from the start.", DIM))
+
+    def show(self, text: Text) -> None:
+        self.text = text
+        self.query_one("#ask-body", Static).update(self.parts()[0])
+        self.call_after_refresh(self.fit)
 
 
 class Pane(VerticalScroll, can_focus=False):
@@ -2180,7 +2329,7 @@ class MonitorTUI(App):
     pty = staticmethod(PtyRun.start)     # what runs `access ... set` on a pty of the TUI's, None without one (the tests set it)
 
     def handover(self, argv: list) -> int | None:
-        """The terminal handed to `argv`, which asks its own questions there, until it ends: its exit status. None where
+        """The terminal handed to `argv`, which asks its own question there, until it ends: its exit status. None where
         the terminal cannot be handed over (Textual's suspend is not supported: no real terminal, Textual Web)."""
         try:
             with self.suspend():
