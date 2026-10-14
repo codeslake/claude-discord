@@ -3574,7 +3574,7 @@ printf '%s\n' "$*" >> "$HOME/ssh.log"
 IFS= read -r -t 0.05 l && printf 'ATE %s\n' "$l" >> "$HOME/ssh.log"
 host="" none=""
 for a in "$@"; do [ "$a" != ControlPath=none ] || none=1; done
-while [ $# -gt 0 ]; do case $1 in -o) shift 2;; --) shift;; *) host=$1; break;; esac; done
+while [ $# -gt 0 ]; do case $1 in -o) shift 2;; --|-t) shift;; *) host=$1; break;; esac; done
 d=$HOME/mon
 [ ! -f "$d/$host.hold" ] || setsid /bin/sleep "$(<"$d/$host.hold")" &
 if [ -f "$d/$host.sleep" ]; then echo $$ > "$d/$host.pid"; /bin/sleep "$(<"$d/$host.sleep")"; fi
@@ -4132,6 +4132,64 @@ at 'n\n' dm1 set mode=none
   { echo "FAIL: leaving dev-manager says what stops and asks about it by itself; no keeps the ledger: rc=$ARC $AO"; exit 1; }
 rm -rf "$MR/dm1"; echo none > "$AD/mode"
 echo "ok: access set mode=<mode> asks, then runs setup --mode with the mode on its stdin (peers and hosts kept), leaving access.json alone; into dev-manager it shows the peers setup adds; out of it with a ledger it says the monitor stops and asks about that by itself, and no keeps both"
+# access --host <alias>: the bot lives on a host of the manager's ledger. Over ssh as the monitor's pass goes (BatchMode,
+# ConnectTimeout, the alias after --, the line's env words, a proxy word in both spellings; name= is no env word), and
+# into the remote command go only hex digits (the project, the bot's name), the action and the change words, behind
+# --version: a host before 1.13.0 prints its version line and does nothing else.
+a_hex() { printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'; }
+printf "$HEAD$LOCAL"'h1 X=1 name=box https_proxy=http://q:1\nh2\n' > "$MR/mgr/hosts"; rm -f "$HOME/ssh.log"
+A_REMOTE="-- h1 env X=1 HTTPS_PROXY=http://q:1 https_proxy=http://q:1 ~/.local/bin/claude-discord --version --access $(a_hex '/x y/한') 616363"
+# The answer is the last line that starts as the document, whatever the host prints around it, and may be far longer
+# than the 4096 bytes a probe's answer is cut at (a server with hundreds of channels).
+A_DOC='{"access":1,"version":"1.13.0","bot":"acc","pad":"'$(printf 'a%.0s' {1..70000})'"}'
+printf 'motd\n{"access":1,"bot":"decoy"}\n%s\nbye\n' "$A_DOC" > "$MON/h1.out"
+ac --host h1 --manager mgr --project '/x y/한' acc --json
+[ "$ARC" = 0 ] && [ "$AO" = "$A_DOC" ] && [ "$(<"$HOME/ssh.log")" = "-o BatchMode=yes -o ConnectTimeout=8 $A_REMOTE --json" ] ||
+  { echo "FAIL: access --host --json asks the host once, capped, and prints the document it answered with: rc=$ARC ${AO:0:200} / $AE / $(cut -c1-400 "$HOME/ssh.log")"; exit 1; }
+# A terminal here: the questions are asked on the host, of this terminal (ssh -t), after its version was asked. The
+# host's exit status is this command's.
+printf 'claude-discord 1.13.0 (abc1234)\n' > "$MON/h1.out"; echo 4 > "$MON/h1.rc"; : > "$MON/h1.both"; rm -f "$HOME/ssh.log"
+at '' --host h1 --manager mgr --project '/x y/한' acc set dm=pairing mention:900=off
+[ "$ARC" = 4 ] && [ "$(command grep -v '^ATE' "$HOME/ssh.log")" = "-o BatchMode=yes -o ConnectTimeout=8 -- h1 ~/.local/bin/claude-discord --version
+-t -o BatchMode=yes -o ConnectTimeout=8 $A_REMOTE set dm=pairing mention:900=off" ] ||
+  { echo "FAIL: access --host set at a terminal asks the host's version, then runs the change there under ssh -t and exits as it did: rc=$ARC $AO / $(<"$HOME/ssh.log")"; exit 1; }
+# A 1.13.0 host that could not do it (no such bot there) prints no version line and says why: that is passed on (exit 1).
+printf "motd\\nclaude-discord: access: no bot 'acc'\\007 set up in /x y/.claude/discord-agents (claude-discord setup <bot>)\\n\\n" > "$MON/h1.out"; echo 1 > "$MON/h1.rc"
+ac --host h1 --manager mgr --project '/x y/한' acc --json
+[ "$ARC" = 1 ] && [ -z "$AO" ] && [ "$AE" = "claude-discord: access: h1: no bot 'acc' set up in /x y/.claude/discord-agents (claude-discord setup <bot>)" ] ||
+  { echo "FAIL: what a 1.13.0 host says when it cannot do it is passed on, without its control characters (exit 1): rc=$ARC $AO / $(printf '%q' "$AE")"; exit 1; }
+# A host before 1.13.0 (it prints its version line whatever follows --version) is said to need the update (exit 5),
+# and a change is never sent to it: an older wrapper would read `access` as a bot's name. An alias that is not in the
+# ledger, or is no alias, is exit 2 and runs no ssh.
+printf 'banner\nclaude-discord 1.12.0 (abc1234)\n' > "$MON/h2.out"; rm -f "$HOME/ssh.log"
+ac --host h2 --manager mgr --project /p acc --json; A=$ARC$AE
+ac --host h2 --manager mgr --project /p acc set dm=pairing
+[ "$A" = "5claude-discord: access: h2 needs claude-discord 1.13.0 for this (it has 1.12.0; claude-discord update, there)" ] && [ "$ARC$AE" = "$A" ] && [ -z "$AO" ] &&
+  [ "$(sed -n 2p "$HOME/ssh.log")" = "-o BatchMode=yes -o ConnectTimeout=8 -- h2 ~/.local/bin/claude-discord --version" ] && [ "$(wc -l < "$HOME/ssh.log")" = 2 ] ||
+  { echo "FAIL: a host before 1.13.0 is exit 5 naming its version, and is sent no change: $A / rc=$ARC $AO $AE / $(<"$HOME/ssh.log")"; exit 1; }
+rm -f "$HOME/ssh.log"
+for bad in nope 'h1;id'; do
+  ac --host "$bad" --manager mgr --project /p acc --json
+  [ "$ARC" = 2 ] && [ ! -e "$HOME/ssh.log" ] && [[ $AE != *';id'* ]] || { echo "FAIL: --host '$bad' is not a host of the ledger: exit 2, no ssh: rc=$ARC $AE"; exit 1; }
+done
+ac --host h1 --manager mgr acc --json
+[ "$ARC" = 2 ] && grep -q 'needs --project' <<<"$AE" && [ ! -e "$HOME/ssh.log" ] || { echo "FAIL: a remote bot is named with its project: rc=$ARC $AE"; exit 1; }
+# The host's side: `--version --access <hex> <hex> ...` is `access --project <dir> -- <bot> ...` there; words that are
+# not hex are exit 2 and print nothing (no version line either: the caller reads that as an older host).
+: > "$CURL_REPLIES"
+out=$(cd "$HOME" && bash "$S" --version --access "$(a_hex "$MP")" "$(a_hex acc)" --json) || :
+jq -e --arg p "$(cd "$MP" && pwd -P)" '.access == 1 and .bot == "acc" and .project == $p and .policy.dm == "allowlist" and ([.channels[].read] | unique) == [null]
+  and .errors == ["the server'"'"'s channels: HTTP 000", "the server'"'"'s roles: HTTP 000", "the bot'"'"'s roles: HTTP 000"]' <<<"$out" >/dev/null ||
+  { echo "FAIL: --version --access decodes the project and the bot and runs access there; what Discord did not answer is in errors, and no channel's readability is guessed: $out"; exit 1; }
+for bad in "zz 616363" "2f7 616363"; do
+  rc=0; out=$(cd "$HOME" && bash "$S" --version --access $bad --json 2>&1) || rc=$?
+  [ "$rc" = 2 ] && [ -z "$out" ] || { echo "FAIL: --version --access '$bad' is exit 2 with no output: rc=$rc $out"; exit 1; }
+done
+# --host local: here, with the env words of the ledger's local line (the monitor's Discord calls use the same).
+rm -f "$HOME/curl.proxy"; ac --host local --manager mgr --project "$MP" acc --json
+[ "$ARC" = 0 ] && jq -e '.bot == "acc"' <<<"$AO" >/dev/null && [ "$(sort -u "$HOME/curl.proxy")" = "http://u:secretpw@127.0.0.1:8118|http://u:secretpw@127.0.0.1:8118" ] && [[ $AO$AE != *secretpw* ]] ||
+  { echo "FAIL: --host local runs here with the local line's env words: rc=$ARC $AO / $AE / $(cat "$HOME/curl.proxy" 2>&1)"; exit 1; }
+echo "ok: access --host: over ssh as a pass goes (the ledger line's env words, the alias after --), only hex digits and change words in the remote command, behind --version; --json takes a document of any length from among what the host prints; set runs under ssh -t at a terminal, after the host's version was asked; a host before 1.13.0 is exit 5 and is sent no change, and what a 1.13.0 host could not do is passed on; local runs here with the local line's env"
 # The monitor cases below find the ledger, the logs and the project as the hosts cases left them.
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -rf "$AD" "$MR/peers.json" "$HOME/ssh.log" "$HOME/curl.proxy" "$HOME/access.err" "$MON"/*; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
 
