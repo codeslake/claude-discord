@@ -2911,13 +2911,14 @@ snowflake_for() {  # $1 = minutes ago
 ID_SEEN=$(snowflake_for 40)     # already answered: the hooks recorded it
 ID_STALE=$(snowflake_for 30)    # newer than that, and past the 15 min threshold
 ID_ANCIENT=$(snowflake_for 400) # past the 4 h ceiling, so no hold survives it
-me_json='{"id":"777"}'
+me_json='{"id":"777","username":"sbot"}'
 
 # A bot's own user id never changes, so health asks once and keeps it in
 # <state dir>/bot-id. Seeding it here means `users/@me` is never called, so
 # the queued replies below stay in step whichever case ran first; the
 # uncached path has its own case.
-seed_id() { printf '777\n' > "$1/bot-id"; }
+# 1.14.0: its Discord name too, read again once a day by the same call: seeded fresh.
+seed_id() { printf '777\n' > "$1/bot-id"; printf '%s sbot\n' "$(date +%s)" > "$1/discord-name"; }
 # The guild a channel belongs to cannot change either, so health keeps it in
 # <state dir>/channel-guild beside the channel it was learned for, and stops
 # asking. 900 is the channel every bot in these fixtures is set up with; a
@@ -3170,7 +3171,8 @@ out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: the first run must ask for the bot id and the guild and carry on: $out"; exit 1; }
 [ "$(dcalls channels/900)" = 1 ] && [ "$(dcalls guilds/5/channels)" = 1 ] && [ "$(wc -l < "$CURL_LOG")" = 6 ] && [ "$(<"$SD/channel-names")" = "900 general" ] ||
   { echo "FAIL: the first read ever is one channels/<id> call and one guilds/<gid>/channels call, six calls in all, and the name is kept in channel-names: $(<"$CURL_LOG") / $(cat "$SD/channel-names" 2>&1)"; exit 1; }
-[ "$(<"$SD/bot-id")" = 777 ] || { echo "FAIL: the bot id must be kept: $(cat "$SD/bot-id" 2>&1)"; exit 1; }
+[ "$(<"$SD/bot-id")" = 777 ] && [ "$(cut -d' ' -f2- "$SD/discord-name")" = sbot ] && [ "$(jq -r '.[0].discord_name' <<<"$out")" = sbot ] ||
+  { echo "FAIL: the bot id must be kept, and its Discord name (health --json's discord_name): $(cat "$SD/bot-id" "$SD/discord-name" 2>&1) / $out"; exit 1; }
 [ "$(guild_of "$SD")" = "900 5 general" ] || { echo "FAIL: the guild must be kept with its channel: $(cat "$SD/channel-guild" 2>&1)"; exit 1; }
 : > "$CURL_LOG"
 queue "200 $NONE" '200 {"threads":[]}'
@@ -3179,6 +3181,12 @@ out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(dcalls channels/900)" = 0 ] && [ "$(dcalls guilds/5/channels)" = 0 ] && [ "$(wc -l < "$CURL_LOG")" = 3 ] ||
   { echo "FAIL: a run the same day asks for neither the channel nor the guild's list (three calls: gateway, messages, threads): $(<"$CURL_LOG")"; exit 1; }
 [ ! -s "$CURL_REPLIES" ] || { echo "FAIL: a cached id and guild must cost no extra call: $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
+# A Discord name a day old is read again (one users/@me call; the id kept), the new one kept and given.
+printf '%s sbot-old\n' "$(( $(date +%s) - 86400 ))" > "$SD/discord-name"; : > "$CURL_LOG"
+queue "200 {\"id\":\"777\",\"username\":\"sbot2\"}" "200 $NONE" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(dcalls users/@me)" = 1 ] && [ "$(wc -l < "$CURL_LOG")" = 4 ] && [ "$(cut -d' ' -f2- "$SD/discord-name")" = sbot2 ] && [ "$(jq -r '.[0].discord_name' <<<"$out")" = sbot2 ] ||
+  { echo "FAIL: a Discord name a day old is read again with one users/@me call and kept: $(<"$CURL_LOG") / $(cat "$SD/discord-name") / $out"; exit 1; }
 printf 'not-an-id\n' > "$SD/bot-id"; printf '901 5\n' > "$SD/channel-guild"   # an id that is not one; a guild cached for another channel
 queue "200 $me_json" "200 $NONE" '200 {"guild_id":"5","name":"general"}' "$GLIST" '200 {"threads":[]}'
 out=$(bash "$S" health --json 2>/dev/null) || :
@@ -4329,6 +4337,7 @@ claude-discord: bot: $AD/.env written. A running session of acc logs in with it 
 KEEP=1" ] && [ "$(stat -c %a "$AD/.env")" = 600 ] && [ "$(stat -c %i "$AD/.env")" != "$ei" ] &&
   [[ $(tail -n 1 "$AD/access.log") =~ ^20[0-9-]{8}T[0-9:]{8}Z\ $(id -un)\ [^\ ]+\ token:\ replaced\ \(bot\ 777\)$ ]] &&
   [ "$(<"$CURL_STDIN_LOG")" = "Authorization: Bot $TOK_NEW" ] && [ "$(<"$CURL_LOG")" = "-s --max-time 10 -w \n%{http_code} -X GET -H @- https://discord.com/api/v10/users/@me" ] &&
+  [ "$(cut -d' ' -f2- "$AD/discord-name")" = acc ] &&
   [[ $BO$(<"$AD/access.log") != *"$TOK_NEW"* ]] ||
   { echo "FAIL: bot token at a terminal, y: .env replaced by rename, mode 600, its other lines kept, a line in access.log, the token on curl's stdin only and never printed: rc=$BRC $BO / $(cat "$AD/.env" "$AD/access.log" "$CURL_LOG" 2>&1)"; exit 1; }
 printf 'DISCORD_BOT_TOKEN=tokAccUnique\n' > "$AD/.env"
@@ -4421,6 +4430,7 @@ bt "$TOK_NEW" - add; A=$BRC$BO; bt "$TOK_NEW" - add
 : > "$CURL_REPLIES"; queue_line '200 {"id":"999","bot":true,"username":"newbot"}'
 bt "$TOK_NEW" y add --mode autoresearchclaw --start
 [ "$BRC" = 0 ] && [ "$(<"$MR/newbot/.env")" = "DISCORD_BOT_TOKEN=$TOK_NEW" ] && [ "$(<"$MR/newbot/mode")" = autoresearchclaw ] && [ "$(<"$MR/newbot/bot-id")" = 999 ] &&
+  [ "$(cut -d' ' -f2- "$MR/newbot/discord-name")" = newbot ] &&
   jq -e '[.groups[]] | length == 1 and .[0].requireMention == true' "$MR/newbot/access.json" >/dev/null && grep -q '^LAUNCHER .* -n newbot ' <<<"$BO" &&
   [ "$(tail -n 1 "$MR/newbot/access.log" | cut -d' ' -f4-)" = "added (bot 999, mode autoresearchclaw)" ] && [ "${BO##*$'\n'}" = "claude-discord: bot: newbot added and started" ] &&
   [[ $BO != *"$TOK_NEW"* ]] || { echo "FAIL: bot add, y: setup writes the bot (token, channel, mention, mode), its id kept and logged, started; the token never printed: rc=$BRC $BO / $(ls "$MR/newbot" 2>&1)"; exit 1; }
@@ -4522,7 +4532,7 @@ posts() { sed -n 's/.* --data-binary \(.*\) https:\/\/discord.com\/api\/v10\/cha
 # Control characters in it go (h1's holds a US, the separator of the reducer's input, and an ESC): box1.
 printf '# mine\r\nlocal name=람다 HTTPS_PROXY=http://127.0.0.1:8118\r\nh3\r\nh1 name=bo\037x\0331\r\nh2\r\n' > "$MR/mgr/hosts"   # saved with CRLF line endings
 # The local answer is a 1.11.0 health document (channel, its name, the last message time, the access policy); h1 answers as 1.10 did, with none of them.
-mdoc lambda 0 "r1:ok" | jq -c '.projects[0].bots[0] += {channel: "900", channel_name: "dev", last_message_at: "2026-10-13T00:00:00Z", mode: "dev-manager", access: {dm: "allowlist", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: [], name: "dev"}]}}' > "$MON/local.out"
+mdoc lambda 0 "r1:ok" | jq -c '.projects[0].bots[0] += {channel: "900", channel_name: "dev", last_message_at: "2026-10-13T00:00:00Z", mode: "dev-manager", discord_name: "R1", access: {dm: "allowlist", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: [], name: "dev"}]}}' > "$MON/local.out"
 mdoc h1 0 "r2:ok" > "$MON/h1.out"
 # h3 (before h1) answers JSON of the wrong shape inside: that host alone is blind, the hosts after it still count.
 echo '{"projects":["x"]}' > "$MON/h3.out"
@@ -4549,8 +4559,8 @@ jq -e '(.hosts.h2| .verdict == "blind" and (.detail | test("exited 3"))) and (.b
 # language and owner; and per bot the four fields health 1.11.0 adds, null for a host whose claude-discord sends none.
 jq -e '(.hosts.local | .display == "람다" and .env == ["HTTPS_PROXY"] and .hostname == "lambda" and .name == "lambda")
   and (.hosts.h1 | .display == "box1" and .env == [] and .hostname == "h1") and (.hosts.h3 | .display == "" and .env == [])
-  and (.bots["local|/home/u/ws/p|r1"] | .channel == "900" and .channel_name == "dev" and .last_message_at == "2026-10-13T00:00:00Z" and .access.groups[0] == {id: "900", mention: true, allow: [], name: "dev"} and .mode == "dev-manager")
-  and (.bots["h1|/home/u/ws/p|r2"] | has("channel") and .channel == null and .channel_name == null and .last_message_at == null and .access == null and has("mode") and .mode == null)
+  and (.bots["local|/home/u/ws/p|r1"] | .channel == "900" and .channel_name == "dev" and .last_message_at == "2026-10-13T00:00:00Z" and .access.groups[0] == {id: "900", mention: true, allow: [], name: "dev"} and .mode == "dev-manager" and .discord_name == "R1")
+  and (.bots["h1|/home/u/ws/p|r2"] | has("channel") and .channel == null and .channel_name == null and .last_message_at == null and .access == null and has("mode") and .mode == null and has("discord_name") and .discord_name == null)
   and (.monitor | .lang == "ko" and .owner_id == "111")' "$MB/state.json" >/dev/null &&
   ! command grep -qF '127.0.0.1:8118' "$MB/state.json" && ! command grep -q 'not KEY=VALUE' "$MB/monitor.log" ||
   { echo "FAIL: the state must carry each host's display name, env key names (no value) and hostname, the monitor's language and owner, and health's 1.11.0 fields and 1.11.1's mode and group names (null from an older host): $(jq -c '[.hosts, .monitor, .bots]' "$MB/state.json") $(command grep 'ledger:' "$MB/monitor.log")"; exit 1; }
