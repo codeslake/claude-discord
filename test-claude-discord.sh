@@ -3986,8 +3986,8 @@ printf '{"peers":[{"name":"peerbot","bot_id":"555","owner_id":"1","machine":"m"}
 # READ_MESSAGE_HISTORY (65536) after the roles and the channel's overwrites: 900 plain; 901 denied to @everyone and
 # given back to a role of the bot; 902 denied to @everyone; 903 its history denied to the bot itself; 904 a voice
 # channel (not listed); 905 an overwrite that is no number (not known, never a guess); 906 a forum, denied to a role
-# the bot has not, its name with an escape sequence in it.
-A_CH='[{"id":"900","type":0,"name":"dev-bots","position":1,"permission_overwrites":[]},{"id":"901","type":0,"name":"bot-health","position":2,"permission_overwrites":[{"id":"5","type":0,"allow":"0","deny":"1024"},{"id":"70","type":0,"allow":"1024","deny":"0"}]},{"id":"902","type":0,"name":"general","position":3,"permission_overwrites":[{"id":"5","type":0,"allow":"0","deny":"1024"}]},{"id":"903","type":0,"name":"hist","position":4,"permission_overwrites":[{"id":"777","type":1,"allow":"0","deny":"65536"}]},{"id":"904","type":2,"name":"voice","position":5},{"id":"905","type":0,"name":"odd","position":6,"permission_overwrites":[{"id":"5","type":0,"allow":"x","deny":"0"}]},{"id":"906","type":15,"name":"fo\u001b[2Jrum","position":0,"permission_overwrites":[{"id":"71","type":0,"allow":"0","deny":"1024"}]}]'
+# the bot has not, its name with an escape sequence and a zero-width space in it.
+A_CH='[{"id":"900","type":0,"name":"dev-bots","position":1,"permission_overwrites":[]},{"id":"901","type":0,"name":"bot-health","position":2,"permission_overwrites":[{"id":"5","type":0,"allow":"0","deny":"1024"},{"id":"70","type":0,"allow":"1024","deny":"0"}]},{"id":"902","type":0,"name":"general","position":3,"permission_overwrites":[{"id":"5","type":0,"allow":"0","deny":"1024"}]},{"id":"903","type":0,"name":"hist","position":4,"permission_overwrites":[{"id":"777","type":1,"allow":"0","deny":"65536"}]},{"id":"904","type":2,"name":"voice","position":5},{"id":"905","type":0,"name":"odd","position":6,"permission_overwrites":[{"id":"5","type":0,"allow":"x","deny":"0"}]},{"id":"906","type":15,"name":"fo\u001b[2Jrum\u200b","position":0,"permission_overwrites":[{"id":"71","type":0,"allow":"0","deny":"1024"}]}]'
 A_G='{"id":"5","name":"Tor-AIC","owner_id":"1","roles":[{"id":"5","permissions":"66560"},{"id":"70","permissions":"0"},{"id":"71","permissions":"8"}]}'
 A_M='{"user":{"id":"777"},"roles":["70"]}'
 A_MM='[{"user":{"id":"111","username":"dy","global_name":"dongyong22"},"nick":null},{"user":{"id":"333","username":"jbot","bot":true},"nick":"junyong-dev-bot"}]'
@@ -4022,6 +4022,11 @@ ac nosuch --json
 [ "$ARC" = 1 ] && grep -q "no bot 'nosuch' set up in $MR" <<<"$AE" || { echo "FAIL: a bot that is not set up is exit 1: rc=$ARC $AE"; exit 1; }
 rc=0; out=$(printf '\n' | bash "$S" setup access 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -q "bot name 'access' is reserved" <<<"$out" || { echo "FAIL: 'access' is a subcommand now, so no bot may take the name: rc=$rc $out"; exit 1; }
+# A DISCORD_CHANNEL_ID that is no id (the bot's main channel when access.json does not say) is said, before Discord is asked.
+cp "$MR/config.env" "$HOME/acc.env.was"; printf "DISCORD_CHANNEL_ID='9 9'\nDISCORD_USER_ID='111'\n" > "$MR/config.env"; : > "$CURL_LOG"
+ac acc --json; cp "$HOME/acc.env.was" "$MR/config.env"; rm -f "$HOME/acc.env.was"
+[ "$ARC" = 1 ] && [ -z "$AO" ] && grep -q "^claude-discord: access: DISCORD_CHANNEL_ID in $MR/config.env is not a channel id" <<<"$AE" && [ ! -s "$CURL_LOG" ] ||
+  { echo "FAIL: a DISCORD_CHANNEL_ID that is no id is exit 1 with a reason, not an empty answer: rc=$ARC $AO / $AE"; exit 1; }
 echo "ok: access --json: one line with the policy, the server's channels and whether the bot can read each (roles, then the channel's overwrites for @everyone, the bot's roles and the bot; not known is null, never a guess), the people (the member list when Discord gives it, the names kept here when it does not) and the peers; four calls, the token on curl's stdin only; 'access' is a reserved bot name"
 # access set, with no terminal: the changes are printed and nothing is written (exit 3), so what a set of words would do
 # can be read by anyone. A change that widens who can drive the bot is marked "!": an @mention no longer required, a
@@ -4158,8 +4163,8 @@ at 'n\n' dm1 set mode=none
 rm -f "$MR/dm1/.env"; ai=$(stat -c %i "$MR/dm1/access.json")
 at 'y\n' dm1 set mode=none
 [ "$ARC" = 1 ] && grep -q "access: the mode was not changed (claude-discord setup dm1 --mode, above)$" <<<"$AO" && ! grep -q 'access.json written' <<<"$AO" &&
-  [ "$(stat -c %i "$MR/dm1/access.json")" = "$ai" ] && [ "$(<"$MR/dm1/mode")" = dev-manager ] && [ -f "$MR/dm1/hosts" ] ||
-  { echo "FAIL: a mode alone leaves access.json alone, and a setup --mode that fails is exit 1: rc=$ARC $AO"; exit 1; }
+  [ "$(stat -c %i "$MR/dm1/access.json")" = "$ai" ] && [ "$(<"$MR/dm1/mode")" = dev-manager ] && [ -f "$MR/dm1/hosts" ] && [ ! -e "$MR/dm1/access.log" ] ||
+  { echo "FAIL: a mode alone leaves access.json alone, and a setup --mode that fails is exit 1 and logs no mode it did not set: rc=$ARC $AO / $(cat "$MR/dm1/access.log" 2>&1)"; exit 1; }
 rm -rf "$MR/dm1"
 echo "ok: access set mode=<mode> asks, then runs setup --mode with the mode on its stdin (peers and hosts kept), leaving access.json alone for a mode alone; into dev-manager the peers it adds go in once, after all the words, are shown (a new one a widening) and are written under the lock, setup adding nothing after; out of it with a ledger it says the monitor stops and asks about that by itself, and no keeps both"
 # access --host <alias>: the bot lives on a host of the manager's ledger. Over ssh as the monitor's pass goes (BatchMode,
@@ -4184,7 +4189,7 @@ at '' --host h1 --manager mgr --project '/x y/한' acc set dm=pairing mention:90
 -t -o BatchMode=yes -o ConnectTimeout=8 $A_REMOTE set dm=pairing mention:900=off" ] ||
   { echo "FAIL: access --host set at a terminal asks the host's version, then runs the change there under ssh -t and exits as it did: rc=$ARC $AO / $(<"$HOME/ssh.log")"; exit 1; }
 # A 1.13.0 host that could not do it (no such bot there) prints no version line and says why: that is passed on (exit 1).
-printf "motd\\nclaude-discord: access: no bot 'acc'\\007 set up in /x y/.claude/discord-agents (claude-discord setup <bot>)\\n\\n" > "$MON/h1.out"; echo 1 > "$MON/h1.rc"
+printf "motd: release notes of claude-discord 1.12.0 (old)\\nclaude-discord: access: no bot 'acc'\\007 set up in /x y/.claude/discord-agents (claude-discord setup <bot>)\\n\\n" > "$MON/h1.out"; echo 1 > "$MON/h1.rc"
 ac --host h1 --manager mgr --project '/x y/한' acc --json
 [ "$ARC" = 1 ] && [ -z "$AO" ] && [ "$AE" = "claude-discord: access: h1: no bot 'acc' set up in /x y/.claude/discord-agents (claude-discord setup <bot>)" ] ||
   { echo "FAIL: what a 1.13.0 host says when it cannot do it is passed on, without its control characters (exit 1): rc=$ARC $AO / $(printf '%q' "$AE")"; exit 1; }

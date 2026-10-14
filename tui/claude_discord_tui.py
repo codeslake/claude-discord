@@ -1978,7 +1978,8 @@ class MonitorTUI(App):
         return [self.wrapper, "access", "--host", txt(b.get("host")), "--manager", self.bot, "--project", txt(b.get("project")), "--", txt(b.get("bot")), *rest]
 
     def access_cli(self, b: dict, *rest: str) -> tuple[int, str, str]:
-        """A read-only access call (`--json`), 60 s at most: the CLI caps its ssh call at 20 s and its Discord calls at 12."""
+        """A read-only access call (`--json`), 60 s at most: the CLI caps its ssh call at 30 s (one retry after a failed
+        connection) and starts no Discord call past 12 s."""
         if not self.wrapper:
             return 127, "", "started without the wrapper (--claude-discord): access cannot be read from here"
         return run_capped(self.access_argv(b, *rest), 60, limit=1 << 22)

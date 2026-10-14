@@ -423,7 +423,9 @@ compact or clear.
 
 `--json` asks Discord, with the bot's own token and on the bot's own machine,
 for the server's channels, its roles, the bot's roles and the member list
-(four calls, five seconds each at most), and prints one line: `policy` (as
+(four calls; six when this machine does not know the bot's id or its server
+yet, which it then asks first; five seconds each at most, none started past 12
+seconds), and prints one line: `policy` (as
 `health --json`'s `access`), `channels` (text, announcement and forum
 channels: `id`, `name`, `kind`, `read`), `people` (`id`, `name`, `kept`: the
 name this machine keeps, or empty, and `bot`),
@@ -449,13 +451,19 @@ line's env words); `set` at a terminal runs under `ssh -t`, so the questions
 are asked on the bot's machine, of your terminal. Into the remote command go
 only hex digits (the project and the bot's name), the action and the change
 words. The remote host needs claude-discord 1.13.0: an older one is said so
-(exit 5) and is never sent a change.
+(exit 5) and is never sent a change. `--json` over ssh is given 30 s (the
+connection, then Discord's calls on the host), or `CLAUDE_DISCORD_PROBE_CAP`
+when that is more; every other call that asks no question, that cap (20 s).
+
+A bot named `access`, set up before 1.13.0, is no longer launched by
+`claude-discord access`, which is this verb now: launch it with
+`claude-discord --name access` (`setup` refuses the name for a new bot).
 
 | exit | means |
 |---|---|
 | 0 | done, or nothing to change |
-| 1 | it could not: no such bot, `access.json` unreadable or changed meanwhile, a failed write, the lock held 5 s, no manager's ledger for `--host` |
-| 2 | usage, a word that is not a change, a change that cannot be made |
+| 1 | it could not: no such bot, `access.json` unreadable or changed meanwhile, a failed write, the lock held 5 s, no manager's ledger for `--host`, a `DISCORD_CHANNEL_ID` in `config.env` that is no id, a mode `setup --mode` did not set |
+| 2 | usage, a word that is not a change, a change that cannot be made, `--host` with several managers' ledgers and no `--manager` |
 | 3 | no terminal: the changes were printed, nothing written |
 | 4 | answered no: nothing written |
 | 5 | `--host`: the host did not answer, or its claude-discord is older than 1.13.0 |
@@ -1457,7 +1465,7 @@ rest of Claude Code.
 | Every bot in the channel answers one message | someone wrote `@everyone`/`@here` with a wrapper older than 2026-09-18, or the mention policy is off on all of them |
 | `no bot '<name>' under ./.claude/discord-agents` | no setup in THIS directory; `cd` to the project you set it up in, or run setup here |
 | `bot name must be a plain directory name` | the name contained `/`, or was `.`/`..` |
-| `bot name 'hooks'` (or `'checkin'`) `is reserved` | those names are claude-discord's own directories under `.claude/discord-agents/`; pick another. A subcommand's name (`setup`, `install`, `update`, `patch`, `compat`, `refresh`, `health`, `monitor`, `tui`) is reserved too |
+| `bot name 'hooks'` (or `'checkin'`) `is reserved` | those names are claude-discord's own directories under `.claude/discord-agents/`; pick another. A subcommand's name (`setup`, `install`, `update`, `patch`, `compat`, `refresh`, `health`, `monitor`, `tui`, `access`) is reserved too |
 | Two bots answer each other forever | the mention policy is off on both; turn it back on for at least one |
 | `Over 500 characters in the channel: start a thread ...` | the bot tried to put a long answer in the channel; `thread start "[<area>] <short title>"`, then post it inside the thread |
 | `A mirror line says which way it went ...` | a line opens with `->` or `<-`; write `[sent to name] ...` or `[received from name] ...` |

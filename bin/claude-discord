@@ -2509,8 +2509,10 @@ if [ "${1:-}" = access ]; then
     a_hex() { printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'; }
     a_remote="env $([ ${#a_env[@]} = 0 ] || printf '%q ' "${a_env[@]}")~/.local/bin/claude-discord --version --access $(a_hex "$a_proj") $(a_hex "$bot") $act${*:+ $*}"
     a_old() {  # no document: an older host printed its version line; a 1.13.0 host that could not do it said why (no such bot there)
-      local l re='claude-discord ([0-9]+\.[0-9]+\.[0-9]+)'
-      if [[ $h_out =~ $re ]]; then echo "claude-discord: access: $a_host needs claude-discord 1.13.0 for this (it has ${BASH_REMATCH[1]}; claude-discord update, there)" >&2; exit 5; fi
+      # A version line is a whole line, as h_capped reads one: the same words inside other text (a banner) are none.
+      local l re='^ *claude-discord +([0-9]+\.[0-9]+\.[0-9]+)( |$)'
+      l=$(printf '%s\n' "$h_out" | grep -E "$re" | tail -n 1) || l=""
+      if [[ $l =~ $re ]]; then echo "claude-discord: access: $a_host needs claude-discord 1.13.0 for this (it has ${BASH_REMATCH[1]}; claude-discord update, there)" >&2; exit 5; fi
       l=$(printf '%s\n' "$h_out" | LC_ALL=C tr -d '\000-\010\013-\037\177' | grep . | tail -n 1) || l=""
       l=${l#claude-discord: access: }
       echo "claude-discord: access: $a_host: ${l:-no answer (exit $h_rc)}" >&2; exit 1
@@ -2522,6 +2524,9 @@ if [ "${1:-}" = access ]; then
       esac
     }
     if [ "$act" = --json ]; then
+      # The host asks Discord, starting no call past 12 s, each 5 s at most, after ssh connected (up to 8 s): 30 s for
+      # the whole call, so a slow host with a slow Discord is still an answer.
+      case $h_cap in *.*) ;; *) [ "$h_cap" -ge 30 ] || h_cap=30;; esac
       h_ssh "$a_host" "$a_remote" raw; a_down
       # The document is the last line that starts as one; what the host printed around it (a banner) is not ours.
       doc=$(printf '%s\n' "$h_out" | grep '^{"access":' | tail -n 1 | jq -c 'select(.access == 1)' 2>/dev/null) || doc=""
@@ -2558,6 +2563,9 @@ if [ "${1:-}" = access ]; then
   command -v jq >/dev/null 2>&1 || { echo "claude-discord: access needs jq" >&2; exit 1; }
   DISCORD_CHANNEL_ID="" DISCORD_USER_ID=""
   [ ! -f "$root/config.env" ] || . "$root/config.env"
+  # The bot's main channel when access.json does not say which (and a part of a URL below): an id or nothing.
+  [ -z "$DISCORD_CHANNEL_ID" ] || c_match "$DISCORD_CHANNEL_ID" '^[0-9]{1,20}$' ||
+    { echo "claude-discord: access: DISCORD_CHANNEL_ID in $root/config.env is not a channel id (digits only); correct it there" >&2; exit 1; }
   # What names this machine keeps: the channels' (health writes channel-names), the people's (on-prompt writes
   # user-names) and the peer bots' (peers.json). They are for reading: every argument and every stored value is an id.
   # member-names: the names Discord's member list gave at the last --json, for set to show next to an id it has no
@@ -2574,14 +2582,14 @@ if [ "${1:-}" = access ]; then
   # $ also matches before a last newline). `policy` is the part of access.json this verb is about, as health --json
   # gives it (dm, dm_allow, groups: id, mention, allow), with the plugin's own defaults: no dmPolicy is pairing, no
   # requireMention is true, no allowFrom is everyone. A name is shown, never trusted: no control character, no bidi
-  # override, 40 characters.
+  # override or isolate, no zero-width character or mark (the TUI's UNSAFE set), 40 characters.
   a_defs='
     def isid: type == "string" and test("\\A[0-9]{1,20}\\z");
     def ids: [arrays[] | tostring | select(isid)] | unique;
     def policy: {dm: (.dmPolicy | if type == "string" then . else "pairing" end), dm_allow: (.allowFrom | ids),
                  groups: [(.groups | if type == "object" then . else {} end) | to_entries[] | select((.key | isid) and (.value | type) == "object")
                           | {id: .key, mention: (.value.requireMention != false), allow: (.value.allowFrom | ids)}]};
-    def safe: tostring | gsub("[[:cntrl:]‪-‮⁦-⁩]"; "") | .[0:40];
+    def safe: tostring | gsub("[[:cntrl:]\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]"; "") | .[0:40];
     def named: split("\n") | map(select(test("^[0-9]+ .")) | {key: (split(" ")[0]), value: (sub("^[0-9]+ "; "") | safe)}) | from_entries;
     def peerlist: (try fromjson catch null) | [objects | .peers | arrays | .[] | objects | {id: (.bot_id // "" | tostring), name: (.name // "" | safe)} | select(.id | isid)];
     def mainof($fb): if (.groups | length) == 1 then .groups[0].id else $fb end;'
@@ -2590,8 +2598,9 @@ if [ "${1:-}" = access ]; then
     a_p=$(jq -r --arg fb "$DISCORD_CHANNEL_ID" "$a_defs"'policy | [mainof($fb), tojson] | join(" ")' "$f" 2>/dev/null) && [ -n "$a_p" ] ||
       { echo "claude-discord: access: $f is not valid JSON" >&2; exit 1; }
     main=${a_p%% *} a_p=${a_p#* }
-    # Discord is asked as health asks it (the token on curl's stdin, never in an argument), five calls at most, each
-    # 5 s at most and none started past 12 s: the answer must arrive inside the cap of the ssh call that may carry it.
+    # Discord is asked as health asks it (the token on curl's stdin, never in an argument): four calls, six when the bot's
+    # id (bot-id) or its server (channel-guild) is not known here yet, each 5 s at most and none started past 12 s, so
+    # the answer arrives inside the cap of the ssh call that may carry it (30 s: access --host).
     a_t0=$SECONDS status=000 resp=""
     a_api() {  # $1 = path; sets $status and $resp
       local out=""
@@ -2697,7 +2706,8 @@ if [ "${1:-}" = access ]; then
         (umask 077; printf '%s\n' "$a_mn" > "$d/member-names.$$") 2>/dev/null && mv -f "$d/member-names.$$" "$d/member-names" 2>/dev/null || rm -f "$d/member-names.$$"
     fi
     printf '%s\n%s\n%s\n' "$a_g" "$a_c" "$a_mm" | a_doc 2>/dev/null ||
-      { errs="$errs${errs:+$'\n'}Discord's answer could not be read"; a_reads=""; printf 'null\nnull\nnull\n' | a_doc; }
+      { errs="$errs${errs:+$'\n'}Discord's answer could not be read"; a_reads=""; printf 'null\nnull\nnull\n' | a_doc; } ||
+      { echo "claude-discord: access: the document could not be made from $f" >&2; exit 1; }
     exit 0
   fi
 
@@ -2860,17 +2870,22 @@ if [ "${1:-}" = access ]; then
       { rm -f "$f.cd.$$"; echo "claude-discord: access: could not write $f; it is as it was" >&2; exit 1; }
     exec 7>&-
   fi
-  # access.log: when, who (the account here), on which machine, and the change words (ids only).
-  (umask 077; printf '%s %s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$a_host_name" "$a_words" >> "$d/access.log") 2>/dev/null || :
+  # access.log: when, who (the account here), on which machine, and the change words (ids only) of what was done: written
+  # once it is done, so a mode setup did not set is not in it.
+  a_log() { (umask 077; printf '%s %s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$a_host_name" "$1" >> "$d/access.log") 2>/dev/null || :; }
   [ -z "$a_file" ] || echo "claude-discord: access: $f written. The plugin reads it at the next message: no restart."
   if [ "$newmode" != "$mode" ]; then
     # setup --mode, with the mode on its stdin and nothing after it: its peers and hosts questions read the end of
     # input, which keeps both lists (README, Modes).
-    printf '%s\n' "$newmode" | CLAUDE_DISCORD_ACCESS_PEERS=written "$self_path" setup "$bot" --mode ||
-      { echo "claude-discord: access: the mode was not changed (claude-discord setup $bn --mode, above)${a_file:+; the changes to access.json stay}" >&2; exit 1; }
+    if ! printf '%s\n' "$newmode" | CLAUDE_DISCORD_ACCESS_PEERS=written "$self_path" setup "$bot" --mode; then
+      a_fw=""; for w in "$@"; do case $w in mode=*) ;; *) a_fw="$a_fw $w";; esac; done
+      [ -z "$a_file" ] || a_log "$a_fw"
+      echo "claude-discord: access: the mode was not changed (claude-discord setup $bn --mode, above)${a_file:+; the changes to access.json stay}" >&2; exit 1
+    fi
     echo "claude-discord: access: the hooks follow the new mode from their next call; the dev-manager rules reach, or leave, a running session at its next start, compact or clear."
     [ "$newmode" != dev-manager ] || echo "claude-discord: access: its peers and the hosts it checks: claude-discord setup $bn --mode, and claude-discord hosts add"
   fi
+  a_log "$a_words"
   exit 0
 fi
 
