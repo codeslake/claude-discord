@@ -654,7 +654,9 @@ def host_step($r):
                  channel: ($b.channel // null), channel_name: ($b.channel_name // null), last_message_at: ($b.last_message_at // null),
                  access: ($b.access // null),
                  # 1.11.1: the bot mode (the name of each access group travels inside `access`); null from an older host.
-                 mode: ($b.mode // null)})
+                 mode: ($b.mode // null),
+                 # 1.14.0: its Discord username (the TUI says when it is not the bot name); null from an older host.
+                 discord_name: ($b.discord_name // null)})
             | if $bw != $b.verdict and ($bw != null or ($b.verdict | good | not)) then .events += ["transition \($k) \($bw // "new")->\($b.verdict)"] else . end)
         # A crashed project with no entry at all here (crashed on first sight): an entry of its own, or it would vanish.
         | reduce ($errs | keys[]) as $p (.;

@@ -1520,6 +1520,12 @@ if [ "${1:-}" = health ]; then
     { while read -r cch t; do names="$names$cch $t"$'\n'; done < "$d/channel-names"; } 2>/dev/null || :
     { read -r mode < "$d/mode"; } 2>/dev/null || :
     mode=${mode//[[:cntrl:]]/}; mode=${mode:-none}
+    # 1.14.0: the bot's Discord username (a bot's name here is that username; the TUI says `≠ Discord` when they differ),
+    # kept in discord-name as "<read at, epoch s> <name>" and read again once it is a day old, by the users/@me call that
+    # also tells the bot's id. A number with a leading zero is decimal (cat_s says why).
+    dn_s="" dname=""; { read -r dn_s dname < "$d/discord-name"; } 2>/dev/null || :
+    case $dn_s in ''|*[!0-9]*) dn_s=0;; esac
+    dn_s=${dn_s#"${dn_s%%[!0]*}"}; dn_s=${dn_s:-0}; dname=${dname//[[:cntrl:]]/}
 
     verdict=ok detail="" oldest="" age=0 me="" status=000 resp=""
     if [ "$net" = down ]; then
@@ -1532,10 +1538,15 @@ if [ "${1:-}" = health ]; then
       # AND one fewer jq per bot per run, for a fact that was already known.
       # A cached value is trusted only if it looks like an id.
       me=$(cat "$d/bot-id" 2>/dev/null) || me=""
-      if ! is_id "$me"; then
+      if ! is_id "$me" || [ $((now_s - dn_s)) -ge 86400 ]; then
         api users/@me
-        me=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null) || me=""
-        ! is_id "$me" || printf '%s\n' "$me" > "$d/bot-id" 2>/dev/null || :
+        nme="" nn=""
+        l=$(printf '%s' "$resp" | jq -r 'objects | [(.id // "" | tostring), (.username // "" | tostring | gsub("[[:cntrl:]]"; ""))] | join("\u001f")' 2>/dev/null) || l=""
+        IFS=$'\x1f' read -r nme nn <<<"$l" || :
+        if ! is_id "$me" && is_id "$nme"; then me=$nme; printf '%s\n' "$me" > "$d/bot-id" 2>/dev/null || :; fi
+        # A read that fails keeps the name it had, and is tried again in an hour, not at every run.
+        if is_id "$nme" && [ -n "$nn" ]; then dname=$nn; printf '%s %s\n' "$now_s" "$dname" > "$d/discord-name" 2>/dev/null || :
+        elif [ -n "$dname" ]; then printf '%s %s\n' "$((now_s - 82800))" "$dname" > "$d/discord-name" 2>/dev/null || :; fi
       fi
       if ! is_id "$me"; then
         # 401 and 403 mean the credential itself was refused. Anything else
@@ -1698,7 +1709,7 @@ if [ "${1:-}" = health ]; then
     lm=""
     [ "$last_seen" = 0 ] || { lm=${last_seen#"${last_seen%%[!0]*}"}; lm=$(( ((${lm:-0} >> 22) + 1420070400000) / 1000 )); }
     is_id "$ch" || ch=""
-    rows=$rows$ch$'\x1f'$cname$'\x1f'$lm$'\x1f'$access$'\x1f'$names$'\x1f'$mode$'\x1f'
+    rows=$rows$ch$'\x1f'$cname$'\x1f'$lm$'\x1f'$access$'\x1f'$names$'\x1f'$mode$'\x1f'$dname$'\x1f'
 
 
     line="claude-discord health: $bot $verdict${detail:+ -- $detail}"
@@ -1713,7 +1724,7 @@ if [ "${1:-}" = health ]; then
     [ "$as_json" = yes ] || echo "$line"
   done
   # One jq for the whole run: it reads the NUL-separated fields, groups them
-  # sixteen at a time into objects, prints them when asked, and reports through
+  # seventeen at a time into objects, prints them when asked, and reports through
   # its exit status whether anything needs a human -- so a caller can tell
   # without parsing anything. `busy` is not a
   # finding. No bots at all is an empty list, which is "nothing wrong".
@@ -1724,7 +1735,7 @@ if [ "${1:-}" = health ]; then
   # (-r prints only a string raw), so printing it needs no second jq.
   rows=$(printf '%s' "$rows" | jq -rRs --argjson show "$([ "$as_json" = yes ] && echo true || echo false)" --arg owner "${DISCORD_USER_ID:-}" '
     [ splits("\u001f") ] | .[:-1]
-    | [ range(0; length; 16) as $i
+    | [ range(0; length; 17) as $i
         # 1.11.1: the kept "<id> <name>" lines, as a name per id for the groups of `access`.
         | (.[$i+14] | split("\n") | map(select(. != "") | split(" ") | {key: .[0], value: (.[1] // "")}) | from_entries) as $n
         | { bot: .[$i], verdict: .[$i+1], detail: .[$i+2], servers: .[$i+3],
@@ -1733,7 +1744,7 @@ if [ "${1:-}" = health ]; then
             trusted: .[$i+9], owner_id: $owner,
             channel: .[$i+10], channel_name: .[$i+11],
             last_message_at: ((.[$i+12] | tonumber? // null) | if . == null then null else todate end),
-            mode: .[$i+15],
+            mode: .[$i+15], discord_name: (.[$i+16] | if . == "" then null else . end),
             access: (.[$i+13] | (try fromjson catch null) | if type == "object" then .groups |= map(. + {name: ($n[.id] // "")}) else . end) } ]
     | (if $show then . else empty end),
       (if all(.[]; .verdict == "ok" or .verdict == "busy") then "ok" else "finding" end)
@@ -3075,6 +3086,8 @@ if [ "${1:-}" = bot ]; then
       echo "claude-discord: bot: '$1' is a dev-manager with a hosts ledger in $p: one backend serves one manager name per machine; nothing was changed" >&2; exit 1
     done < <(cat "$helpers/records/projects" 2>/dev/null)
   }
+  # b_dname <bot dir> <name>: Discord's name for the bot, as health keeps it (discord-name: "<read at> <name>").
+  b_dname() { printf '%s %s\n' "$(date +%s)" "${2//[[:cntrl:]]/}" > "$1/discord-name" 2>/dev/null || :; }
   # b_log <bot dir> <what>: a line in the bot's access.log, as access set writes it (the token: the fact only).
   b_log() { (umask 077; printf '%s %s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$b_host_name" "$2" >> "$1/access.log") 2>/dev/null || :; }
 
@@ -3115,6 +3128,7 @@ if [ "${1:-}" = bot ]; then
     fi
     tok=""
     printf '%s\n' "$b_id" > "$root/$new/bot-id" 2>/dev/null || :
+    b_dname "$root/$new" "$new"
     b_log "$root/$new" "added (bot $b_id, mode $b_mode)"
     if [ -n "$b_start" ]; then
       ! untrusted || { echo "claude-discord: bot: $new is added, not started: $PWD is not a trusted workspace (run 'claude' here once and accept the trust prompt), then claude-discord --bg --name $new" >&2; exit 1; }
@@ -3150,6 +3164,7 @@ if [ "${1:-}" = bot ]; then
       { rm -f "$d/.env.cd.$$"; echo "claude-discord: bot: could not write $d/.env; it is as it was" >&2; exit 1; }
     tok=""
     c_match "$me" '^[0-9]{1,20}$' || printf '%s\n' "$b_id" > "$d/bot-id" 2>/dev/null || :
+    b_dname "$d" "$b_user"
     b_log "$d" "token: replaced (bot $b_id)"
     echo "claude-discord: bot: $d/.env written. A running session of $bn logs in with it within 10 s."
     exit 0
@@ -3218,6 +3233,7 @@ if [ "${1:-}" = bot ]; then
     b_log "$d" "rename: on Discord $b_shown -> $new"
   fi
   tok=""
+  b_dname "$d" "$new"
   [ "$new" != "$bot" ] || { echo "claude-discord: bot: Discord calls it $new now, as it is called here"; exit 0; }
   b_again=""; [ -z "$b_disc" ] || b_again=" (Discord calls it $new now: run this again to rename it here)"
   if [ -n "$live" ] && ! stop_sessions "$bn" "$live"; then
