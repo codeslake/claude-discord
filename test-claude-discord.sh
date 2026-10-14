@@ -4045,27 +4045,27 @@ A_FILE=$(<"$AD/access.json")
 ac acc set mention:900=off allow:900-222 allow:900+333 channel+902 allow:902+333 allow:902+222 mention:901=on allow:901+111 dm=pairing dm+222 dm-111
 [ "$ARC" = 3 ] && [ "$AO" = "claude-discord: access: acc on $(uname -n | cut -d. -f1), $AD/access.json
   ! #dev-bots: an @mention required -> any message
+  ! 333 (junyong-dev-bot): new to this bot: may write to it in #dev-bots, #902
+  ! DMs: allowlist -> pairing: anyone who shares a server with the bot can DM it and is sent a pairing code
+  ! DMs: + gpu villain (222) may DM it, and answers its permission prompts
     #dev-bots: - gpu villain (222) may no longer write to it there
     #bot-health: any message -> an @mention required
     #bot-health: from anyone -> from dongyong22 (111)
     #902: + listens here: an @mention required, from dongyong22 (111), gpu villain (222), 333 (junyong-dev-bot)
-  ! 333 (junyong-dev-bot): new to this bot: may write to it in #dev-bots, #902
-  ! DMs: allowlist -> pairing: anyone who shares a server with the bot can DM it and is sent a pairing code
-  ! DMs: + gpu villain (222) may DM it, and answers its permission prompts
     DMs: - dongyong22 (111) may no longer DM it
 warning: dongyong22 (111) is the owner of this bot and no longer gets its DMs or its permission prompts" ] &&
   grep -q 'not a terminal (stdin and stdout), so nothing was changed' <<<"$AE" && [ "$(<"$AD/access.json")" = "$A_FILE" ] && [ ! -e "$AD/access.log" ] ||
-  { echo "FAIL: access set with no terminal prints the changes (a widening marked !, the others not, the warnings last), writes nothing and exits 3: rc=$ARC $AO / $AE"; exit 1; }
+  { echo "FAIL: access set with no terminal prints the changes (the widenings first, marked !, then the others, the warnings last), writes nothing and exits 3: rc=$ARC $AO / $AE"; exit 1; }
 # The other widenings and warnings: a channel opened to anyone, a new channel that answers every message, the owner
 # and a peer bot taken off a dev-manager's channel, the channel the bot's prompt and hooks name left behind.
 echo dev-manager > "$AD/mode"; jq '.groups["900"].allowFrom += ["555"] | .dmPolicy = "disabled"' <<<"$ACC" > "$AD/access.json"
 ac acc set allow:901=any allow:901+111 allow:901=any channel+903 mention:903=off allow:900-111 allow:900-555 channel-901 channel-900 channel+900 allow:900+222 allow:900-111 dm=allowlist
-[ "$ARC" = 3 ] && [ "$(sed 1d <<<"$AO")" = "    #903: + listens here: any message, from dongyong22 (111)
-  ! #903: answers every message there, with no @mention
+[ "$ARC" = 3 ] && [ "$(sed 1d <<<"$AO")" = "  ! #903: answers every message there, with no @mention
+  ! DMs: disabled -> allowlist: the bot receives again, in its channels too (disabled drops every message)
+    #903: + listens here: any message, from dongyong22 (111)
     #dev-bots: - dongyong22 (111) may no longer write to it there
     #dev-bots: - peerbot (555) may no longer write to it there
     #bot-health: - stops listening here
-  ! DMs: disabled -> allowlist: the bot receives again, in its channels too (disabled drops every message)
 warning: dongyong22 (111) is the owner of this bot (DISCORD_USER_ID) and can no longer write to it in #dev-bots
 warning: peerbot (555) is a peer dev bot (peers.json) and can no longer reach this bot in #dev-bots" ] ||
   { echo "FAIL: the words are applied in order (a channel left and taken again is the same channel with the senders given; =any undone by a later +), and the owner's and a peer's removal are warned of: rc=$ARC $AO / $AE"; exit 1; }
@@ -4091,20 +4091,20 @@ done
 ac acc set channel+900 mention:900=on allow:900+111 dm=allowlist dm+111
 [ "$ARC" = 0 ] && [ "$AO" = "claude-discord: access: acc is already so; nothing to change" ] && [ "$(<"$AD/access.json")" = "$A_FILE" ] && [ ! -e "$AD/access.log" ] ||
   { echo "FAIL: words that change nothing are said so (exit 0, with or without a terminal): rc=$ARC $AO / $AE"; exit 1; }
-echo "ok: access set without a terminal prints what would change and writes nothing (exit 3): each widening marked (no @mention, anyone, pairing, back from disabled, a DM sender, a person new to the bot), the owner's, a peer's and the main channel's loss warned of, the words applied in order; a list is never emptied by a removal, a rule needs its channel, and what is no change word is refused unechoed (exit 2)"
+echo "ok: access set without a terminal prints what would change and writes nothing (exit 3): the widenings first, each marked (no @mention, anyone, pairing, back from disabled, a DM sender, a person new to the bot), the owner's, a peer's and the main channel's loss warned of, the words applied in order; a list is never emptied by a removal, a rule needs its channel, and what is no change word is refused unechoed (exit 2)"
 # access set at a terminal. at <answers> <args>: the same call with a terminal on stdin and stdout (python3's pty, which
 # types what it is fed; the suite needs python3 for thread-guard's table already), all it printed in AO. Past the
 # answers a case means come two n: a question nobody expected is answered no (exit 4) instead of hanging the suite.
 at() { ARC=0; AO=$(printf "$1"'n\nn\n' | python3 -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' bash "$S" access "${@:2}" 2>&1) || ARC=$?; AO=${AO//$'\r'/}; }
-# Each widening is asked about by itself, then the rest together, once. All yes: the file is replaced by rename (never
+# One question for the whole change set (1.13.1), naming how many changes and how many of them widen. Yes: the file is replaced by rename (never
 # written in place: the plugin reads it at every message), mode 600 whatever it was, and holds the new policy with
 # every other key as it was and in its place (the plugin's pending pairing, a key nobody here knows); access.log gets
 # the time, the account, the machine and the words.
 chmod 644 "$AD/access.json"; ai=$(stat -c %i "$AD/access.json")
-at 'y\ny\ny\n' acc set mention:900=off allow:900-222 channel+902 dm=pairing
-[ "$ARC" = 0 ] && [ "$(grep -o 'Allow? \[y/N\]' <<<"$AO" | wc -l)" = 2 ] && grep -q 'Apply the other 2 changes too? \[y/N\]' <<<"$AO" &&
+at 'y\n' acc set mention:900=off allow:900-222 channel+902 dm=pairing
+[ "$ARC" = 0 ] && [ "$(grep -o '\[y/N\]' <<<"$AO" | wc -l)" = 1 ] && grep -q '^Apply 4 changes, 2 of them widening? \[y/N\]' <<<"$AO" &&
   grep -q "access.json written. The plugin reads it at the next message: no restart.$" <<<"$AO" && grep -qF $'\033[1;31m  ! #dev-bots: an @mention required -> any message\033[0m' <<<"$AO" ||
-  { echo "FAIL: at a terminal each widening (red) has its own question and the other changes one together: rc=$ARC $(printf '%q' "$AO")"; exit 1; }
+  { echo "FAIL: at a terminal one question names the changes and the widenings (shown red) among them: rc=$ARC $(printf '%q' "$AO")"; exit 1; }
 [ "$(jq -c . "$AD/access.json")" = '{"dmPolicy":"pairing","allowFrom":["111"],"ackReaction":"👀","groups":{"900":{"requireMention":false,"allowFrom":["111"]},"901":{"requireMention":false,"allowFrom":[]},"902":{"requireMention":true,"allowFrom":["111"]}},"pending":{"abc123":{"senderId":"999","chatId":"5","createdAt":1,"expiresAt":99999999999999}},"custom":{"keep":[1,2]}}' ] &&
   [ "$(stat -c %a "$AD/access.json")" = 600 ] && [ "$(stat -c %i "$AD/access.json")" != "$ai" ] && [ "$(ls "$AD" | grep -c '^access')" = 3 ] ||
   { echo "FAIL: the new access.json holds the changes and every other key as it was, is mode 600 and was moved in (access.json, its .lock and access.log are all there is): $(jq -c . "$AD/access.json") $(ls -l "$AD")"; exit 1; }
@@ -4114,22 +4114,22 @@ at 'y\ny\ny\n' acc set mention:900=off allow:900-222 channel+902 dm=pairing
 A=$(<"$AD/access.json"); ARC=0; AO=$(python3 -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' bash -c 'exec bash "$0" access acc set mention:901=on </dev/null' "$S" 2>&1) || ARC=$?
 [ "$ARC" = 3 ] && grep -q 'not a terminal (stdin and stdout), so nothing was changed' <<<"$AO" && [ "$(<"$AD/access.json")" = "$A" ] ||
   { echo "FAIL: stdin that is no terminal is refused even with stdout one (exit 3): rc=$ARC $AO"; exit 1; }
-# One no, anywhere, writes nothing (exit 4): the file is what was shown and agreed to, or as it was. Here both
-# widenings are agreed to and the last question, for the rest, is not.
+# Anything but y writes nothing (exit 4): the file is what was shown and agreed to, or as it was. Here the answer is
+# "yes", which is not y.
 printf '%s\n' "$A_FILE" > "$AD/access.json"; A_LOG=$(<"$AD/access.log")
-at 'y\ny\nn\n' acc set mention:900=off allow:900-222 channel+902 dm=pairing
-[ "$ARC" = 4 ] && grep -q 'answered no; nothing was changed' <<<"$AO" && [ "$(<"$AD/access.json")" = "$A_FILE" ] && [ "$(<"$AD/access.log")" = "$A_LOG" ] ||
-  { echo "FAIL: one no, after two yes, writes nothing and exits 4: rc=$ARC $AO"; exit 1; }
+at 'yes\n' acc set mention:900=off allow:900-222 channel+902 dm=pairing
+[ "$ARC" = 4 ] && grep -q 'answered no; nothing was changed' <<<"$AO" && [ "$(grep -o '\[y/N\]' <<<"$AO" | wc -l)" = 1 ] && [ "$(<"$AD/access.json")" = "$A_FILE" ] && [ "$(<"$AD/access.log")" = "$A_LOG" ] ||
+  { echo "FAIL: an answer that is not y writes nothing and exits 4, asking nothing more: rc=$ARC $AO"; exit 1; }
 # Another writer: while one holds the lock a second waits for it, then makes its document from the file as it is THEN,
 # and writes nothing when the policy in it is no longer the one its questions were about.
 perl -e 'open(L, ">>", "$ARGV[0].lock") or die; flock(L, 2) or die; open(R, ">", "$ARGV[0].held"); print R 1; close R; select(undef, undef, undef, 0.1);
   open(F, ">", "$ARGV[0].other") or die; print F $ARGV[1]; close F; rename "$ARGV[0].other", $ARGV[0]' "$AD/access.json" "$(jq '.groups["901"].allowFrom = ["111"]' <<<"$ACC")" &
 wait_for_file "$AD/access.json.held"; rm -f "$AD/access.json.held"
 at 'y\n' acc set channel-901; wait
-[ "$ARC" = 1 ] && grep -q 'changed while you were answering (or is no longer valid JSON); nothing was changed, run it again' <<<"$AO" && [ "$(jq -c '.groups["901"]' "$AD/access.json")" = '{"requireMention":false,"allowFrom":["111"]}' ] ||
+[ "$ARC" = 1 ] && grep -q '^Apply this change? \[y/N\]' <<<"$AO" && grep -q 'changed while you were answering (or is no longer valid JSON); nothing was changed, run it again' <<<"$AO" && [ "$(jq -c '.groups["901"]' "$AD/access.json")" = '{"requireMention":false,"allowFrom":["111"]}' ] ||
   { echo "FAIL: a write waits for the lock and is given up when the policy changed meanwhile: rc=$ARC $AO / $(jq -c .groups "$AD/access.json")"; exit 1; }
 printf '%s\n' "$A_FILE" > "$AD/access.json"
-echo "ok: access set at a terminal asks about each widening by itself and the rest once; all yes writes access.json by rename, mode 600, every other key kept, and one access.log line; one no writes nothing (exit 4); a second writer waits for the lock and gives up when the policy changed under its questions"
+echo "ok: access set at a terminal asks once for the whole change set, naming the widenings among them; yes writes access.json by rename, mode 600, every other key kept, and one access.log line; anything but y writes nothing (exit 4); a second writer waits for the lock and gives up when the policy changed under its questions"
 # The mode goes through `setup <bot> --mode` (the mode on its stdin; its peers and hosts questions read the end of
 # input, which keeps both lists), after this verb's own question. A mode alone changes no access.json; the mode the
 # bot has is no change, and a word that is no mode is no change word.
@@ -4139,8 +4139,8 @@ ac acc set mode=none; A=$ARC$AO; ac acc set mode=secretpw
 # words, wherever mode= stands; the changes shown say so (555 is new to this bot: a widening, here on the channel
 # added in the same call too; 777 is this bot itself, skipped by name as setup skips it).
 ac acc set mode=dev-manager channel+902; A=$ARC$AO; ac acc set channel+902 mode=dev-manager
-[ "$ARC$AO" = "$A" ] && [ "$ARC" = 3 ] && [ "$(sed 1d <<<"$AO")" = "    #902: + listens here: an @mention required, from dongyong22 (111), peerbot (555)
-  ! peerbot (555): new to this bot: may write to it in #dev-bots, #902
+[ "$ARC$AO" = "$A" ] && [ "$ARC" = 3 ] && [ "$(sed 1d <<<"$AO")" = "  ! peerbot (555): new to this bot: may write to it in #dev-bots, #902
+    #902: + listens here: an @mention required, from dongyong22 (111), peerbot (555)
     mode: none -> dev-manager: it gets a hosts ledger (this machine) and its monitor starts, which posts in #bot-health-check" ] || { echo "FAIL: mode=dev-manager shows the peers it adds, to a channel added in the same call too, whatever the order of the words: $A / rc=$ARC $AO / $AE"; exit 1; }
 # A peer the bot already lists is known: put on one more channel it is no widening. Taken off in the same call that
 # enters dev-manager, it is put back (so no removal is shown) and that is said.
@@ -4155,21 +4155,21 @@ echo dev-manager > "$AD/mode"; ac acc set allow:900-555 mode=none; echo none > "
   { echo "FAIL: a peer taken off by a call that also leaves dev-manager is no warning: rc=$ARC $AO / $AE"; exit 1; }
 # At a terminal, all yes: setup --mode sets the mode, and access.json holds exactly what was shown, written once, under
 # the lock: setup does not merge the peers again (a peer whose id is no id, which access never adds, would show it).
-at 'y\ny\n' acc set mode=dev-manager
-[ "$ARC" = 0 ] && [ "$(<"$AD/mode")" = dev-manager ] && [ "$(grep -o 'Allow? \[y/N\]' <<<"$AO" | wc -l)" = 1 ] && grep -q 'Apply the other change too? \[y/N\]' <<<"$AO" &&
+at 'y\n' acc set mode=dev-manager
+[ "$ARC" = 0 ] && [ "$(<"$AD/mode")" = dev-manager ] && [ "$(grep -o '\[y/N\]' <<<"$AO" | wc -l)" = 1 ] && grep -q '^Apply 2 changes, 1 of them widening? \[y/N\]' <<<"$AO" &&
   grep -q "claude-discord: $AD/mode set to dev-manager$" <<<"$AO" && grep -q 'access.json written' <<<"$AO" &&
   grep -q 'the hooks follow the new mode from their next call; the dev-manager rules reach, or leave, a running session at its next start, compact or clear' <<<"$AO" &&
   [ "$(jq -c .groups "$AD/access.json")" = '{"900":{"requireMention":true,"allowFrom":["111","222","555"]},"901":{"requireMention":false,"allowFrom":[]}}' ] &&
   [ "$(tail -n 1 "$AD/access.log" | cut -d' ' -f4-)" = "mode=dev-manager" ] ||
   { echo "FAIL: mode=dev-manager at a terminal is asked about, set through setup --mode, logged, and access.json holds the peers shown and nothing setup added after: rc=$ARC $AO / $(cat "$AD/mode" "$AD/access.log") / $(jq -c .groups "$AD/access.json")"; exit 1; }
 rm -f "$AD/hosts"; echo none > "$AD/mode"; printf '%s\n' "$A_FILE" > "$AD/access.json"
-# Out of dev-manager with a ledger: setup deletes the ledger, which stops the monitor and its keeper. That has its own
-# question; no keeps the ledger and the mode.
+# Out of dev-manager with a ledger: setup deletes the ledger, which stops the monitor and its keeper. That is a
+# widening; no keeps the ledger and the mode.
 mkdir -p "$MR/dm1"; cp "$AD/access.json" "$AD/.env" "$MR/dm1/"; echo dev-manager > "$MR/dm1/mode"; printf 'local\nh9\n' > "$MR/dm1/hosts"
 at 'n\n' dm1 set mode=none
 [ "$ARC" = 4 ] && grep -qF "  ! mode: dev-manager -> none: its hosts ledger ($MR/dm1/hosts) is deleted and its monitor and keeper stop within a minute. Nobody is told in #bot-health-check when a bot of its hosts goes down" <<<"$AO" &&
-  grep -q 'when a bot of its hosts goes down\..* Allow? \[y/N\]' <<<"$AO" && [ "$(<"$MR/dm1/hosts")" = "$(printf 'local\nh9')" ] && [ "$(<"$MR/dm1/mode")" = dev-manager ] ||
-  { echo "FAIL: leaving dev-manager says what stops and asks about it by itself; no keeps the ledger: rc=$ARC $AO"; exit 1; }
+  grep -q '^Apply this widening change? \[y/N\]' <<<"$AO" && [ "$(<"$MR/dm1/hosts")" = "$(printf 'local\nh9')" ] && [ "$(<"$MR/dm1/mode")" = dev-manager ] ||
+  { echo "FAIL: leaving dev-manager says what stops, as a widening; no keeps the ledger: rc=$ARC $AO"; exit 1; }
 # A mode alone changes no access.json: yes here runs setup --mode, which fails (this bot has no token: not set up).
 rm -f "$MR/dm1/.env"; ai=$(stat -c %i "$MR/dm1/access.json")
 at 'y\n' dm1 set mode=none
@@ -4177,7 +4177,7 @@ at 'y\n' dm1 set mode=none
   [ "$(stat -c %i "$MR/dm1/access.json")" = "$ai" ] && [ "$(<"$MR/dm1/mode")" = dev-manager ] && [ -f "$MR/dm1/hosts" ] && [ ! -e "$MR/dm1/access.log" ] ||
   { echo "FAIL: a mode alone leaves access.json alone, and a setup --mode that fails is exit 1 and logs no mode it did not set: rc=$ARC $AO / $(cat "$MR/dm1/access.log" 2>&1)"; exit 1; }
 rm -rf "$MR/dm1"
-echo "ok: access set mode=<mode> asks, then runs setup --mode with the mode on its stdin (peers and hosts kept), leaving access.json alone for a mode alone; into dev-manager the peers it adds go in once, after all the words, are shown (a new one a widening) and are written under the lock, setup adding nothing after; out of it with a ledger it says the monitor stops and asks about that by itself, and no keeps both"
+echo "ok: access set mode=<mode> asks, then runs setup --mode with the mode on its stdin (peers and hosts kept), leaving access.json alone for a mode alone; into dev-manager the peers it adds go in once, after all the words, are shown (a new one a widening) and are written under the lock, setup adding nothing after; out of it with a ledger it says the monitor stops, a widening, and no keeps both"
 # access --host <alias>: the bot lives on a host of the manager's ledger. Over ssh as the monitor's pass goes (BatchMode,
 # ConnectTimeout, the alias after --, the line's env words, a proxy word in both spellings; name= is no env word), and
 # into the remote command go only hex digits (the project, the bot's name), the action and the change words, behind

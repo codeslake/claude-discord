@@ -76,9 +76,9 @@
 #                                        mention rule and the senders, the DM policy, its mode; with the
 #                                        server's channels and whether the bot can read each (read-only)
 #   claude-discord access [...] <name> set <change>...
-#                                        shows the changes, asks at the terminal (each widening by itself)
+#                                        shows the changes (widenings first), asks once at the terminal
 #                                        and writes access.json; refuses without a terminal. --host: a bot
-#                                        on a host of a manager's ledger, over ssh (-t for the questions)
+#                                        on a host of a manager's ledger, over ssh (-t for the question)
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
@@ -2434,9 +2434,10 @@ fi
 #     allow:<channel id>+<user id>  allow:<channel id>-<user id>  allow:<channel id>=any    who may write there
 #     dm=allowlist|pairing|off  dm+<user id>  dm-<user id>          DMs: off is an allowlist with nobody on it
 #     mode=none|dev-manager|autoresearchclaw              through `setup <bot> --mode`, its questions answered by Enter
-# A change that widens who can drive the bot (marked "!", red at a terminal) is asked about by itself; the others are
-# confirmed together, once. Any "no" writes nothing: the file is what was shown and agreed to, or as it was.
-# It refuses to write unless stdin and stdout are a terminal, and has no flag to skip the questions. That is a speed
+# A change that widens who can drive the bot is shown first, marked "!" (red at a terminal), then the others; one
+# question is asked for all of them, naming how many widen (1.13.1). Anything but y writes nothing: the file is what
+# was shown and agreed to, or as it was.
+# It refuses to write unless stdin and stdout are a terminal, and has no flag to skip the question. That is a speed
 # bump, not a boundary: whoever can run this can also edit the file. Without a terminal it prints the changes and exits 3.
 # --project <dir>: the bot's project (default: the one above the cwd that has the bot).
 # --host <alias>: the bot lives on a host of a manager's ledger (--manager <bot> when the project has several): `local`
@@ -2539,7 +2540,7 @@ if [ "${1:-}" = access ]; then
     [ -n "$a_v" ] || { echo "claude-discord: access: $a_host answered, but not as claude-discord (exit $h_rc)" >&2; exit 5; }
     ver_ge "$a_v" 1.13.0 || a_old
     if [ -t 0 ] && [ -t 1 ]; then
-      # The questions are asked on that host, of this terminal. No cap: a person is answering.
+      # The question is asked on that host, of this terminal. No cap: a person is answering.
       a_rc=0; ssh -t -o BatchMode=yes -o ConnectTimeout=8 -- "$a_host" "$a_remote" || a_rc=$?
       [ "$a_rc" != 255 ] || { echo "claude-discord: access: ssh to $a_host failed (exit 255)" >&2; exit 5; }
       exit "$a_rc"
@@ -2716,7 +2717,7 @@ if [ "${1:-}" = access ]; then
   # it: a pending pairing), and fails when the policy in it is no longer the one the diff was made from ($seen).
   # The words are applied in order to the whole document, so every key this verb does not know stays as it is.
   # A diff line is <kind> US <where> US <text>; the kinds: P the policy the diff was made from, as JSON; W a change that
-  # widens who can drive the bot (asked about by itself); C any other change; N a warning; E a change that cannot be
+  # widens who can drive the bot (shown first, red); C any other change; N a warning; E a change that cannot be
   # made (exit 2). Widening is: an @mention no longer required; a channel opened to anyone; DMs to pairing, or back
   # from disabled; a person added to the DM allowlist (they then answer the bot's permission prompts too); a person
   # this bot listed nowhere until now.
@@ -2821,39 +2822,39 @@ if [ "${1:-}" = access ]; then
   a_diff=$(a_jq diff 2>/dev/null) && [ -n "$a_diff" ] || { echo "claude-discord: access: $f is not valid JSON; nothing was changed" >&2; exit 1; }
   red="" yel="" off=""
   [ ! -t 1 ] || { red=$'\033[1;31m' yel=$'\033[33m' off=$'\033[0m'; }
-  a_seen="" a_w=() a_n=0 a_warn=""
-  shown="claude-discord: access: $bn on $a_host_name, $f"
+  # The widenings are shown first, then the other changes, then the warnings; one question is asked for all of them.
+  a_seen="" a_nw=0 a_n=0 a_warn="" a_sw="" a_sc=""
   while IFS=$'\x1f' read -r k where text; do
     case $k in
       P) a_seen=$text;;
       E) echo "claude-discord: access: $text" >&2; exit 2;;
-      W) a_w+=("$where: $text"); shown="$shown"$'\n'"$red  ! $where: $text$off";;
-      C) a_n=$((a_n + 1)); shown="$shown"$'\n'"    $where: $text";;
+      W) a_nw=$((a_nw + 1)); a_sw="$a_sw"$'\n'"$red  ! $where: $text$off";;
+      C) a_n=$((a_n + 1)); a_sc="$a_sc"$'\n'"    $where: $text";;
       N) a_warn="$a_warn"$'\n'"${yel}warning: $text$off";;
     esac
   done <<<"$a_diff"
   # The mode is not in access.json: its line is made here. Out of dev-manager with a hosts ledger, `setup --mode` deletes
-  # the ledger, which stops the manager's monitor: asked about by itself, like a widening.
+  # the ledger, which stops the manager's monitor: a widening.
   newmode=$mode
   for w in "$@"; do case $w in mode=*) newmode=${w#mode=};; esac; done
   a_mgr=""; [ "$newmode" != dev-manager ] || [ -f "$d/hosts" ] || a_mgr=": it gets a hosts ledger (this machine) and its monitor starts, which posts in #bot-health-check"
   if [ "$newmode" != "$mode" ] && [ "$mode" = dev-manager ] && [ -f "$d/hosts" ]; then
     a_mq="mode: dev-manager -> $newmode: its hosts ledger ($d/hosts) is deleted and its monitor and keeper stop within a minute. Nobody is told in #bot-health-check when a bot of its hosts goes down"
-    a_w+=("$a_mq"); shown="$shown"$'\n'"$red  ! $a_mq$off"
+    a_nw=$((a_nw + 1)); a_sw="$a_sw"$'\n'"$red  ! $a_mq$off"
   elif [ "$newmode" != "$mode" ]; then
-    a_n=$((a_n + 1)); shown="$shown"$'\n'"    mode: $mode -> $newmode$a_mgr"
+    a_n=$((a_n + 1)); a_sc="$a_sc"$'\n'"    mode: $mode -> $newmode$a_mgr"
   fi
-  if [ ${#a_w[@]} = 0 ] && [ "$a_n" = 0 ]; then echo "claude-discord: access: $bn is already so; nothing to change"; exit 0; fi
-  printf '%s%s\n' "$shown" "$a_warn"
+  if [ "$a_nw" = 0 ] && [ "$a_n" = 0 ]; then echo "claude-discord: access: $bn is already so; nothing to change"; exit 0; fi
+  printf '%s%s%s%s\n' "claude-discord: access: $bn on $a_host_name, $f" "$a_sw" "$a_sc" "$a_warn"
   [ -t 0 ] && [ -t 1 ] || { echo "claude-discord: access: not a terminal (stdin and stdout), so nothing was changed: run it in a terminal to answer for these changes" >&2; exit 3; }
   a_no() { echo "claude-discord: access: answered no; nothing was changed" >&2; exit 4; }
-  a_yes() { local a=""; read -r -p "$1 [y/N] " a || a=""; case $a in y|Y) return 0;; esac; return 1; }
-  for q in ${a_w[@]+"${a_w[@]}"}; do a_yes "$red$q.$off Allow?" || a_no; done
-  if [ "$a_n" != 0 ]; then
-    if [ ${#a_w[@]} = 0 ]; then q="Apply $([ "$a_n" = 1 ] && echo "this change" || echo "these $a_n changes")?"
-    else q="Apply the other $([ "$a_n" = 1 ] && echo change || echo "$a_n changes") too?"; fi
-    a_yes "$q" || a_no
-  fi
+  # One question for the whole change set (1.13.1): y writes all of it; n, the end of input or anything else, none.
+  a_t=$((a_nw + a_n))
+  if [ "$a_nw" = 0 ]; then q="Apply $([ "$a_t" = 1 ] && echo "this change" || echo "these $a_t changes")?"
+  elif [ "$a_nw" = "$a_t" ]; then q="Apply $([ "$a_t" = 1 ] && echo "this widening change" || echo "these $a_t widening changes")?"
+  else q="Apply $a_t changes, $a_nw of them widening?"; fi
+  a=""; read -r -p "$q [y/N] " a || a=""
+  case $a in y|Y) ;; *) a_no;; esac
   a_file=""; case $'\n'$a_diff in *$'\n'[WC]$'\x1f'*) a_file=1;; esac   # a change of access.json itself, not of the mode alone
   if [ -n "$a_file" ]; then
     # One writer of ours at a time (flock through perl on <file>.lock, as the ledger's: fd 7, never stale), and the
