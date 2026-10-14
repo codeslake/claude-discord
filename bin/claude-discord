@@ -2414,7 +2414,9 @@ fi
 # host, or its claude-discord is older than 1.13.0.
 if [ "${1:-}" = access ]; then
   shift
-  a_usage="usage: claude-discord access [--project <dir>] <bot> --json"
+  a_usage="usage: claude-discord access [--project <dir>] <bot> --json | set <change>...
+  a change: channel+<channel id> | channel-<channel id> | mention:<channel id>=on|off | allow:<channel id>+<user id> | allow:<channel id>-<user id> | allow:<channel id>=any | dm=allowlist|pairing|off | dm+<user id> | dm-<user id>"
+  a_word_re='^(channel[+-][0-9]{1,20}|mention:[0-9]{1,20}=(on|off)|allow:[0-9]{1,20}([+-][0-9]{1,20}|=any)|dm=(allowlist|pairing|off)|dm[+-][0-9]{1,20})$'
   a_proj=""
   while [ $# -gt 0 ]; do
     case $1 in
@@ -2431,6 +2433,10 @@ if [ "${1:-}" = access ]; then
   case $bot in ''|.|..|*/*) echo "claude-discord: access: the bot's name must be a plain directory name" >&2; exit 2;; esac
   case $act in
     --json) [ $# = 0 ] || { echo "$a_usage" >&2; exit 2; };;
+    set)
+      [ $# -gt 0 ] || { echo "$a_usage" >&2; exit 2; }
+      # Never echoed: a refused word is text from somewhere else (a paste, a state file), only where it stands is said.
+      i=0; for w in "$@"; do i=$((i + 1)); c_match "$w" "$a_word_re" || { echo "claude-discord: access: change $i is not one of the changes access takes (claude-discord access, with no argument, lists them)" >&2; exit 2; }; done;;
     *) echo "$a_usage" >&2; exit 2;;
   esac
 
@@ -2579,6 +2585,145 @@ if [ "${1:-}" = access ]; then
       { errs="$errs${errs:+$'\n'}Discord's answer could not be read"; a_reads=""; printf 'null\nnull\nnull\n' | a_doc; }
     exit 0
   fi
+
+  # set. One jq program does both halves: with $out = "diff" it prints what the words would change, one line a change;
+  # with $out = "doc" it prints the new access.json, made from the file as it is THEN (the plugin adds its own keys to
+  # it: a pending pairing), and fails when the policy in it is no longer the one the diff was made from ($seen).
+  # The words are applied in order to the whole document, so every key this verb does not know stays as it is.
+  # A diff line is <kind> US <where> US <text>; the kinds: P the policy the diff was made from, as JSON; W a change that
+  # widens who can drive the bot (asked about by itself); C any other change; N a warning; E a change that cannot be
+  # made (exit 2). Widening is: an @mention no longer required; a channel opened to anyone; DMs to pairing, or back
+  # from disabled; a person added to the DM allowlist (they then answer the bot's permission prompts too); a person
+  # this bot listed nowhere until now.
+  a_prog="$a_defs"'
+    def has_grp($c): (.d.groups | type) == "object" and (.d.groups | has($c)) and (.d.groups[$c] | type) == "object";
+    def without($u): [arrays[] | select(tostring != $u)];
+    def with($u): [arrays[]] | if any(.[]; tostring == $u) then . else . + [$u] end;
+    def step($x):
+      if .err then .
+      elif ($x | startswith("channel+")) then $x[8:] as $c
+        | if has_grp($c) then . elif $owner == "" then .err = "channel+\($c): no owner id is known (DISCORD_USER_ID in config.env), so who may write there cannot be set"
+          else .d.groups = ((.d.groups | if type == "object" then . else {} end) + {($c): {requireMention: true, allowFrom: [$owner]}}) end
+      elif ($x | startswith("channel-")) then $x[8:] as $c | (if has_grp($c) then del(.d.groups[$c]) else . end) | .any -= [$c]
+      elif ($x | startswith("mention:")) then ($x[8:] | split("=")) as [$c, $v]
+        | if has_grp($c) then .d.groups[$c].requireMention = ($v == "on") else .err = "mention:\($c): the bot does not listen in that channel (channel+\($c) first)" end
+      elif ($x | startswith("allow:")) then ($x[6:] | capture("^(?<c>[0-9]+)(?<o>[-+=])(?<u>.*)$")) as $m | $m.c as $c
+        | if has_grp($c) | not then .err = "allow:\($c): the bot does not listen in that channel (channel+\($c) first)"
+          elif $m.o == "=" then .d.groups[$c].allowFrom = [] | .any += [$c]
+          elif $m.o == "+" then .d.groups[$c].allowFrom |= with($m.u) | .any -= [$c]
+          else .d.groups[$c].allowFrom |= without($m.u) end
+      elif $x == "dm=off" then .d.dmPolicy = "allowlist" | .d.allowFrom = []
+      elif ($x | startswith("dm=")) then .d.dmPolicy = $x[3:]
+      elif ($x | startswith("dm+")) then .d.allowFrom |= with($x[3:])
+      elif ($x | startswith("dm-")) then .d.allowFrom |= without($x[3:])
+      else . end;
+    def dmw: if .dm == "disabled" then "disabled" elif .dm != "allowlist" then "pairing" elif .dm_allow == [] then "off" else "allowlist" end;
+    . as $doc | policy as $P0
+    | (reduce ($words | split(" ")[] | select(. != "")) as $x ({d: $doc, any: [], err: null}; step($x))) as $r
+    | ($r.d | policy) as $P1
+    | ($P0.groups | map({key: .id, value: .}) | from_entries) as $G0 | ($P1.groups | map({key: .id, value: .}) | from_entries) as $G1
+    # The last sender taken off a list would leave it empty, and an empty list is everyone: never by a removal.
+    | ([$P1.groups[] | select(.allow == [] and ((.id as $i | $r.any | index($i)) == null) and ($G0[.id] == null or $G0[.id].allow != [])) | .id][0]) as $emptied
+    | (if $r.err then $r.err elif $emptied then "allow:\($emptied): that would leave no sender, and a channel with none listed takes everyone. Say allow:\($emptied)=any to mean that, or channel-\($emptied) to stop listening there" else null end) as $err
+    | if $out == "doc" then
+        (if $err or (($P0 | tojson) != $seen) then error("changed") else $r.d end)
+      else
+        ($cn | named) as $CN | ($un | named) as $UN | ($peers | peerlist) as $PL | ($PL | map({key: .id, value: .name}) | from_entries) as $PN
+        | def ch: "#" + ($CN[.] // .);
+          def who: . as $u | ($UN[$u] // $PN[$u] // "") | if . == "" then $u else "\(.) (\($u))" end;
+          def whos: if . == [] then "anyone" else map(who) | join(", ") end;
+          def rule: if .mention then "an @mention required" else "any message" end;
+          def line($k; $l; $t): [$k, $l, $t] | join("\u001f");
+          ([$P0.groups[].allow[]] + $P0.dm_allow | unique) as $known
+        | line("P"; ""; $P0 | tojson),
+          (if $err then line("E"; ""; $err) else
+            ($P1.groups[] | . as $n | $G0[$n.id] as $o
+             | if $o == null then
+                 line("C"; $n.id | ch; "+ listens here: \($n | rule), from \($n.allow | whos)"),
+                 (if $n.mention then empty else line("W"; $n.id | ch; "answers every message there, with no @mention") end),
+                 (if $n.allow == [] then line("W"; $n.id | ch; "anyone in the channel may write to it") else empty end)
+               else
+                 (if $o.mention and ($n.mention | not) then line("W"; $n.id | ch; "an @mention required -> any message")
+                  elif ($o.mention | not) and $n.mention then line("C"; $n.id | ch; "any message -> an @mention required") else empty end),
+                 (if $o.allow != [] and $n.allow == [] then line("W"; $n.id | ch; "from \($o.allow | whos) -> from anyone in the channel")
+                  elif $o.allow == [] and $n.allow != [] then line("C"; $n.id | ch; "from anyone -> from \($n.allow | whos)")
+                  else (($n.allow - $o.allow)[] | select(. as $u | $known | index($u)) | line("C"; $n.id | ch; "+ \(who) may write to it there")),
+                       (($o.allow - $n.allow)[] | line("C"; $n.id | ch; "- \(who) may no longer write to it there")) end)
+               end),
+            ($P0.groups[] | select($G1[.id] == null) | line("C"; .id | ch; "- stops listening here")),
+            ([$P1.groups[] | . as $n | select($G0[$n.id] == null or $G0[$n.id].allow != []) | ($n.allow - $known)[] | {u: ., c: $n.id}] | group_by(.u)[]
+             | line("W"; .[0].u | who; "new to this bot: may write to it in \(map(.c | ch) | join(", "))")),
+            (($P0 | dmw) as $a | ($P1 | dmw) as $b
+             | if $a == $b then empty
+               elif $a == "disabled" then line("W"; "DMs"; "disabled -> \($b): the bot receives again, in its channels too (disabled drops every message)")
+               elif $b == "pairing" then line("W"; "DMs"; "\($a) -> pairing: anyone who shares a server with the bot can DM it and is sent a pairing code")
+               else line("C"; "DMs"; "\($a) -> \($b)") end),
+            (($P1.dm_allow - $P0.dm_allow)[] | line("W"; "DMs"; "+ \(who) may DM it, and answers its permission prompts")),
+            (($P0.dm_allow - $P1.dm_allow)[] | line("C"; "DMs"; "- \(who) may no longer DM it")),
+            # Warnings: the owner taken off a list, the main channel moved, a dev-manager cut off from a peer.
+            (select($owner != "") | $P0.groups[] | . as $o | $G1[$o.id] | select(. != null and .allow != [] and ($o.allow | index($owner)) != null and (.allow | index($owner)) == null)
+             | line("N"; ""; "\($owner | who) is the owner of this bot (DISCORD_USER_ID) and can no longer write to it in \($o.id | ch)")),
+            (select($owner != "" and ($P0.dm_allow | index($owner)) != null and ($P1.dm_allow | index($owner)) == null)
+             | line("N"; ""; "\($owner | who) is the owner of this bot and no longer gets its DMs or its permission prompts")),
+            (($P0 | mainof($fb)) as $a | ($P1 | mainof($fb)) as $b | select($a != $b)
+             | line("N"; ""; "the main channel of the bot becomes \(if $b == "" then "none" else ($b | ch) end) (was \($a | ch)): its session prompt, its hooks and health use that one"
+                    + (if $b != "" and $G1[$b] == null then ", and it does not listen there" else "" end))),
+            (select($mode == "dev-manager") | $PL[] | . as $p | $P0.groups[] | . as $o | $G1[$o.id]
+             | select(. != null and .allow != [] and ($o.allow | index($p.id)) != null and (.allow | index($p.id)) == null)
+             | line("N"; ""; "\($p.id | who) is a peer dev bot (peers.json) and can no longer reach this bot in \($o.id | ch)"))
+          end)
+      end'
+  a_jq() {  # $1 = diff|doc, $2 = the policy the diff was made from (doc)
+    jq -r --arg out "$1" --arg seen "${2:-}" --arg words "$a_words" --arg owner "$a_owner" --arg fb "$DISCORD_CHANNEL_ID" --arg bot "$bot" \
+      --arg mode "$mode" --arg cn "$a_cn" --arg un "$a_un" --arg peers "$a_peers" "$a_prog" "$f"
+  }
+  a_owner=$DISCORD_USER_ID; c_match "$a_owner" '^[0-9]{1,20}$' || a_owner=""
+  a_words=" $*"
+  a_diff=$(a_jq diff 2>/dev/null) && [ -n "$a_diff" ] || { echo "claude-discord: access: $f is not valid JSON; nothing was changed" >&2; exit 1; }
+  red="" yel="" off=""
+  [ ! -t 1 ] || { red=$'\033[1;31m' yel=$'\033[33m' off=$'\033[0m'; }
+  a_seen="" a_w=() a_n=0 a_warn=""
+  shown="claude-discord: access: $bn on $a_host_name, $f"
+  while IFS=$'\x1f' read -r k where text; do
+    case $k in
+      P) a_seen=$text;;
+      E) echo "claude-discord: access: $text" >&2; exit 2;;
+      W) a_w+=("$where: $text"); shown="$shown"$'\n'"$red  ! $where: $text$off";;
+      C) a_n=$((a_n + 1)); shown="$shown"$'\n'"    $where: $text";;
+      N) a_warn="$a_warn"$'\n'"${yel}warning: $text$off";;
+    esac
+  done <<<"$a_diff"
+  if [ ${#a_w[@]} = 0 ] && [ "$a_n" = 0 ]; then echo "claude-discord: access: $bn is already so; nothing to change"; exit 0; fi
+  printf '%s%s\n' "$shown" "$a_warn"
+  [ -t 0 ] && [ -t 1 ] || { echo "claude-discord: access: not a terminal (stdin and stdout), so nothing was changed: run it in a terminal to answer for these changes" >&2; exit 3; }
+  a_no() { echo "claude-discord: access: answered no; nothing was changed" >&2; exit 4; }
+  a_yes() { local a=""; read -r -p "$1 [y/N] " a || a=""; case $a in y|Y) return 0;; esac; return 1; }
+  for q in ${a_w[@]+"${a_w[@]}"}; do a_yes "$red$q.$off Allow?" || a_no; done
+  if [ "$a_n" != 0 ]; then
+    if [ ${#a_w[@]} = 0 ]; then q="Apply $([ "$a_n" = 1 ] && echo "this change" || echo "these $a_n changes")?"
+    else q="Apply the other $([ "$a_n" = 1 ] && echo change || echo "$a_n changes") too?"; fi
+    a_yes "$q" || a_no
+  fi
+  a_file=""; case $'\n'$a_diff in *$'\n'[WC]$'\x1f'*) a_file=1;; esac   # a change of access.json itself, not of the mode alone
+  if [ -n "$a_file" ]; then
+    # One writer of ours at a time (flock through perl on <file>.lock, as the ledger's: fd 7, never stale), and the
+    # file replaced by rename, never written in place: the plugin reads it at every message, and one it cannot parse it
+    # moves aside and answers with its defaults (pairing, no channel). The plugin takes no lock: it rewrites the file
+    # itself when a DM asks for a pairing code or one expires, which is why the new document is made from the file as
+    # it is now, a moment before the rename.
+    exec 7>>"$f.lock"
+    perl -e 'open(my $l, ">&=", 7) or exit 1; for (1 .. 50) { exit 0 if flock($l, 6); select(undef, undef, undef, 0.1) } exit 1' ||
+      { echo "claude-discord: access: $f is being changed by another claude-discord access; nothing was changed" >&2; exit 1; }
+    a_new=$(a_jq doc "$a_seen" 2>/dev/null) && [ -n "$a_new" ] ||
+      { echo "claude-discord: access: $f changed while you were answering (or is no longer valid JSON); nothing was changed, run it again" >&2; exit 1; }
+    (umask 077; printf '%s\n' "$a_new" > "$f.cd.$$") && mv -f "$f.cd.$$" "$f" ||
+      { rm -f "$f.cd.$$"; echo "claude-discord: access: could not write $f; it is as it was" >&2; exit 1; }
+    exec 7>&-
+  fi
+  # access.log: when, who (the account here), on which machine, and the change words (ids only).
+  (umask 077; printf '%s %s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$a_host_name" "$a_words" >> "$d/access.log") 2>/dev/null || :
+  [ -z "$a_file" ] || echo "claude-discord: access: $f written. The plugin reads it at the next message: no restart."
+  exit 0
 fi
 
 # monitor: the backend health monitor of a manager bot (monitor/monitor.sh has
