@@ -41,14 +41,26 @@ plant_old() {
   fi
   printf '%s\n' "${PLANTED[$base]}" > "$f"
 }
-# The test's own waits (~140 short naps). /bin/sleep, past the sleep stub. Not `read -t` on a pipe the shell holds open: when
-# the process is descheduled between bash's alarm check and read(2), the alarm fires first and the read never returns
-# (bash 5.1; measured 2026-10-11, 0.01 s naps on one contended CPU hung 3 of 3 loops, /bin/sleep 0 of 3).
-nap() { /bin/sleep "$1"; }
+# The test's own waits (~600 short naps). A /bin/sleep for each is a fork and an exec on top of the nap (~1 ms, ~0.6 s a
+# run), so this shell asks one helper instead: a perl started once, as a coprocess, that sleeps what a line on its stdin
+# says and answers with a line. The read that waits for the answer has no timeout. Not `read -t` on a pipe the shell
+# holds open: when the process is descheduled between bash's alarm check and read(2), the alarm fires first and the read
+# never returns (bash 5.1; measured 2026-10-11, 0.01 s naps on one contended CPU hung 3 of 3 loops, /bin/sleep 0 of 3).
+# Anywhere but in this shell (bash keeps a coprocess's descriptors out of a subshell, and they are close-on-exec), or with
+# the helper gone, a nap is /bin/sleep, past the sleep stub. The helper is started here, before HOME is the sandbox (it
+# is none of the sandbox's processes), and disowned (a bare `wait` must not wait for it); it ends with its stdin, which
+# is this shell's exit, and looks once a second whether this shell is still its parent.
+coproc NAPPER { exec perl -e '$| = 1; my $pp = getppid(); my $rin = ""; vec($rin, 0, 1) = 1;
+  while (1) { if (select(my $r = $rin, undef, undef, 1)) { defined(my $l = <STDIN>) or exit 0; select(undef, undef, undef, $l + 0); print "\n" } elsif (getppid() != $pp) { exit 0 } }' 2>/dev/null; }
+NAP_PID=$NAPPER_PID NAP_SH=$BASHPID; disown "$NAP_PID"
+nap() {
+  if [ "$BASHPID" = "$NAP_SH" ] && kill -0 "$NAP_PID" 2>/dev/null && printf '%s\n' "$1" >&"${NAPPER[1]}" && IFS= read -r _ <&"${NAPPER[0]}"; then return 0; fi
+  /bin/sleep "$1"
+}
 echo() { case ${1-} in ok:*) LAST_OK=$1;; esac; builtin echo "$@"; }   # the last ok: line, which the TERM trap names
-wait_for_file() {  # $1 = path; up to 2s in 0.01s steps, for an async write to land
+wait_for_file() {  # $1 = path; up to 2s in 0.002s steps, for an async write to land
   local n=0
-  while [ ! -s "$1" ] && [ "$n" -lt 200 ]; do nap 0.01; n=$((n+1)); done
+  while [ ! -s "$1" ] && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n+1)); done
 }
 
 # grep -q without a process: a spawn costs ~2.7 ms here and the suite makes ~500 of them. It answers the plain cases itself, a
@@ -753,7 +765,7 @@ DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1","prompt":"<c
 [ "$(<"$DSD/turns/s1")" = "$(printf '111 222 9\n555 666 9')" ] || { echo "FAIL: a second prompt in the same turn must append, not replace: $(<"$DSD/turns/s1")"; exit 1; }
 : > "$CURL_LOG"
 DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s1"}'
-n=0; while [ "$(wc -l < "$CURL_LOG" 2>/dev/null || echo 0)" -lt 2 ] && [ "$n" -lt 200 ]; do nap 0.01; n=$((n+1)); done
+n=0; while [ "$(wc -l < "$CURL_LOG" 2>/dev/null || echo 0)" -lt 2 ] && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n+1)); done
 grep -q 'channels/111/messages/222/reactions/%E2%9C%85/@me' "$CURL_LOG" && grep -q 'channels/555/messages/666/reactions/%E2%98%91%EF%B8%8F/@me' "$CURL_LOG" &&
   [ "$(grep -c '%E2%9C%85' "$CURL_LOG")" = 1 ] || { echo "FAIL: the message before the reply must get ✅ and the one recorded after it ☑️: $(<"$CURL_LOG")"; exit 1; }
 echo "ok: prompt, reply, then a mid-turn prompt: both are recorded, the reply flag survives, no .pending is created, ✅ on the first and ☑️ on the one after the reply"
@@ -1088,7 +1100,7 @@ echo "ok: on-stop never blocks and prints nothing; a turn with no reply gets ☑
 # upgrade) still covers every message of the turn.
 printf '111 222\n111 333\n' > "$DSD/turns/s9"; : > "$DSD/turns/s9.replied"; : > "$CURL_LOG"
 DISCORD_STATE_DIR="$DSD" bash "$H/on-stop" <<<'{"session_id":"s9"}'
-n=0; while [ "$(wc -l < "$CURL_LOG")" -lt 2 ] && [ "$n" -lt 200 ]; do nap 0.01; n=$((n+1)); done
+n=0; while [ "$(wc -l < "$CURL_LOG")" -lt 2 ] && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n+1)); done
 [ "$(grep -c '%E2%9C%85' "$CURL_LOG")" = 2 ] && [ ! -e "$DSD/turns/s9.replied" ] || { echo "FAIL: an empty .replied from before 1.9.4 must give ✅ to every message: $(<"$CURL_LOG")"; exit 1; }
 echo "ok: an empty .replied from before 1.9.4 gives ✅ to every message of the turn"
 
@@ -2602,7 +2614,7 @@ printf '# handoff\n## Next\nHANDOFF_BODY\n' > "$R/alpha/handoff.md"
 echo 1550600000000000000 > "$R/alpha/last-message-id"
 # Run from elsewhere with the state dir in the environment, as a session's Bash would.
 (cd / && DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh --model x >/dev/null)
-for _ in {1..1500}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.01; done
+for _ in {1..7500}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.002; done
 grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: refresh never started a session; log: $(<"$R/alpha/refresh.log")"; exit 1; }
 [ -f "$R/alpha/refresh.log" ] && ! grep -q deprecated "$R/alpha/refresh.log" || { echo "FAIL: refresh relaunches with --name and must not print the deprecation line; log: $(<"$R/alpha/refresh.log")"; exit 1; }
 [ "$(grep -c '^STOP ' "$HOME/claude.calls")" = 2 ] || { echo "FAIL: expected the live and the blocked session stopped: $(<"$HOME/claude.calls")"; exit 1; }
@@ -2642,7 +2654,7 @@ STUB
 rm -f "$HOME/claude.calls" "$R/alpha/refresh.log"
 printf 'x\n' > "$R/alpha/handoff.md"
 env -u CLAUDE_DISCORD_LAUNCHER -u CLAUDE_CONFIG_DIR bash "$S" refresh alpha >/dev/null
-for _ in {1..1500}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.01; done
+for _ in {1..7500}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.002; done
 [ "$(grep '^STOP ' "$HOME/claude.calls" | sort | tr '\n' ' ')" = "STOP cpy22222 STOP ren11111 " ] || { echo "FAIL: refresh must stop both of alpha's renamed sessions and not the child: $(<"$HOME/claude.calls"); log: $(<"$R/alpha/refresh.log")"; exit 1; }
 grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: refresh must start after stopping them"; exit 1; }
 rm -rf "$JD"
@@ -2675,7 +2687,7 @@ STUB
 rm -f "$HOME/claude.calls"
 printf 'x\n' > "$R/alpha/handoff.md"
 env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null
-for _ in {1..2000}; do grep -q "still running after stop" "$R/alpha/refresh.log" 2>/dev/null && break; nap 0.01; done
+for _ in {1..10000}; do grep -q "still running after stop" "$R/alpha/refresh.log" 2>/dev/null && break; nap 0.002; done
 grep -q "still running after stop" "$R/alpha/refresh.log" || { echo "FAIL: a stop that did not take must be reported; log: $(<"$R/alpha/refresh.log")"; exit 1; }
 grep -q PLAIN "$HOME/claude.calls" && { echo "FAIL: a session that would not stop must not be doubled"; exit 1; }
 [ -f "$R/alpha/handoff.md" ] || { echo "FAIL: a refused refresh must leave the handoff for the next try"; exit 1; }
@@ -2694,13 +2706,13 @@ esac
 STUB
 rm -f "$HOME/claude.calls"
 env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force >/dev/null
-for _ in {1..300}; do grep -q "what is running is unknown" "$R/alpha/refresh.log" 2>/dev/null && break; nap 0.01; done
+for _ in {1..1500}; do grep -q "what is running is unknown" "$R/alpha/refresh.log" 2>/dev/null && break; nap 0.002; done
 grep -q "what is running is unknown" "$R/alpha/refresh.log" || { echo "FAIL: a failed listing must refuse; log: $(<"$R/alpha/refresh.log")"; exit 1; }
 [ ! -f "$HOME/claude.calls" ] || { echo "FAIL: a failed listing must start nothing, even with --force"; exit 1; }
 sed -i 's/^  agents) .*/  agents) echo "{}";;/' "$HOME/bin/claude"
 rm -f "$R/alpha/refresh.log"
 env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force >/dev/null
-for _ in {1..300}; do grep -q "what is running is unknown" "$R/alpha/refresh.log" 2>/dev/null && break; nap 0.01; done
+for _ in {1..1500}; do grep -q "what is running is unknown" "$R/alpha/refresh.log" 2>/dev/null && break; nap 0.002; done
 grep -q "what is running is unknown" "$R/alpha/refresh.log" || { echo "FAIL: a listing that is not an array must refuse; log: $(<"$R/alpha/refresh.log")"; exit 1; }
 [ ! -f "$HOME/claude.calls" ] || { echo "FAIL: a non-list listing must start nothing, even with --force"; exit 1; }
 echo "ok: refresh refuses, --force or not, when 'claude agents --json' fails or is not a list"
@@ -2717,7 +2729,7 @@ STUB
 rm -f "$HOME/claude.calls"
 printf 'x\n' > "$R/alpha/handoff.md"
 env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null
-for _ in {1..300}; do grep -q "no running session" "$R/alpha/refresh.log" 2>/dev/null && break; nap 0.01; done
+for _ in {1..1500}; do grep -q "no running session" "$R/alpha/refresh.log" 2>/dev/null && break; nap 0.002; done
 grep -q "no running session" "$R/alpha/refresh.log" || { echo "FAIL: should refuse when no live session is found; log: $(<"$R/alpha/refresh.log")"; exit 1; }
 [ ! -f "$HOME/claude.calls" ] || { echo "FAIL: refused refresh must start nothing"; exit 1; }
 [ -f "$R/alpha/handoff.md" ] || { echo "FAIL: a refused refresh must leave the handoff for the next try"; exit 1; }
@@ -2728,7 +2740,7 @@ echo "ok: refresh refuses when no live session of that name is found in this pro
 # first turn, so the default kickoff must stay out.
 rm -f "$HOME/claude.calls" "$R/alpha/handoff.md"
 (cd "$(dirname "$S")" && DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "./$(basename "$S")" refresh alpha --force --model y "summarize recent activity" >/dev/null)
-for _ in {1..1000}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.01; done
+for _ in {1..5000}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.002; done
 grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: --force refresh never started a session; log: $(<"$R/alpha/refresh.log")"; exit 1; }
 grep -q 'HANDOFF_BODY' "$HOME/claude.calls" && { echo "FAIL: --force must not resurrect the consumed handoff"; exit 1; }
 grep -q -- '--force' "$HOME/claude.calls" && { echo "FAIL: --force leaked into claude args"; exit 1; }
@@ -2750,13 +2762,13 @@ echo "ok: a second refresh keeps the previous run's log as refresh.prev.log"
 echo autoresearchclaw > "$R/alpha/mode"
 rm -f "$HOME/claude.calls"
 DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force --allowedTools Bash >/dev/null
-for _ in {1..1000}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.01; done
+for _ in {1..5000}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.002; done
 grep -q -- '--allowedTools Bash ' "$HOME/claude.calls" && grep -q 'Catch up on the channel and continue from your handoff. $' "$HOME/claude.calls" || { echo "FAIL: a flag's value is no prompt; the default kickoff must stay: $(<"$HOME/claude.calls")"; exit 1; }
 ! grep -qE 'Never share|AutoResearchClaw' "$HOME/claude.calls" || { echo "FAIL: an autoresearchclaw bot's launch must not carry the never-share sentence: $(<"$HOME/claude.calls")"; exit 1; }
 echo none > "$R/alpha/mode"
 rm -f "$HOME/claude.calls"
 DISCORD_STATE_DIR="$R/alpha" env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force --debug --model opus >/dev/null
-for _ in {1..1000}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.01; done
+for _ in {1..5000}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.002; done
 grep -q -- '--debug --model opus ' "$HOME/claude.calls" && grep -q 'Catch up on the channel and continue from your handoff. $' "$HOME/claude.calls" || { echo "FAIL: --debug (optional value) must not swallow --model, whose value is no prompt: $(<"$HOME/claude.calls")"; exit 1; }
 echo "ok: refresh keeps the default kickoff past a value-taking flag (--allowedTools Bash) and past an optional-value one before another flag (--debug --model opus), and an autoresearchclaw bot's launch carries no never-share sentence in its system prompt"
 # --- refresh: the workspace-trust pre-check ---------------------------------
@@ -2787,7 +2799,7 @@ echo "ok: refresh refuses in an untrusted workspace, before stopping anything, a
 # --force overrides it, like every other refusal here.
 rm -f "$HOME/claude.calls"
 env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha --force >/dev/null
-for _ in {1..1000}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.01; done
+for _ in {1..5000}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.002; done
 grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: --force must refresh an untrusted workspace anyway; log: $(<"$R/alpha/refresh.log")"; exit 1; }
 echo "ok: refresh --force starts anyway in an untrusted workspace"
 
@@ -2805,7 +2817,7 @@ printf 'not json at all\n' > "$HOME/.claude.json"
 rm -f "$HOME/claude.calls"
 printf 'x\n' > "$R/alpha/handoff.md"
 env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null 2>&1
-for _ in {1..1000}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.01; done
+for _ in {1..5000}; do grep -q PLAIN "$HOME/claude.calls" 2>/dev/null && break; nap 0.002; done
 grep -q PLAIN "$HOME/claude.calls" || { echo "FAIL: the trust check must fail open when jq cannot parse the file; log: $(<"$R/alpha/refresh.log")"; exit 1; }
 # The projects set up from here on are trusted, so no setup asks; none is a refresh target.
 jq -n --arg h "$PHOME" '[$h + "/health-project", $h + "/single-project", $h + "/working-project", $h + "/notify-project", $h + "/project5"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
@@ -2828,7 +2840,7 @@ STUB
 rm -f "$HOME/claude.calls" "$R/alpha/handoff.prev.md"
 printf '# handoff\nRESTORE_ME\n' > "$R/alpha/handoff.md"
 env -u CLAUDE_DISCORD_LAUNCHER bash "$S" refresh alpha >/dev/null 2>&1
-for _ in {1..1500}; do grep -q 'put back' "$R/alpha/refresh.log" 2>/dev/null && break; nap 0.01; done
+for _ in {1..7500}; do grep -q 'put back' "$R/alpha/refresh.log" 2>/dev/null && break; nap 0.002; done
 grep -q 'put back' "$R/alpha/refresh.log" || { echo "FAIL: a failed start must report the restored handoff; log: $(<"$R/alpha/refresh.log")"; exit 1; }
 grep -q RESTORE_ME "$R/alpha/handoff.md" || { echo "FAIL: a failed start must put handoff.md back"; exit 1; }
 [ ! -f "$R/alpha/handoff.prev.md" ] || { echo "FAIL: the restore must move the file, not copy it"; exit 1; }
@@ -3961,10 +3973,10 @@ mpid() { local s="" re='"monitor":\{([^{}]*,)?"pid":([0-9]+)'; { IFS= read -r s 
 # wait_log <n> <regex>: until monitor.log holds n lines matching it (3 s at most).
 wait_log() {
   local n=0 c=0
-  while [ "$n" -lt 300 ]; do
+  while [ "$n" -lt 1500 ]; do
     c=$(command grep -cE -- "$2" "$MB/monitor.log" 2>/dev/null) || :
     [ "${c:-0}" -lt "$1" ] || return 0
-    nap 0.01; n=$((n + 1))
+    nap 0.002; n=$((n + 1))
   done
   echo "FAIL: the monitor never logged '$2' $1 time(s): $(tail -5 "$MB/monitor.log" 2>&1)"; exit 1
 }
@@ -3979,14 +3991,14 @@ running() { local st=""; { read -r st < "/proc/$1/stat"; } 2>/dev/null || return
 wait_tick() {
   local f="$MB/holders/tui-4194999" n=0
   echo "4194999 - tui" > "$f"
-  while [ -e "$f" ] && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); done
+  while [ -e "$f" ] && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done
   [ ! -e "$f" ] || { echo "FAIL: the monitor ran no holder check within 3 s: $(tail -3 "$MB/monitor.log")"; exit 1; }
 }
 mstop() {  # the holder goes and the monitor is TERMed (it does not end for want of a holder); gone at once
   local p n=0; p=$(mpid)
   kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
   [ -z "$p" ] || kill "$p" 2>/dev/null || :
-  while [ -n "$p" ] && running "$p" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+  while [ -n "$p" ] && running "$p" && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
   [ -z "$p" ] || ! running "$p" || { echo "FAIL: the monitor must exit on a TERM: $(tail -3 "$MB/monitor.log")"; exit 1; }
 }
 # backend_gone, after a --stop and before its marker is removed: no process of this bot's backend is left. --stop TERMs
@@ -3996,8 +4008,8 @@ mstop() {  # the holder goes and the monitor is TERMed (it does not end for want
 # installed monitor.sh's path in argv, the waiter too. 3 s at most.
 backend_gone() {
   local n=0
-  while pgrep -f "$PC/monitor/monitor\.sh .* mgr( |\$)" >/dev/null && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); done
-  [ "$n" -lt 300 ] || { echo "FAIL: a keeper, monitor or lock waiter of mgr is still there 3 s after --stop: $(pgrep -af "$PC/monitor/monitor\.sh")"; exit 1; }
+  while pgrep -f "$PC/monitor/monitor\.sh .* mgr( |\$)" >/dev/null && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done
+  [ "$n" -lt 1500 ] || { echo "FAIL: a keeper, monitor or lock waiter of mgr is still there 3 s after --stop: $(pgrep -af "$PC/monitor/monitor\.sh")"; exit 1; }
 }
 mstart() {  # a holder, then --ensure; returns after the first pass of this start
   local want=$(( $(passes) + 1 ))
@@ -4050,8 +4062,8 @@ jq -e '(.hosts.local | .display == "람다" and .env == ["HTTPS_PROXY"] and .hos
 # monitor must have reopened it, or its output would grow monitor.log.1 past the cap. Polled: the monitor runs builtins
 # with 2>/dev/null nearly all the time at this tick, so one read of fd 2 can land on /dev/null.
 mp=$(mpid) n=0
-until [ "$(readlink "/proc/$mp/fd/1")" = "$MB/monitor.log" ] && [ "$(readlink "/proc/$mp/fd/2")" = "$MB/monitor.log" ] || [ "$n" -ge 100 ]; do nap 0.01; n=$((n + 1)); done
-[ "$n" -lt 100 ] ||
+until [ "$(readlink "/proc/$mp/fd/1")" = "$MB/monitor.log" ] && [ "$(readlink "/proc/$mp/fd/2")" = "$MB/monitor.log" ] || [ "$n" -ge 500 ]; do nap 0.002; n=$((n + 1)); done
+[ "$n" -lt 500 ] ||
   { echo "FAIL: after a rotation the monitor's stdout and stderr must append to the new monitor.log: fd1 $(readlink "/proc/$mp/fd/1") fd2 $(readlink "/proc/$mp/fd/2")"; exit 1; }
 # A holder record whose pid lives but started at another time is a reused pid: dead. Were it counted, the monitor
 # would outlive the real holder below.
@@ -4062,7 +4074,7 @@ nap 0.05
 # The last holder gone does not end the monitor (its record goes, within a tick): only --stop, a removed ledger or a
 # signal does. A tick later it still checks its holders.
 mp=$(mpid); kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
-n=0; while [ -e "$MB/holders/tui-$HPID" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; wait_tick; wait_tick
+n=0; while [ -e "$MB/holders/tui-$HPID" ] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done; wait_tick; wait_tick
 [ ! -e "$MB/holders/tui-$HPID" ] && running "$mp" && ! grep -q 'exit reason=' "$MB/monitor.log" ||
   { echo "FAIL: a monitor with no holder left must drop the record and go on: $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
 mstop
@@ -4097,7 +4109,7 @@ echo 5 > "$MON/h1.sleep"; rm -f "$MON/h1.pid"; holder
 wait_for_file "$MON/h1.pid"
 old=$(mpid); kill -9 "$old"; rm -f "$MON/h1.sleep"; KILL_AT_EXIT="$KILL_AT_EXIT $(<"$MON/h1.pid")"
 (cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID")
-n=0; while { [ -z "$(mpid)" ] || [ "$(mpid)" = "$old" ]; } && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while { [ -z "$(mpid)" ] || [ "$(mpid)" = "$old" ]; } && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 [ -n "$(mpid)" ] && [ "$(mpid)" != "$old" ] || { echo "FAIL: an orphaned ssh must not hold the lock: a new monitor must start within 1 s"; exit 1; }
 kill -- -"$(<"$MON/h1.pid")" 2>/dev/null || :; mstop   # the ssh is its own process group: its sleep goes with it
 mstate '.bots["h1|/home/u/ws/q|e1"] = {host: "h1", project: "/home/u/ws/q", bot: "e1", verdict: "ok", owner_id: "222"}'
@@ -4120,7 +4132,7 @@ echo "ok: monitor: a crashed monitor's orphaned ssh holds no lock, an --ensure m
 # home, which cannot signal this monitor), so the monitor must leave mid-pass, saying whose stop it was. Each cap kill
 # and the exit take the host's whole process group: the stub's sleep must not outlive either.
 printf 's%s\n' 1 2 3 4 5 6 7 8 9 10 > "$MR/mgr/hosts"
-for i in 1 2 3 4 5 6 7 8 9 10; do echo 4.37 > "$MON/s$i.sleep"; done
+for i in 1 2 3 4 5 6 7 8 9 10; do echo "4.$$" > "$MON/s$i.sleep"; done   # this run's own duration: another copy of the suite running beside it must not be counted below
 na=$(command grep -c 'no answer' "$MB/monitor.log") || :; ex=$(command grep -c 'exit reason=stopped$' "$MB/monitor.log") || :; np=$(passes); holder
 (cd "$MP" && CLAUDE_DISCORD_MONITOR_TICK=0.05 CLAUDE_DISCORD_MONITOR_HOST_CAP=0.02 bash "$S" monitor --ensure mgr --holder tui "$HPID")
 wait_log $(( na + 1 )) 'no answer'; : > "$MB/stopped"
@@ -4129,7 +4141,7 @@ wait_log $(( ex + 1 )) 'exit reason=stopped$'
   jq -e '.monitor.pid == null and .monitor.stopped_by_user == true' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a stopped marker met mid-pass must end the monitor at the pass's next tick, whatever host runs, the state saying so: $(tail -4 "$MB/monitor.log") $(jq -c .monitor "$MB/state.json")"; exit 1; }
 rm -f "$MB/stopped"; kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
-! pgrep -f '^/bin/sleep 4\.37$' >/dev/null || { echo "FAIL: a pass child's subtree must die with it, at the cap and at exit: $(pgrep -af '^/bin/sleep 4\.37$')"; exit 1; }
+! pgrep -f "^/bin/sleep 4\.$$\$" >/dev/null || { echo "FAIL: a pass child's subtree must die with it, at the cap and at exit: $(pgrep -af "^/bin/sleep 4\.$$\$")"; exit 1; }
 echo "ok: monitor: the tick's checks count across the whole pass (a stopped marker met mid-pass ends it within a tick), and a killed host takes its whole process group"
 
 # Every row of the failure table in one pass. Seeded: since times old enough (or not) for each hold, and what the
@@ -4278,7 +4290,7 @@ jq -e '(.bots["h1|/home/u/ws/p|nf"].posted // "none") == "none" and .monitor.pos
 # A stray file in holders/ named other than <kind>-<digits> (here a copy of the live record): removed, never read as a
 # pid, which would break the holders' JSON and with it every pass.
 cp "$MB/holders/tui-$HPID" "$MB/holders/tui-${HPID}x"; next_pass
-n=0; while [ -e "$MB/holders/tui-${HPID}x" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while [ -e "$MB/holders/tui-${HPID}x" ] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 [ ! -e "$MB/holders/tui-${HPID}x" ] && ! grep -q 'pass failed' "$MB/monitor.log" || { echo "FAIL: a holder record whose name is not <kind>-<digits> must be dropped, never fail a pass: $(ls "$MB/holders") $(tail -2 "$MB/monitor.log")"; exit 1; }
 printf '200 {}\n' > "$CURL_REPLIES"
 wait_log 1 'post h1\|/home/u/ws/p\|nf stale 200$'; next_pass
@@ -4299,7 +4311,7 @@ rm -f "$MON/local.rc"; echo 1 > "$MON/local.sleep"
 # the hold come before the answer that has x1 and x2: a pass may read it at once.
 ex=$(command grep -c 'exit reason=stopped$' "$MB/monitor.log") || :; printf 'h1\nlocal laptop\n' > "$MR/mgr/hosts"
 printf '%s\n' '429 {"retry_after": 0.01}' '200 {}' '200 {}' > "$CURL_REPLIES"; : > "$CURL_LOG"; : > "$HOME/curl.hold"; mdoc h1 1 nf:stale x1:stale x2:stale > "$MON/h1.out"
-n=0; while [ ! -s "$HOME/curl.held" ] && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while [ ! -s "$HOME/curl.held" ] && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done
 command grep -q '] x1 on' "$CURL_LOG" || { echo "FAIL: the first of the two new findings (x1) must be the POST under way: $(posts)"; exit 1; }
 : > "$MB/stopped"; rm -f "$HOME/curl.hold"; : > "$HOME/curl.go"
 wait_log $(( ex + 1 )) 'exit reason=stopped$'
@@ -4394,7 +4406,7 @@ cp "$HOME/monitor.good" "$PC/monitor/monitor.sh"; wait_log 3 'restart: monitor\.
 printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; : > "$HOME/curl.hold"; mdoc lambda 0 r1:stale la:stale lb:stale > "$MON/local.out"
 ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :
 wait_for_file "$HOME/curl.held"; rm -f "$MB/lock"; : > "$MB/lock"; : > "$HOME/curl.go"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
-n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; rm -f "$HOME/curl.hold" "$HOME/curl.held" "$HOME/curl.go"
+n=0; while running "$rp" && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done; rm -f "$HOME/curl.hold" "$HOME/curl.held" "$HOME/curl.go"
 ! running "$rp" && [ "$(mpid)" = "$rp" ] && [ "$(posts | grep -c '\] l[ab] on')" = 1 ] &&
   jq -e '.bots["local|/home/u/ws/p|la"].posted == "stale" and .bots["local|/home/u/ws/p|lb"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a monitor whose lock file was replaced posts nothing more, records what it sent and leaves its pid: $(posts | grep '\] l[ab] on') $(jq -c '[.monitor.pid, (.bots | map_values(.posted))]' "$MB/state.json") $(tail -2 "$MB/monitor.log")"; exit 1; }
@@ -4406,7 +4418,7 @@ wait_log $(( np + 1 )) ' pass hosts='; rp=$(mpid)
 printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; : > "$HOME/curl.hold"; mdoc lambda 0 r1:stale la:stale lb:stale lc:stale ld:stale > "$MON/local.out"
 ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :
 wait_for_file "$HOME/curl.held"; printf '1\n' > "$MB/lock"; : > "$HOME/curl.go"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
-n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; rm -f "$HOME/curl.hold" "$HOME/curl.held" "$HOME/curl.go"
+n=0; while running "$rp" && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done; rm -f "$HOME/curl.hold" "$HOME/curl.held" "$HOME/curl.go"
 ! running "$rp" && [ "$(<"$MB/lock")" = 1 ] && [ "$(posts | grep -c '\] l[cd] on')" = 1 ] &&
   jq -e '.bots["local|/home/u/ws/p|lc"].posted == null and .bots["local|/home/u/ws/p|ld"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a monitor whose lock file names another pid ends without writing state.json: $(posts | grep '\] l[cd] on') $(jq -c '[.monitor.pid, (.bots | map_values(.posted))]' "$MB/state.json") $(tail -2 "$MB/monitor.log")"; exit 1; }
@@ -4428,7 +4440,7 @@ echo none > "$MR/mgr/mode"; rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr
 [ "$rc" = 1 ] && grep -q 'not a dev-manager' <<<"$out" || { echo "FAIL: --keep for a bot that is not a dev-manager exits 1 saying so (rc=$rc): $out"; exit 1; }
 perl -MFcntl=:flock -e 'open(my $l, ">>", $ARGV[0]) or die; flock($l, LOCK_EX) or die; open(my $w, ">", $ARGV[0]) or die; print $w "$$\n"; close $w; sleep 30' "$MB/lock" & LP=$!
 KILL_AT_EXIT="$KILL_AT_EXIT $LP"; n=0; l=""
-until [ "$l" = "$LP" ] || [ "$n" -ge 200 ]; do nap 0.01; n=$((n + 1)); { read -r l < "$MB/lock"; } 2>/dev/null || :; done
+until [ "$l" = "$LP" ] || [ "$n" -ge 1000 ]; do nap 0.002; n=$((n + 1)); { read -r l < "$MB/lock"; } 2>/dev/null || :; done
 # (The holder wrote its pid before these two calls, so their second look reads what the first did: the lock wait between them is cut.)
 rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_MONITOR_LOCK_WAIT=0.01 bash "$S" monitor --keep mgr 2>&1) || rc=$?
 # An automatic (detached) start that is refused leaves this side's marker (refused.<pid namespace id>, plain `refused` where
@@ -4458,20 +4470,20 @@ mp=$(mpid); want=$(( $(starts) + 1 )); kill -9 "$mp"; wait_log "$want" 'Z start$
 rc=0; out=$(cd "$MP" && bash "$S" monitor --keep mgr 2>&1) || rc=$?
 [ "$rc" = 0 ] && grep -q "a keeper already runs for mgr" <<<"$out" && [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] ||
   { echo "FAIL: a second --keep exits 0 saying one runs, and registers nothing (rc=$rc): $out $(ls "$MB/holders")"; exit 1; }
-n=0; mp=""; while { [ -z "$mp" ] || [ "$(<"$MB/lock")" != "$mp" ] || ! running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); mp=$(mpid); done
+n=0; mp=""; while { [ -z "$mp" ] || [ "$(<"$MB/lock")" != "$mp" ] || ! running "$mp"; } && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n + 1)); mp=$(mpid); done
 kill -STOP "$mp"; kill -TERM "$KP"; rc=0; wait "$KP" || rc=$?; rec=$(ls "$MB/holders"); kill -CONT "$mp"
 wait_tick; wait_tick   # the tick after the one that met no holder: the monitor does not leave with its last holder (and starts no keeper here: the suite's NO_AUTOSTART)
 [ "$rc" = 0 ] && [ -z "$rec" ] && running "$mp" && [ "$(mpid)" = "$mp" ] && [ -z "$(ls "$MB/holders")" ] ||
   { echo "FAIL: a TERM ends the keeper (rc 0) and removes its record, and the monitor goes on without it (rc=$rc): '$rec' $(tail -2 "$MB/monitor.log")"; exit 1; }
-kill "$mp"; n=0; while running "$mp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+kill "$mp"; n=0; while running "$mp" && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 # --stop with a TUI holder too, so the monitor does not leave on its own once the keeper is gone: --stop ends it.
 want=$(( $(starts) + 1 ))
 (cd "$MP" && exec bash "$S" monitor --keep mgr) >> "$HOME/keep.out" 2>&1 & KP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $KP"
 wait_for_file "$MB/holders/keeper-$KP"; wait_log "$want" 'Z start$'; holder; (cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID")
 # The monitor both hold (a waiter of the previous keeper's last --ensure may have started one that left at once).
-n=0; mp=""; while { [ -z "$mp" ] || [ "$(<"$MB/lock")" != "$mp" ] || ! running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); mp=$(mpid); done
+n=0; mp=""; while { [ -z "$mp" ] || [ "$(<"$MB/lock")" != "$mp" ] || ! running "$mp"; } && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n + 1)); mp=$(mpid); done
 out=$(cd "$MP" && bash "$S" monitor --stop mgr 2>&1); rc=0; wait "$KP" || rc=$?
-n=0; while running "$mp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while running "$mp" && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
 [ "$rc" = 0 ] && ! running "$mp" && [ -z "$(ls "$MB/holders")" ] && grep -q "stopped keeper $KP$" <<<"$out" && grep -q "stopped monitor $mp$" <<<"$out" &&
   [ -e "$MB/stopped" ] && jq -e '.monitor.stopped_by_user == true' "$MB/state.json" >/dev/null ||
@@ -4504,7 +4516,7 @@ want=$(( $(starts) + 1 )); PFK=$(cat "$HOME/.claude-discord/records/projects" 2>
 printf '%s\n' "$(date +%s)" > "$MB/${rf/refused/last-start}"   # an automatic start a moment ago: --start does not wait for the backoff
 rc=0; out=$(cd "$HOME" && bash "$S" monitor --start mgr 2>&1) || rc=$?; printf '%s\n' "$PFK" > "$HOME/.claude-discord/records/projects"
 [ "$rc" = 0 ] || { echo "FAIL: monitor --start from outside the project must find the recorded project (rc=$rc): $out"; exit 1; }
-KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
+KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 1000 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.002; n=$((n + 1)); done
 wait_log "$want" 'Z start$'
 [ "$out" = "claude-discord: started the backend of mgr (a keeper and the monitor, detached); stop it with: claude-discord monitor --stop mgr" ] &&
   [ -n "$KP" ] && [ ! -e "$MB/stopped" ] && jq -e '.monitor | has("stopped_by_user") | not' "$MB/state.json" >/dev/null ||
@@ -4521,8 +4533,11 @@ out=$(cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" monitor --keep mg
 [ "$out" = "claude-discord: monitor: a keeper already runs for mgr" ] ||
   { echo "FAIL: a keeper that re-exec'd itself must still hold its keeper lock: $out"; exit 1; }
 cp "$HOME/monitor.keep" "$PC/monitor/monitor.sh"; rm -f "$HOME/monitor.keep" "$MB/monitor.log.1"; wait_log 2 "keeper $KP restart: monitor\.sh changed\$"
+# Its start line too, before the ledger goes: a keeper that meets no ledger while it re-execs itself leaves by the front's
+# refusal, which removes no record, and this case is the keeper's own round meeting it.
+wait_log 2 " keeper $KP start "
 mv "$MR/mgr/hosts" "$MR/mgr/hosts.off"
-n=0; while running "$KP" && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while running "$KP" && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n + 1)); done
 mv "$MR/mgr/hosts.off" "$MR/mgr/hosts"
 ! running "$KP" && [ ! -e "$MB/holders/keeper-$KP" ] || { echo "FAIL: a keeper whose ledger is gone must leave, its record with it"; exit 1; }
 # A keeper that finds the stopped marker (a start that passed its own check while --stop ran) leaves too.
@@ -4535,7 +4550,7 @@ wait_for_file "$MB/holders/keeper-$KP"; : > "$MB/stopped"; rc=0; wait "$KP" || r
 rm -f "$HOME"/ks.*; kp=()
 for i in 1 2 3; do (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" monitor --keep mgr --detach > "$HOME/ks.$i" 2>&1) & kp+=($!); done
 for q in "${kp[@]}"; do wait "$q"; done
-KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
+KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 1000 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.002; n=$((n + 1)); done
 [ "$(cat "$HOME"/ks.* | command grep -c 'started the backend of mgr')" = 1 ] && [ "$(cat "$HOME"/ks.* | command grep -c 'a keeper already runs for mgr$')" = 2 ] &&
   [ "$(ls "$MB/holders" | command grep -c '^keeper-')" = 1 ] ||
   { echo "FAIL: three starters at once must leave one keeper (one started, two found it): $(cat "$HOME"/ks.*) $(ls "$MB/holders")"; exit 1; }
@@ -4544,14 +4559,14 @@ out=$(cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" monitor --keep mg
 [ "$out" = "claude-discord: monitor: a keeper already runs for mgr" ] ||
   { echo "FAIL: a keeper whose record was deleted still holds the keeper lock: a starter must find it, not start another: $out"; exit 1; }
 kill -TERM "$KP"; rm -f "$HOME"/ks.*
-n=0; while running "$KP" && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while running "$KP" && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n + 1)); done
 # setup in dev-manager mode starts the backend when none runs, and says so in one line.
 out=$(printf 'dev-manager\n\n\n' | env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" setup mgr --mode 2>&1)
-KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
+KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 1000 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.002; n=$((n + 1)); done
 [ -n "$KP" ] && [ "$(grep -c 'started the backend of mgr' <<<"$out")" = 1 ] && grep -q 'stop it with: claude-discord monitor --stop mgr' <<<"$out" ||
   { echo "FAIL: setup of a dev-manager with a ledger must start the backend and say so once: '$KP' $out"; exit 1; }
 (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null); backend_gone; rm -f "$MB/stopped"
-n=0; while running "$KP" && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while running "$KP" && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n + 1)); done
 unset CLAUDE_DISCORD_KEEP_INTERVAL; rm -f "$HOME/keep.out"
 echo "ok: monitor --keep refuses no ledger, a non-manager and a lock held by a monitor this side cannot see; registers a keeper holder with its start time, brings a killed monitor back, is one per bot, ends on TERM with its record, runs a changed monitor.sh as the same process, leaves with its ledger; --stop ends keeper and monitor and marks the bot stopped (--keep, --ensure and setup start nothing) until --start; setup starts the backend"
 
@@ -4567,18 +4582,18 @@ mstate '.hosts = "x"'   # this monitor's reducer fails every pass (a state whose
 hook() { env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$PC/hooks/turn/$1" < "$HOME/$2" >/dev/null 2>&1; }
 newkeeper() {  # $1 = a keeper pid that does not count; sets KP to the one whose record appears
   KP=""; local n=0 f
-  while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || [ "${f##*-}" = "$1" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
+  while [ -z "$KP" ] && [ "$n" -lt 1000 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || [ "${f##*-}" = "$1" ] || KP=${f##*-}; done; nap 0.002; n=$((n + 1)); done
 }
 rm -f "$MB"/last-start*; want=$(( $(starts) + 1 )); hook on-session-start ss.json; newkeeper ""; wait_log "$want" 'Z start$'
 [ -n "$KP" ] && [ "$(ps -o sid= -p "$KP" | tr -d ' ')" = "$KP" ] && ! ls "$MB/holders" | grep -q '^session-' ||
   { echo "FAIL: the manager's SessionStart must start a detached keeper and register no session: '$KP' $(ls "$MB/holders")"; exit 1; }
 # A reducer that fails is said in state.json, for the TUI's red bar, not only in monitor.log (a pass that goes through
 # clears it: the cadence block above).
-n=0; while ! jq -e '.monitor.error | startswith("the reducer rejected its input at ")' "$MB/state.json" >/dev/null 2>&1 && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
-[ "$n" -lt 100 ] || { echo "FAIL: a failed reducer must write state.json with monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
+n=0; while ! jq -e '.monitor.error | startswith("the reducer rejected its input at ")' "$MB/state.json" >/dev/null 2>&1 && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
+[ "$n" -lt 500 ] || { echo "FAIL: a failed reducer must write state.json with monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
 ka() { bash -c '. "$1"; bot_name=mgr; keeper_alive' x "$D/hooks/lib/discord.sh"; }
 ka || { echo "FAIL: keeper_alive must see the running keeper $KP"; exit 1; }
-old=$KP; kill -9 "$old"; n=0; while running "$old" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+old=$KP; kill -9 "$old"; n=0; while running "$old" && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 ! ka || { echo "FAIL: keeper_alive must see a keeper killed with -9 as dead"; exit 1; }
 rm -f "$MB"/last-start*   # the start above was under a minute ago: the backoff is its own case below
 hook on-prompt up.json; newkeeper "$old"
@@ -4593,13 +4608,13 @@ plain; nap 0.05; [ -z "$(ls "$MB/holders")" ] || { echo "FAIL: a plain bot's pro
 backend_gone; rm -f "$MB/stopped" "$MB"/last-start*; old=$KP; plain; newkeeper "$old"
 [ -n "$KP" ] || { echo "FAIL: a plain bot's prompt must start a dead manager's keeper: $(ls "$MB/holders")"; exit 1; }
 (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null); backend_gone; rm -f "$MB/stopped" "$HOME/ss.json" "$HOME/up.json"; unset CLAUDE_DISCORD_KEEP_INTERVAL
-n=0; while running "$KP" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while running "$KP" && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 # Decoys under a monitor/monitor.sh of their own (a sleep), each waited for until ps shows its command line. A decoy's
 # sleep is a child of its bash: the TERM trap takes it down too, set before the fork.
 mkdir -p "$HOME/decoy/monitor"; printf '%s\n' 'trap "kill \$! 2>/dev/null; exit" TERM; sleep 30 & wait' > "$HOME/decoy/monitor/monitor.sh"
 decoy() {  # $@ = the arguments after monitor.sh; a keeper record names the decoy
   bash "$HOME/decoy/monitor/monitor.sh" "$@" & DP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $DP"
-  n=0; while [[ $(ps -p "$DP" -o command= 2>/dev/null) != *monitor.sh* ]] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+  n=0; while [[ $(ps -p "$DP" -o command= 2>/dev/null) != *monitor.sh* ]] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
   : > "$MB/holders/keeper-$DP"
 }
 undecoy() { kill "$DP" 2>/dev/null || :; wait "$DP" 2>/dev/null || :; rm -f "$MB/holders/keeper-$DP"; }
@@ -4622,7 +4637,7 @@ fxout=$(perl -e 'use Time::HiRes qw(time); open(STDIN, "<", shift) or die; my $t
     if (!$pid) { open(STDERR, ">&", \*STDOUT); exec @ARGV; die } local $/; my $o = <P>; printf "%.3f\n%s", time - $t, $o;' \
   "$HOME/ss.json" env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-session-start")
 fxel=$(printf '%s\n' "$fxout" | head -n 1)
-n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 [ -s "$HOME/fx.pid" ] && kill "$(<"$HOME/fx.pid")" 2>/dev/null || :   # the stub's sleep (exec'd, same pid): not left behind
 jq -ne --arg e "$fxel" '($e | tonumber) < 1.5' >/dev/null || { echo "FAIL: the SessionStart hook must return at once while the keeper's start runs (the pipe closed after $fxel s)"; exit 1; }
 [ "$(printf '%s\n' "$fxout" | tail -n +2)" = "$(jq -nc --arg c "CLAUDE_DISCORD_TOOLS=$FXR/tools" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}')" ] ||
@@ -4634,7 +4649,7 @@ rm -f "$HOME/fx.rec" "$HOME/fx.pid" "$MB"/last-start*; cp "$D/hooks/turn/on-prom
 /bin/sleep 30 & SP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $SP"; : > "$MB/holders/keeper-$SP"
 printf '{"session_id":"sFx","prompt":"hi"}' > "$HOME/up.json"
 env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1
-n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 [ -s "$HOME/fx.pid" ] && kill "$(<"$HOME/fx.pid")" 2>/dev/null || :
 [ -s "$HOME/fx.pid" ] && [ "$(<"$HOME/fx.rec")" = "$MP monitor --keep mgr --detach" ] ||
   { echo "FAIL: a prompt with a keeper record naming a live pid that is no keeper must start the keeper: $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
@@ -4649,7 +4664,7 @@ for b in mgr noenv; do echo dev-manager > "$DUP/.claude/discord-agents/$b/mode";
 echo DISCORD_BOT_TOKEN=x > "$DUP/.claude/discord-agents/mgr/.env"
 printf '%s\n' "$MP" "$DUP" > "$HOME/.claude-discord/records/projects"
 env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDECODE=1 CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1
-n=0; while [ ! -s "$HOME/fx2.rec" ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; nap 0.05
+n=0; while [ ! -s "$HOME/fx2.rec" ] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done; nap 0.05
 [ "$(<"$HOME/fx2.rec")" = "$MP monitor --keep mgr --detach|unset|unset|unset|unset" ] ||
   { echo "FAIL: a prompt must start one keeper per manager name, from its project, with none of the session's own env, and none for a manager with no .env: $(cat "$HOME/fx2.rec" 2>&1)"; exit 1; }
 # A start that keeps failing (the stub starts no keeper, as one that dies at once): the prompt just now wrote this side's
@@ -4660,7 +4675,7 @@ env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR=
 [ "$(wc -l < "$HOME/fx2.rec")" = 1 ] || { echo "FAIL: a second prompt within 60 s of a start must not start again: $(cat "$HOME/fx2.rec")"; exit 1; }
 echo 0 > "$LS"
 env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1
-n=0; while [ "$(wc -l < "$HOME/fx2.rec")" != 2 ] && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while [ "$(wc -l < "$HOME/fx2.rec")" != 2 ] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 [ "$(wc -l < "$HOME/fx2.rec")" = 2 ] && [ "$(<"$LS")" != 0 ] || { echo "FAIL: a prompt over a minute after the last start must start again and record the time: $(cat "$HOME/fx2.rec") '$(<"$LS")'"; exit 1; }
 # And setup refuses a dev-manager name another recorded project already runs, naming that project (the same project may re-run).
 D3="$HOME/dupproj3"; mkdir -p "$D3/.claude/discord-agents/mgr"; echo DISCORD_BOT_TOKEN=x > "$D3/.claude/discord-agents/mgr/.env"; echo '{}' > "$D3/.claude/discord-agents/mgr/access.json"
@@ -4679,8 +4694,8 @@ echo "ok: a dev-manager's SessionStart returns at once with only its context on 
 # the suite's NO_AUTOSTART. kp: the keeper record's pid (one at most); wait_backend: a keeper record other than $1 and a
 # running monitor that holds the lock.
 kp() { local f; for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || { echo "${f##*-}"; return 0; }; done; }
-wait_keeper() { local n=0; K=$(kp); while { [ -z "$K" ] || [ "$K" = "${1:-}" ] || ! running "$K"; } && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); K=$(kp); done; [ -n "$K" ] && [ "$K" != "${1:-}" ] && running "$K"; }
-wait_monitor() { local n=0; Mp=$(mpid); while { [ -z "$Mp" ] || [ "$Mp" = "${1:-}" ] || [ "$(cat "$MB/lock" 2>/dev/null)" != "$Mp" ] || ! running "$Mp"; } && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); Mp=$(mpid); done; [ -n "$Mp" ] && [ "$Mp" != "${1:-}" ] && running "$Mp"; }
+wait_keeper() { local n=0; K=$(kp); while { [ -z "$K" ] || [ "$K" = "${1:-}" ] || ! running "$K"; } && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); K=$(kp); done; [ -n "$K" ] && [ "$K" != "${1:-}" ] && running "$K"; }
+wait_monitor() { local n=0; Mp=$(mpid); while { [ -z "$Mp" ] || [ "$Mp" = "${1:-}" ] || [ "$(cat "$MB/lock" 2>/dev/null)" != "$Mp" ] || ! running "$Mp"; } && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); Mp=$(mpid); done; [ -n "$Mp" ] && [ "$Mp" != "${1:-}" ] && running "$Mp"; }
 (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null 2>&1; backend_gone; env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_DISCORD_KEEP_INTERVAL=0.05 bash "$S" monitor --start mgr >/dev/null 2>&1)
 wait_keeper && wait_monitor || { echo "FAIL: monitor --start must bring up a keeper and a monitor: $(ls "$MB/holders") $(tail -3 "$MB/monitor.log")"; exit 1; }
 k1=$K m1=$Mp
@@ -4699,7 +4714,7 @@ m2=$Mp
 # touched (the tick that dropped its record is over); with that time a minute old it is. Nor while this side's refused
 # marker stands, whatever the clock says (the marker first, a tick before the clock, so no tick reads one without the other).
 ls0=$(( $(date +%s) - 30 )); echo "$ls0" > "$LS"; kill -9 "$k2"
-n=0; while [ -e "$MB/holders/keeper-$k2" ] && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); done; wait_tick
+n=0; while [ -e "$MB/holders/keeper-$k2" ] && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done; wait_tick
 [ ! -e "$MB/holders/keeper-$k2" ] && [ -z "$(kp)" ] && running "$m2" && [ "$(<"$LS")" = "$ls0" ] || { echo "FAIL: the monitor must not start a keeper twice within 60 s: $(ls "$MB/holders") $(<"$LS") (was $ls0)"; exit 1; }
 : > "$MB/$rf"; wait_tick; echo 0 > "$LS"; wait_tick; wait_tick
 [ -z "$(kp)" ] && running "$m2" && [ "$(<"$LS")" = 0 ] || { echo "FAIL: the monitor must start no keeper while this side's refused marker stands: $(ls "$MB" "$MB/holders")"; exit 1; }
@@ -4710,7 +4725,7 @@ k3=$K
 # held and leaves; the same keeper registers again at its next round. The keeper is held still meanwhile (it keeps its
 # lock), and the record removed until the monitor met it missing: an --ensure of the keeper's under way writes it once more.
 c=$(command grep -c 'a keeper already runs for mgr$' "$MB/monitor.log") || :; kill -STOP "$k3"; echo 0 > "$LS"
-n=0; while [ "$(command grep -c 'a keeper already runs for mgr$' "$MB/monitor.log")" -le "$c" ] && [ "$n" -lt 300 ]; do rm -f "$MB/holders/keeper-$k3"; nap 0.01; n=$((n + 1)); done
+n=0; while [ "$(command grep -c 'a keeper already runs for mgr$' "$MB/monitor.log")" -le "$c" ] && [ "$n" -lt 1500 ]; do rm -f "$MB/holders/keeper-$k3"; nap 0.002; n=$((n + 1)); done
 kill -CONT "$k3"; wait_log $(( c + 1 )) 'a keeper already runs for mgr$'; wait_for_file "$MB/holders/keeper-$k3"
 running "$k3" && [ "$(kp)" = "$k3" ] && [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] || { echo "FAIL: a live keeper with no record must stay the only one: $(ls "$MB/holders") $(tail -3 "$MB/monitor.log")"; exit 1; }
 # --stop ends both, and nothing comes back. The monitor leaves on the marker before the TERM here (the keeper is held
@@ -4732,14 +4747,14 @@ mkdir -p "$MP/sub/dir"   # from a subdirectory: the project is found above it
 (cd "$MP/sub/dir" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui 2>/dev/null) || { echo "FAIL: tui from a subdirectory of the project must find the project above it"; exit 1; }
 [ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord" ] || { echo "FAIL: tui must run the script through uv with the bot, the state dir and the wrapper: $(cat "$HOME/uv.args" 2>&1)"; exit 1; }
 # It started a keeper, detached (a session of its own), so the monitor outlives the TUI; the next tui starts none.
-n=0; KP=""; while [ -z "$KP" ] && [ "$n" -lt 200 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.01; n=$((n + 1)); done
+n=0; KP=""; while [ -z "$KP" ] && [ "$n" -lt 1000 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.002; n=$((n + 1)); done
 [ -n "$KP" ] && [ "$(ps -o sid= -p "$KP" | tr -d ' ')" = "$KP" ] || { echo "FAIL: tui must start a keeper in a session of its own: '$KP' $(ls "$MB/holders")"; exit 1; }
 (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui 2>/dev/null) || { echo "FAIL: a second tui must run"; exit 1; }
 [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] && grep -q "a keeper already runs for mgr" "$MB/monitor.log" ||
   { echo "FAIL: tui must not start a second keeper while one lives: $(ls "$MB/holders")"; exit 1; }
 # Stopped here, before the cases below that can fail: a keeper left running by a failing case outlived the suite.
 mp=$(mpid); (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null)
-n=0; while { running "$KP" || running "$mp"; } && [ "$n" -lt 200 ]; do nap 0.01; n=$((n + 1)); done
+n=0; while { running "$KP" || running "$mp"; } && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n + 1)); done
 ! running "$KP" && ! running "$mp" || { echo "FAIL: --stop must end the keeper tui started and its monitor"; exit 1; }
 rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'tui needs uv' <<<"$out" || { echo "FAIL: without uv, tui must say so (rc=$rc): $out"; exit 1; }
