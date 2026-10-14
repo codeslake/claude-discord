@@ -138,11 +138,14 @@ write_access() {  # $1 = bot dir, $2 = requireMention (true|false), $3 = "all" f
     > "$1/access.json"
 }
 
-# Every JSON file claude-discord edits in place (settings.json, access.json,
+# Every JSON file claude-discord edits (settings.json, access.json,
 # peers.json) goes through here: the file (a missing or 0-byte one reads as
 # {}) is run through the jq filter in the arguments and written back only
-# when the result differs, through a symlink (`cat tmp > file`, never mv)
-# and with a trailing newline. A file that is not valid JSON, a filter that
+# when the result differs, with a trailing newline, never in place: a temp
+# file beside it with its mode (cp -p) is renamed over it, so a reader (the
+# plugin reads access.json at every message and moves a file it cannot parse
+# aside) sees the old file or the new one, never half of one. A symlink's
+# target is replaced, so the link stays. A file that is not valid JSON, a filter that
 # fails on it (a non-object, an event key holding a non-array) or a failed
 # write is warned about on stderr, naming the file, and left alone: an edit
 # must never fail the setup or the start it runs inside.
@@ -160,12 +163,18 @@ jq_edit() {  # $1 = file, the rest = jq arguments
   merged=$(printf '%s' "$base" | jq "$@" 2>/dev/null) || merged=""
   [ -n "$merged" ] || { echo "claude-discord: could not update $f, leaving it alone" >&2; return 0; }
   [ "$merged" != "$base" ] || return 0
-  if mkdir -p "$(dirname "$f")" 2>/dev/null && printf '%s\n' "$merged" > "$f.tmp.$$" 2>/dev/null && cat "$f.tmp.$$" > "$f" 2>/dev/null; then
+  local t=$f
+  [ ! -L "$f" ] || t=$(readlink -f "$f" 2>/dev/null) || t=""
+  if [ -z "$t" ]; then
+    # A link readlink cannot resolve (a macOS before 12.3 has no readlink -f): written through it, as before.
+    { printf '%s\n' "$merged" > "$f"; } 2>/dev/null || echo "claude-discord: could not write $f, leaving it alone" >&2
+  elif mkdir -p "$(dirname "$t")" 2>/dev/null && { [ ! -e "$t" ] || cp -p "$t" "$t.tmp.$$" 2>/dev/null; } &&
+       printf '%s\n' "$merged" > "$t.tmp.$$" 2>/dev/null && mv -f "$t.tmp.$$" "$t" 2>/dev/null; then
     :
   else
+    rm -f "$t.tmp.$$"
     echo "claude-discord: could not write $f, leaving it alone" >&2
   fi
-  rm -f "$f.tmp.$$"
 }
 
 # Adds access.json's ackReaction key (the plugin's own read-receipt
@@ -910,7 +919,9 @@ EOT
     # An EMPTY allowFrom already lets every author through, peers included, and
     # adding ids to it would narrow the group to just those ids -- turning
     # "everyone" into "peers only" without saying so. Such a group is left as
-    # it is.
+    # it is. `access set mode=dev-manager` (CLAUDE_DISCORD_ACCESS_PEERS=written) has done this already, shown it and
+    # written it under its lock: done again here it would be a write outside that lock, of peers nobody was shown.
+    [ "${CLAUDE_DISCORD_ACCESS_PEERS:-}" = written ] ||
     jq_edit "$root/$name/access.json" --argjson ids "${ids:-[]}" \
       'if (.groups | type) == "object"
        then .groups |= map_values(if (.allowFrom // []) == [] then .
@@ -2718,7 +2729,8 @@ if [ "${1:-}" = access ]; then
     | ([$peers | peerlist[] | select((.name | ascii_downcase) != ($bot | ascii_downcase)) | .id]) as $pi
     | (reduce ($words | split(" ")[] | select(. != "")) as $x ({d: $doc, any: [], err: null}; step($x))) as $r0
     # Entering dev-manager, the peers of peers.json go into every channel that lists its senders: what `setup --mode`
-    # does, done here once, after all the words (wherever mode= stands), so the diff shows it and the question is asked.
+    # does, done here once, after all the words (wherever mode= stands), so the diff shows it, the question is asked and
+    # the file written under the lock holds it; setup is then told not to do it again (CLAUDE_DISCORD_ACCESS_PEERS).
     | (if $nm == "dev-manager" and $mode != "dev-manager" and ($r0.err | not) and (($r0.d.groups | type) == "object")
        then $r0 | .d.groups |= map_values(if (.allowFrom // []) == [] then . else .allowFrom = (.allowFrom as $a | $a + ($pi - $a)) end)
        else $r0 end) as $r
@@ -2843,7 +2855,7 @@ if [ "${1:-}" = access ]; then
   if [ "$newmode" != "$mode" ]; then
     # setup --mode, with the mode on its stdin and nothing after it: its peers and hosts questions read the end of
     # input, which keeps both lists (README, Modes).
-    printf '%s\n' "$newmode" | "$self_path" setup "$bot" --mode ||
+    printf '%s\n' "$newmode" | CLAUDE_DISCORD_ACCESS_PEERS=written "$self_path" setup "$bot" --mode ||
       { echo "claude-discord: access: the mode was not changed (claude-discord setup $bn --mode, above)${a_file:+; the changes to access.json stay}" >&2; exit 1; }
     echo "claude-discord: access: the hooks follow the new mode from their next call; the dev-manager rules reach, or leave, a running session at its next start, compact or clear."
     [ "$newmode" != dev-manager ] || echo "claude-discord: access: its peers and the hosts it checks: claude-discord setup $bn --mode, and claude-discord hosts add"

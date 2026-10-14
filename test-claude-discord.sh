@@ -1595,6 +1595,7 @@ P2="$HOME/project2"; mkdir -p "$P2/.claude/discord-agents/gamma"; cd "$P2"
 printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$P2/.claude/discord-agents/config.env"
 printf 'DISCORD_BOT_TOKEN=tokG\n' > "$P2/.claude/discord-agents/gamma/.env"
 jq -n '{dmPolicy:"allowlist", allowFrom:["2"], groups:{"1":{requireMention:true, allowFrom:["2"]}}}' > "$P2/.claude/discord-agents/gamma/access.json"
+chmod 640 "$P2/.claude/discord-agents/gamma/access.json"; gi=$(stat -c %i "$P2/.claude/discord-agents/gamma/access.json")
 
 # b. no plugin install in this project: a start registers nothing (the
 # plugin's hooks.json does) and adds the missing ackReaction and hooks symlink.
@@ -1602,6 +1603,10 @@ jq -n '{dmPolicy:"allowlist", allowFrom:["2"], groups:{"1":{requireMention:true,
 bash "$S" --name gamma >/dev/null 2>&1
 [ ! -e "$P2/.claude/settings.local.json" ] && [ ! -e "$P2/.claude/settings.json" ] || { echo "FAIL: a start must write no settings file"; exit 1; }
 [ "$(jq -r '.ackReaction' "$P2/.claude/discord-agents/gamma/access.json")" = "👀" ]
+# jq_edit replaces a file by rename (the plugin reads access.json at every message and moves a half-written one aside),
+# keeping its mode.
+[ "$(stat -c %i "$P2/.claude/discord-agents/gamma/access.json")" != "$gi" ] && [ "$(stat -c %a "$P2/.claude/discord-agents/gamma/access.json")" = 640 ] ||
+  { echo "FAIL: jq_edit must replace access.json by a rename (a new inode), never write it in place, and keep its mode: $(stat -c '%i %a' "$P2/.claude/discord-agents/gamma/access.json") was $gi 640"; exit 1; }
 [ -L "$P2/.claude/discord-agents/hooks" ] || { echo "FAIL: start must create the hooks symlink"; exit 1; }
 [ "$(tail -c1 "$P2/.claude/discord-agents/gamma/access.json" | wc -l)" -eq 1 ] || { echo "FAIL: access.json must end with a trailing newline"; exit 1; }
 echo "ok: start registers no settings hook, adds ackReaction and the hooks symlink when they were missing, access.json ends with a trailing newline"
@@ -3975,7 +3980,7 @@ cd "$MP"; AD="$MR/acc"; mkdir -p "$AD"; echo none > "$AD/mode"; printf 'DISCORD_
 ACC='{"dmPolicy":"allowlist","allowFrom":["111"],"ackReaction":"👀","groups":{"900":{"requireMention":true,"allowFrom":["111","222"]},"901":{"requireMention":false,"allowFrom":[]}},"pending":{"abc123":{"senderId":"999","chatId":"5","createdAt":1,"expiresAt":99999999999999}},"custom":{"keep":[1,2]}}'
 jq . <<<"$ACC" > "$AD/access.json"; printf '777\n' > "$AD/bot-id"; printf '900 5 dev-bots %s\n' "$(date +%s)" > "$AD/channel-guild"
 printf '900 dev-bots\n901 bot-health\n' > "$AD/channel-names"; printf '111 dongyong22\n222 gpu villain\n' > "$AD/user-names"
-printf '{"peers":[{"name":"peerbot","bot_id":"555","owner_id":"1","machine":"m"},{"name":"ACC","bot_id":"777","owner_id":"1","machine":"m"}]}\n' > "$MR/peers.json"
+printf '{"peers":[{"name":"peerbot","bot_id":"555","owner_id":"1","machine":"m"},{"name":"ACC","bot_id":"777","owner_id":"1","machine":"m"},{"name":"odd","bot_id":"x9","owner_id":"1","machine":"m"}]}\n' > "$MR/peers.json"
 # access --json asks Discord four things with the bot's token: the server's channels, the server (its roles), the bot's
 # membership (its roles) and the members. Whether the bot can read a channel is VIEW_CHANNEL (1024) and
 # READ_MESSAGE_HISTORY (65536) after the roles and the channel's overwrites: 900 plain; 901 denied to @everyone and
@@ -4112,16 +4117,9 @@ echo "ok: access set at a terminal asks about each widening by itself and the re
 # bot has is no change, and a word that is no mode is no change word.
 ac acc set mode=none; A=$ARC$AO; ac acc set mode=secretpw
 [ "$A" = "0claude-discord: access: acc is already so; nothing to change" ] && [ "$ARC" = 2 ] && [[ $AO$AE != *secretpw* ]] || { echo "FAIL: the bot's own mode is nothing to change, and a mode setup does not know is refused unechoed: $A / rc=$ARC $AE"; exit 1; }
-ai=$(stat -c %i "$AD/access.json")
-at 'y\n' acc set mode=autoresearchclaw
-[ "$ARC" = 0 ] && [ "$(<"$AD/mode")" = autoresearchclaw ] && grep -q 'Apply this change? \[y/N\]' <<<"$AO" && grep -q "claude-discord: $AD/mode set to autoresearchclaw$" <<<"$AO" &&
-  grep -q 'the hooks follow the new mode from their next call; the dev-manager rules reach, or leave, a running session at its next start, compact or clear' <<<"$AO" &&
-  ! grep -q 'access.json written' <<<"$AO" && [ "$(stat -c %i "$AD/access.json")" = "$ai" ] && [ "$(tail -n 1 "$AD/access.log" | cut -d' ' -f4-)" = "mode=autoresearchclaw" ] ||
-  { echo "FAIL: mode=<mode> is asked about, set through setup --mode, logged, and leaves access.json alone: rc=$ARC $AO / $(cat "$AD/mode" "$AD/access.log")"; exit 1; }
 # Into dev-manager: the peers of peers.json go into every channel that lists its senders, once, after all the other
 # words, wherever mode= stands; the changes shown say so (555 is new to this bot: a widening, here on the channel
 # added in the same call too; 777 is this bot itself, skipped by name as setup skips it).
-echo none > "$AD/mode"
 ac acc set mode=dev-manager channel+902; A=$ARC$AO; ac acc set channel+902 mode=dev-manager
 [ "$ARC$AO" = "$A" ] && [ "$ARC" = 3 ] && [ "$(sed 1d <<<"$AO")" = "    #902: + listens here: an @mention required, from dongyong22 (111), peerbot (555)
   ! peerbot (555): new to this bot: may write to it in #dev-bots, #902
@@ -4137,6 +4135,16 @@ warning: peerbot (555) is a peer dev bot (peers.json): entering dev-manager puts
 echo dev-manager > "$AD/mode"; ac acc set allow:900-555 mode=none; echo none > "$AD/mode"; printf '%s\n' "$A_FILE" > "$AD/access.json"
 [ "$ARC" = 3 ] && grep -qx '    #dev-bots: - peerbot (555) may no longer write to it there' <<<"$AO" && ! grep -q 'peer dev bot' <<<"$AO" ||
   { echo "FAIL: a peer taken off by a call that also leaves dev-manager is no warning: rc=$ARC $AO / $AE"; exit 1; }
+# At a terminal, all yes: setup --mode sets the mode, and access.json holds exactly what was shown, written once, under
+# the lock: setup does not merge the peers again (a peer whose id is no id, which access never adds, would show it).
+at 'y\ny\n' acc set mode=dev-manager
+[ "$ARC" = 0 ] && [ "$(<"$AD/mode")" = dev-manager ] && [ "$(grep -o 'Allow? \[y/N\]' <<<"$AO" | wc -l)" = 1 ] && grep -q 'Apply the other change too? \[y/N\]' <<<"$AO" &&
+  grep -q "claude-discord: $AD/mode set to dev-manager$" <<<"$AO" && grep -q 'access.json written' <<<"$AO" &&
+  grep -q 'the hooks follow the new mode from their next call; the dev-manager rules reach, or leave, a running session at its next start, compact or clear' <<<"$AO" &&
+  [ "$(jq -c .groups "$AD/access.json")" = '{"900":{"requireMention":true,"allowFrom":["111","222","555"]},"901":{"requireMention":false,"allowFrom":[]}}' ] &&
+  [ "$(tail -n 1 "$AD/access.log" | cut -d' ' -f4-)" = "mode=dev-manager" ] ||
+  { echo "FAIL: mode=dev-manager at a terminal is asked about, set through setup --mode, logged, and access.json holds the peers shown and nothing setup added after: rc=$ARC $AO / $(cat "$AD/mode" "$AD/access.log") / $(jq -c .groups "$AD/access.json")"; exit 1; }
+rm -f "$AD/hosts"; echo none > "$AD/mode"; printf '%s\n' "$A_FILE" > "$AD/access.json"
 # Out of dev-manager with a ledger: setup deletes the ledger, which stops the monitor and its keeper. That has its own
 # question; no keeps the ledger and the mode.
 mkdir -p "$MR/dm1"; cp "$AD/access.json" "$AD/.env" "$MR/dm1/"; echo dev-manager > "$MR/dm1/mode"; printf 'local\nh9\n' > "$MR/dm1/hosts"
@@ -4144,8 +4152,14 @@ at 'n\n' dm1 set mode=none
 [ "$ARC" = 4 ] && grep -qF "  ! mode: dev-manager -> none: its hosts ledger ($MR/dm1/hosts) is deleted and its monitor and keeper stop within a minute. Nobody is told in #bot-health-check when a bot of its hosts goes down" <<<"$AO" &&
   grep -q 'when a bot of its hosts goes down\..* Allow? \[y/N\]' <<<"$AO" && [ "$(<"$MR/dm1/hosts")" = "$(printf 'local\nh9')" ] && [ "$(<"$MR/dm1/mode")" = dev-manager ] ||
   { echo "FAIL: leaving dev-manager says what stops and asks about it by itself; no keeps the ledger: rc=$ARC $AO"; exit 1; }
-rm -rf "$MR/dm1"; echo none > "$AD/mode"
-echo "ok: access set mode=<mode> asks, then runs setup --mode with the mode on its stdin (peers and hosts kept), leaving access.json alone; into dev-manager it shows the peers setup adds; out of it with a ledger it says the monitor stops and asks about that by itself, and no keeps both"
+# A mode alone changes no access.json: yes here runs setup --mode, which fails (this bot has no token: not set up).
+rm -f "$MR/dm1/.env"; ai=$(stat -c %i "$MR/dm1/access.json")
+at 'y\n' dm1 set mode=none
+[ "$ARC" = 1 ] && grep -q "access: the mode was not changed (claude-discord setup dm1 --mode, above)$" <<<"$AO" && ! grep -q 'access.json written' <<<"$AO" &&
+  [ "$(stat -c %i "$MR/dm1/access.json")" = "$ai" ] && [ "$(<"$MR/dm1/mode")" = dev-manager ] && [ -f "$MR/dm1/hosts" ] ||
+  { echo "FAIL: a mode alone leaves access.json alone, and a setup --mode that fails is exit 1: rc=$ARC $AO"; exit 1; }
+rm -rf "$MR/dm1"
+echo "ok: access set mode=<mode> asks, then runs setup --mode with the mode on its stdin (peers and hosts kept), leaving access.json alone for a mode alone; into dev-manager the peers it adds go in once, after all the words, are shown (a new one a widening) and are written under the lock, setup adding nothing after; out of it with a ledger it says the monitor stops and asks about that by itself, and no keeps both"
 # access --host <alias>: the bot lives on a host of the manager's ledger. Over ssh as the monitor's pass goes (BatchMode,
 # ConnectTimeout, the alias after --, the line's env words, a proxy word in both spellings; name= is no env word), and
 # into the remote command go only hex digits (the project, the bot's name), the action and the change words, behind
