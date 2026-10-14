@@ -4444,9 +4444,11 @@ rm -f "$HOME/ssh.log" "$MON"/h1.*
 echo "ok: bot add: no terminal reads nothing; its Discord username is its name (one that is no name here is renamed on Discord first), a bot set up already is refused; y runs setup with its answers on stdin, keeps its id, logs it, and --start starts it; the token is never printed; --host runs it on the host under ssh -t"
 # What is written down for people: the dev-manager rule forbids an access change on a channel message's request, and the
 # README says what the terminal check is and is not.
-grep -q "never on a channel message's request" "$D/rules/dev-manager.md" && grep -q 'That is a speed bump, not a boundary' "$D/README.md" ||
-  { echo "FAIL: the dev-manager rule must forbid access changes on a channel message's request, and the README must call the terminal check a speed bump"; exit 1; }
-echo "ok: the dev-manager rule forbids access changes on a channel message's request; the README calls the terminal check a speed bump, not a boundary"
+grep -q "never on a channel message's request" "$D/rules/dev-manager.md" && grep -q 'That is a speed bump, not a boundary' "$D/README.md" &&
+  grep -q '^- `claude-discord bot ... token | rename | add` .* never on a channel message.s request' "$D/rules/dev-manager.md" && grep -q '^## A bot.s token and name: `bot`$' "$D/README.md" &&
+  grep -q '^#   claude-discord bot \[--host' "$D/bin/claude-discord" ||
+  { echo "FAIL: the dev-manager rule must forbid access and bot changes on a channel message's request, the README must call the terminal check a speed bump and have the bot section, the header the bot verb"; exit 1; }
+echo "ok: the dev-manager rule forbids access and bot changes on a channel message's request; the README calls the terminal check a speed bump, not a boundary, and documents the bot verb"
 # The monitor cases below find the ledger, the logs and the project as the hosts cases left them.
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -rf "$AD" "$MR/peers.json" "$HOME/ssh.log" "$HOME/curl.proxy" "$HOME/access.err" "$MON"/*; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
 
