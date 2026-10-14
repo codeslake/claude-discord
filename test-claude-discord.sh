@@ -186,7 +186,20 @@ echo "ok: plugin.json and hooks.json are valid and every hook command exists"
 # KILL_AT_EXIT: pids this test started (fake workers), so a failed assertion
 # cannot leave one running.
 KILL_AT_EXIT=""
-export HOME=/tmp/claude-discord-test-$$; mkdir -p "$HOME"
+# The sandbox, a throwaway HOME. The suite makes and removes tens of thousands of small files there (the jq cache, the
+# clones, the compat rebuilds), which a container's overlay root makes slow: on tmpfs the run is ~0.9 s shorter (measured
+# 2026-10-14 in lmd79's container, three interleaved runs each). So /dev/shm when it is a tmpfs with room (256 MB free;
+# the sandbox peaks at ~16 MB) on which a script runs (not noexec), else /tmp as before. Nothing reads the place by name.
+SBX=/tmp/claude-discord-test-$$
+if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+  sbt="" sba=0 sbs=0; read -r sbt sba sbs < <(stat -f -c '%T %a %S' /dev/shm 2>/dev/null) || :
+  case $sba$sbs in *[!0-9]*) sba=0;; esac
+  if [ "$sbt" = tmpfs ] && [ $(( sba * sbs / 1048576 )) -ge 256 ]; then
+    sbd=/dev/shm/claude-discord-test-$$
+    if mkdir -p "$sbd" && printf '#!/bin/sh\n' > "$sbd/x" && chmod +x "$sbd/x" && "$sbd/x" 2>/dev/null; then SBX=$sbd; rm -f "$sbd/x"; else rm -rf "$sbd"; fi
+  fi
+fi
+export HOME=$SBX; mkdir -p "$HOME"
 # sandbox_pids: everything running from the sandbox, detached or not: its path in argv, or (Linux) the sandbox as the HOME it
 # inherited (an orphaned `/bin/sleep 30` names no path of the suite's). Never `pgrep -f`, whose own argv matches. The ps and
 # the grep run apart from each other and from the final filter, which drops this shell and the subshells running this.
@@ -213,7 +226,7 @@ reap_sandbox() {
     kill -$sig $pids 2>/dev/null || :; nap 0.1
   done
 }
-trap 'kill $KILL_AT_EXIT 2>/dev/null || :; reap_sandbox; rm -rf /tmp/claude-discord-test-$$' EXIT
+trap 'kill $KILL_AT_EXIT 2>/dev/null || :; reap_sandbox; rm -rf "$SBX"' EXIT
 # Watchdog: a hang fails the suite, saying where, instead of blocking its caller. After $1 s it lists every process under
 # the shell that armed it (a hung command, a nap too: it is /bin/sleep) and kills that shell and all of them at once: a
 # grandchild in a $(...) holds the capture pipe open, so killing the children alone left the shell blocked. The shell's
