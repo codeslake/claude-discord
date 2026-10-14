@@ -417,9 +417,12 @@ replaces with its defaults (pairing, no channel), which is why the file is
 never written in place. The plugin rewrites the file itself, with no lock,
 when a DM asks for a pairing code or a code expires: the new file is made from
 the file as it is at the moment of the write, and the write is given up (exit
-1) when the policy changed while the question was open. Each write adds a
-line to `<bot dir>/access.log`: the time, the local account, the machine and
-the change words. A mode change reaches the hooks at their next call; the
+1) when the policy changed while the question was open. `<bot dir>/access.log`
+gets a line for each thing done, each with the time, the local account and the
+machine: `access.json: <the change words>` right after the rename (before the
+mode is set, so a run stopped there still has its write logged), then
+`mode: <old> -> <new>`, or the same followed by `failed (...)` when
+`setup --mode` failed. A mode change reaches the hooks at their next call; the
 dev-manager rule text reaches, or leaves, a running session at its next start,
 compact or clear.
 
@@ -1278,7 +1281,9 @@ least: a pass under way is not overdue);
 `↑` `↓` move the row cursor, `q` quits (the backend keeps running), `Q` quits
 and stops the backend (after a yes; the same as `monitor --stop`). Opened
 after `--stop`, it asks whether to start the backend again (No by default:
-then it only shows the state). A red bar under the tabs says what the title
+then it only shows the state). In every popup with buttons `←` `→` move the
+focus from one button to the next and Enter presses the focused one; a
+question opens with the focus on its safe choice (No, Cancel). A red bar under the tabs says what the title
 cannot: `no state yet`, `monitor stopped at <time>`, `auto-start refused
 here: another side holds the monitor lock`, `monitor pid <pid> is gone`
 (killed without cleaning up; the TUI starts it again, once per 30 s at
@@ -1336,15 +1341,28 @@ alert colour. Nothing is written while editing: `s` runs
 `claude-discord access ... set <the changes>` (with `--host`, so `ssh -t` for a
 remote bot) on a pseudo-terminal the TUI holds (1.13.1), so the command's
 terminal check holds and it prints the changes and asks its one question
-itself. What it printed up to the question is shown in a popup, its red
-widenings red and every other escape sequence and control character removed;
-`y` writes `y` to it, `n`, Enter or `esc` writes `n`. The TUI then says what came
-of it: saved (it asks the monitor for a pass and closes the editor), answered
-no (the edits stay), or the command's own words and exit status when it
-stopped without asking (nothing to change, refused, no terminal, no answer
-from the host). The command is given 40 s to reach its question, and again
-after the answer; past that, or on `esc` while it runs, or when the editor
-closes, its whole process group is killed. Where no pseudo-terminal can be
+itself. The TUI takes the question only as the command's own whole line
+(`Apply ...? [y/N]`) after the marker line it prints just before it, which no
+Discord name can hold, so a name that ends in `[y/N]` never passes for it.
+What it printed up to the question is shown in a popup, its red widenings red
+and every other escape sequence and control character removed; the popup fits
+the screen at any size: the question with its counts and the buttons stay in
+view, and the text above them scrolls (`↑` `↓` `PgUp` `PgDn` `Home` `End`),
+with a line saying how much of it is above and below. It opens on No: `y`
+writes `y` to the command, and so does Enter on Yes; `n`, `esc` or Enter on
+No writes `n`. Anything else the command prints and then waits after (a
+ProxyCommand asking for a code, a host slow to answer) is shown in a popup as
+"the host says:", never answered: Cancel (the default) stops the command,
+Wait waits on for its question. A host that asks for a code at login needs the
+command in a shell. The TUI then says what came of it: saved (it asks the
+monitor for a pass and closes the editor), answered no (the edits stay), or
+the command's own words and exit status (nothing to change, refused, no
+terminal, no answer from the host, an exit after the answer). The command is
+given 40 s to reach its question; past that, or on `esc` before the answer,
+its whole process group is killed, and nothing was written. After a `y`
+there is no cap and `esc` does not stop it (it may be writing `access.json`
+or setting the mode): the TUI says so and waits for its end, and so does
+closing the TUI. Where no pseudo-terminal can be
 opened the TUI hands its terminal to the command instead (Enter returns to
 the TUI), and where that is not possible either it shows the command for a
 shell (`c` copies it). The editor reads through `access ... --json`, run on the bot's own

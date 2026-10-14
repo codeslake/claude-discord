@@ -16,6 +16,13 @@ widening? [y/N]`), the widenings shown first, red, marked `!`; and the TUI's `s`
 runs it on a pty the TUI holds and asks that question in a popup, instead of
 handing the terminal over (kept only where no pty can be opened).
 
+Changed 2026-10-14 by the owner (1.13.1, after review): in every popup with
+buttons `←` `→` move the focus between the buttons and Enter presses the
+focused one (so Enter on Yes applies an access change); popups still open on
+the safe choice (No / Cancel) and `y` still answers directly. After a `y` the
+run has no cap and is never killed (`esc` and closing wait for it);
+`access.log` gets the `access.json` line right after the rename.
+
 ## Owners' requirements (quoted)
 
 - dongyong22: "UI가 너무 구리다", "`host` 제목 행이 왜 둘인지", "`for 63m`,
