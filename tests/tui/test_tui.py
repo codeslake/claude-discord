@@ -1809,7 +1809,7 @@ def pty_runs():
         # answered; the question after it comes with all that was printed. Past the cap with no question: killed, 124.
         code = pty_py("Verification code: ", 0.3, f"\r\nhdr\n{mark}\n{q}")
         code_end = later(lambda: (code.next(), code.next()))
-        capped = pty_py("code: ", then="time.sleep(30)", cap=1)
+        capped = pty_py("code: ", then="time.sleep(30)", cap=0.5)
         capped_end = later(lambda: (capped.next(), capped.next(), time.monotonic() - t0))
         # After a y there is no cap: it may be writing access.json or setting the mode, and is read to its end.
         answered = pty_py(f"{mark}\n{q}", then="sys.stdin.readline(); time.sleep(0.9); w('written\\n')", cap=0.6)
@@ -1938,8 +1938,7 @@ async def access_host(app, pilot):
     ssh_home(app)
     scr = lambda sel: text(app.screen, sel)
     fake_pty(app, [("Verification code: \x1b]0;T\x07", "said"), None],
-             [("Verification code: ", "said"), None],
-             [("Verification code: ", "said"), ("Verification code: \r\nok\r\n" + ASK, "ask"), ("n\r\nclaude-discord: access: answered no; nothing was changed\r\n", 4)])
+             [("Verification code: ", "said"), None, ("Verification code: \r\nok\r\n" + ASK, "ask"), ("n\r\nclaude-discord: access: answered no; nothing was changed\r\n", 4)])
     await pilot.press("e")
     await settle(app, pilot)
     await pilot.press("m", "s")
@@ -1954,22 +1953,20 @@ async def access_host(app, pilot):
     await pilot.press("escape")
     await settle(app, pilot)
     assert app.runs[0].killed.is_set() and app.runs[0].written == [] and isinstance(app.screen, tui.AccessEdit) and scr("#a-msg") == "stopped: nothing was changed", scr("#a-msg")
-    # Wait: the popup goes, the run goes on; esc in the editor still stops it (no answer was given).
+    # Wait: the popup goes, the run goes on. It says more: shown again; then its question replaces that popup, with
+    # all that was printed.
     await pilot.press("s")
     await pilot.pause()
     await pilot.press("right", "enter")
     await pilot.pause()
-    assert isinstance(app.screen, tui.AccessEdit) and not app.runs[1].killed.is_set() and app.screen.run is app.runs[1]
-    await pilot.press("escape")
-    await settle(app, pilot)
-    assert app.runs[1].killed.is_set() and scr("#a-msg") == "stopped: nothing was changed"
-    # The question after it: the host's popup is replaced by the question's, with all that was printed.
-    await pilot.press("s")
+    run = app.runs[1]
+    assert isinstance(app.screen, tui.AccessEdit) and not run.killed.is_set() and app.screen.run is run
+    run.finish(("Verification code: \r\nok\r\n", "said"))
     await settle(app, pilot)
     assert isinstance(app.screen, tui.AccessAsk) and len(app.screen_stack) == 3 and app.screen.text.plain.startswith("Verification code:\nok\nclaude-discord: access: photobot"), (app.screen_stack, app.screen.text.plain[:80])
     await pilot.press("n")
     await settle(app, pilot)
-    assert app.runs[2].written == ["n\n"] and scr("#a-msg").startswith("answered no: nothing was changed")
+    assert run.written == ["n\n"] and scr("#a-msg").startswith("answered no: nothing was changed")
 
 
 async def access_answered(app, pilot):
