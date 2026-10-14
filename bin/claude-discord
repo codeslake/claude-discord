@@ -2560,9 +2560,12 @@ if [ "${1:-}" = access ]; then
   [ ! -f "$root/config.env" ] || . "$root/config.env"
   # What names this machine keeps: the channels' (health writes channel-names), the people's (on-prompt writes
   # user-names) and the peer bots' (peers.json). They are for reading: every argument and every stored value is an id.
-  a_cn="" a_un="" a_peers="" mode=""
+  # member-names: the names Discord's member list gave at the last --json, for set to show next to an id it has no
+  # name of its own for (after it: a display name is anyone's to choose).
+  a_cn="" a_un="" a_mn="" a_peers="" mode=""
   { a_cn=$(<"$d/channel-names"); } 2>/dev/null || :
   { a_un=$(<"$d/user-names"); } 2>/dev/null || :
+  { a_mn=$(<"$d/member-names"); } 2>/dev/null || :
   { a_peers=$(<"$root/peers.json"); } 2>/dev/null || :
   { read -r mode < "$d/mode"; } 2>/dev/null || :
   mode=${mode//[[:cntrl:]]/}; mode=${mode:-none}
@@ -2681,11 +2684,18 @@ if [ "${1:-}" = access ]; then
            policy: $policy,
            channels: ([$gc | sort_by(.position // 0)[] | {id, name: (.name // "" | safe), kind: (if .type == 15 then "forum" elif .type == 5 then "news" else "text" end), read: $R[.id]}]
                       + [$policy.groups[] | .id as $i | select(all($gc[]; .id != $i)) | {id: $i, name: ($CN[$i] // ""), kind: "unknown", read: null}]),
-           people: (($api + $kept + [($policy.dm_allow + [$policy.groups[].allow[]])[] | {id: ., name: "", bot: false}])
-                    | map(select(.id | isid)) | group_by(.id) | map(.[0] + {name: (map(.name | select(. != ""))[0] // ""), bot: any(.[]; .bot)})),
+           # kept: the name this machine keeps (user-names, peers.json), the only one the TUI takes a typed name for.
+           people: (([$api[] | . + {k: ""}] + [$kept[] | . + {k: .name}] + [($policy.dm_allow + [$policy.groups[].allow[]])[] | {id: ., name: "", bot: false, k: ""}])
+                    | map(select(.id | isid)) | group_by(.id)
+                    | map({id: .[0].id, name: (map(.name | select(. != ""))[0] // ""), kept: (map(.k | select(. != ""))[0] // ""), bot: any(.[]; .bot)})),
            members: (if ($mm | type) == "array" then "api" else "names" end),
            errors: ($errs | split("\n") | map(select(. != "")))}'
     }
+    if [ "$a_mm" != null ]; then
+      a_mn=$(printf '%s' "$a_mm" | jq -r "$a_defs"'.[]? | objects | select(.user | type == "object")
+        | [(.user.id | tostring), (.nick // .user.global_name // .user.username // "" | safe)] | select((.[0] | isid) and .[1] != "") | join(" ")' 2>/dev/null) &&
+        (umask 077; printf '%s\n' "$a_mn" > "$d/member-names.$$") 2>/dev/null && mv -f "$d/member-names.$$" "$d/member-names" 2>/dev/null || rm -f "$d/member-names.$$"
+    fi
     printf '%s\n%s\n%s\n' "$a_g" "$a_c" "$a_mm" | a_doc 2>/dev/null ||
       { errs="$errs${errs:+$'\n'}Discord's answer could not be read"; a_reads=""; printf 'null\nnull\nnull\n' | a_doc; }
     exit 0
@@ -2743,9 +2753,10 @@ if [ "${1:-}" = access ]; then
     | if $out == "doc" then
         (if $err or (($P0 | tojson) != $seen) then error("changed") else $r.d end)
       else
-        ($cn | named) as $CN | ($un | named) as $UN | ($peers | peerlist) as $PL | ($PL | map({key: .id, value: .name}) | from_entries) as $PN
+        ($cn | named) as $CN | ($un | named) as $UN | ($mn | named) as $MN | ($peers | peerlist) as $PL | ($PL | map({key: .id, value: .name}) | from_entries) as $PN
         | def ch: "#" + ($CN[.] // .);
-          def who: . as $u | ($UN[$u] // $PN[$u] // "") | if . == "" then $u else "\(.) (\($u))" end;
+          # A name kept here goes before the id; one only the Discord member list gave (the person chose it) after it.
+          def who: . as $u | ($UN[$u] // $PN[$u] // "") | if . != "" then "\(.) (\($u))" else ($MN[$u] // "" | if . == "" then $u else "\($u) (\(.))" end) end;
           def whos: if . == [] then "anyone" else map(who) | join(", ") end;
           def rule: if .mention then "an @mention required" else "any message" end;
           def line($k; $l; $t): [$k, $l, $t] | join("\u001f");
@@ -2793,7 +2804,7 @@ if [ "${1:-}" = access ]; then
       end'
   a_jq() {  # $1 = diff|doc, $2 = the policy the diff was made from (doc)
     jq -r --arg out "$1" --arg seen "${2:-}" --arg words "$a_words" --arg owner "$a_owner" --arg fb "$DISCORD_CHANNEL_ID" --arg bot "$bot" \
-      --arg mode "$mode" --arg cn "$a_cn" --arg un "$a_un" --arg peers "$a_peers" "$a_prog" "$f"
+      --arg mode "$mode" --arg cn "$a_cn" --arg un "$a_un" --arg mn "$a_mn" --arg peers "$a_peers" "$a_prog" "$f"
   }
   a_owner=$DISCORD_USER_ID; c_match "$a_owner" '^[0-9]{1,20}$' || a_owner=""
   a_words=" $*"

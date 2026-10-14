@@ -1305,18 +1305,27 @@ def access_people(doc: dict, was: dict, now: dict, extra=()) -> list[dict]:
 
 
 def find_person(text: str, doc: dict) -> tuple[str | None, str]:
-    """A typed name or id as a user id: (id, "") for digits, or for the one known person of that name (the whole name
-    first, then a part of it; a leading @ is dropped); (None, why) for no one or for several."""
-    t = text.strip().lstrip("@")
+    """A typed name or id as a user id: (id, "") for digits, or for the one person of that name (the whole name, any
+    case, first; then the one name it starts; a leading @ is dropped); (None, why) for no one or for several. A name is
+    looked up only among the names this machine keeps (`kept`: user-names, peers.json) and those of the people already
+    on one of the bot's lists, never among the names only Discord's member list gave: a display name is anyone's to
+    choose, and the one picked may get a shell-capable bot."""
+    t = text.strip().lstrip("@").lower()
     if DIGITS.fullmatch(t):
         return t, ""
-    people = [p for p in seq(obj(doc).get("people")) if isinstance(p, dict) and DIGITS.fullmatch(txt(p.get("id"))) and txt(p.get("name"))]
-    hits = [p for p in people if p["name"].lower() == t.lower()] or [p for p in people if t and t.lower() in p["name"].lower()]
+    m = access_model(doc)
+    listed = {u for g in m["groups"].values() for u in g["allow"]} | set(m["dm_allow"])
+    names = []   # (name, id): a person may be found by two
+    for p in seq(obj(doc).get("people")):
+        u = txt(obj(p).get("id"))
+        if DIGITS.fullmatch(u):
+            names += [(n, u) for n in {txt(p.get("kept")), txt(p.get("name")) if u in listed else ""} if n]
+    hits = {u: n for n, u in names if n.lower() == t} or {u: n for n, u in names if t and n.lower().startswith(t)}
     if len(hits) == 1:
-        return hits[0]["id"], ""
+        return next(iter(hits)), ""
     if not hits:
-        return None, "no one of that name is known here: type the numeric user id"
-    return None, f"{len(hits)} people match: " + ", ".join(sorted(p["name"] for p in hits)[:5]) + (" …" if len(hits) > 5 else "")
+        return None, "no one of that name is kept here or on the bot's lists: type the numeric user id"
+    return None, f"{len(hits)} people match: " + ", ".join(sorted(hits.values())[:5]) + (" …" if len(hits) > 5 else "")
 
 
 def box(on: bool) -> str:

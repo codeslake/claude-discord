@@ -98,8 +98,9 @@ def access_doc():
             "channels": [{"id": "906", "name": "fo\x1b[2Jrum", "kind": "forum", "read": True}, {"id": "900", "name": "dev-bots", "kind": "text", "read": True},
                          {"id": "901", "name": "bot-health", "kind": "text", "read": True}, {"id": "902", "name": "general", "kind": "text", "read": False},
                          {"id": "905", "name": "odd", "kind": "text", "read": None}, {"id": "1234", "name": "", "kind": "unknown", "read": None}],
-            "people": [{"id": "111", "name": "dongyong22", "bot": False}, {"id": "222", "name": "gpuvillain", "bot": False},
-                       {"id": "333", "name": "junyong-dev-bot", "bot": True}, {"id": "444", "name": "pho\x1b[2Jto", "bot": False}, {"id": "555", "name": "peerbot", "bot": True}],
+            "people": [{"id": "111", "name": "dongyong22", "kept": "dongyong22", "bot": False}, {"id": "222", "name": "gpuvillain", "kept": "", "bot": False},
+                       {"id": "333", "name": "junyong-dev-bot", "kept": "", "bot": True}, {"id": "444", "name": "pho\x1b[2Jto", "kept": "", "bot": False},
+                       {"id": "555", "name": "peerbot", "kept": "peerbot", "bot": True}, {"id": "556", "name": "peerbot-old", "kept": "peerbot-old", "bot": True}],
             "members": "api", "errors": []}
 
 
@@ -600,11 +601,15 @@ def pure():
     assert [(p["name"], p["tag"]) for p in people] == [("dongyong22", "owner"), ("gpuvillain", "")], people
     assert [p["name"] for p in tui.access_people(DOC, was, edit(groups__900__allow=["111", "555", "9999"]))] == ["9999", "dongyong22", "gpuvillain", "peerbot"], "a person with no name is the id; bots last"
     find = lambda t: tui.find_person(t, DOC)
-    assert find("12345") == ("12345", "") and find(" @GPUvillain ") == ("222", "") and find("junyong") == ("333", "") and find("peer") == ("555", "")
+    # A name kept here (111, 555, 556) or of a person on the bot's lists (222, by the name Discord gave): the whole name
+    # first, then the one it starts; never a part inside it, and never a name only the member list gave (333, 444).
+    assert find("12345") == ("12345", "") and find(" @GPUvillain ") == ("222", "") and find("dong") == ("111", "") and find("PEERBOT") == ("555", "")
+    assert find("junyong")[0] is None and find("junyong-dev-bot")[0] is None and find("pho[2Jto")[0] is None and find("villain")[0] is None and find("yong22")[0] is None
     assert find("nobody")[0] is None and "numeric user id" in find("nobody")[1] and find("")[0] is None
-    assert find("o") == (None, "4 people match: dongyong22, junyong-dev-bot, peerbot, pho[2Jto"), find("o")
+    assert find("peer") == (None, "2 people match: peerbot, peerbot-old"), find("peer")
     assert find("x" * 30)[0] is None and find("12345678901234567890123")[0] is None, "more than 20 digits is no id"
-    print("ok: the people listed are those on a list before or now; a typed name is the one known person it names, digits are an id, and several matches are named")
+    print("ok: the people listed are those on a list before or now; a typed name is the one person it names among the names kept here and the bot's lists "
+          "(the whole name first, then the one it starts), never a name only Discord's member list gave; digits are an id, and several matches are named")
 
     def lines(now, at=0, side="left", prow=0, width=112):
         return [l.plain.rstrip() for l in tui.access_lines(DOC, was, now, at, side, prow, width)]
@@ -1455,6 +1460,8 @@ async def access_edit(app, pilot):
     await pilot.press("down", "down", "m", "space")
     assert body()[4].split() == "▸ [✓] #general bot cannot read required a adds a person by name or id".split() and "[✓] dongyong22  owner" in body()[1], body()
     await pilot.press("tab", "a", *"junyong", "enter")
+    assert "numeric user id" in scr("#a-msg") and app.screen.adding(), "a name only Discord's member list gave is not taken"
+    await pilot.press(*["backspace"] * 7, *"333", "enter")
     assert "▸ [✓] junyong-dev-bot  bot" in "\n".join(body()) and not app.screen.adding() and app.focused is None, body()
     # A name nobody has, then one several have: said, and the field stays for another try; escape leaves the field, not the editor.
     await pilot.press("a", *"zzz", "enter")

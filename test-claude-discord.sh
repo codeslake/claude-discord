@@ -3999,9 +3999,10 @@ ac acc --json
   and .policy == {dm: "allowlist", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: ["111", "222"]}, {id: "901", mention: false, allow: []}]}
   and ([.channels[] | [.id, .name, .kind, .read]] == [["906", "fo[2Jrum", "forum", true], ["900", "dev-bots", "text", true], ["901", "bot-health", "text", true],
        ["902", "general", "text", false], ["903", "hist", "text", false], ["905", "odd", "text", null]])
-  and .people == [{id: "111", name: "dongyong22", bot: false}, {id: "222", name: "gpu villain", bot: false}, {id: "333", name: "junyong-dev-bot", bot: true},
-                  {id: "555", name: "peerbot", bot: true}, {id: "777", name: "ACC", bot: true}]' <<<"$AO" >/dev/null ||
-  { echo "FAIL: access --json is one line: the policy, the server's text and forum channels with whether the bot can read each (true, false, or null when it cannot be told), the people (the members, then the names kept here), the peers: rc=$ARC $AO / $AE"; exit 1; }
+  and .people == [{id: "111", name: "dongyong22", kept: "dongyong22", bot: false}, {id: "222", name: "gpu villain", kept: "gpu villain", bot: false},
+                  {id: "333", name: "junyong-dev-bot", kept: "", bot: true}, {id: "555", name: "peerbot", kept: "peerbot", bot: true}, {id: "777", name: "ACC", kept: "ACC", bot: true}]' <<<"$AO" >/dev/null &&
+  [ "$(<"$AD/member-names")" = "$(printf '111 dongyong22\n333 junyong-dev-bot')" ] && [ "$(stat -c %a "$AD/member-names")" = 600 ] ||
+  { echo "FAIL: access --json is one line: the policy, the server's text and forum channels with whether the bot can read each (true, false, or null when it cannot be told), the people (the members, then the names kept here, which are marked kept), the peers; the member list's names are kept in member-names for set: rc=$ARC $AO / $AE / $(cat "$AD/member-names" 2>&1)"; exit 1; }
 [ "$(<"$CURL_LOG")" = "$(printf '%s\n' "-s --max-time 5 -w \n%{http_code} -H @- https://discord.com/api/v10/guilds/5/"{channels,,members/777,members?limit=1000} | sed 's#/$##')" ] &&
   [ "$(sort -u "$CURL_STDIN_LOG")" = "Authorization: Bot tokAccUnique" ] && [[ $AO$AE$(<"$CURL_LOG") != *tokAcc* ]] ||
   { echo "FAIL: access --json makes four calls, the token on curl's stdin and nowhere else: $(<"$CURL_LOG") / $(<"$CURL_STDIN_LOG")"; exit 1; }
@@ -4026,7 +4027,8 @@ echo "ok: access --json: one line with the policy, the server's channels and whe
 # can be read by anyone. A change that widens who can drive the bot is marked "!": an @mention no longer required, a
 # channel opened to anyone, DMs to pairing, a person added to the DM allowlist, a person the bot listed nowhere
 # (333: once, however many channels). The rest is not: a sender taken off, a channel added for people it already
-# lists, a channel left. People are named with their id (a display name is the sender's to choose), channels by name.
+# lists, a channel left. People are named with their id (a display name is the sender's to choose), channels by name:
+# a name kept here before the id, one only the member list gave (member-names, from the last --json) after it.
 A_FILE=$(<"$AD/access.json")
 ac acc set mention:900=off allow:900-222 allow:900+333 channel+902 allow:902+333 allow:902+222 mention:901=on allow:901+111 dm=pairing dm+222 dm-111
 [ "$ARC" = 3 ] && [ "$AO" = "claude-discord: access: acc on $(uname -n | cut -d. -f1), $AD/access.json
@@ -4034,8 +4036,8 @@ ac acc set mention:900=off allow:900-222 allow:900+333 channel+902 allow:902+333
     #dev-bots: - gpu villain (222) may no longer write to it there
     #bot-health: any message -> an @mention required
     #bot-health: from anyone -> from dongyong22 (111)
-    #902: + listens here: an @mention required, from dongyong22 (111), gpu villain (222), 333
-  ! 333: new to this bot: may write to it in #dev-bots, #902
+    #902: + listens here: an @mention required, from dongyong22 (111), gpu villain (222), 333 (junyong-dev-bot)
+  ! 333 (junyong-dev-bot): new to this bot: may write to it in #dev-bots, #902
   ! DMs: allowlist -> pairing: anyone who shares a server with the bot can DM it and is sent a pairing code
   ! DMs: + gpu villain (222) may DM it, and answers its permission prompts
     DMs: - dongyong22 (111) may no longer DM it

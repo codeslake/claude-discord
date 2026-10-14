@@ -384,7 +384,10 @@ names. The words are applied in order to the file as it is, so every key the
 verb does not know (the plugin's `pending` pairings, `ackReaction`, anything
 else) stays. `set` prints each change, names resolved from what this machine
 keeps (`channel-names`, `user-names`, `peers.json`; a person is shown with the
-id, since a display name is the sender's to choose), then asks:
+id, since a display name is the sender's to choose: `name (id)`), then asks. A
+person this machine keeps no name for is shown as `id (name)` with the name the
+server's member list gave at the bot's last `--json` (`<bot dir>/member-names`):
+that name is whatever the person chose, so read the id.
 
 - **a change that widens who can drive the bot** is marked `!`, red at a
   terminal, and is asked about by itself: an @mention no longer required; a
@@ -422,7 +425,8 @@ compact or clear.
 for the server's channels, its roles, the bot's roles and the member list
 (four calls, five seconds each at most), and prints one line: `policy` (as
 `health --json`'s `access`), `channels` (text, announcement and forum
-channels: `id`, `name`, `kind`, `read`), `people` (`id`, `name`, `bot`),
+channels: `id`, `name`, `kind`, `read`), `people` (`id`, `name`, `kept`: the
+name this machine keeps, or empty, and `bot`),
 `members` (`api` when the member list answered, which it does only with the
 Server Members Intent already on; `names` otherwise: the people are then the
 ones this machine has names for), `owner`, `main`, `peers`, `mode`, `guild`
@@ -1313,7 +1317,10 @@ mention rule (`m` toggles), `main` for the channel its prompt names, `bot
 cannot read` where its roles and the channel's overwrites keep it out, `?`
 where that could not be told; on the right who may write in the channel under
 the cursor (`tab` goes there; `space` ticks a person or `anyone in the
-channel`; `a` adds a person by name or numeric id); below, the DM policy and
+channel`; `a` adds a person by numeric id, or by a name this machine keeps
+(`user-names`, `peers.json`) or of a person already on one of the bot's lists:
+the whole name first, any case, then the one name it starts. A name only the
+server's member list gave is never taken: anyone can choose that one); below, the DM policy and
 the mode as radios. A change that widens who can drive the bot is drawn in the
 alert colour. Nothing is written while editing: `s` hands the terminal to
 `claude-discord access ... set <the changes>`, which prints them, asks (each
