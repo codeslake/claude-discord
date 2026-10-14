@@ -490,6 +490,10 @@ int main(int argc, char **argv) {
 }
 EOF
 JQS=("$HOME/jqstub.sh")   # every stub built here, for the self-test below
+# The suite's own jq calls run real jq, past the stub: nearly all of them read a document no earlier call read (a state.json
+# the monitor just wrote, a wrapper's output), so the stub would only add its own start and copies. (`command -v jq` names
+# this function from here on: the two stubs below that exec jq take $JQR.)
+jq() { "$JQR" "$@"; }
 if cc -O2 -o "$HOME/jqstub" -DJQR="\"$JQR\"" -DJQC="\"$HOME/jq.cache\"" "$HOME/jqstub.c" 2>/dev/null; then cp "$HOME/jqstub" "$HOME/bin/jq"; JQS+=("$HOME/jqstub"); fi
 # A file replaced between the stub's read and real jq's open (a "real" jq that does the mv -f first) must store nothing:
 # the later call on the old contents gets the real answer, not the new contents' one. For each stub built.
@@ -1778,7 +1782,7 @@ echo "ok: an old-path hook runs with no marker (no marker directory, or another 
 # holds it until the eleven other hooks have ended (3 s at most), so they all passed the marker check while the first
 # migration ran: each of them would migrate too without it (and then every migration waits the 3 s out).
 JL="$HOME/jq.log" JD="$HOME/par.done"; mkdir -p "$HOME/jqshim"; : > "$JL"; : > "$JD"
-printf '#!/bin/bash\ncase "$*" in *discord-agents/hooks*) echo x >> "%s"; n=0; while mapfile -t d < "%s" && [ "${#d[@]}" -lt 11 ] && [ "$n" -lt 600 ]; do /bin/sleep 0.005; n=$((n + 1)); done;; esac\nexec %s "$@"\n' "$JL" "$JD" "$(command -v jq)" > "$HOME/jqshim/jq"; chmod +x "$HOME/jqshim/jq"
+printf '#!/bin/bash\ncase "$*" in *discord-agents/hooks*) echo x >> "%s"; n=0; while mapfile -t d < "%s" && [ "${#d[@]}" -lt 11 ] && [ "$n" -lt 600 ]; do /bin/sleep 0.005; n=$((n + 1)); done;; esac\nexec %s "$@"\n' "$JL" "$JD" "$JQR" > "$HOME/jqshim/jq"; chmod +x "$HOME/jqshim/jq"
 echo '{"permissions":{"allow":["Bash(ls)"]}}' > "$P2/.claude/settings.local.json"; plant_old "$P2/.claude/settings.local.json"
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do (PATH="$HOME/jqshim:$PATH" plugin_hook "$P2" gamma par1; echo x >> "$JD") & done; wait
 [ "$(wc -l < "$JL" | tr -d ' ')" = 1 ] && [ "$(jq -c . "$P2/.claude/settings.local.json")" = '{"permissions":{"allow":["Bash(ls)"]}}' ] || { echo "FAIL: twelve parallel first runs must migrate once ($(wc -l < "$JL") migrations): $(<"$P2/.claude/settings.local.json")"; exit 1; }
@@ -2292,7 +2296,7 @@ out=$(tguard "$(body 43 "$LONG")"); t=$(newtext <<<"$out")
 [ "${#t}" = 501 ] || { echo "FAIL: fixture: the sample must convert to exactly 501 characters, got ${#t}: $t"; exit 1; }
 out=$(tguard "$(body 42 "$LONG")")
 [ "$(reason <<<"$out")" = "$TG_REASON" ] && ! grep -q updatedInput <<<"$out" || { echo "FAIL: a channel reply over 500 characters once converted must be denied, without updatedInput: $out"; exit 1; }
-mkdir -p "$HOME/nopy"; for c in jq grep head cat basename dirname; do ln -sf "$(command -v "$c")" "$HOME/nopy/$c"; done
+mkdir -p "$HOME/nopy"; for c in jq grep head cat basename dirname; do ln -sf "$(command -v "$c")" "$HOME/nopy/$c"; done; ln -sf "$HOME/bin/jq" "$HOME/nopy/jq"   # the stub, as before the function above
 out=$(DISCORD_STATE_DIR="$R4/mgr" CLAUDE_PROJECT_DIR="$P4" PATH="$HOME/nopy" "$BASH" "$G/thread-guard" <<<"$(body 43 "$TBL")")
 [ "$(reason <<<"$out")" = "$TB_REASON" ] || { echo "FAIL: without python3 a table must be denied as before: $out"; exit 1; }
 out=$(tguard "$(body 43 $'a | b\n---\n|---|')")   # a pipe in prose, a rule, a one-column bar
