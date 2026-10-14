@@ -1,4 +1,4 @@
-# claude-discord TUI redesign, hosts and access editing (1.11.0 - 1.13.1)
+# claude-discord TUI redesign, hosts and access editing (1.11.0 - 1.14.0)
 
 Status: approved by dongyong22 2026-10-12 20:00Z and the owner (gpuvillain) 20:01Z,
 thread 1559286847446982770. Mock: `mock.py` + `render.sh` beside this file
@@ -22,6 +22,13 @@ focused one (so Enter on Yes applies an access change); popups still open on
 the safe choice (No / Cancel) and `y` still answers directly. After a `y` the
 run has no cap and is never killed (`esc` and closing wait for it);
 `access.log` gets the `access.json` line right after the rename.
+
+Changed 2026-10-14 by the owner (1.14.0): a bot's name is its Discord username
+(`[A-Za-z0-9_-]`); the token, a rename and a new bot are written by one verb,
+`claude-discord bot ... token | rename | add`, not by `access`. Renaming changes
+Discord first, then everything here keyed by the name; a name that differs from
+Discord's is shown `≠ Discord: <name>` with `=` to take Discord's. Plan:
+`docs/superpowers/plans/2026-10-14-bot-1.14.0.md`.
 
 ## Owners' requirements (quoted)
 

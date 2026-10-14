@@ -79,6 +79,15 @@
 #                                        shows the changes (widenings first), asks once at the terminal
 #                                        and writes access.json; refuses without a terminal. --host: a bot
 #                                        on a host of a manager's ledger, over ssh (-t for the question)
+#   claude-discord bot [--host <alias> [--manager <name>]] [--project <dir>] <name> token
+#                                        reads a new token with the echo off (never the current one),
+#                                        checks it with Discord as the same bot, asks, writes .env (600)
+#   claude-discord bot [...] <name> rename <new>
+#                                        renames the bot on Discord first, then here: its directory,
+#                                        peers.json, a manager's records; a running session is stopped
+#                                        and started again from its handoff
+#   claude-discord bot [...] add [--mode none|dev-manager|autoresearchclaw] [--start]
+#                                        a new bot from its token; its name is its Discord username
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at

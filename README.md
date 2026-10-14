@@ -473,6 +473,75 @@ A bot named `access`, set up before 1.13.0, is no longer launched by
 | 4 | answered no: nothing written |
 | 5 | `--host`: the host did not answer, or its claude-discord is older than 1.13.0 |
 
+## A bot's token and name: `bot`
+
+A bot's name here is its Discord username (1.14.0): 2 to 32 of `A-Z a-z 0-9 _ -`,
+and none of claude-discord's own words (`setup`, `access`, `bot`, ...). Its
+token, its name and a new bot are written by one verb, at a terminal, as
+`access set` is (that is a speed bump, not a boundary):
+
+```sh
+claude-discord bot <bot> token          # a new token for the bot; the current one is never read
+claude-discord bot <bot> rename <new>   # Discord first, then everything here keyed by the name
+claude-discord bot add [--mode none|dev-manager|autoresearchclaw] [--start]   # a new bot, named by its token
+```
+
+- **token** reads the token with the terminal's echo off (`Token (hidden): `),
+  asks Discord who it is (`GET /users/@me`, the token on curl's stdin), and
+  refuses a token of another bot: the id kept in `<bot dir>/bot-id`, or, with
+  none kept, Discord's name for it, must be this bot's. It shows what it will
+  do and asks once; `y` writes `.env` by rename (mode 600, its other lines
+  kept). A running session logs in with the new token within 10 s: the
+  plugin's login loop re-reads `.env` by its path, and since 1.14.0 it also
+  waits for a new token when Discord closes the gateway with 4004 (a token
+  reset in the Developer Portal), which discord.js never retries. A session
+  started before 1.14.0 has the old loop: `claude-discord refresh <bot> --force`.
+  `access.log` gets `token: replaced (bot <id>)`, never the token.
+- **rename** changes the username on Discord (`PATCH /users/@me`; Discord
+  allows about two changes an hour) and only then the name here: if Discord
+  refuses, nothing here changes. Then, in this order: a running session is
+  stopped; a manager's keeper and monitor are stopped; the bot's directory
+  (token, `access.json`, mode, ledger, logs, handoff) is renamed in one step;
+  its line in every project's `peers.json` on this machine is renamed, found
+  by its id; `~/.claude-discord/scratch/<bot>` is moved; a manager's
+  `records/monitor/<bot>` is moved and its `state.json` names the new manager,
+  its backend starts again (unless you had stopped it) and its watcher record
+  on each ledger host is renamed over ssh; the session starts again under the
+  new name from its `handoff.md`. A failure before the directory moves
+  starts again what was stopped and changes nothing here; after it, what
+  failed is said with the command that finishes it. Peers on other machines
+  keep the old name in their `peers.json` and still reach the bot by its id;
+  their owner runs `setup <their bot> --mode` to show the new name. A session
+  cannot rename its own bot (it would be stopped on the way): run it from a
+  terminal outside that session.
+- **add** needs a project whose channel and owner are set (`config.env`): its
+  name is the token's Discord username. A username that is no name here is
+  refused, with the advice to rename the bot in the Developer Portal first; a
+  bot already set up on this machine (its id in some `bot-id`) is refused.
+  `y` runs `setup <name>` with its answers on its stdin (the mode, Enter for
+  the rest), keeps the id, and `--start` starts it (`--bg --name`).
+- `--host <alias> [--manager <bot>] --project <dir>` runs any of them on a
+  host of a manager's ledger, under `ssh -t`, as `access --host` does: the
+  token is typed into that terminal and read there, never put in a command
+  line. The host needs claude-discord 1.14.0 (exit 5 otherwise).
+
+`health --json` gives each bot's `discord_name`, Discord's username for it,
+asked once a day (kept in `<bot dir>/discord-name`). The TUI shows a bot whose
+two names differ with `≠ Discord: <name>`; `=` on that row renames it here to
+Discord's name (Discord is not asked to change). In the TUI, `n` renames,
+`t` replaces the token and `a` on the Bots tab adds a bot, each through this
+verb on a pseudo-terminal the TUI holds: the token goes from a masked field
+(never copied, emptied when taken) to the command's hidden prompt only.
+
+| exit | means |
+|---|---|
+| 0 | done, or nothing to change |
+| 1 | it could not: Discord refused the token or the name, another bot's token, a name taken, a failed write; or a step after the rename failed (said, with its command) |
+| 2 | usage, a name that is no name, a session renaming its own bot |
+| 3 | no terminal: nothing was read or changed |
+| 4 | answered no: nothing was changed |
+| 5 | `--host`: the host did not answer, or its claude-discord is older than 1.14.0 |
+
 ## AutoResearchClaw reports
 
 An `autoresearchclaw` bot posts one report per research iteration of the
