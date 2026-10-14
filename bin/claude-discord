@@ -1743,6 +1743,72 @@ if [ "${1:-}" = health ]; then
   exit 0
 fi
 
+# untrusted: this project's workspace trust is an explicit false in ~/.claude.json, so a `claude --bg` start here would
+# refuse ("Workspace not trusted"). Fail-open: no file, no jq, no key all read as trusted (refresh, below, says why).
+# `// "unset"` would be wrong: jq's `//` treats FALSE as empty, so the one value this checks for could never be seen.
+untrusted() {
+  command -v jq >/dev/null 2>&1 &&
+    [ "$(jq -r --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted | if . == null then "unset" else tostring end' "$HOME/.claude.json" 2>/dev/null)" = false ]
+}
+# live_sessions <name> <bot dir>: "<job id or -> <pid or ->" for each session of the bot started in this project, by its
+# name or by its job record (refresh, below, says why both). Exit 1 when `claude agents --json` fails or gives no list:
+# what runs is then unknown, which is not "nothing runs".
+live_sessions() {
+  local jobs agents
+  jobs=$(grep -lF -- "DISCORD_STATE_DIR\\\": \\\"$2\\\"" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/jobs/*/state.json 2>/dev/null) || jobs=""
+  jobs=$(printf '%s\n' "$jobs" | sed -n 's#.*/\([^/]*\)/state\.json$#\1#p')
+  agents=$(claude agents --json 2>/dev/null) && printf '%s' "${agents:-null}" | jq -r --arg n "$1" --arg jobs "$jobs" --arg cwd "$(pwd -P)" '
+      ($jobs | split("\n")) as $j |
+      if type != "array" then error("not a list") else
+        .[] | select((.name == $n or (.id as $i | any($j[]; . == $i))) and .cwd == $cwd and (.id != null or .pid != null))
+        | "\(.id // "-") \(.pid // "-")" end' 2>/dev/null
+}
+# stop_sessions <name> <live_sessions' lines>: each stopped, a background one by `claude stop <id>`, a foreground one by
+# TERM (what closing its terminal sends); then up to 10 s for their pids to go, then 3 s for the gateway to let the token
+# go. Exit 1, the pids still running in `alive`, when one would not die: a start then would put two sessions on one token.
+stop_sessions() {
+  local id pid
+  pids=()
+  while read -r id pid; do
+    [ -n "$id" ] || continue
+    echo "claude-discord: stopping $1 ($id, pid $pid)"
+    if [ "$id" != - ]; then
+      claude stop "$id" || echo "claude-discord: stop $id failed (already gone?)" >&2
+    else
+      kill -TERM "$pid" 2>/dev/null || :
+    fi
+    [ "$pid" = - ] || pids+=("$pid")
+  done <<<"$2"
+  # A stop that did not take leaves two sessions on one token, so wait for
+  # every old pid to go before starting anything; a session that will not die
+  # is reported, not raced.
+  for _ in $(seq 20); do
+    alive=()
+    for pid in ${pids[@]+"${pids[@]}"}; do kill -0 "$pid" 2>/dev/null && alive+=("$pid") || :; done
+    [ ${#alive[@]} -gt 0 ] || break
+    sleep 0.5
+  done
+  [ ${#alive[@]} = 0 ] || return 1
+  # The stopped session's channel server needs a moment to release the token;
+  # a fresh gateway login while the old one is still up gets both dropped.
+  [ -z "$2" ] || sleep 3
+}
+# start_fresh <wrapper> <name> <bot dir> <claude args>...: the bot started in the background (`--bg --name`), from this
+# project; the launch folds handoff.md into its prompt and moves it to handoff.prev.md BEFORE claude starts, so a start
+# that fails puts it back (a retry would else find none): only a handoff THIS start had, never one an earlier start left
+# in handoff.prev.md, which would hand the next session a stale one. Its exit status is the start's; put_back=1 when the
+# handoff was put back.
+start_fresh() {
+  local had=no rc=0
+  put_back=""
+  [ ! -s "$3/handoff.md" ] || had=yes
+  "$1" --bg --name "$2" "${@:4}" || rc=$?
+  if [ "$rc" != 0 ] && [ "$had" = yes ] && [ ! -s "$3/handoff.md" ] && [ -s "$3/handoff.prev.md" ]; then
+    mv "$3/handoff.prev.md" "$3/handoff.md" && put_back=1 || :
+  fi
+  return "$rc"
+}
+
 # A long-running session answers worse as its context fills, and the automatic
 # compaction near the limit summarises at the point the model is least able to
 # judge what matters. `refresh` replaces the session on purpose while it can
@@ -1808,8 +1874,7 @@ if [ "${1:-}" = refresh ]; then
   # `// "unset"` would be wrong here: jq's `//` treats FALSE as empty, so
   # `false // "unset"` is "unset" and the one value this checks for could
   # never be seen (measured). An explicit null test is the only correct form.
-  if [ "$force" = no ] && command -v jq >/dev/null 2>&1 &&
-     [ "$(jq -r --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted | if . == null then "unset" else tostring end' "$HOME/.claude.json" 2>/dev/null)" = false ]; then
+  if [ "$force" = no ] && untrusted; then
     echo "claude-discord: $PWD is not a trusted workspace, so the fresh --bg session would refuse to start and $name would be left down." >&2
     echo "claude-discord: run 'claude' here once and accept the trust prompt, then retry; --force refreshes anyway." >&2
     exit 1
@@ -1842,13 +1907,7 @@ if [ "${1:-}" = refresh ]; then
   # pid, and SIGTERM is what closing its terminal would send. A listing that
   # fails or is not an array says nothing about what is running, which is not
   # the same as "nothing is": --force may not paper over it.
-  jobs=$(grep -lF -- "DISCORD_STATE_DIR\\\": \\\"$dir\\\"" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/jobs/*/state.json 2>/dev/null) || jobs=""
-  jobs=$(printf '%s\n' "$jobs" | sed -n 's#.*/\([^/]*\)/state\.json$#\1#p')
-  if ! agents=$(claude agents --json 2>/dev/null) || ! live=$(printf '%s' "${agents:-null}" | jq -r --arg n "$name" --arg jobs "$jobs" --arg cwd "$(pwd -P)" '
-      ($jobs | split("\n")) as $j |
-      if type != "array" then error("not a list") else
-        .[] | select((.name == $n or (.id as $i | any($j[]; . == $i))) and .cwd == $cwd and (.id != null or .pid != null))
-        | "\(.id // "-") \(.pid // "-")" end' 2>/dev/null); then
+  if ! live=$(live_sessions "$name" "$dir"); then
     echo "claude-discord: 'claude agents --json' failed, so what is running is unknown; refusing to start a second session" >&2
     exit 1
   fi
@@ -1863,33 +1922,10 @@ if [ "${1:-}" = refresh ]; then
     fi
     echo "claude-discord: no running session named $name found; starting a fresh one (--force)"
   fi
-  pids=()
-  while read -r id pid; do
-    [ -n "$id" ] || continue
-    echo "claude-discord: stopping $name ($id, pid $pid)"
-    if [ "$id" != - ]; then
-      claude stop "$id" || echo "claude-discord: stop $id failed (already gone?)" >&2
-    else
-      kill -TERM "$pid" 2>/dev/null || :
-    fi
-    [ "$pid" = - ] || pids+=("$pid")
-  done <<<"$live"
-  # A stop that did not take leaves two sessions on one token, so wait for
-  # every old pid to go before starting anything; a session that will not die
-  # is reported, not raced.
-  for _ in $(seq 20); do
-    alive=()
-    for pid in ${pids[@]+"${pids[@]}"}; do kill -0 "$pid" 2>/dev/null && alive+=("$pid") || :; done
-    [ ${#alive[@]} -gt 0 ] || break
-    sleep 0.5
-  done
-  if [ ${#alive[@]} -gt 0 ]; then
+  if ! stop_sessions "$name" "$live"; then
     echo "claude-discord: session $name still running after stop (pid ${alive[*]}); not starting another. Stop it by hand, then run 'claude-discord refresh $name --force'" >&2
     exit 1
   fi
-  # The stopped session's channel server needs a moment to release the token;
-  # a fresh gateway login while the old one is still up gets both dropped.
-  [ -n "$live" ] && sleep 3
   echo "claude-discord: starting $name"
   unset CLAUDE_DISCORD_REFRESH_CHILD   # the fresh session's own refresh must fork again
   # A first turn, or the fresh session sits idle until the next message and
@@ -1910,17 +1946,8 @@ if [ "${1:-}" = refresh ]; then
   # still a shell to put the file back. `claude --bg` returns as soon as the
   # session is backgrounded (measured: 0 s), so waiting for it costs nothing
   # and a non-zero status is a real launch failure.
-  # Whether THIS refresh had a handoff to consume, recorded before the start.
-  # Without it, a --force refresh of a bot with no handoff.md would "restore"
-  # whatever handoff.prev.md an EARLIER refresh left behind, handing the next
-  # session a stale handoff -- worse than none.
-  had_handoff=no; [ ! -s "$dir/handoff.md" ] || had_handoff=yes
-  "$self" --bg --name "$name" ${fresh[@]+"${fresh[@]}"} ${kickoff[@]+"${kickoff[@]}"} && exit 0
-  rc=$?
-  if [ "$had_handoff" = yes ] && [ ! -s "$dir/handoff.md" ] && [ -s "$dir/handoff.prev.md" ]; then
-    mv "$dir/handoff.prev.md" "$dir/handoff.md" &&
-      echo "claude-discord: start failed, so $name's handoff was put back; fix the error above and run 'claude-discord refresh $name'" >&2
-  fi
+  rc=0; start_fresh "$self" "$name" "$dir" ${fresh[@]+"${fresh[@]}"} ${kickoff[@]+"${kickoff[@]}"} || rc=$?
+  [ -z "$put_back" ] || echo "claude-discord: start failed, so $name's handoff was put back; fix the error above and run 'claude-discord refresh $name'" >&2
   exit "$rc"
 fi
 
@@ -2912,21 +2939,29 @@ if [ "${1:-}" = access ]; then
   exit 0
 fi
 
-# bot: a bot's token (1.14.0), for people and the TUI, which changes it through this verb only. A bot's name here is its
-# Discord username (b_name_re: 2 to 32 of A-Z a-z 0-9 _ -).
-#   bot <name> token   the new token, read from the terminal with its echo off; Discord is asked who it is (GET /users/@me
-#                      as that token): a token Discord refuses, or one of another bot, is refused; <bot dir>/.env replaced
-#                      by rename, mode 600, its other lines kept. A running session logs in with it within 10 s.
-# It asks one question at the terminal, after the marker line access set prints (U+2060), and refuses without a terminal
-# on stdin and stdout (exit 3) before it reads anything. The token is never printed, never in an argument list, the
-# environment or a log: read from the terminal, sent to curl on its stdin.
+# bot: a bot's token and its name (1.14.0), for people and the TUI, which changes them through this verb only. A bot's
+# name here is its Discord username (b_name_re: 2 to 32 of A-Z a-z 0-9 _ -): its directory, its session's name and what
+# the monitor and the TUI show.
+#   bot <name> token          the new token, read from the terminal with its echo off; Discord is asked who it is (GET
+#                             /users/@me as that token): a token Discord refuses, or one of another bot, is refused;
+#                             <bot dir>/.env replaced by rename, mode 600, its other lines kept. A running session logs in
+#                             with it within 10 s.
+#   bot <name> rename <new>   Discord's name first (PATCH /users/@me as the bot: about two changes an hour are allowed,
+#                             and a refusal changes nothing here), then everything here keyed by the name (below). <new>
+#                             that Discord has already: only the name here changes (the TUI's `=`).
+# Each asks one question at the terminal, after the marker line access set prints (U+2060), and refuses without a
+# terminal on stdin and stdout (exit 3): token before it reads anything, rename after printing what it would do. The
+# token is never printed, never in an argument list, the environment or a log: read from the terminal (or .env), sent to
+# curl on its stdin.
 # --host <alias> [--manager <bot>] --project <dir>: as access --host; the host needs claude-discord 1.14.0.
-# Exit status: 0 done, or nothing to change; 1 it could not (Discord refused the token or did not answer, a token of
-# another bot, no such bot, a failed write); 2 usage, or what was typed is no token; 3 no terminal: nothing read or
-# changed; 4 answered no; 5 --host: no answer from the host, or its claude-discord is older than 1.14.0.
+# Exit status: 0 done, or nothing to change; 1 it could not (Discord refused or did not answer, a token of another bot,
+# no such bot, a name taken, a failed write or start: what was done and what was not is said); 2 usage, a name that is
+# none, or what was typed is no token; 3 no terminal: nothing read or changed; 4 answered no; 5 --host: no answer from
+# the host, or its claude-discord is older than 1.14.0.
 if [ "${1:-}" = bot ]; then
   shift
-  b_usage="usage: claude-discord bot [--host <alias> [--manager <bot>]] [--project <dir>] <bot> token"
+  b_usage="usage: claude-discord bot [--host <alias> [--manager <bot>]] [--project <dir>] <bot> token | <bot> rename <new name>"
+  b_name_re='^[A-Za-z0-9_-]{2,32}$'   # a bot's name: Discord's username, which it is
   a_host="" a_proj="" hb=""
   while [ $# -gt 0 ]; do
     case $1 in
@@ -2939,13 +2974,21 @@ if [ "${1:-}" = bot ]; then
       *) break;;
     esac
   done
-  [ $# = 2 ] && [ "$2" = token ] || { echo "$b_usage" >&2; exit 2; }
-  bot=$1 act=$2
+  [ $# -ge 2 ] || { echo "$b_usage" >&2; exit 2; }
+  bot=$1 act=$2 new=""; shift 2
   case $bot in ''|.|..|*/*) echo "claude-discord: bot: the bot's name must be a plain directory name" >&2; exit 2;; esac
+  case $act in
+    token) [ $# = 0 ] || { echo "$b_usage" >&2; exit 2; };;
+    rename)
+      [ $# = 1 ] || { echo "$b_usage" >&2; exit 2; }
+      new=$1
+      c_match "$new" "$b_name_re" || { echo "claude-discord: bot: the new name is 2 to 32 of A-Z a-z 0-9 _ - (Discord's username, which it becomes)" >&2; exit 2; };;
+    *) echo "$b_usage" >&2; exit 2;;
+  esac
   b_noterm() { echo "claude-discord: bot: $act reads the token from a terminal and asks there: run it in a terminal (stdin and stdout); nothing was read or changed" >&2; exit 3; }
   if [ -n "$a_host" ]; then
-    [ -t 0 ] && [ -t 1 ] || b_noterm   # nothing is read over ssh without a terminal here
-    via_host bot 1.14.0 "$bot" "$act"
+    [ "$act" != token ] || { [ -t 0 ] && [ -t 1 ]; } || b_noterm   # nothing is read over ssh without a terminal here
+    via_host bot 1.14.0 "$bot" "$act" ${new:+"$new"}
   fi
   if [ -n "$a_proj" ]; then
     cd "$a_proj" 2>/dev/null || { echo "claude-discord: bot: no such project directory (--project)" >&2; exit 1; }
@@ -2959,15 +3002,17 @@ if [ "${1:-}" = bot ]; then
   b_host_name=$(uname -n); b_host_name=${b_host_name%%.*}
   [ -f "$d/.env" ] || { echo "claude-discord: bot: no bot '$bn' set up in $root (claude-discord setup <bot>)" >&2; exit 1; }
   command -v jq >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 || { echo "claude-discord: bot needs jq and curl" >&2; exit 1; }
-  # b_api <method> <path>: Discord asked with $tok, which goes to curl on its stdin as health sends it; sets status and resp.
+  # b_api <method> <path> [<JSON body>]: Discord asked with $tok, which goes to curl on its stdin as health sends it;
+  # sets status and resp.
   b_api() {
     local out=""
-    out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 10 -w '\n%{http_code}' -X "$1" -H @- "https://discord.com/api/v10/$2" 2>/dev/null) || out=""
+    out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 10 -w '\n%{http_code}' -X "$1" -H @- ${3:+-H 'Content-Type: application/json' --data-binary "$3"} "https://discord.com/api/v10/$2" 2>/dev/null) || out=""
     status=${out##*$'\n'} resp=${out%$'\n'*}
     case $status in ''|*[!0-9]*) status=000;; esac
   }
-  # b_me: who $tok is: b_id, b_user (its username, as Discord gives it), b_isbot, and b_shown (that name made safe to
-  # print: another program's text). Exit 1 when Discord refused the token or did not answer.
+  # b_me <what to do when Discord refuses it>: who $tok is: b_id, b_user (its username, as Discord gives it), b_isbot,
+  # and b_shown (that name made safe to print: another program's text). Exit 1 when Discord refused the token or did not
+  # answer.
   b_me() {
     local l
     b_api GET users/@me
@@ -2976,7 +3021,7 @@ if [ "${1:-}" = bot ]; then
     b_shown=$(printf '%s' "$b_user" | LC_ALL=C tr -d '\000-\037\177'); b_shown=${b_shown:0:40}
     case $status in
       2*) c_match "$b_id" '^[0-9]{1,20}$' || { echo "claude-discord: bot: Discord's answer had no bot id in it; nothing was changed" >&2; exit 1; };;
-      401) echo "claude-discord: bot: Discord refused the token (HTTP 401): copy it again (Developer Portal, the bot's Bot tab, Reset Token); nothing was changed" >&2; exit 1;;
+      401) echo "claude-discord: bot: Discord refused the token (HTTP 401): $1; nothing was changed" >&2; exit 1;;
       *) echo "claude-discord: bot: Discord did not answer (HTTP $status); nothing was changed" >&2; exit 1;;
     esac
   }
@@ -3003,34 +3048,186 @@ if [ "${1:-}" = bot ]; then
   # b_log <bot dir> <what>: a line in the bot's access.log, as access set writes it (the token: the fact only).
   b_log() { (umask 077; printf '%s %s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$b_host_name" "$2" >> "$1/access.log") 2>/dev/null || :; }
 
-  [ -t 0 ] && [ -t 1 ] || b_noterm
-  b_read
-  b_me
-  [ "$b_isbot" = true ] || { echo "claude-discord: bot: that token is no bot's (Discord says it is a user's); nothing was changed" >&2; exit 1; }
-  # The same bot: its id, kept in bot-id by health; with none kept here, its Discord name is this bot's name.
-  me=""; { read -r me < "$d/bot-id"; } 2>/dev/null || :
-  if c_match "$me" '^[0-9]{1,20}$'; then
-    [ "$me" = "$b_id" ] || { echo "claude-discord: bot: that token is the bot $b_shown ($b_id), not $bn ($me): a token of another bot is refused, it would make this another bot; nothing was changed" >&2; exit 1; }
-  elif [ "$b_user" != "$bot" ]; then
-    echo "claude-discord: bot: this machine does not know $bn's Discord id yet, and that token is the bot $b_shown ($b_id), another name: refused; nothing was changed" >&2; exit 1
+  if [ "$act" = token ]; then
+    [ -t 0 ] && [ -t 1 ] || b_noterm
+    b_read
+    b_me "copy it again (Developer Portal, the bot's Bot tab, Reset Token)"
+    [ "$b_isbot" = true ] || { echo "claude-discord: bot: that token is no bot's (Discord says it is a user's); nothing was changed" >&2; exit 1; }
+    # The same bot: its id, kept in bot-id by health; with none kept here, its Discord name is this bot's name.
+    me=""; { read -r me < "$d/bot-id"; } 2>/dev/null || :
+    if c_match "$me" '^[0-9]{1,20}$'; then
+      [ "$me" = "$b_id" ] || { echo "claude-discord: bot: that token is the bot $b_shown ($b_id), not $bn ($me): a token of another bot is refused, it would make this another bot; nothing was changed" >&2; exit 1; }
+    elif [ "$b_user" != "$bot" ]; then
+      echo "claude-discord: bot: this machine does not know $bn's Discord id yet, and that token is the bot $b_shown ($b_id), another name: refused; nothing was changed" >&2; exit 1
+    fi
+    b_keep="" b_old=""
+    while IFS= read -r l || [ -n "$l" ]; do
+      case $l in DISCORD_BOT_TOKEN=*) [ -n "$b_old" ] || b_old=${l#DISCORD_BOT_TOKEN=};; *) b_keep="$b_keep$l"$'\n';; esac
+    done < "$d/.env"
+    [ "$b_old" != "$tok" ] || { echo "claude-discord: bot: that is $bn's token already; nothing to change"; exit 0; }
+    printf '%s\n' "claude-discord: bot: $bn on $b_host_name, $d/.env" \
+      "    its token is replaced by this one, of $b_shown ($b_id); the old one is not kept" \
+      "    a running session of $bn logs in with it within 10 s (one started before claude-discord 1.14.0: claude-discord refresh $bn --force)"
+    b_ask "Replace the token?"
+    # By rename, never in place: the plugin re-reads .env every 10 s while it waits for a token, by its path.
+    (umask 077; printf 'DISCORD_BOT_TOKEN=%s\n%s' "$tok" "$b_keep" > "$d/.env.cd.$$") && mv -f "$d/.env.cd.$$" "$d/.env" ||
+      { rm -f "$d/.env.cd.$$"; echo "claude-discord: bot: could not write $d/.env; it is as it was" >&2; exit 1; }
+    tok=""
+    c_match "$me" '^[0-9]{1,20}$' || printf '%s\n' "$b_id" > "$d/bot-id" 2>/dev/null || :
+    b_log "$d" "token: replaced (bot $b_id)"
+    echo "claude-discord: bot: $d/.env written. A running session of $bn logs in with it within 10 s."
+    exit 0
   fi
-  b_keep="" b_old=""
-  while IFS= read -r l || [ -n "$l" ]; do
-    case $l in DISCORD_BOT_TOKEN=*) [ -n "$b_old" ] || b_old=${l#DISCORD_BOT_TOKEN=};; *) b_keep="$b_keep$l"$'\n';; esac
-  done < "$d/.env"
-  [ "$b_old" != "$tok" ] || { echo "claude-discord: bot: that is $bn's token already; nothing to change"; exit 0; }
-  printf '%s\n' "claude-discord: bot: $bn on $b_host_name, $d/.env" \
-    "    its token is replaced by this one, of $b_shown ($b_id); the old one is not kept" \
-    "    a running session of $bn logs in with it within 10 s (one started before claude-discord 1.14.0: claude-discord refresh $bn --force)"
-  b_ask "Replace the token?"
-  # By rename, never in place: the plugin re-reads .env every 10 s while it waits for a token, by its path.
-  (umask 077; printf 'DISCORD_BOT_TOKEN=%s\n%s' "$tok" "$b_keep" > "$d/.env.cd.$$") && mv -f "$d/.env.cd.$$" "$d/.env" ||
-    { rm -f "$d/.env.cd.$$"; echo "claude-discord: bot: could not write $d/.env; it is as it was" >&2; exit 1; }
+
+  # rename <new>. What is keyed by the name here, and how each moves (README, A bot's name):
+  #   the bot's directory, with its token, access.json, mode, ledger, logs, caches and handoff: one rename(2);
+  #   its running session: stopped first, started again under the new name after, from its handoff.md when it has one;
+  #   this bot's line in the peers.json of each project of this machine, found by its id (a bot skips its own NAME there);
+  #   its scratch directory, ~/.claude-discord/scratch/<name>;
+  #   a manager's backend: its keeper and monitor stopped, records/monitor/<name> (state, alerts, log) moved, state.json's
+  #   manager renamed, the backend started again unless its owner had stopped it, and its watcher record on each host
+  #   of its ledger renamed (over ssh, as hosts add wrote it).
+  # Not here: the monitor's row of the old name leaves at its next pass, unannounced; peers on other machines keep the old
+  # name in their peers.json (they reach it by id); both are said. Before the directory moves, a failure undoes what was
+  # stopped; after it, what fails is said and the rest goes on: the name here is the new one either way.
+  d=$root/$bot nd=$root/$new M=$helpers/records/monitor
+  case $new in setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access|bot|hooks|checkin)
+    echo "claude-discord: bot: '$new' is a subcommand or a directory of claude-discord, so no bot may take the name" >&2; exit 2;; esac
+  [ ! -e "$nd" ] || [ "$nd" -ef "$d" ] || { echo "claude-discord: bot: a bot '$new' is set up in $root already" >&2; exit 1; }
+  # The session that would run this is the one stopped on the way.
+  [ -z "${DISCORD_STATE_DIR:-}" ] || ! [ "$DISCORD_STATE_DIR" -ef "$d" ] ||
+    { echo "claude-discord: bot: a session cannot rename its own bot: it is stopped on the way. Run it in a terminal outside $bn's session" >&2; exit 2; }
+  mode=""; { read -r mode < "$d/mode"; } 2>/dev/null || :
+  mgr=""; [ "$mode" != dev-manager ] || [ ! -f "$d/hosts" ] || [ "$new" = "$bot" ] || mgr=1
+  if [ -n "$mgr" ]; then
+    # One backend per manager name on a machine (setup says why).
+    [ ! -e "$M/$new" ] || [ "$M/$new" -ef "$M/$bot" ] || { echo "claude-discord: bot: $M/$new is there: a manager named $new has a backend on this machine" >&2; exit 1; }
+    while IFS= read -r p || [ -n "$p" ]; do
+      p=${p%$'\r'}
+      [ -n "$p" ] && [ -f "$p/.claude/discord-agents/$new/hosts" ] || continue
+      echo "claude-discord: bot: '$new' is a dev-manager with a hosts ledger in $p: one backend serves one manager name per machine" >&2; exit 1
+    done < <(cat "$helpers/records/projects" 2>/dev/null)
+  fi
   tok=""
-  c_match "$me" '^[0-9]{1,20}$' || printf '%s\n' "$b_id" > "$d/bot-id" 2>/dev/null || :
-  b_log "$d" "token: replaced (bot $b_id)"
-  echo "claude-discord: bot: $d/.env written. A running session of $bn logs in with it within 10 s."
-  exit 0
+  { while IFS= read -r l || [ -n "$l" ]; do case $l in DISCORD_BOT_TOKEN=*) tok=${l#DISCORD_BOT_TOKEN=}; break;; esac; done < "$d/.env"; } 2>/dev/null || :
+  [ -n "$tok" ] || { echo "claude-discord: bot: no token in $d/.env (claude-discord bot $bn token)" >&2; exit 1; }
+  b_me "claude-discord bot $bn token, first"
+  me=""; { read -r me < "$d/bot-id"; } 2>/dev/null || :
+  ! c_match "$me" '^[0-9]{1,20}$' || [ "$me" = "$b_id" ] ||
+    { echo "claude-discord: bot: $d/.env holds the token of the bot $b_shown ($b_id), not $bn's ($me): claude-discord bot $bn token puts its own back; nothing was changed" >&2; exit 1; }
+  [ "$b_user" != "$new" ] || [ "$new" != "$bot" ] || { echo "claude-discord: bot: $bn is its name here and on Discord already; nothing to change"; exit 0; }
+  # A peer of that name in peers.json: the bot would skip it as itself.
+  b_clash=$(jq -r --arg n "$new" --arg id "$b_id" 'first(.peers[]? | objects | select((.name // "" | tostring | ascii_downcase) == ($n | ascii_downcase) and (.bot_id // "" | tostring) != $id) | .bot_id | tostring) // empty' "$root/peers.json" 2>/dev/null) || b_clash=""
+  [ -z "$b_clash" ] || { echo "claude-discord: bot: the peer $new (${b_clash//[!0-9]/}) in $root/peers.json has that name, and a bot skips its own name there; nothing was changed" >&2; exit 1; }
+  live=""
+  if [ "$new" != "$bot" ]; then
+    live=$(live_sessions "$bot" "$d") || { echo "claude-discord: bot: 'claude agents --json' failed, so what runs is unknown; nothing was changed" >&2; exit 1; }
+    [ -z "$live" ] || ! untrusted || { echo "claude-discord: bot: $PWD is not a trusted workspace, so $bn would not start again after the rename: run 'claude' here once and accept the trust prompt; nothing was changed" >&2; exit 1; }
+  fi
+  b_n=0; [ -z "$live" ] || b_n=$(printf '%s\n' "$live" | grep -c .)
+  printf '%s\n' "claude-discord: bot: $bn on $b_host_name, $root"
+  if [ "$b_user" = "$new" ]; then echo "    Discord: it is $new there already: Discord is not asked to change it"
+  else echo "    Discord: $b_shown -> $new (about 2 changes an hour are allowed: if Discord refuses, nothing here is changed)"; fi
+  if [ "$new" != "$bot" ]; then
+    echo "    here: $bn -> $new (its directory, and its line in the peers.json of this machine's projects)"
+    if [ -z "$live" ]; then echo "    it is not running: renamed only (claude-discord --bg --name $new starts it)"
+    elif [ -s "$d/handoff.md" ]; then echo "    it runs ($b_n session$([ "$b_n" = 1 ] || echo s)): stopped, renamed, started again as $new from its handoff.md"
+    else echo "    it runs ($b_n session$([ "$b_n" = 1 ] || echo s)): stopped, renamed, started again as $new with no handoff.md: an empty context that catches up from the channel"; fi
+    [ -z "$mgr" ] || echo "    a manager: its keeper and monitor stop, its state, alerts and log move to $M/$new, its backend starts again as $new, and its record on each ledger host is renamed"
+  fi
+  [ -t 0 ] && [ -t 1 ] || { echo "claude-discord: bot: not a terminal (stdin and stdout), so nothing was changed: run it in a terminal to answer" >&2; exit 3; }
+  b_ask "Rename it to $new?"
+  b_disc=""
+  if [ "$b_user" != "$new" ]; then
+    b_api PATCH users/@me "{\"username\":\"$new\"}"
+    l=$(printf '%s' "$resp" | jq -r 'objects | (.username // "") | tostring' 2>/dev/null) || l=""
+    case $status in
+      2*) [ "$l" = "$new" ] || { echo "claude-discord: bot: Discord calls it '$(printf '%s' "$l" | LC_ALL=C tr -d '\000-\037\177' | cut -c1-40)' now, not $new: nothing here was changed" >&2; exit 1; };;
+      *) l=$(printf '%s' "$resp" | jq -r 'objects | [.errors.username._errors[]?.message?, .message, (.retry_after | if . then "retry after \(.) s" else null end)] | map(select(type == "string")) | join(": ")' 2>/dev/null) || l=""
+         echo "claude-discord: bot: Discord refused the new name (HTTP $status${l:+: $(printf '%s' "$l" | LC_ALL=C tr -d '\000-\037\177' | cut -c1-200)}); nothing was changed" >&2; exit 1;;
+    esac
+    b_disc=1
+    b_log "$d" "rename: on Discord $b_shown -> $new"
+  fi
+  tok=""
+  [ "$new" != "$bot" ] || { echo "claude-discord: bot: Discord calls it $new now, as it is called here"; exit 0; }
+  b_again=""; [ -z "$b_disc" ] || b_again=" (Discord calls it $new now: run this again to rename it here)"
+  if [ -n "$live" ] && ! stop_sessions "$bn" "$live"; then
+    echo "claude-discord: bot: $bn still runs after stop (pid ${alive[*]}): nothing here was renamed$b_again. Stop it by hand first" >&2; exit 1
+  fi
+  b_undo() {  # the directory did not move: what was stopped runs again
+    if [ -n "$mgr" ]; then
+      rm -f "$M/$new/stopped"; rmdir "$M/$new" 2>/dev/null || :
+      [ -n "$was_stopped" ] || bash "$self_root/monitor/monitor.sh" "$self_path" --start "$bot" </dev/null >/dev/null 2>&1 || :
+    fi
+    [ -z "$live" ] || start_fresh "$self_path" "$bot" "$d" "Catch up on the channel and continue from your handoff." || :
+  }
+  was_stopped=""
+  if [ -n "$mgr" ]; then
+    [ ! -e "$M/$bot/stopped" ] || was_stopped=1
+    bash "$self_root/monitor/monitor.sh" "$self_path" --stop "$bot" </dev/null >/dev/null 2>&1 || :
+    # A marker under the new name before the directory has it: no session's hook starts a backend for it meanwhile.
+    mkdir -p "$M" && mkdir "$M/$new" && : > "$M/$new/stopped" ||
+      { b_undo; echo "claude-discord: bot: could not make $M/$new: nothing here was renamed$b_again" >&2; exit 1; }
+  fi
+  perl -e 'rename $ARGV[0], $ARGV[1] or exit 1' "$d" "$nd" ||
+    { b_undo; echo "claude-discord: bot: could not rename $d: nothing here was renamed$b_again" >&2; exit 1; }
+  b_log "$nd" "rename: $bn -> $new"
+  b_rc=0 b_warn=""
+  # This bot's line in each project's peers.json, by its id.
+  while IFS= read -r p || [ -n "$p" ]; do
+    p=${p%$'\r'}
+    [ -n "$p" ] && [ -f "$p/.claude/discord-agents/peers.json" ] || continue
+    jq_edit "$p/.claude/discord-agents/peers.json" --arg id "$b_id" --arg n "$new" \
+      'if (.peers | type) == "array" then .peers |= map(if type == "object" and ((.bot_id // "") | tostring) == $id then .name = $n else . end) else . end'
+  done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null)
+  if [ -d "$helpers/scratch/$bot" ] && [ ! -e "$helpers/scratch/$new" ]; then
+    mv "$helpers/scratch/$bot" "$helpers/scratch/$new" 2>/dev/null || b_warn="$b_warn"$'\n'"    its scratch directory stays $helpers/scratch/$bot"
+  fi
+  if [ -n "$mgr" ]; then
+    rm -f "$M/$new/stopped"
+    if [ ! -d "$M/$bot" ]; then
+      rmdir "$M/$new" 2>/dev/null || :
+    elif rmdir "$M/$new" 2>/dev/null && perl -e 'rename $ARGV[0], $ARGV[1] or exit 1' "$M/$bot" "$M/$new"; then
+      # The monitor starts from a state.json only when it names this manager: else it would post standing findings again.
+      { jq -c --arg m "$new" '.manager = $m' "$M/$new/state.json" > "$M/$new/state.json.tmp" && mv -f "$M/$new/state.json.tmp" "$M/$new/state.json"; } 2>/dev/null || rm -f "$M/$new/state.json.tmp"
+    else
+      b_warn="$b_warn"$'\n'"    its state and alerts stay in $M/$bot: the monitor of $new starts with none (a finding standing now is posted again)"
+    fi
+    if [ -n "$was_stopped" ]; then
+      b_warn="$b_warn"$'\n'"    its backend stays stopped, as you left it: claude-discord monitor --start $new"
+    else
+      bash "$self_root/monitor/monitor.sh" "$self_path" --start "$new" </dev/null >/dev/null 2>&1 ||
+        { b_rc=1; b_warn="$b_warn"$'\n'"    its backend did not start: claude-discord monitor --start $new"; }
+    fi
+    # Its record on each host of its ledger (hosts add wrote it): renamed over ssh, a host that does not answer said.
+    mine=""; { read -r mine < "$helpers/host-id"; } 2>/dev/null || :
+    if c_match "$mine" "$hid_re" && c_match "$new" "$mgr_re"; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        set -f; set -- ${line%$'\r'}; set +f
+        a=${1:-}
+        [ "$a" != local ] && c_match "$a" "$alias_re" || continue
+        h_ssh "$a" "~/.local/bin/claude-discord --version --watch $new $mine $a"
+        if [ "$h_rc" = 0 ]; then
+          ! c_match "$bot" "$mgr_re" || h_ssh "$a" "~/.local/bin/claude-discord --version --unwatch $bot $mine"
+        else
+          b_warn="$b_warn"$'\n'"    $a did not answer (ssh exit $h_rc), so its watcher record still names $bn: ssh $a '~/.local/bin/claude-discord --version --watch $new $mine $a'"
+        fi
+      done < "$nd/hosts"
+    fi
+  fi
+  b_ran=""
+  if [ -n "$live" ]; then
+    if start_fresh "$self_path" "$new" "$nd" "Catch up on the channel and continue from your handoff."; then b_ran=1
+    else b_rc=1; b_warn="$b_warn"$'\n'"    $new did not start (above)${put_back:+; its handoff was put back}: claude-discord --bg --name $new"; fi
+  fi
+  echo "claude-discord: bot: renamed: $nd${b_disc:+ (and on Discord)}"
+  [ -z "$b_ran" ] || echo "    its session runs again as $new"
+  [ -n "$live" ] || echo "    it was not running: claude-discord --bg --name $new starts it"
+  echo "    the monitor shows $new from its next pass; the row of $bn leaves it then, unannounced"
+  [ "$mode" != dev-manager ] || echo "    peers on other machines list it as $bn in their peers.json, by its id $b_id, so they still reach it; to show the new name there, their owner runs claude-discord setup <their bot> --mode, with the peer $new:$b_id:<owner id>:<machine>"
+  [ -z "$b_warn" ] || printf 'claude-discord: bot: not done:%s\n' "$b_warn" >&2
+  exit "$b_rc"
 fi
 
 # monitor: the backend health monitor of a manager bot (monitor/monitor.sh has
