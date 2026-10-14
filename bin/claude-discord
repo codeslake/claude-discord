@@ -2186,13 +2186,16 @@ if [ "${1:-}" = hosts ]; then
   h_cap=${CLAUDE_DISCORD_PROBE_CAP:-20}
   case $h_cap in ''|0*|*[!0-9]*|????*) h_cap=20;; esac
   [ "$h_cap" -le 300 ] || h_cap=20
+  # The suite cannot wait a whole second for a hung probe: CLAUDE_DISCORD_PROBE_CAP_TENTHS (one digit, 1 to 9; read
+  # here only, not for users) is the cap in tenths of a second instead. Anything else leaves the cap above as it is.
+  case ${CLAUDE_DISCORD_PROBE_CAP_TENTHS:-} in [1-9]) h_cap=0.$CLAUDE_DISCORD_PROBE_CAP_TENTHS;; esac
   h_capped='my ($cap, $max, $buf, $st) = (shift, 65536, "");
     pipe(my $r, my $w) or exit 127;
     my $pid = fork(); defined $pid or exit 127;
     if (!$pid) { setpgrp(0, 0); close $r; open(STDOUT, ">&", $w); open(STDERR, ">&", $w); close $w; exec { $ARGV[0] } @ARGV; exit 127 }
     setpgrp($pid, $pid); close $w;
     $SIG{ALRM} = $SIG{INT} = $SIG{TERM} = $SIG{HUP} = sub { kill "KILL", -$pid; exit 142 };
-    alarm $cap;
+    if ($cap =~ /^\d+$/) { alarm $cap } else { require Time::HiRes; Time::HiRes::alarm($cap) }   # a fraction: the suite only
     my $rin = ""; vec($rin, fileno($r), 1) = 1;
     while (length($buf) < $max) {
       $st = $? if !defined $st && waitpid($pid, 1) == $pid;   # 1 is WNOHANG
