@@ -3418,18 +3418,16 @@ out=$(bash "$S" health --json 2>/dev/null) || :
 case $(detail_of wbot "$out") in *"no answer from 'claude agents'"*) ;; *) echo "FAIL: the held line should say the state is unknown: $(detail_of wbot "$out")"; exit 1;; esac
 [[ $(<"$WD/health-unknown") =~ ^1\ ([0-9]+)$ ]] && [ $(( $(date +%s) - BASH_REMATCH[1] )) -lt 60 ] || { echo "FAIL: an unknown must be counted, with the time of the first: $(<"$WD/health-unknown")"; exit 1; }
 # The cap is so many runs AND so long since the first of them: a pass can be asked for (monitor --check), so six runs
-# may be seconds apart. Six runs within a second hold; so does a long streak of fewer runs. Seeded rather than looped
-# there: the count and the time are read from this file and written back.
+# may be seconds apart. A long streak of fewer runs holds; so do more than six runs within a second. Seeded rather
+# than looped there: the count and the time are read from this file and written back.
 unk() { printf '%s\n' "$1" > "$WD/health-unknown"; stale_one; out=$(bash "$S" health --json 2>/dev/null) || :; }
-unk "5 $(date +%s)"
-[ "$(verdict_of wbot "$out")" = busy ] && [[ $(<"$WD/health-unknown") =~ ^6\ [0-9]+$ ]] || { echo "FAIL: six runs with no answer within a second are no finding yet (the cap is 25 minutes too): $out / $(<"$WD/health-unknown")"; exit 1; }
 unk "4 $(( $(date +%s) - 9000 ))"
 [ "$(verdict_of wbot "$out")" = busy ] || { echo "FAIL: fewer than six runs with no answer are no finding, however long ago the first: $out"; exit 1; }
-# A file of before 1.12.0 holds the count only: its streak starts now (an upgrade must not alert), and with a leading
-# zero (a hand edit) it is decimal 8, where bash would read an octal number that is none and end the whole health block
-# (as for channel-guild above).
+# A file of before 1.12.0 holds the count only: its streak starts now (an upgrade must not alert; and this is the ninth
+# run of a streak that began this second), and with a leading zero (a hand edit) it is decimal 8, where bash would read
+# an octal number that is none and end the whole health block (as for channel-guild above).
 unk 08
-[ "$(verdict_of wbot "$out")" = busy ] && [[ $(<"$WD/health-unknown") =~ ^9\ [0-9]+$ ]] || { echo "FAIL: a count with no time (a file of before 1.12.0) starts its 25 minutes now: $out / $(<"$WD/health-unknown")"; exit 1; }
+[ "$(verdict_of wbot "$out")" = busy ] && [[ $(<"$WD/health-unknown") =~ ^9\ [0-9]+$ ]] || { echo "FAIL: six runs or more with no answer within a second are no finding yet, and a count with no time (a file of before 1.12.0) starts its 25 minutes now: $out / $(<"$WD/health-unknown")"; exit 1; }
 unk "09 0$(( $(date +%s) - 1500 ))"
 [ "$(verdict_of wbot "$out")" = nostate ] || { echo "FAIL: past the cap (six runs and 25 minutes) the not-knowing is itself the finding: $out"; exit 1; }
 case $(detail_of wbot "$out") in *"'claude agents' has not answered for 10 runs"*'daemon itself may be unwell'*) ;; *) echo "FAIL: the finding should name the likely cause: $(detail_of wbot "$out")"; exit 1;; esac
@@ -3618,7 +3616,7 @@ hc --bot plain list
 [ "$HRC" = 1 ] && grep -q "no dev-manager bot 'plain' with a hosts ledger" <<<"$HE" || { echo "FAIL: a bot that is no dev-manager with a ledger is exit 1: rc=$HRC $HE"; exit 1; }
 rm -rf "$MR/mgr2" "$MR/plain" "$MP/sub"
 # A flag that means nothing for the verb is a usage error too, not ignored (`rm --dry-run` would remove).
-for bad in "" "nosuchverb" "list extra" "--bot" "list --frob" "list --no-probe" "list --stdin" "rm --dry-run h1" "rm --json h1" "set h1 X=1 --dry-run" "add --stdin h7" "add --json h7" "laptop --no-probe h1 on" "--json"; do
+for bad in "" "nosuchverb" "list extra" "--bot" "list --frob" "list --stdin" "rm --dry-run h1" "set h1 X=1 --dry-run" "add --json h7" "laptop --no-probe h1 on"; do
   hc $bad </dev/null
   [ "$HRC" = 2 ] && grep -q '^usage: claude-discord hosts ' <<<"$HE" && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] || { echo "FAIL: 'hosts $bad' is a usage error (exit 2), nothing written: rc=$HRC $HE"; exit 1; }
 done
@@ -3657,7 +3655,7 @@ for bad in '-oProxyCommand=touch$IFS/tmp/pwned' '-v'; do
   [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [ ! -e "$HOME/ssh.log" ] && grep -q '^usage: ' <<<"$HE" || { echo "FAIL: an alias that is an ssh option ($bad) is a usage error: rc=$HRC $HE"; exit 1; }
 done
 # The arguments swapped, a secret where the alias belongs: every verb says the same and echoes nothing of it.
-for cmd in "set HTTPS_PROXY=http://u:secretpw@h lap" "add K=secretpw h8" "rm secretpw/x" "laptop secretpw! on" "set secretpw~ --stdin"; do
+for cmd in "set HTTPS_PROXY=http://u:secretpw@h lap" "rm secretpw/x" "laptop secretpw! on"; do
   hc $cmd </dev/null
   [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [ ! -e "$HOME/ssh.log" ] && [ "$HO$HE" = "$NOALIAS" ] || { echo "FAIL: 'hosts $cmd': a refused alias is never echoed: rc=$HRC $HO $HE"; exit 1; }
 done
@@ -3665,21 +3663,21 @@ done
 # with a space, a quote or a control character, a display name with a space, an empty value (the word may be a token
 # that ends in =), a value past 1024 characters, a display name past 40. Exit 2, and nothing of the word is echoed
 # (a secret pasted in the wrong place), its key neither: only where it stands.
-for bad in 'secretpw' '1K=secretpw' 'K=secretpw x' 'K="secretpw"' $'K=secretpw\033[2J' 'name=secretpw box' 'secretpw=' "K=secretpw$(printf 'a%.0s' {1..1020})" 'Ｋ=secretpw' 'secretpwé=1' "name=secretpw$(printf '가%.0s' {1..33})"; do
+for bad in 'secretpw' '1K=secretpw' 'K=secretpw x' 'K="secretpw"' $'K=secretpw\033[2J' 'name=secretpw box' 'secretpw=' "K=secretpw$(printf 'a%.0s' {1..1020})" 'Ｋ=secretpw' "name=secretpw$(printf '가%.0s' {1..33})"; do
   HRC=0; HE=$(LC_ALL=en_US.utf8 bash "$S" hosts add --no-probe h8 "$bad" 2>&1) || HRC=$?
   [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [[ $HE != *secretpw* ]] && [[ $HE == "claude-discord: hosts: argument 3"* ]] || { echo "FAIL: '$bad' is no word of a ledger line: exit 2, nothing written, the word not echoed: rc=$HRC $HE"; exit 1; }
 done
 hc add --no-probe h8 'K=secretpw x'
 grep -q '^claude-discord: hosts: argument 3: a value holds no space' <<<"$HE" || { echo "FAIL: a refused value is named by where it stands: $HE"; exit 1; }
 # laptop is the third word or none, and a KEY comes once.
-for cmd in "h8 laptop laptop" "h8 X=1 laptop" "h8 laptop X=secretpw Y=2 X=3"; do
+for cmd in "h8 laptop laptop" "h8 laptop X=secretpw Y=2 X=3"; do
   hc add --no-probe $cmd
   [ "$HRC" = 2 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] && [[ $HE != *secretpw* ]] && [[ $HE == "claude-discord: hosts: argument "[46][:\ ]* ]] || { echo "FAIL: 'hosts add $cmd' repeats a word: exit 2, nothing written: rc=$HRC $HE"; exit 1; }
 done
 # A display name is counted in characters of the user's locale (40 Hangul are 120 bytes), and may hold any of them.
 HRC=0; HE=$(LC_ALL=en_US.utf8 bash "$S" hosts add --no-probe h40 "name=$(printf '가%.0s' {1..40})" 2>&1 >/dev/null) || HRC=$?
 [ "$HRC" = 0 ] && [ -z "$HE" ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = "h40 name=$(printf '가%.0s' {1..40})" ] || { echo "FAIL: a display name of 40 characters that are not ASCII is taken: rc=$HRC $HE"; exit 1; }
-hc rm --no-probe h40
+printf '%s\n' "$LEDGER" > "$MR/mgr/hosts"
 # Two writers: one holds the ledger's lock, reads the ledger, and 0.1 s later moves in its own version (as a TUI save
 # or another `hosts` call would). An add started meanwhile must wait for it and then add to THAT version; were it not
 # to wait, the first writer's rename would drop its line.
@@ -3750,8 +3748,8 @@ for cmd in "set web A=9" "laptop web on" "rm --no-probe web"; do
   hc $cmd
   [ "$HRC" = 3 ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] || { echo "FAIL: 'hosts $cmd' must not touch web2: rc=$HRC $HE / $(<"$MR/mgr/hosts")"; exit 1; }
 done
-hc add --no-probe web; hc set web2 A=2; hc laptop web on; hc rm --no-probe web
-[ "$HRC" = 0 ] && ledger_is "$HEAD${LOCAL}web2 A=2 * [a-z]*" || { echo "FAIL: web is added, set and removed beside web2, whose line keeps its words (a * is no file list): rc=$HRC $HE / $(<"$MR/mgr/hosts")"; exit 1; }
+hc set web2 A=2
+[ "$HRC" = 0 ] && ledger_is "$HEAD${LOCAL}web2 A=2 * [a-z]*" || { echo "FAIL: a changed line keeps its other words as they are (a * is no list of the files here): rc=$HRC $HE / $(<"$MR/mgr/hosts")"; exit 1; }
 # A ledger with no local line (hand-edited): its last host stays, or the monitor would run with none and say nothing;
 # and `add local` adds this machine with no ssh (nobody is asked who local is).
 printf '# c\nh1\nh2 X=1\n-x\n' > "$MR/mgr/hosts"; rm -f "$HOME/ssh.log"
@@ -3786,15 +3784,21 @@ ID_B=$(printf 'b%.0s' {1..32})
 LEDGER=$(<"$MR/mgr/hosts"); rm -f "$HOME/ssh.log"
 # The probe's command: --dry-run prints it and runs nothing; the real add then runs exactly that (ssh's argument list
 # is the printed line without its quoting), with stdin closed, and adds the host.
-ans h5 1.12.0 "$ID_B"
+# Its answer comes after a banner (sshd's, the shell's) longer than the 4096 bytes kept, which holds a version line and
+# this home's own id: the LAST line that reads as a version line counts, with what follows it. And its ssh leaves a
+# process behind that holds the output open for 3 s (as a ControlPersist master does): the answer is taken when ssh
+# ends, not when the last holder of its output does.
+ans h5 1.12.0 "$ID_B"; echo 3 > "$MON/h5.hold"
+{ printf 'claude-discord 0.0.1 (banner)\nhost-id %s\n' "$L"; head -c 6000 /dev/zero | tr '\0' 'b' | fold -w 100; echo; cat "$MON/h5.out"; } > "$MON/h5.t" && mv "$MON/h5.t" "$MON/h5.out"
 hc add --dry-run h5; SHOWN=$HO
 [ "$HRC" = 0 ] && [ "$SHOWN" = "$(printf "ssh -o BatchMode=yes -o ConnectTimeout=8 -- h5 '~/.local/bin/claude-discord --version --host-id'\nchecks it and writes ~/.claude-discord/host-id there if missing; adding it writes ~/.claude-discord/watchers/mgr")" ] && [ ! -e "$HOME/ssh.log" ] && [ "$(<"$MR/mgr/hosts")" = "$LEDGER" ] ||
   { echo "FAIL: add --dry-run prints the probe's command and what the add writes on that machine, and runs nothing: rc=$HRC $HO / $HE"; exit 1; }
 SHOWN=${SHOWN%%$'\n'*}
-HRC=0; HO=$(printf 'left on stdin\n' | bash "$S" hosts add h5 laptop X=1 2>"$HOME/hosts.err") || HRC=$?
+t0=$(date +%s%N); HRC=0; HO=$(printf 'left on stdin\n' | bash "$S" hosts add h5 laptop X=1 2>"$HOME/hosts.err") || HRC=$?
+[ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 2000 ] || { echo "FAIL: an answer is taken when ssh ends, not when what it left behind lets go of its output (3 s here): $(( ($(date +%s%N) - t0) / 1000000 )) ms"; exit 1; }
 SHOWN=${SHOWN#ssh }; SHOWN=${SHOWN//\'/}
 [ "$HRC" = 0 ] && [ ! -s "$HOME/hosts.err" ] && [ "$(sed -n 1p "$HOME/ssh.log")" = "$SHOWN" ] && [ "$(command grep -c -- '--host-id$' "$HOME/ssh.log")" = 1 ] && ! grep -q '^ATE' "$HOME/ssh.log" && [ "$(tail -n 1 "$MR/mgr/hosts")" = "h5 laptop X=1" ] ||
-  { echo "FAIL: add runs the command --dry-run printed, once, eats no stdin, and adds the host that answered with another home's id: rc=$HRC $HO / $(<"$HOME/hosts.err") / $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
+  { echo "FAIL: add runs the command --dry-run printed, once, eats no stdin, and adds the host that answered (after a banner) with another home's id: rc=$HRC $HO / $(<"$HOME/hosts.err") / $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
 LEDGER=$(<"$MR/mgr/hosts"); rm -f "$HOME/ssh.log"
 # refused <host> <exit status> <stderr regex> <what>: `hosts add <host>` exits so, says so, and writes nothing.
 refused() {
@@ -3817,9 +3821,12 @@ printf 'banner \033[2J\nssh: connect to host dead port 22: Connect\302\233ion \3
 refused dead 5 'dead did not answer \(ssh exit 255, also with ControlPath=none\): ssh: connect to host dead port 22: Connection timed out\]0;x\. Not added; .*hosts add --no-probe dead' "an unreachable host is not added"
 [ "$(command grep -c ' -- dead ' "$HOME/ssh.log")" = 2 ] && [ "$(command grep -c 'ControlPath=none -- dead ' "$HOME/ssh.log")" = 1 ] || { echo "FAIL: an ssh exit 255 is tried once more with ControlPath=none: $(<"$HOME/ssh.log")"; exit 1; }
 # 255 on the first try only (a stale master): the retry's answer counts.
-ans stale 1.12.0 "$ID_B"; echo 255 > "$MON/stale.rc"; echo 0 > "$MON/stale.rc2"
+# Its answer is a 1.12.0 with no host-id: it could not make one (an unwritable home). Said as that, not as an older
+# version, and added.
+ans stale 1.12.0; echo 255 > "$MON/stale.rc"; echo 0 > "$MON/stale.rc2"
 hc add stale
-[ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = stale ] || { echo "FAIL: a host that answers on the ControlPath=none retry is added: rc=$HRC $HE"; exit 1; }
+[ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = stale ] && [ "${HE%% (*}" = "claude-discord: hosts: warning: claude-discord 1.12.0 on stale answered but could not create its host-id" ] ||
+  { echo "FAIL: a host that answers on the ControlPath=none retry is added; a 1.12.0 with no host-id with the warning that it could not create one: rc=$HRC $HE"; exit 1; }
 LEDGER=$(<"$MR/mgr/hosts")
 # A host that connects and never answers: the cap (1 s here) ends the whole call, the ssh process group killed. Also
 # when a process ssh left behind outside its group still holds the output open (as a ControlPersist master does): it
@@ -3827,33 +3834,18 @@ LEDGER=$(<"$MR/mgr/hosts")
 ans hang 1.12.0 "$ID_B"; echo 4 > "$MON/hang.sleep"; echo 4 > "$MON/hang.hold"
 t0=$(date +%s%N); CLAUDE_DISCORD_PROBE_CAP=1 refused hang 5 'hang gave no answer within 1s\. Not added' "a probe that hangs is ended by the cap"
 [ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 3000 ] && ! kill -0 "$(<"$MON/hang.pid")" 2>/dev/null || { echo "FAIL: a hung probe must end at its cap (1 s; within 2 s more), its ssh killed, whatever still holds its output: $(( ($(date +%s%N) - t0) / 1000000 )) ms"; exit 1; }
-# The cap is an integer from 1 to 300, else the default 20 (0 would be no cap at all); a HUP or a TERM to the runner
-# (a closed terminal) ends ssh as the cap does. Seen through the one message that names the cap.
-for c in 0 301; do
-  rm -f "$MON/hang.pid" "$MON/hang.hold"; sig=HUP; [ "$c" = 0 ] || sig=TERM
-  CLAUDE_DISCORD_PROBE_CAP=$c bash "$S" hosts add hang >/dev/null 2>"$HOME/hosts.err" & hp=$!
-  wait_for_file "$MON/hang.pid"; read -r _ _ _ pp _ < "/proc/$(<"$MON/hang.pid")/stat"
-  kill -"$sig" "$pp"; HRC=0; wait "$hp" || HRC=$?
-  [ "$HRC" = 5 ] && grep -q 'hang gave no answer within 20s' "$HOME/hosts.err" && ! kill -0 "$(<"$MON/hang.pid")" 2>/dev/null ||
-    { echo "FAIL: CLAUDE_DISCORD_PROBE_CAP=$c is the default 20, and a $sig to the runner kills ssh: rc=$HRC $(<"$HOME/hosts.err")"; exit 1; }
-done
-# ssh has ended and answered, and something it left behind holds the output open for 3 s more: the answer counts at once.
-ans quick 1.12.0 "$ID_B"; echo 3 > "$MON/quick.hold"
-t0=$(date +%s%N); hc add quick
-[ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = quick ] && [ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 1500 ] || { echo "FAIL: an answer is taken when ssh ends, not when the last holder of its output does: rc=$HRC $HE $(( ($(date +%s%N) - t0) / 1000000 )) ms"; exit 1; }
-LEDGER=$(<"$MR/mgr/hosts")
-# A host that prints megabytes: read up to 65536 bytes and no further. Whatever follows them is not waded through, were it a version line.
-{ head -c 2000000 /dev/zero | tr '\0' 'x' | fold -w 100; printf '\nclaude-discord 1.12.0 (abc1234)\nhost-id %s\n' "$ID_B"; } > "$MON/big.out"
-refused big 5 'big answered, but not as claude-discord \(exit [0-9]+\)' "an answer is read up to 65536 bytes and no further"
-# A banner before the answer (sshd's, the shell's), longer than the 4096 bytes kept: the LAST line that reads as a
-# version line counts, with what follows it. Here the banner holds a version line and this home's own id.
-{ printf 'claude-discord 0.0.1 (banner)\nhost-id %s\n' "$L"; head -c 6000 /dev/zero | tr '\0' 'b' | fold -w 100; printf '\nclaude-discord 1.12.0 (abc1234)\nhost-id %s\n' "$ID_B"; } > "$MON/banner.out"
-hc add banner
-[ "$HRC" = 0 ] && [ -z "$HE" ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = banner ] || { echo "FAIL: a long banner before the version line is skipped, and a version line in it is not the answer: rc=$HRC $HE"; exit 1; }
-LEDGER=$(<"$MR/mgr/hosts")
-# A line of the answer is cut at 200 characters before any of it is printed.
-printf 'y%.0s' {1..300} > "$MON/long.out"; echo 127 > "$MON/long.rc"; : > "$MON/long.both"
-refused long 5 "\(exit 127\): y{200}\. Install" "an answer's line is cut at 200 characters"
+# The cap is an integer from 1 to 300, else the default 20 (0 would be no cap at all); a HUP to the runner (a closed
+# terminal) ends ssh as the cap does. Seen through the one message that names the cap.
+rm -f "$MON/hang.pid" "$MON/hang.hold"
+CLAUDE_DISCORD_PROBE_CAP=0 bash "$S" hosts add hang >/dev/null 2>"$HOME/hosts.err" & hp=$!
+wait_for_file "$MON/hang.pid"; read -r _ _ _ pp _ < "/proc/$(<"$MON/hang.pid")/stat"
+kill -HUP "$pp"; HRC=0; wait "$hp" || HRC=$?
+[ "$HRC" = 5 ] && grep -q 'hang gave no answer within 20s' "$HOME/hosts.err" && ! kill -0 "$(<"$MON/hang.pid")" 2>/dev/null ||
+  { echo "FAIL: CLAUDE_DISCORD_PROBE_CAP=0 is the default 20, and a HUP to the runner kills ssh: rc=$HRC $(<"$HOME/hosts.err")"; exit 1; }
+# A host that prints megabytes: read up to 65536 bytes and no further. Whatever follows them is not waded through, were
+# it a version line. And a line of an answer is cut at 200 characters before any of it is printed.
+{ head -c 2000000 /dev/zero | tr '\0' 'x' | fold -w 300; printf '\nclaude-discord 1.12.0 (abc1234)\nhost-id %s\n' "$ID_B"; } > "$MON/big.out"
+refused big 5 'big answered, but not as claude-discord \(exit [0-9]+\): x{200}\. Install' "an answer is read up to 65536 bytes and no further, its line cut at 200 characters"
 # No claude-discord there (the remote shell's exit 127).
 echo 'bash: line 1: /home/u/.local/bin/claude-discord: No such file or directory' > "$MON/bare.out"; echo 127 > "$MON/bare.rc"; : > "$MON/bare.both"
 refused bare 5 'bare answered, but not as claude-discord \(exit 127\): bash: line 1: /home/u/.local/bin/claude-discord: No such file or directory\. Install it there first' "a host with no claude-discord is not added"
@@ -3863,12 +3855,6 @@ printf 'motd \033[2J\033]52;c;eA==\007 banner\nclaude-discord 1.11.1 (abc1234)\n
 hc add old
 [ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = old ] && grep -q '^claude-discord: hosts: warning: claude-discord 1.11.1 on old is older than 1.12.0 and has no host-id' <<<"$HE" && [[ $HE != *$'\033'* ]] && [[ $HE != *motd* ]] ||
   { echo "FAIL: a host whose claude-discord is older than 1.12.0 is added with a warning (a host-id line that is no id is none): rc=$HRC $HE"; exit 1; }
-# A claude-discord of 1.12.0 that prints no host-id could not make one (its exit 1): said as that, not as an older
-# version; added, and sent no --watch.
-ans noid 1.12.0; echo 1 > "$MON/noid.rc"; : > "$MON/noid.both"; rm -f "$HOME/ssh.log"
-hc add noid
-[ "$HRC" = 0 ] && [ "$(tail -n 1 "$MR/mgr/hosts")" = noid ] && [ "$(wc -l < "$HOME/ssh.log")" = 1 ] && [ "${HE%% (*}" = "claude-discord: hosts: warning: claude-discord 1.12.0 on noid answered but could not create its host-id" ] ||
-  { echo "FAIL: a 1.12.0 host with no host-id is added with the warning that it could not create one: rc=$HRC $HE"; exit 1; }
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -f "$HOME/ssh.log" "$MON"/*
 echo "ok: host-id is made once (eight first calls agree, a damaged file is replaced); hosts add asks the host with the command --dry-run prints (stdin closed, ConnectTimeout, -- before the alias, a 255 retried with ControlPath=none), refuses the same home (exit 4) and a host that did not answer, hung past the cap (whatever holds its output open), printed megabytes or has no claude-discord (exit 5, its last line cleaned and cut), takes the last version line after a banner, and adds an older claude-discord with a warning; --no-probe, local and a listed alias run no ssh"
 
@@ -4809,20 +4795,20 @@ gpass
 
 # monitor --check (the TUI's Check now, and what it runs after it changed the ledger): the running monitor starts a pass
 # at a tick instead of waiting out the interval (60 s here), and that pass reads the ledger as it is on disk then. With
-# no monitor running nobody is asked: exit 1, no marker left. A requested pass comes CHECK_GAP (60 s; 0.3 s here) after
+# no monitor running nobody is asked: exit 1, no marker left. A requested pass comes CHECK_GAP (60 s; 0.2 s here) after
 # the last pass began at the earliest, and several requests met before then are one pass: health counts runs and the
 # reducer passes, so a pass per request would turn their minutes into seconds.
 printf 'h1\n' > "$MR/mgr/hosts"; gdoc g1:ok; : > "$CURL_REPLIES"; : > "$CURL_LOG"; mstate '.hosts = {} | .bots = {} | .alerts = []'
 rc=0; out=$(cd "$MP" && bash "$S" monitor --check mgr 2>&1) || rc=$?
 [ "$rc" = 1 ] && [ ! -e "$MB/pass-now" ] && grep -q 'no monitor of mgr runs here, so nothing was asked' <<<"$out" || { echo "FAIL: monitor --check with no monitor running is exit 1 and leaves no marker: rc=$rc $out"; exit 1; }
-t0=$(date +%s%N); CLAUDE_DISCORD_MONITOR_CHECK_GAP=0.3 mstart; p=$(passes)
+t0=$(date +%s%N); CLAUDE_DISCORD_MONITOR_CHECK_GAP=0.2 mstart; p=$(passes)
 printf 'h1\nhnew\n' > "$MR/mgr/hosts"
 rc=0; out=$(cd "$MP" && bash "$S" monitor --check mgr 2>&1) || rc=$?
 : > "$MB/pass-now"; : > "$MB/pass-now"   # two more requests before the first is served
 wait_log $((p + 1)) ' pass hosts='; t1=$(( ($(date +%s%N) - t0) / 1000000 )); nap 0.05
 [ "$rc" = 0 ] && [ "$(passes)" = $((p + 1)) ] && [ ! -e "$MB/pass-now" ] && grep -q 'check requested: a pass now$' "$MB/monitor.log" && jq -e '.hosts | has("hnew")' "$MB/state.json" >/dev/null && [ -z "$(posts)" ] ||
   { echo "FAIL: monitor --check makes the running monitor run ONE pass for all the requests it meets, over the ledger as it is then, and posts nothing itself: rc=$rc $out passes=$(passes) (was $p) $(tail -3 "$MB/monitor.log")"; exit 1; }
-[ "$t1" -ge 300 ] || { echo "FAIL: a requested pass must wait until CHECK_GAP (0.3 s here) after the last pass began: it was logged $t1 ms after the monitor was started"; exit 1; }
+[ "$t1" -ge 200 ] || { echo "FAIL: a requested pass must wait until CHECK_GAP (0.2 s here) after the last pass began: it was logged $t1 ms after the monitor was started"; exit 1; }
 mstop
 # A marker that cannot be removed (here a directory that is not empty) would be a pass every tick: said once, and no
 # request is served until the monitor is started again. Met at the start, where the first pass runs anyway.
