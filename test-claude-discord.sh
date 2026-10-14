@@ -250,7 +250,9 @@ cat > "$HOME/bin/curl" <<'EOF'
 printf '%s\n' "$*" >> "$CURL_LOG"
 [ -z "${HTTPS_PROXY:-}${https_proxy:-}" ] || printf '%s|%s\n' "${HTTPS_PROXY:-}" "${https_proxy:-}" >> "$HOME/curl.proxy"   # the env a call ran with (the monitor's POST)
 while IFS= read -r l || [ -n "$l" ]; do printf '%s\n' "$l"; done >> "$CURL_STDIN_LOG" 2>/dev/null
-[ ! -f "$HOME/curl.sleep" ] || { echo 1 > "$HOME/curl.slept"; /bin/sleep "$(<"$HOME/curl.sleep")"; }   # a slow answer, after the request
+# A held answer, after the request: with $HOME/curl.hold the call says it is under way (curl.held) and answers only when
+# the case lets it (curl.go), so what a case does "during a POST" is done during it on any machine (5 s at most).
+if [ -f "$HOME/curl.hold" ]; then echo 1 > "$HOME/curl.held"; n=0; until [ -e "$HOME/curl.go" ] || [ "$n" -ge 1000 ]; do /bin/sleep 0.005; n=$((n + 1)); done; fi
 line=""; rest=()
 { IFS= read -r line && while IFS= read -r l; do rest+=("$l"); done; } < "$CURL_REPLIES" 2>/dev/null || :   # no mapfile: bash 3.2 runs this on a Mac
 if [ -n "$line" ]; then
@@ -4243,13 +4245,13 @@ echo "ok: monitor: every row of the failure table posts after its hold and not b
 # before the post is recorded in the pass, so finish reads curl's own answer (post.out) and records a 2xx as sent. This
 # block's restart is the next monitor: tm, in h1's answer again, is not sent again (one POST in all).
 mstop
-rm -f "$HOME/curl.slept"; printf 'h1\n' > "$MR/mgr/hosts"; mdoc h1 1 tm:stale > "$MON/h1.out"
-printf '200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"; echo 0.15 > "$HOME/curl.sleep"
+rm -f "$HOME/curl.held" "$HOME/curl.go"; printf 'h1\n' > "$MR/mgr/hosts"; mdoc h1 1 tm:stale > "$MON/h1.out"
+printf '200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"; : > "$HOME/curl.hold"
 ex=$(command grep -c 'exit reason=signal$' "$MB/monitor.log") || :; holder
 (cd "$MP" && bash "$S" monitor --ensure mgr --holder tui "$HPID")
-# The lock file names the monitor from its start: a read, not a $(mpid) fork inside the stub's 0.15 s sleep.
-wait_for_file "$HOME/curl.slept"; read -r mp < "$MB/lock"; kill -TERM "$mp"; wait_log $(( ex + 1 )) 'exit reason=signal$'
-kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
+# The stub holds its answer until the TERM is sent (the lock file names the monitor from its start).
+wait_for_file "$HOME/curl.held"; read -r mp < "$MB/lock"; kill -TERM "$mp"; : > "$HOME/curl.go"; wait_log $(( ex + 1 )) 'exit reason=signal$'
+kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :; rm -f "$HOME/curl.hold" "$HOME/curl.held" "$HOME/curl.go"
 [ "$(posts | grep -c '\] tm on')" = 1 ] || { echo "FAIL: the POST under way when the TERM came must have gone out once: $(posts)"; exit 1; }
 # The in-flight path ran, not the ordinary one: a TERM that came after curl returned would have the pass log the post
 # (and record it) itself, and this case would pass without finish ever reading post.out. Here no 'post ... tm' line
@@ -4293,12 +4295,15 @@ jq -e --arg sp "h2|/home/u/it's \$x here|s p'q" '(.hosts | keys) == ["h1", "h2",
 # alerts. And the stop looked for between posts: the stopped marker appears while the first of two posts waits out a
 # 429, so the second stays pending and the monitor leaves with the first recorded as sent. nf, sent above, is not sent again.
 rm -f "$MON/local.rc"; echo 1 > "$MON/local.sleep"
-mdoc h1 1 nf:stale x1:stale x2:stale > "$MON/h1.out"; printf '%s\n' '429 {"retry_after": 0.15}' '200 {}' '200 {}' > "$CURL_REPLIES"; : > "$CURL_LOG"
+# The 429 itself is held by the stub until the marker is there, then waited out for 0.01 s. The ledger, the replies and
+# the hold come before the answer that has x1 and x2: a pass may read it at once.
 ex=$(command grep -c 'exit reason=stopped$' "$MB/monitor.log") || :; printf 'h1\nlocal laptop\n' > "$MR/mgr/hosts"
-n=0; while ! command grep -q '] x1 on' "$CURL_LOG" && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); done
-: > "$MB/stopped"
+printf '%s\n' '429 {"retry_after": 0.01}' '200 {}' '200 {}' > "$CURL_REPLIES"; : > "$CURL_LOG"; : > "$HOME/curl.hold"; mdoc h1 1 nf:stale x1:stale x2:stale > "$MON/h1.out"
+n=0; while [ ! -s "$HOME/curl.held" ] && [ "$n" -lt 300 ]; do nap 0.01; n=$((n + 1)); done
+command grep -q '] x1 on' "$CURL_LOG" || { echo "FAIL: the first of the two new findings (x1) must be the POST under way: $(posts)"; exit 1; }
+: > "$MB/stopped"; rm -f "$HOME/curl.hold"; : > "$HOME/curl.go"
 wait_log $(( ex + 1 )) 'exit reason=stopped$'
-rm -f "$MB/stopped"; kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
+rm -f "$MB/stopped" "$HOME/curl.held" "$HOME/curl.go"; kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
 [ "$(posts | grep -c .)" = 2 ] && [ "$(posts | grep -c '\] x1 on')" = 2 ] &&
   jq -e '.bots["h1|/home/u/ws/p|x1"].posted == "stale" and .bots["h1|/home/u/ws/p|x2"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a stopped marker met between posts ends the posting (the rest stay pending), what was sent recorded, nf not sent again: $(posts) $(jq -c '.bots | map_values(.posted)' "$MB/state.json")"; exit 1; }
@@ -4385,10 +4390,11 @@ cp "$HOME/monitor.good" "$PC/monitor/monitor.sh"; wait_log 3 'restart: monitor\.
 # logged, so lb is not sent, and la, sent, goes into state.json as posted (the file is empty: no successor has read
 # state.json yet), so the next monitor does not send it again. Its pid stays there, for the successor to replace.
 [ "$(<"$MB/lock")" = "$rp" ] || { echo "FAIL: the lock file must hold the monitor's pid: $(<"$MB/lock")"; exit 1; }
-mdoc lambda 0 r1:stale la:stale lb:stale > "$MON/local.out"; printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; echo 0.15 > "$HOME/curl.sleep"
-ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :   # before the marker is waited for: no fork inside the stub's sleep
-wait_for_file "$HOME/curl.slept"; rm -f "$MB/lock"; : > "$MB/lock"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
-n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
+# The stub holds la's POST until the file is replaced (the replies and the hold first: the next pass may read the answer at once).
+printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; : > "$HOME/curl.hold"; mdoc lambda 0 r1:stale la:stale lb:stale > "$MON/local.out"
+ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :
+wait_for_file "$HOME/curl.held"; rm -f "$MB/lock"; : > "$MB/lock"; : > "$HOME/curl.go"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
+n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; rm -f "$HOME/curl.hold" "$HOME/curl.held" "$HOME/curl.go"
 ! running "$rp" && [ "$(mpid)" = "$rp" ] && [ "$(posts | grep -c '\] l[ab] on')" = 1 ] &&
   jq -e '.bots["local|/home/u/ws/p|la"].posted == "stale" and .bots["local|/home/u/ws/p|lb"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a monitor whose lock file was replaced posts nothing more, records what it sent and leaves its pid: $(posts | grep '\] l[ab] on') $(jq -c '[.monitor.pid, (.bots | map_values(.posted))]' "$MB/state.json") $(tail -2 "$MB/monitor.log")"; exit 1; }
@@ -4397,10 +4403,10 @@ n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; r
 mstop; mdoc lambda 0 r1:stale la:stale lb:stale > "$MON/local.out"; printf '200 {}\n' > "$CURL_REPLIES"; np=$(passes); holder
 (cd "$MP" && PATH="$CK:$PATH" CLAUDE_DISCORD_MONITOR_PASS=0.02 CLAUDE_DISCORD_MONITOR_HOST_CAP=5 bash "$S" monitor --ensure mgr --holder tui "$HPID")
 wait_log $(( np + 1 )) ' pass hosts='; rp=$(mpid)
-mdoc lambda 0 r1:stale la:stale lb:stale lc:stale ld:stale > "$MON/local.out"; printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; echo 0.15 > "$HOME/curl.sleep"
+printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; : > "$HOME/curl.hold"; mdoc lambda 0 r1:stale la:stale lb:stale lc:stale ld:stale > "$MON/local.out"
 ll=$(command grep -c 'exit reason=lock-lost' "$MB/monitor.log") || :
-wait_for_file "$HOME/curl.slept"; printf '1\n' > "$MB/lock"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
-n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; rm -f "$HOME/curl.sleep" "$HOME/curl.slept"
+wait_for_file "$HOME/curl.held"; printf '1\n' > "$MB/lock"; : > "$HOME/curl.go"; wait_log $(( ll + 1 )) 'exit reason=lock-lost'
+n=0; while running "$rp" && [ "$n" -lt 100 ]; do nap 0.01; n=$((n + 1)); done; rm -f "$HOME/curl.hold" "$HOME/curl.held" "$HOME/curl.go"
 ! running "$rp" && [ "$(<"$MB/lock")" = 1 ] && [ "$(posts | grep -c '\] l[cd] on')" = 1 ] &&
   jq -e '.bots["local|/home/u/ws/p|lc"].posted == null and .bots["local|/home/u/ws/p|ld"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: a monitor whose lock file names another pid ends without writing state.json: $(posts | grep '\] l[cd] on') $(jq -c '[.monitor.pid, (.bots | map_values(.posted))]' "$MB/state.json") $(tail -2 "$MB/monitor.log")"; exit 1; }
