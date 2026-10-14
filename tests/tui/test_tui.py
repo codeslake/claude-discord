@@ -914,7 +914,7 @@ def ssh_home(app, config=SSH_CONFIG):
     app.notify = lambda m, **k: app.said_all.append(m if k.get("markup") is False else ("markup", m))
 
 
-CHECKS = "claude-discord: monitor: mgr checks its hosts at its next tick (within 30 s)"
+CHECKS = "claude-discord: monitor: mgr checks its hosts at its next tick (within 30 s; a minute after its last pass began at the earliest)"
 NO_MONITOR = "claude-discord: monitor: no monitor of mgr runs here, so nothing was asked (claude-discord monitor --start mgr starts the backend)"
 # The stub's `monitor --check`: the monitor's own answer, or its refusal once the case made a `nomonitor` file.
 CHECK_STUB = f'''
