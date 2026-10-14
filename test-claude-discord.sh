@@ -4107,6 +4107,31 @@ at 'y\n' acc set channel-901; wait
   { echo "FAIL: a write waits for the lock and is given up when the policy changed meanwhile: rc=$ARC $AO / $(jq -c .groups "$AD/access.json")"; exit 1; }
 printf '%s\n' "$A_FILE" > "$AD/access.json"
 echo "ok: access set at a terminal asks about each widening by itself and the rest once; all yes writes access.json by rename, mode 600, every other key kept, and one access.log line; one no writes nothing (exit 4); a second writer waits for the lock and gives up when the policy changed under its questions"
+# The mode goes through `setup <bot> --mode` (the mode on its stdin; its peers and hosts questions read the end of
+# input, which keeps both lists), after this verb's own question. A mode alone changes no access.json; the mode the
+# bot has is no change, and a word that is no mode is no change word.
+ac acc set mode=none; A=$ARC$AO; ac acc set mode=secretpw
+[ "$A" = "0claude-discord: access: acc is already so; nothing to change" ] && [ "$ARC" = 2 ] && [[ $AO$AE != *secretpw* ]] || { echo "FAIL: the bot's own mode is nothing to change, and a mode setup does not know is refused unechoed: $A / rc=$ARC $AE"; exit 1; }
+ai=$(stat -c %i "$AD/access.json")
+at 'y\n' acc set mode=autoresearchclaw
+[ "$ARC" = 0 ] && [ "$(<"$AD/mode")" = autoresearchclaw ] && grep -q 'Apply this change? \[y/N\]' <<<"$AO" && grep -q "claude-discord: $AD/mode set to autoresearchclaw$" <<<"$AO" &&
+  grep -q 'the hooks follow the new mode from their next call; the dev-manager rules reach, or leave, a running session at its next start, compact or clear' <<<"$AO" &&
+  ! grep -q 'access.json written' <<<"$AO" && [ "$(stat -c %i "$AD/access.json")" = "$ai" ] && [ "$(tail -n 1 "$AD/access.log" | cut -d' ' -f4-)" = "mode=autoresearchclaw" ] ||
+  { echo "FAIL: mode=<mode> is asked about, set through setup --mode, logged, and leaves access.json alone: rc=$ARC $AO / $(cat "$AD/mode" "$AD/access.log")"; exit 1; }
+# Into dev-manager: setup then adds the peers of peers.json to every channel that lists its senders, so the changes
+# shown say so first (555 is new to this bot: a widening; 777 is this bot itself, skipped by name as setup skips it).
+ac acc set mode=dev-manager
+[ "$ARC" = 3 ] && [ "$(sed 1d <<<"$AO")" = "  ! peerbot (555): new to this bot: may write to it in #dev-bots
+    mode: autoresearchclaw -> dev-manager: it gets a hosts ledger (this machine) and its monitor starts, which posts in #bot-health-check" ] || { echo "FAIL: mode=dev-manager shows the peers setup will add: rc=$ARC $AO / $AE"; exit 1; }
+# Out of dev-manager with a ledger: setup deletes the ledger, which stops the monitor and its keeper. That has its own
+# question; no keeps the ledger and the mode.
+mkdir -p "$MR/dm1"; cp "$AD/access.json" "$AD/.env" "$MR/dm1/"; echo dev-manager > "$MR/dm1/mode"; printf 'local\nh9\n' > "$MR/dm1/hosts"
+at 'n\n' dm1 set mode=none
+[ "$ARC" = 4 ] && grep -qF "  ! mode: dev-manager -> none: its hosts ledger ($MR/dm1/hosts) is deleted and its monitor and keeper stop within a minute. Nobody is told in #bot-health-check when a bot of its hosts goes down" <<<"$AO" &&
+  grep -q 'when a bot of its hosts goes down\..* Allow? \[y/N\]' <<<"$AO" && [ "$(<"$MR/dm1/hosts")" = "$(printf 'local\nh9')" ] && [ "$(<"$MR/dm1/mode")" = dev-manager ] ||
+  { echo "FAIL: leaving dev-manager says what stops and asks about it by itself; no keeps the ledger: rc=$ARC $AO"; exit 1; }
+rm -rf "$MR/dm1"; echo none > "$AD/mode"
+echo "ok: access set mode=<mode> asks, then runs setup --mode with the mode on its stdin (peers and hosts kept), leaving access.json alone; into dev-manager it shows the peers setup adds; out of it with a ledger it says the monitor stops and asks about that by itself, and no keeps both"
 # The monitor cases below find the ledger, the logs and the project as the hosts cases left them.
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -rf "$AD" "$MR/peers.json" "$HOME/ssh.log" "$HOME/curl.proxy" "$HOME/access.err" "$MON"/*; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
 

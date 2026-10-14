@@ -2415,8 +2415,8 @@ fi
 if [ "${1:-}" = access ]; then
   shift
   a_usage="usage: claude-discord access [--project <dir>] <bot> --json | set <change>...
-  a change: channel+<channel id> | channel-<channel id> | mention:<channel id>=on|off | allow:<channel id>+<user id> | allow:<channel id>-<user id> | allow:<channel id>=any | dm=allowlist|pairing|off | dm+<user id> | dm-<user id>"
-  a_word_re='^(channel[+-][0-9]{1,20}|mention:[0-9]{1,20}=(on|off)|allow:[0-9]{1,20}([+-][0-9]{1,20}|=any)|dm=(allowlist|pairing|off)|dm[+-][0-9]{1,20})$'
+  a change: channel+<channel id> | channel-<channel id> | mention:<channel id>=on|off | allow:<channel id>+<user id> | allow:<channel id>-<user id> | allow:<channel id>=any | dm=allowlist|pairing|off | dm+<user id> | dm-<user id> | mode=none|dev-manager|autoresearchclaw"
+  a_word_re='^(channel[+-][0-9]{1,20}|mention:[0-9]{1,20}=(on|off)|allow:[0-9]{1,20}([+-][0-9]{1,20}|=any)|dm=(allowlist|pairing|off)|dm[+-][0-9]{1,20}|mode=(none|dev-manager|autoresearchclaw))$'
   a_proj=""
   while [ $# -gt 0 ]; do
     case $1 in
@@ -2616,6 +2616,11 @@ if [ "${1:-}" = access ]; then
       elif ($x | startswith("dm=")) then .d.dmPolicy = $x[3:]
       elif ($x | startswith("dm+")) then .d.allowFrom |= with($x[3:])
       elif ($x | startswith("dm-")) then .d.allowFrom |= without($x[3:])
+      elif $x == "mode=dev-manager" then
+        # What `setup --mode` does next for a dev-manager: the peers of peers.json go into every channel that lists its
+        # senders. Done here first, so the diff shows it and the question is asked.
+        ([$peers | peerlist[] | select((.name | ascii_downcase) != ($bot | ascii_downcase)) | .id]) as $pi
+        | if (.d.groups | type) == "object" then .d.groups |= map_values(if (.allowFrom // []) == [] then . else .allowFrom = (.allowFrom as $a | $a + ($pi - $a)) end) else . end
       else . end;
     def dmw: if .dm == "disabled" then "disabled" elif .dm != "allowlist" then "pairing" elif .dm_allow == [] then "off" else "allowlist" end;
     . as $doc | policy as $P0
@@ -2693,6 +2698,17 @@ if [ "${1:-}" = access ]; then
       N) a_warn="$a_warn"$'\n'"${yel}warning: $text$off";;
     esac
   done <<<"$a_diff"
+  # The mode is not in access.json: its line is made here. Out of dev-manager with a hosts ledger, `setup --mode` deletes
+  # the ledger, which stops the manager's monitor: asked about by itself, like a widening.
+  newmode=$mode
+  for w in "$@"; do case $w in mode=*) newmode=${w#mode=};; esac; done
+  a_mgr=""; [ "$newmode" != dev-manager ] || [ -f "$d/hosts" ] || a_mgr=": it gets a hosts ledger (this machine) and its monitor starts, which posts in #bot-health-check"
+  if [ "$newmode" != "$mode" ] && [ "$mode" = dev-manager ] && [ -f "$d/hosts" ]; then
+    a_mq="mode: dev-manager -> $newmode: its hosts ledger ($d/hosts) is deleted and its monitor and keeper stop within a minute. Nobody is told in #bot-health-check when a bot of its hosts goes down"
+    a_w+=("$a_mq"); shown="$shown"$'\n'"$red  ! $a_mq$off"
+  elif [ "$newmode" != "$mode" ]; then
+    a_n=$((a_n + 1)); shown="$shown"$'\n'"    mode: $mode -> $newmode$a_mgr"
+  fi
   if [ ${#a_w[@]} = 0 ] && [ "$a_n" = 0 ]; then echo "claude-discord: access: $bn is already so; nothing to change"; exit 0; fi
   printf '%s%s\n' "$shown" "$a_warn"
   [ -t 0 ] && [ -t 1 ] || { echo "claude-discord: access: not a terminal (stdin and stdout), so nothing was changed: run it in a terminal to answer for these changes" >&2; exit 3; }
@@ -2723,6 +2739,14 @@ if [ "${1:-}" = access ]; then
   # access.log: when, who (the account here), on which machine, and the change words (ids only).
   (umask 077; printf '%s %s %s%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$a_host_name" "$a_words" >> "$d/access.log") 2>/dev/null || :
   [ -z "$a_file" ] || echo "claude-discord: access: $f written. The plugin reads it at the next message: no restart."
+  if [ "$newmode" != "$mode" ]; then
+    # setup --mode, with the mode on its stdin and nothing after it: its peers and hosts questions read the end of
+    # input, which keeps both lists (README, Modes).
+    printf '%s\n' "$newmode" | "$self_path" setup "$bot" --mode ||
+      { echo "claude-discord: access: the mode was not changed (claude-discord setup $bn --mode, above)${a_file:+; the changes to access.json stay}" >&2; exit 1; }
+    echo "claude-discord: access: the hooks follow the new mode from their next call; the dev-manager rules reach, or leave, a running session at its next start, compact or clear."
+    [ "$newmode" != dev-manager ] || echo "claude-discord: access: its peers and the hosts it checks: claude-discord setup $bn --mode, and claude-discord hosts add"
+  fi
   exit 0
 fi
 
