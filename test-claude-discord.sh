@@ -371,14 +371,17 @@ EOF
 # The same stub in C, used instead wherever a C compiler builds it: one exec a call, no bash start (a hit costs ~0.9 ms
 # against ~1.9, a miss ~1.5 ms less, ~1800 calls a run). Same calls kept, same calls passed to real jq, same answer for a
 # missing lone file. Its entry is "<rc>\n<key length>\n<key><stdout>\004", named by the key's hash (decimal), created
-# with O_EXCL and taken only whole; real jq's stdin, stdout and stderr are files, as above, and removed after.
+# with O_EXCL and taken only whole; real jq's stdin, stdout and stderr are files, as above, but in memory with no name
+# (memfd: nothing to create or remove in the cache dir, ~0.3 ms a miss, ~900 misses a run); without memfd, real jq.
 cat > "$HOME/jqstub.c" <<'EOF'
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <regex.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -444,7 +447,7 @@ int main(int argc, char **argv) {
   if (piped) { if (slurp_fd(0, &in) < 0) real(); put(&key, in.p ? in.p : "", in.n); }
   unsigned long long h = 1469598103934665603ULL;   /* FNV-1a */
   for (size_t i = 0; i < key.n; i++) { h ^= (unsigned char)key.p[i]; h *= 1099511628211ULL; }
-  char path[4096], ti[4200], to[4200], te[4200]; int i = 0;
+  char path[4096]; int i = 0;
   for (;; i++) {
     buf e = {0}; char *n1, *n2;
     snprintf(path, sizeof path, "%s/%llu.%d", cache, h, i);
@@ -455,22 +458,22 @@ int main(int argc, char **argv) {
     }
     free(e.p);
   }
-  snprintf(ti, sizeof ti, "%s/t%d.i", cache, (int)getpid()); snprintf(to, sizeof to, "%s/t%d.o", cache, (int)getpid());
-  snprintf(te, sizeof te, "%s/t%d.e", cache, (int)getpid());
-  if (piped) { int fd = open(ti, O_WRONLY | O_CREAT | O_TRUNC, 0600); if (fd < 0) real(); out(fd, in.p ? in.p : "", in.n); close(fd); }
+  /* Real jq's stdin (rewound after the write), stdout and stderr: anonymous files. Any failure before the fork: real jq. */
+  int fi = -1, fo = memfd_create("jq.o", 0), fe = memfd_create("jq.e", 0);
+  if (fo < 0 || fe < 0) real();
+  if (piped) { if ((fi = memfd_create("jq.i", 0)) < 0) real(); out(fi, in.p ? in.p : "", in.n); if (lseek(fi, 0, SEEK_SET) != 0) real(); }
   pid_t c = fork();
   if (c < 0) real();
   if (c == 0) {
-    int fo = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0600), fe = open(te, O_WRONLY | O_CREAT | O_TRUNC, 0600), fi;
-    if (fo < 0 || fe < 0) _exit(127);
-    if (piped) { if ((fi = open(ti, O_RDONLY)) < 0) _exit(127); dup2(fi, 0); close(fi); }
-    dup2(fo, 1); dup2(fe, 2); close(fo); close(fe);
+    if (piped) dup2(fi, 0);
+    dup2(fo, 1); dup2(fe, 2); close(fo); close(fe); if (piped) close(fi);
     av[0] = (char *)jqr; execv(jqr, av); _exit(127);
   }
   int st, rc; buf o = {0}, er = {0}, nk = {0};
   while (waitpid(c, &st, 0) < 0) if (errno != EINTR) return 127;
   rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
-  slurp(to, &o); slurp(te, &er); unlink(to); unlink(te); if (piped) unlink(ti);
+  if (lseek(fo, 0, SEEK_SET) == 0) slurp_fd(fo, &o);
+  if (lseek(fe, 0, SEEK_SET) == 0) slurp_fd(fe, &er);
   out(1, o.p ? o.p : "", o.n);
   if (er.n) { out(2, er.p, er.n); return rc; }
   /* Real jq opened the files by path after the key was read: one replaced in between answered for other contents. */
