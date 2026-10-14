@@ -1769,15 +1769,15 @@ git -C "$P2" worktree remove --force "$P2/.claude/worktrees/wt1"
 rm -rf "$P2/.git" "$P2/.claude/plain" "$P2/.claude/worktrees" "$HOME/.claude/discord-agents/hw" "$HOME/hproj" "$HOME/gitshim" "$GL" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"; rmdir "$HOME/.claude/discord-agents" 2>/dev/null || :
 echo "ok: an old-path hook runs with no marker (no marker directory, or another session's) and exits 0 doing nothing in a marked session, whatever CLAUDE_PLUGIN_ROOT says; the plugin's hook still runs there and keeps its marker fresh; a new marker prunes month-old ones; a session in another project, or in a plain directory under the bot's, is no bot, one in a git worktree of its project is (git runs only then), and for a bot in a subdirectory of a repo, the worktree's subdirectory, not its root"
 
-# h7. one migration per session however many of its hooks start at once (noclobber on the marker). A slow jq
-# (0.3 s) keeps the first migration running while the others pass the marker check, so each of them would
-# migrate too without it.
-JL="$HOME/jq.log"; mkdir -p "$HOME/jqshim"; : > "$JL"
-printf '#!/bin/bash\ncase "$*" in *discord-agents/hooks*) echo x >> "%s"; sleep 0.3;; esac\nexec %s "$@"\n' "$JL" "$(command -v jq)" > "$HOME/jqshim/jq"; chmod +x "$HOME/jqshim/jq"
+# h7. one migration per session however many of its hooks start at once (noclobber on the marker). A migration's jq
+# holds it until the eleven other hooks have ended (3 s at most), so they all passed the marker check while the first
+# migration ran: each of them would migrate too without it (and then every migration waits the 3 s out).
+JL="$HOME/jq.log" JD="$HOME/par.done"; mkdir -p "$HOME/jqshim"; : > "$JL"; : > "$JD"
+printf '#!/bin/bash\ncase "$*" in *discord-agents/hooks*) echo x >> "%s"; n=0; while mapfile -t d < "%s" && [ "${#d[@]}" -lt 11 ] && [ "$n" -lt 600 ]; do /bin/sleep 0.005; n=$((n + 1)); done;; esac\nexec %s "$@"\n' "$JL" "$JD" "$(command -v jq)" > "$HOME/jqshim/jq"; chmod +x "$HOME/jqshim/jq"
 echo '{"permissions":{"allow":["Bash(ls)"]}}' > "$P2/.claude/settings.local.json"; plant_old "$P2/.claude/settings.local.json"
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do PATH="$HOME/jqshim:$PATH" plugin_hook "$P2" gamma par1 & done; wait
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do (PATH="$HOME/jqshim:$PATH" plugin_hook "$P2" gamma par1; echo x >> "$JD") & done; wait
 [ "$(wc -l < "$JL" | tr -d ' ')" = 1 ] && [ "$(jq -c . "$P2/.claude/settings.local.json")" = '{"permissions":{"allow":["Bash(ls)"]}}' ] || { echo "FAIL: twelve parallel first runs must migrate once ($(wc -l < "$JL") migrations): $(<"$P2/.claude/settings.local.json")"; exit 1; }
-rm -rf "$HOME/jqshim" "$JL" "$GD/plugin-sessions"
+rm -rf "$HOME/jqshim" "$JL" "$JD" "$GD/plugin-sessions"
 echo "ok: twelve hooks of one session starting at once migrate once (noclobber marker) and leave valid JSON"
 
 mv "$HOME/.claude/plugins.off" "$HOME/.claude/plugins"
