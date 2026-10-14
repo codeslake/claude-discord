@@ -786,7 +786,7 @@ if [ "${1:-}" = setup ]; then
   case $name in
     ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
     hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
-    setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access) echo "claude-discord: bot name '$name' is reserved: 'claude-discord $name' is a subcommand" >&2; exit 2;;
+    setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access|bot) echo "claude-discord: bot name '$name' is reserved: 'claude-discord $name' is a subcommand" >&2; exit 2;;
   esac
   if [ "${3:-}" = --mode ]; then
     [ -z "$scope$method" ] || { echo "claude-discord: --mode changes only the mode and installs nothing; --scope and --method do not apply" >&2; exit 2; }
@@ -1957,10 +1957,10 @@ host_id() {
 # What `access --host` runs on another machine (1.13.0): `--version --access <hex of the project> <hex of the bot> ...` is
 # `access --project <project> -- <bot> ...` here. Behind --version for the reason --host-id is (below): an older
 # claude-discord prints its version line and exits. Hex, so that no name or path has to survive a remote shell.
-if [ "${1:-}" = --version ] && [ "${2:-}" = --access ]; then
+if [ "${1:-}" = --version ] && { [ "${2:-}" = --access ] || [ "${2:-}" = --bot ]; }; then
   c_match "${3:-}" '^([0-9a-f][0-9a-f]){1,1024}$' && c_match "${4:-}" '^([0-9a-f][0-9a-f]){1,255}$' || exit 2
   a_unhex() { local h=$1 o=""; while [ -n "$h" ]; do o="$o\\x${h:0:2}"; h=${h:2}; done; printf "$o"; }
-  set -- access --project "$(a_unhex "$3")" -- "$(a_unhex "$4")" "${@:5}"
+  set -- "${2#--}" --project "$(a_unhex "$3")" -- "$(a_unhex "$4")" "${@:5}"
 fi
 # self_root is already the real clone (a link resolved through readlink and pwd -P).
 if [ "${1:-}" = --version ]; then
@@ -2421,6 +2421,88 @@ if [ "${1:-}" = hosts ]; then
   exit 0
 fi
 
+# via_host <verb> <first version> <first word> <word>...: `claude-discord <verb> --host <alias> ...` (access since 1.13.0,
+# bot since 1.14.0), the bot living on a host of a manager's ledger; a_host, hb (--manager) and a_proj (--project) are
+# the verb's. `local` runs the verb here with that ledger line's env words, any other alias over ssh with them, as a
+# monitor pass goes. Into the remote command go hex digits (the project and the first word, which may be a bot's name)
+# and the verb's own words, which it has matched as plain. Never returns.
+via_host() {
+  local verb=$1 minv=$2 w1=$3 line w a_hit=""
+  shift 3
+  c_match "$a_host" "$alias_re" || { echo "claude-discord: $verb: --host is not an ssh alias: letters, digits, . _ @ -, not starting with -, 255 at most" >&2; exit 2; }
+  h_manager "$verb" --manager
+  # The env words of the host's ledger line, as the monitor's pass reads them (monitor/monitor.sh, run_pass): a proxy
+  # word sets both spellings, name= is no env word; of two lines for one alias the last counts.
+  a_env=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    set -f; a_w=(${line%$'\r'}); set +f
+    [ "${a_w[0]:-}" = "$a_host" ] || continue
+    a_hit=1 a_env=()
+    for w in ${a_w[@]+"${a_w[@]:1}"}; do
+      case $w in name=*) continue;; esac
+      [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+      case ${w%%=*} in
+        HTTPS_PROXY|https_proxy) a_env+=("HTTPS_PROXY=${w#*=}" "https_proxy=${w#*=}");;
+        HTTP_PROXY|http_proxy) a_env+=("HTTP_PROXY=${w#*=}" "http_proxy=${w#*=}");;
+        ALL_PROXY|all_proxy) a_env+=("ALL_PROXY=${w#*=}" "all_proxy=${w#*=}");;
+        NO_PROXY|no_proxy) a_env+=("NO_PROXY=${w#*=}" "no_proxy=${w#*=}");;
+        *) a_env+=("$w");;
+      esac
+    done
+  done < "$hf"
+  [ -n "$a_hit" ] || { echo "claude-discord: $verb: $a_host is not in $hf (claude-discord hosts list)" >&2; exit 2; }
+  if [ "$a_host" = local ]; then
+    a_pa=(); [ -z "$a_proj" ] || a_pa=(--project "$a_proj")
+    exec env ${a_env[@]+"${a_env[@]}"} "$self_path" "$verb" ${a_pa[@]+"${a_pa[@]}"} -- "$w1" "$@"
+  fi
+  [ -n "$a_proj" ] || { echo "claude-discord: $verb: --host $a_host needs --project <the bot's project directory on that host>" >&2; exit 2; }
+  # The project and the first word travel as hex digits (a path or a name may hold anything; no quoting of ours has to
+  # hold in the remote shell), behind `--version`: an older claude-discord prints its version line and exits whatever
+  # follows, while a new verb would be read there as a bot's name and reach the launcher.
+  a_hex() { printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'; }
+  a_remote="env $([ ${#a_env[@]} = 0 ] || printf '%q ' "${a_env[@]}")~/.local/bin/claude-discord --version --$verb $(a_hex "$a_proj") $(a_hex "$w1")${*:+ $*}"
+  a_old() {  # no document: an older host printed its version line; a host new enough that could not do it said why (no such bot there)
+    # A version line is a whole line, as h_capped reads one: the same words inside other text (a banner) are none.
+    local l re='^ *claude-discord +([0-9]+\.[0-9]+\.[0-9]+)( |$)'
+    l=$(printf '%s\n' "$h_out" | grep -E "$re" | tail -n 1) || l=""
+    if [[ $l =~ $re ]]; then echo "claude-discord: $verb: $a_host needs claude-discord $minv for this (it has ${BASH_REMATCH[1]}; claude-discord update, there)" >&2; exit 5; fi
+    l=$(printf '%s\n' "$h_out" | LC_ALL=C tr -d '\000-\010\013-\037\177' | grep . | tail -n 1) || l=""
+    l=${l#claude-discord: $verb: }
+    echo "claude-discord: $verb: $a_host: ${l:-no answer (exit $h_rc)}" >&2; exit 1
+  }
+  a_down() {
+    case $h_rc in
+      255) echo "claude-discord: $verb: $a_host did not answer (ssh exit 255, also with ControlPath=none)" >&2; exit 5;;
+      142) echo "claude-discord: $verb: $a_host gave no answer within ${h_cap}s" >&2; exit 5;;
+    esac
+  }
+  if [ "${1:-}" = --json ]; then
+    # The host asks Discord, starting no call past 12 s, each 5 s at most, after ssh connected (up to 8 s): 30 s for
+    # the whole call, so a slow host with a slow Discord is still an answer.
+    case $h_cap in *.*) ;; *) [ "$h_cap" -ge 30 ] || h_cap=30;; esac
+    h_ssh "$a_host" "$a_remote" raw; a_down
+    # The document is the last line that starts as one; what the host printed around it (a banner) is not ours.
+    doc=$(printf '%s\n' "$h_out" | grep '^{"access":' | tail -n 1 | jq -c 'select(.access == 1)' 2>/dev/null) || doc=""
+    [ -n "$doc" ] || a_old
+    printf '%s\n' "$doc"; exit 0
+  fi
+  h_ssh "$a_host" "~/.local/bin/claude-discord --version"; a_down
+  a_v="" a_re='claude-discord ([0-9]+\.[0-9]+\.[0-9]+)'
+  if [[ $h_out =~ $a_re ]]; then a_v=${BASH_REMATCH[1]}; fi
+  [ -n "$a_v" ] || { echo "claude-discord: $verb: $a_host answered, but not as claude-discord (exit $h_rc)" >&2; exit 5; }
+  ver_ge "$a_v" "$minv" || a_old
+  if [ -t 0 ] && [ -t 1 ]; then
+    # The question is asked on that host, of this terminal. No cap: a person is answering.
+    a_rc=0; ssh -t -o BatchMode=yes -o ConnectTimeout=8 -- "$a_host" "$a_remote" || a_rc=$?
+    [ "$a_rc" != 255 ] || { echo "claude-discord: $verb: ssh to $a_host failed (exit 255)" >&2; exit 5; }
+    exit "$a_rc"
+  fi
+  # No terminal here: the host prints the changes and refuses (exit 3). What it printed is another machine's text.
+  h_ssh "$a_host" "$a_remote" raw; a_down
+  printf '%s\n' "$h_out" | LC_ALL=C tr -d '\000-\010\013-\037\177'
+  exit "$h_rc"
+}
+
 # access: reads and changes who may drive a bot, for people, scripts and the TUI, which changes a bot's access.json and
 # mode through this verb only: the channels it listens in (access.json's groups), per channel whether an @mention is
 # required and who may write, the DM policy with its allowlist, and the bot's mode.
@@ -2476,80 +2558,7 @@ if [ "${1:-}" = access ]; then
     *) echo "$a_usage" >&2; exit 2;;
   esac
 
-  if [ -n "$a_host" ]; then
-    c_match "$a_host" "$alias_re" || { echo "claude-discord: access: --host is not an ssh alias: letters, digits, . _ @ -, not starting with -, 255 at most" >&2; exit 2; }
-    h_manager access --manager
-    # The env words of the host's ledger line, as the monitor's pass reads them (monitor/monitor.sh, run_pass): a proxy
-    # word sets both spellings, name= is no env word; of two lines for one alias the last counts.
-    a_env=() a_hit=""
-    while IFS= read -r line || [ -n "$line" ]; do
-      set -f; a_w=(${line%$'\r'}); set +f
-      [ "${a_w[0]:-}" = "$a_host" ] || continue
-      a_hit=1 a_env=()
-      for w in ${a_w[@]+"${a_w[@]:1}"}; do
-        case $w in name=*) continue;; esac
-        [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
-        case ${w%%=*} in
-          HTTPS_PROXY|https_proxy) a_env+=("HTTPS_PROXY=${w#*=}" "https_proxy=${w#*=}");;
-          HTTP_PROXY|http_proxy) a_env+=("HTTP_PROXY=${w#*=}" "http_proxy=${w#*=}");;
-          ALL_PROXY|all_proxy) a_env+=("ALL_PROXY=${w#*=}" "all_proxy=${w#*=}");;
-          NO_PROXY|no_proxy) a_env+=("NO_PROXY=${w#*=}" "no_proxy=${w#*=}");;
-          *) a_env+=("$w");;
-        esac
-      done
-    done < "$hf"
-    [ -n "$a_hit" ] || { echo "claude-discord: access: $a_host is not in $hf (claude-discord hosts list)" >&2; exit 2; }
-    if [ "$a_host" = local ]; then
-      a_pa=(); [ -z "$a_proj" ] || a_pa=(--project "$a_proj")
-      exec env ${a_env[@]+"${a_env[@]}"} "$self_path" access ${a_pa[@]+"${a_pa[@]}"} -- "$bot" "$act" "$@"
-    fi
-    [ -n "$a_proj" ] || { echo "claude-discord: access: --host $a_host needs --project <the bot's project directory on that host>" >&2; exit 2; }
-    # The project and the bot's name travel as hex digits (a path or a name may hold anything; no quoting of ours has to
-    # hold in the remote shell), behind `--version`: a claude-discord before 1.13.0 prints its version line and exits
-    # whatever follows, while a new verb would be read there as a bot's name and reach the launcher.
-    a_hex() { printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'; }
-    a_remote="env $([ ${#a_env[@]} = 0 ] || printf '%q ' "${a_env[@]}")~/.local/bin/claude-discord --version --access $(a_hex "$a_proj") $(a_hex "$bot") $act${*:+ $*}"
-    a_old() {  # no document: an older host printed its version line; a 1.13.0 host that could not do it said why (no such bot there)
-      # A version line is a whole line, as h_capped reads one: the same words inside other text (a banner) are none.
-      local l re='^ *claude-discord +([0-9]+\.[0-9]+\.[0-9]+)( |$)'
-      l=$(printf '%s\n' "$h_out" | grep -E "$re" | tail -n 1) || l=""
-      if [[ $l =~ $re ]]; then echo "claude-discord: access: $a_host needs claude-discord 1.13.0 for this (it has ${BASH_REMATCH[1]}; claude-discord update, there)" >&2; exit 5; fi
-      l=$(printf '%s\n' "$h_out" | LC_ALL=C tr -d '\000-\010\013-\037\177' | grep . | tail -n 1) || l=""
-      l=${l#claude-discord: access: }
-      echo "claude-discord: access: $a_host: ${l:-no answer (exit $h_rc)}" >&2; exit 1
-    }
-    a_down() {
-      case $h_rc in
-        255) echo "claude-discord: access: $a_host did not answer (ssh exit 255, also with ControlPath=none)" >&2; exit 5;;
-        142) echo "claude-discord: access: $a_host gave no answer within ${h_cap}s" >&2; exit 5;;
-      esac
-    }
-    if [ "$act" = --json ]; then
-      # The host asks Discord, starting no call past 12 s, each 5 s at most, after ssh connected (up to 8 s): 30 s for
-      # the whole call, so a slow host with a slow Discord is still an answer.
-      case $h_cap in *.*) ;; *) [ "$h_cap" -ge 30 ] || h_cap=30;; esac
-      h_ssh "$a_host" "$a_remote" raw; a_down
-      # The document is the last line that starts as one; what the host printed around it (a banner) is not ours.
-      doc=$(printf '%s\n' "$h_out" | grep '^{"access":' | tail -n 1 | jq -c 'select(.access == 1)' 2>/dev/null) || doc=""
-      [ -n "$doc" ] || a_old
-      printf '%s\n' "$doc"; exit 0
-    fi
-    h_ssh "$a_host" "~/.local/bin/claude-discord --version"; a_down
-    a_v="" a_re='claude-discord ([0-9]+\.[0-9]+\.[0-9]+)'
-    if [[ $h_out =~ $a_re ]]; then a_v=${BASH_REMATCH[1]}; fi
-    [ -n "$a_v" ] || { echo "claude-discord: access: $a_host answered, but not as claude-discord (exit $h_rc)" >&2; exit 5; }
-    ver_ge "$a_v" 1.13.0 || a_old
-    if [ -t 0 ] && [ -t 1 ]; then
-      # The question is asked on that host, of this terminal. No cap: a person is answering.
-      a_rc=0; ssh -t -o BatchMode=yes -o ConnectTimeout=8 -- "$a_host" "$a_remote" || a_rc=$?
-      [ "$a_rc" != 255 ] || { echo "claude-discord: access: ssh to $a_host failed (exit 255)" >&2; exit 5; }
-      exit "$a_rc"
-    fi
-    # No terminal here: the host prints the changes and refuses (exit 3). What it printed is another machine's text.
-    h_ssh "$a_host" "$a_remote" raw; a_down
-    printf '%s\n' "$h_out" | LC_ALL=C tr -d '\000-\010\013-\037\177'
-    exit "$h_rc"
-  fi
+  [ -z "$a_host" ] || via_host access 1.13.0 "$bot" "$act" "$@"
 
   if [ -n "$a_proj" ]; then
     cd "$a_proj" 2>/dev/null || { echo "claude-discord: access: no such project directory (--project)" >&2; exit 1; }
@@ -2892,6 +2901,127 @@ if [ "${1:-}" = access ]; then
     [ "$newmode" != dev-manager ] || echo "claude-discord: access: its peers and the hosts it checks: claude-discord setup $bn --mode, and claude-discord hosts add"
     a_log "mode: $mode -> $newmode"
   fi
+  exit 0
+fi
+
+# bot: a bot's token (1.14.0), for people and the TUI, which changes it through this verb only. A bot's name here is its
+# Discord username (b_name_re: 2 to 32 of A-Z a-z 0-9 _ -).
+#   bot <name> token   the new token, read from the terminal with its echo off; Discord is asked who it is (GET /users/@me
+#                      as that token): a token Discord refuses, or one of another bot, is refused; <bot dir>/.env replaced
+#                      by rename, mode 600, its other lines kept. A running session logs in with it within 10 s.
+# It asks one question at the terminal, after the marker line access set prints (U+2060), and refuses without a terminal
+# on stdin and stdout (exit 3) before it reads anything. The token is never printed, never in an argument list, the
+# environment or a log: read from the terminal, sent to curl on its stdin.
+# --host <alias> [--manager <bot>] --project <dir>: as access --host; the host needs claude-discord 1.14.0.
+# Exit status: 0 done, or nothing to change; 1 it could not (Discord refused the token or did not answer, a token of
+# another bot, no such bot, a failed write); 2 usage, or what was typed is no token; 3 no terminal: nothing read or
+# changed; 4 answered no; 5 --host: no answer from the host, or its claude-discord is older than 1.14.0.
+if [ "${1:-}" = bot ]; then
+  shift
+  b_usage="usage: claude-discord bot [--host <alias> [--manager <bot>]] [--project <dir>] <bot> token"
+  a_host="" a_proj="" hb=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --host|--manager|--project)
+        [ $# -ge 2 ] || { echo "$b_usage" >&2; exit 2; }
+        case $1 in --host) a_host=$2;; --manager) hb=$2;; *) a_proj=$2;; esac
+        shift 2;;
+      --) shift; break;;
+      -*) echo "$b_usage" >&2; exit 2;;
+      *) break;;
+    esac
+  done
+  [ $# = 2 ] && [ "$2" = token ] || { echo "$b_usage" >&2; exit 2; }
+  bot=$1 act=$2
+  case $bot in ''|.|..|*/*) echo "claude-discord: bot: the bot's name must be a plain directory name" >&2; exit 2;; esac
+  b_noterm() { echo "claude-discord: bot: $act reads the token from a terminal and asks there: run it in a terminal (stdin and stdout); nothing was read or changed" >&2; exit 3; }
+  if [ -n "$a_host" ]; then
+    [ -t 0 ] && [ -t 1 ] || b_noterm   # nothing is read over ssh without a terminal here
+    via_host bot 1.14.0 "$bot" "$act"
+  fi
+  if [ -n "$a_proj" ]; then
+    cd "$a_proj" 2>/dev/null || { echo "claude-discord: bot: no such project directory (--project)" >&2; exit 1; }
+  else
+    bp=$PWD
+    while [ ! -d "$bp/.claude/discord-agents/$bot" ] && [ -n "$bp" ]; do bp=${bp%/*}; done
+    [ -z "$bp" ] || cd "$bp"
+  fi
+  root=$PWD/.claude/discord-agents; d=$root/$bot
+  bn=${bot//[[:cntrl:]]/}   # the name as it is printed
+  b_host_name=$(uname -n); b_host_name=${b_host_name%%.*}
+  [ -f "$d/.env" ] || { echo "claude-discord: bot: no bot '$bn' set up in $root (claude-discord setup <bot>)" >&2; exit 1; }
+  command -v jq >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 || { echo "claude-discord: bot needs jq and curl" >&2; exit 1; }
+  # b_api <method> <path>: Discord asked with $tok, which goes to curl on its stdin as health sends it; sets status and resp.
+  b_api() {
+    local out=""
+    out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 10 -w '\n%{http_code}' -X "$1" -H @- "https://discord.com/api/v10/$2" 2>/dev/null) || out=""
+    status=${out##*$'\n'} resp=${out%$'\n'*}
+    case $status in ''|*[!0-9]*) status=000;; esac
+  }
+  # b_me: who $tok is: b_id, b_user (its username, as Discord gives it), b_isbot, and b_shown (that name made safe to
+  # print: another program's text). Exit 1 when Discord refused the token or did not answer.
+  b_me() {
+    local l
+    b_api GET users/@me
+    l=$(printf '%s' "$resp" | jq -r 'objects | [(.id // "" | tostring), (.bot == true | tostring), (.username // "" | tostring)] | join("\u001f")' 2>/dev/null) || l=""
+    IFS=$'\x1f' read -r b_id b_isbot b_user <<<"$l" || :
+    b_shown=$(printf '%s' "$b_user" | LC_ALL=C tr -d '\000-\037\177'); b_shown=${b_shown:0:40}
+    case $status in
+      2*) c_match "$b_id" '^[0-9]{1,20}$' || { echo "claude-discord: bot: Discord's answer had no bot id in it; nothing was changed" >&2; exit 1; };;
+      401) echo "claude-discord: bot: Discord refused the token (HTTP 401): copy it again (Developer Portal, the bot's Bot tab, Reset Token); nothing was changed" >&2; exit 1;;
+      *) echo "claude-discord: bot: Discord did not answer (HTTP $status); nothing was changed" >&2; exit 1;;
+    esac
+  }
+  # b_read: the token, from the terminal with its echo off (turned off before the prompt is printed, so nothing typed or
+  # written to it is shown), after the marker line: into tok. Ctrl-C puts the echo back.
+  b_read() {
+    local st
+    st=$(stty -g 2>/dev/null) && stty -echo 2>/dev/null || { echo "claude-discord: bot: the terminal's echo could not be turned off, so no token is read" >&2; exit 1; }
+    trap 'stty "$st" 2>/dev/null' EXIT; trap 'exit 130' INT TERM HUP
+    printf '\342\201\240\n' >&2
+    tok=""; IFS= read -r -p "Token (hidden): " tok || tok=""
+    stty "$st" 2>/dev/null; trap - EXIT INT TERM HUP
+    echo >&2
+    tok=${tok%$'\r'}
+    c_match "$tok" '^[A-Za-z0-9._-]{20,200}$' || { tok=""; echo "claude-discord: bot: what was typed is no bot token (letters, digits and . _ -, 20 to 200 of them); nothing was changed" >&2; exit 2; }
+  }
+  # b_ask <question>: the one question, after the marker (the TUI asks only after it); anything but y is exit 4.
+  b_ask() {
+    local a=""
+    printf '\342\201\240\n' >&2
+    read -r -p "$1 [y/N] " a || a=""
+    case $a in y|Y) ;; *) echo "claude-discord: bot: answered no; nothing was changed" >&2; exit 4;; esac
+  }
+  # b_log <bot dir> <what>: a line in the bot's access.log, as access set writes it (the token: the fact only).
+  b_log() { (umask 077; printf '%s %s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$b_host_name" "$2" >> "$1/access.log") 2>/dev/null || :; }
+
+  [ -t 0 ] && [ -t 1 ] || b_noterm
+  b_read
+  b_me
+  [ "$b_isbot" = true ] || { echo "claude-discord: bot: that token is no bot's (Discord says it is a user's); nothing was changed" >&2; exit 1; }
+  # The same bot: its id, kept in bot-id by health; with none kept here, its Discord name is this bot's name.
+  me=""; { read -r me < "$d/bot-id"; } 2>/dev/null || :
+  if c_match "$me" '^[0-9]{1,20}$'; then
+    [ "$me" = "$b_id" ] || { echo "claude-discord: bot: that token is the bot $b_shown ($b_id), not $bn ($me): a token of another bot is refused, it would make this another bot; nothing was changed" >&2; exit 1; }
+  elif [ "$b_user" != "$bot" ]; then
+    echo "claude-discord: bot: this machine does not know $bn's Discord id yet, and that token is the bot $b_shown ($b_id), another name: refused; nothing was changed" >&2; exit 1
+  fi
+  b_keep="" b_old=""
+  while IFS= read -r l || [ -n "$l" ]; do
+    case $l in DISCORD_BOT_TOKEN=*) [ -n "$b_old" ] || b_old=${l#DISCORD_BOT_TOKEN=};; *) b_keep="$b_keep$l"$'\n';; esac
+  done < "$d/.env"
+  [ "$b_old" != "$tok" ] || { echo "claude-discord: bot: that is $bn's token already; nothing to change"; exit 0; }
+  printf '%s\n' "claude-discord: bot: $bn on $b_host_name, $d/.env" \
+    "    its token is replaced by this one, of $b_shown ($b_id); the old one is not kept" \
+    "    a running session of $bn logs in with it within 10 s (one started before claude-discord 1.14.0: claude-discord refresh $bn --force)"
+  b_ask "Replace the token?"
+  # By rename, never in place: the plugin re-reads .env every 10 s while it waits for a token, by its path.
+  (umask 077; printf 'DISCORD_BOT_TOKEN=%s\n%s' "$tok" "$b_keep" > "$d/.env.cd.$$") && mv -f "$d/.env.cd.$$" "$d/.env" ||
+    { rm -f "$d/.env.cd.$$"; echo "claude-discord: bot: could not write $d/.env; it is as it was" >&2; exit 1; }
+  tok=""
+  c_match "$me" '^[0-9]{1,20}$' || printf '%s\n' "$b_id" > "$d/bot-id" 2>/dev/null || :
+  b_log "$d" "token: replaced (bot $b_id)"
+  echo "claude-discord: bot: $d/.env written. A running session of $bn logs in with it within 10 s."
   exit 0
 fi
 
