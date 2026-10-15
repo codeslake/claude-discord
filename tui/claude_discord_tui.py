@@ -1658,6 +1658,7 @@ class Asking:
     never after one (it may be writing)."""
     run = None                 # its PtyRun while it runs
     printed = ""               # what it printed after the answer, whole, once it ended (ended() gets the last of it)
+    FRAME = ("#access", "#a-tail")   # the popup's box and the scroll of its message line in it (BotPopup sets its own)
     asked = stopped = False    # it asked its question; esc (or Cancel) stopped it
     yes: bool | None = None    # the answer written to it; None: none yet
     says = None                # the HostSays popup while it is open
@@ -1706,12 +1707,29 @@ class Asking:
         rc, self.run = what, None
         self.forget()
         self.printed = ask_text(text).plain   # all of it, for a line a program reads (BotName: `renamed: <old> -> <new>`)
-        # What is said: every line after the answer's echo, 16 at most, never the program line (1.14.1).
+        # What is said: every line after the answer's echo, 16 at most, never the program line (1.14.1). The message
+        # sits in a scroll pinned to its end (fit_tail), so on a short terminal it is the FIRST of those lines that go
+        # out of view, never the last, where what failed and its command are (review I2).
         lines = [l for l in self.printed.split("\n") if l.strip() and not RENAMED.match(l)]
         if self.yes is not None and lines and lines[0].strip() in ("y", "n"):
             lines.pop(0)   # the pty's echo of the answer
         said = "\n".join(lines[-16:])
         self.ended(rc, f"\n{said}" if said else "")
+
+    def fit_tail(self) -> None:
+        """The message's scroll (FRAME: the popup's box and that scroll) as high as the terminal leaves it beside the
+        box's other rows, 3 at least, and scrolled to its end: a message longer than that shows its last lines. Called
+        after the message is set and at a resize (the box is `height: auto`, so it would else grow past the terminal,
+        which cuts it at its end)."""
+        if not self.query(self.FRAME[0]):   # taken down meanwhile
+            return
+        box, tail = self.query_one(self.FRAME[0]), self.query_one(self.FRAME[1], VerticalScroll)
+        rest = box.gutter.height + sum(w.outer_size.height for w in box.children if w is not tail)
+        tail.styles.max_height = max(3, self.app.size.height - rest)
+        self.call_after_refresh(tail.scroll_end, animate=False)
+
+    def on_resize(self, event: Resize) -> None:
+        self.call_after_refresh(self.fit_tail)
 
     def forget(self) -> None:
         """The token zeroed, as far as Python lets a program forget: it never was a str here (the field it was typed in
@@ -1759,7 +1777,8 @@ class AccessEdit(Asking, ModalScreen):
     Its exit status decides what is said. Dismissed with what there is to say after a save, or None."""
     CSS = f"""AccessEdit {{ align: center middle; }}
     #access {{ width: 118; max-width: 96%; height: auto; border: round {BRAND}; padding: 1 2; }}
-    #a-body {{ height: auto; margin: 1 0; text-wrap: nowrap; }} #a-add {{ width: 44; display: none; }} #a-add.shown {{ display: block; }}"""
+    #a-body {{ height: auto; margin: 1 0; text-wrap: nowrap; }} #a-add {{ width: 44; display: none; }} #a-add.shown {{ display: block; }}
+    #a-tail {{ height: auto; }}"""
     AUTO_FOCUS = ""   # nothing is focused (None would mean the app's rule: the first field), so the keys are the screen's until a name is typed
     # tab is the screen's too (priority: before the focus moves).
     BINDINGS = [Binding("escape", "close", "close"), Binding("up", "move(-1)"), Binding("down", "move(1)"), Binding("left", "turn(-1)"), Binding("right", "turn(1)"),
@@ -1785,7 +1804,10 @@ class AccessEdit(Asking, ModalScreen):
             yield Static("", id="a-title")
             yield Static("", id="a-body")
             yield Input(id="a-add", placeholder="a name or a numeric user id, then enter", max_length=64, compact=True)
-            yield Static("reading access.json and the server's channels ...", id="a-msg", markup=False)
+            tail = VerticalScroll(id="a-tail")   # the message, in a scroll pinned to its end (fit_tail): never focused
+            tail.can_focus = False
+            with tail:
+                yield Static("reading access.json and the server's channels ...", id="a-msg", markup=False)
 
     def on_mount(self) -> None:
         self.paint()
@@ -1794,6 +1816,7 @@ class AccessEdit(Asking, ModalScreen):
 
     def say(self, text: str, style: str = DIM) -> None:
         self.query_one("#a-msg", Static).update(Text(text, style))
+        self.call_after_refresh(self.fit_tail)
 
     def loaded(self, answer: tuple) -> None:
         """The document. Another program's output, from another machine for a remote bot: parsed as JSON, cleaned, read
@@ -2204,8 +2227,9 @@ class BotPopup(Asking, ModalScreen):
     #bot {{ width: 104; max-width: 96%; height: auto; border: round {BRAND}; padding: 1 2; }}
     #bot Horizontal {{ height: auto; }} #bot .lab {{ width: 12; color: $text-muted; }} #bot .hint {{ width: auto; padding-left: 2; color: $text-muted; }}
     #b-field {{ width: 56; }} #b-buttons {{ margin-top: 1; }} #bot Button {{ margin-right: 2; }}
-    Choice:focus, Check:focus {{ background: {CURSOR}; }}"""
+    Choice:focus, Check:focus {{ background: {CURSOR}; }} #b-tail {{ height: auto; }}"""
     BINDINGS = [Binding("escape", "close", "close")]
+    FRAME = ("#bot", "#b-tail")
     GO = "Run"     # the label of the button that runs it
     DONE = "done"  # what is said when it ran and said nothing
 
@@ -2224,10 +2248,14 @@ class BotPopup(Asking, ModalScreen):
             with Horizontal(id="b-buttons"):
                 yield Btn("Cancel", id="b-no")
                 yield Btn(self.GO, id="b-go", variant="error")
-            yield Static("", id="b-msg", markup=False)
+            tail = VerticalScroll(id="b-tail")   # the message, in a scroll pinned to its end (fit_tail): never focused
+            tail.can_focus = False
+            with tail:
+                yield Static("", id="b-msg", markup=False)
 
     def say(self, text: str, style: str = DIM) -> None:
         self.query_one("#b-msg", Static).update(Text(text, style))
+        self.call_after_refresh(self.fit_tail)
 
     def changed(self, choice: "Choice") -> None:
         pass

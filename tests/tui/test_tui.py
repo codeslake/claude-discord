@@ -2240,6 +2240,41 @@ async def bot_token_unasked(app, pilot):
     assert text(pop, "#b-msg").startswith("the host did not answer, or its claude-discord is older than 1.14.0"), text(pop, "#b-msg")
 
 
+TAIL_OUT = "y\r\n" + "".join(f"line{i:02}\r\n" for i in range(1, 16)) + "the last line, which says what failed and its command: FINAL-LINE\r\n"
+
+
+async def access_tail(app, pilot):
+    """At 24 rows (review I2): the editor's message shows the CLI's LAST lines, however many the terminal has room
+    for (16 at most, 8 at least): the popup grows by them, and past the terminal's edge it is the last lines, what
+    failed and its command, that would be cut."""
+    fake_pty(app, [(ASK, "ask"), (TAIL_OUT, 1)])
+    await pilot.press("e")
+    await settle(app, pilot)
+    await pilot.press("m", "s")
+    await settle(app, pilot)
+    await pilot.press("y")
+    await settle(app, pilot)
+    msg, shot = text(app.screen, "#a-msg"), app.export_screenshot()
+    assert isinstance(app.screen, tui.AccessEdit) and msg.endswith("FINAL-LINE") and "FINAL-LINE" in shot and "line15" in shot, (msg, "FINAL-LINE" in shot)
+    assert 9 <= len(msg.split("\n")) <= 17 and "line08" in msg, msg   # 8 lines at least, 16 at most, after the header line
+
+
+async def bot_tail(app, pilot):
+    """The same for a bot popup at 24 rows."""
+    fake_pty(app, [(BOT_HEAD + f"{tui.A_MARK}\r\nRename it to photo2? [y/N] ", "ask"), (TAIL_OUT, 1)])
+    await pilot.press("n")
+    await settle(app, pilot)
+    await pilot.press("shift+tab")
+    app.screen.query_one("#b-field").value = "photo2"
+    await pilot.press("enter")
+    await settle(app, pilot)
+    await pilot.press("y")
+    await settle(app, pilot)
+    msg, shot = text(app.screen, "#b-msg"), app.export_screenshot()
+    assert isinstance(app.screen, tui.BotName) and msg.endswith("FINAL-LINE") and "FINAL-LINE" in shot and "line15" in shot, (msg, "FINAL-LINE" in shot)
+    assert 9 <= len(msg.split("\n")) <= 17 and "line08" in msg, msg
+
+
 async def bot_token_stopped(app, pilot):
     """A token taken from its field and not yet asked for (the run is still before its prompt) is zeroed when esc, or
     Cancel, stops the run, and was never written (M6e of the 1.14.0 review)."""
@@ -2377,6 +2412,8 @@ async def main():
     await case("bot_token", bot_token, state="all_ok", wrapper=bot_cli)
     await case("bot_token_unasked", bot_token_unasked, state="all_ok", wrapper=bot_cli)
     await case("bot_token_stopped", bot_token_stopped, state="all_ok", wrapper=bot_cli)
+    await case("access_tail", access_tail, state="all_ok", wrapper=access_cli, size=(137, 24))
+    await case("bot_tail", bot_tail, state="all_ok", wrapper=bot_cli, size=(137, 24))
     await case("bot_add", bot_add, state="all_ok", wrapper=bot_cli)
     await case("access_long_host_answered", access_long_host_answered, state="all_ok", wrapper=access_cli)
     await case("stopped", stopped)
