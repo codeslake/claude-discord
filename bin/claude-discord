@@ -121,8 +121,14 @@ helpers=$HOME/.claude-discord
 plugin=discord@claude-plugins-official
 # This script lives at <plugin root>/bin/claude-discord; the plugin's tools
 # and rules are named from here, resolved through any symlink to the real copy.
-self_path=$(readlink -f "$0" 2>/dev/null || echo "$0")
-self_root=$(cd "${self_path%/*}/.." && pwd -P)   # ${..%/*}, not dirname: one fork less on every call
+# $0 that is no symlink (the shim runs the file itself) is taken as it is, made absolute: no readlink is started on
+# every call (self_root below is the physical directory either way).
+case $0 in /*) self_path=$0;; *) self_path=$PWD/$0;; esac
+[ ! -L "$self_path" ] || self_path=$(readlink -f "$0" 2>/dev/null || echo "$self_path")
+# The plugin root, physical (as the hooks' plugin_root is), found by cd and back in this shell: no $(...) fork on every call.
+cd_here=$PWD self_root=""
+! { cd -- "${self_path%/*}/.." && cd -P .; } 2>/dev/null || self_root=$PWD   # ${..%/*}, not dirname: one fork less
+cd -- "$cd_here" 2>/dev/null || { echo "claude-discord: could not return to $cd_here" >&2; exit 1; }
 # reserved_name <name>: a word no bot may take as its name (setup, bot rename, bot add): claude-discord's subcommands,
 # `add` (`claude-discord bot add`), and the directories beside the bots.
 reserved_name() { case $1 in setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access|bot|add|hooks|checkin) return 0;; esac; return 1; }
