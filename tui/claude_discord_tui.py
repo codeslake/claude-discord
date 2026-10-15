@@ -2322,11 +2322,14 @@ class BotName(BotPopup):
         self.start(self.app.bot_argv(self.entry, txt(self.entry.get("bot")), "rename", new))
 
     def ended(self, rc: int, said: str) -> None:
-        # The manager itself, once the CLI says its directory moved (its last line), whatever failed after that: its
-        # backend's state is the new name's now. Its exit status cannot say it: a start after the move may fail.
-        m = RENAMED.search(said)
-        if m and m.group(1) == txt(self.entry.get("bot")) == self.app.bot and self.entry.get("host") == "local":
-            self.app.retarget(m.group(2))
+        # Once the CLI says the directory moved (its last line), whatever failed after that: the bot's row is the new
+        # name's now (1.14.1), and for the manager itself its backend's state is the new name's too. Its exit status
+        # cannot say it: a start after the move may fail.
+        m, e = RENAMED.search(said), self.entry
+        if m and m.group(1) == txt(e.get("bot")):
+            self.app.renamed(txt(e.get("host")), txt(e.get("project")), m.group(1), m.group(2))
+            if m.group(1) == self.app.bot and e.get("host") == "local":
+                self.app.retarget(m.group(2))
         super().ended(rc, said)
 
 
@@ -2691,6 +2694,24 @@ class MonitorTUI(App):
         self.bot, self.state_dir = bot, self.state_dir.parent / bot
         self.holder, self.mtime = self.state_dir / "holders" / f"tui-{os.getpid()}", None
         self.refresh_state()
+
+    def renamed(self, host: str, project: str, old: str, new: str) -> None:
+        """`bot rename` moved a bot's directory (the CLI's last line): its row is the new name's now, without waiting
+        for the pass the popup asked for. Both names are the new one, so the `≠ Discord` line goes. The next
+        state.json replaces all of this. The key is the monitor's reducer's, `host|project|bot` (a remote bot's project
+        is the path on that host, as the entry holds it)."""
+        bots = obj(self.state.get("bots"))
+        for key in [k for k, b in bots.items() if isinstance(b, dict) and (txt(b.get("host")), txt(b.get("project")), txt(b.get("bot"))) == (host, project, old)]:
+            b = bots.pop(key)
+            b["bot"], b["discord_name"] = new, new
+            nk = "|".join((host, project, new))
+            bots[nk] = b
+            if self.cursor["bots"] == key:
+                self.cursor["bots"] = nk
+            if key in self.opened:
+                self.opened = (self.opened - {key}) | {nk}
+        self.names = load_names(self.state)
+        self.paint()
 
     def access_argv(self, b: dict, *rest: str) -> list[str]:
         """`claude-discord access --host <the bot's host> --manager <this manager> --project <its project> -- <bot> ...`,
