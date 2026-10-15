@@ -2137,8 +2137,13 @@ async def bot_renamed_row(app, pilot):
     fake_pty(app, [(BOT_HEAD + f"{tui.A_MARK}\r\nRename it to photo2? [y/N] ", "ask"),
                    ("y\r\nclaude-discord: bot: renamed: /home/u/rcps/.claude/discord-agents/photo2 (and on Discord)\r\n"
                     "claude-discord: bot: not done:\r\n    photo2 did not start (above): claude-discord --bg --name photo2\r\nrenamed: photobot -> photo2\r\n", 1)])
+    # mgr down too: it sorts before photobot, so photobot's row is not the first (a cursor left on the old key would
+    # fall to the first row, which must then not be the renamed one).
+    app.state["bots"][MGRBOT]["verdict"] = "down"
+    app.paint()
     await pilot.press("space")   # the row open: it stays open under its new key
     assert app.cursor["bots"] == PHOTO and app.opened == {PHOTO} and "≠ Discord: photo_x" in text(app, "#body"), body(app)
+    assert [l[2:].split()[0] for l in body(app) if l[:2] in ("▸ ", "▾ ")][:2] == ["mgr", "photobot"], body(app)
     await pilot.press("n")
     await settle(app, pilot)
     pop = app.screen
