@@ -149,9 +149,11 @@ z=${x,,}   # bash4-ok: Linux-only path
 EOF
 [ "$(bash4_lint "$LF" | wc -l | tr -d ' ')" = 19 ] || { echo "FAIL: the bash 4 lint must flag each of the 19 code lines and exempt only the trailing marker: $(bash4_lint "$LF")"; exit 1; }
 rm -f "$LF"; trap - EXIT
-if bash4_lint "$S" "$D/shim/claude-discord" "$D"/hooks/*/* "$D"/tools/* "$D/monitor/monitor.sh"; then
-  echo "FAIL: bash 4+ construct in the wrapper, shim, hooks, tools or monitor (macOS /bin/bash is 3.2)"; exit 1
+if bash4_lint "$S" "$D"/bin/lib/*.sh "$D/shim/claude-discord" "$D"/hooks/*/* "$D"/tools/* "$D/monitor/monitor.sh"; then
+  echo "FAIL: bash 4+ construct in the wrapper, its bin/lib, shim, hooks, tools or monitor (macOS /bin/bash is 3.2)"; exit 1
 fi
+# 1.15.0: the wrapper sources bin/lib/*.sh on demand; each is parsed on the Mac too.
+for f in "$D"/bin/lib/*.sh; do bash -n "$f"; done
 bash -n "$D/hooks/lib/discord.sh"
 bash -n "$D/hooks/lib/old-hooks.sh"
 bash -n "$D/hooks/turn/on-prompt"
@@ -184,7 +186,7 @@ done <<<"$cmds"
 jq -e '.hooks.PreToolUse[] | select(.matcher == "mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message") | .hooks[] | select(.command | endswith("peers/thread-guard\""))' "$D/hooks/hooks.json" >/dev/null || { echo "FAIL: thread-guard must cover reply and edit_message"; exit 1; }
 ! jq -e '.hooks.PostToolUse[] | select(.matcher | test("react"))' "$D/hooks/hooks.json" >/dev/null || { echo "FAIL: no hook may run after a react (the Stop hook reacts by itself)"; exit 1; }
 echo "ok: plugin.json and hooks.json are valid and every hook command exists"
-[ "$(grep -c "if (msg.author.bot) return" "$S")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in the wrapper"; exit 1; }
+[ "$(grep -c "if (msg.author.bot) return" "$D/bin/lib/patch.sh")" = 1 ] || { echo "FAIL: server.ts patch block must appear exactly once in bin/lib/patch.sh (patch_official lives there since 1.15.0)"; exit 1; }
 # KILL_AT_EXIT: pids this test started (fake workers), so a failed assertion
 # cannot leave one running.
 KILL_AT_EXIT=""
@@ -586,6 +588,33 @@ TT=$PC/tools/thread   # the hooks name the thread tool by its absolute path in t
 [ -L "$R/hooks" ] || { echo "FAIL: setup must create the hooks symlink"; exit 1; }
 [ "$(readlink "$R/hooks")" = "$PC/hooks" ] || { echo "FAIL: hooks symlink must point at the installed plugin's hooks: $(readlink "$R/hooks")"; exit 1; }
 echo "ok: setup registers no settings hook and links the project's hooks to the installed plugin (after access.json is written)"
+
+# 1.15.0: bin/claude-discord is a top plus bin/lib/*.sh sourced on demand. A lib is found through every path shape the
+# wrapper is run by: the project's directory symlink to the source (the file itself is no symlink, so self_root comes from
+# cd -P, as on lmd42), the shim from inside the project, and the absolute path from another cwd; each gives the direct
+# call's output. A lib that is not there is refused by name (exit 1) before anything runs: a copy of the one file is no install.
+BU=$(bash "$S" bot 2>&1) && { echo "FAIL: bot with no arguments is a usage refusal"; exit 1; }; rc=$?
+[ "$rc" = 2 ] && grep -q '^usage: claude-discord bot ' <<<"$BU" || { echo "FAIL: bot's usage: rc=$rc $BU"; exit 1; }
+r1=0 r2=0 r3=0
+o1=$(bash "$P/.claude/skills/claude-discord/bin/claude-discord" bot 2>&1) || r1=$?
+o2=$(cd "$P" && "$HOME/.local/bin/claude-discord" bot 2>&1) || r2=$?
+o3=$(cd "$HOME" && "$S" bot 2>&1) || r3=$?
+[ "$r1 $r2 $r3" = "2 2 2" ] && [ "$o1" = "$BU" ] && [ "$o2" = "$BU" ] && [ "$o3" = "$BU" ] ||
+  { echo "FAIL: bot must find bin/lib through the project link ($r1: $o1), the shim ($r2: $o2) and from another cwd ($r3: $o3)"; exit 1; }
+mv "$PC/bin/lib/bot.sh" "$PC/bin/lib/bot.sh.off" 2>/dev/null || :
+rc=0; out=$(bash "$S" bot 2>&1) || rc=$?
+[ "$rc" = 1 ] && [ "$out" = "claude-discord: $PC/bin/lib/bot.sh is missing: bin/claude-discord runs beside bin/lib/ (a copy of the one file is no install)" ] ||
+  { echo "FAIL: a missing bin/lib/bot.sh must be refused by name, exit 1: rc=$rc $out"; exit 1; }
+mv "$PC/bin/lib/bot.sh.off" "$PC/bin/lib/bot.sh" 2>/dev/null || :
+mv "$PC/bin/lib/patch.sh" "$PC/bin/lib/patch.sh.off" 2>/dev/null || :
+rc=0; out=$(bash "$S" --name alpha 2>&1) || rc=$?
+[ "$rc" = 1 ] && [ "$out" = "claude-discord: $PC/bin/lib/patch.sh is missing: bin/claude-discord runs beside bin/lib/ (a copy of the one file is no install)" ] ||
+  { echo "FAIL: a launch without bin/lib/patch.sh must be refused by name before anything starts, exit 1: rc=$rc $out"; exit 1; }
+mv "$PC/bin/lib/patch.sh.off" "$PC/bin/lib/patch.sh" 2>/dev/null || :
+rc=0; out=$(bash "$S" setup 2>&1) || rc=$?
+[ "$rc" = 2 ] && [ "$out" = "usage: claude-discord setup <name> [--scope project|global] [--method link|clone] [--reset|--mode]" ] ||
+  { echo "FAIL: setup with no name prints its usage line as is (no 'line N' prefix of a sourced file), exit 2: rc=$rc $out"; exit 1; }
+echo "ok: bin/lib is found through the project's directory link, the shim and from another cwd; a missing lib is refused by name for bot and for a launch; setup with no name prints its usage"
 
 printf 'tokB\nn\n' | bash "$S" setup beta --scope project >/dev/null
 [ "$(jq -r '.groups["1550575144320110662"].requireMention' "$R/beta/access.json")" = true ]
