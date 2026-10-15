@@ -3098,6 +3098,26 @@ if [ "${1:-}" = bot ]; then
       echo "claude-discord: bot: '$1' is a dev-manager with a hosts ledger in $p: one backend serves one manager name per machine; nothing was changed" >&2; exit 1
     done < <(cat "$helpers/records/projects" 2>/dev/null)
   }
+  # b_set_up [<a bot dir to skip>]: b_where, the first bot directory of this machine (this project's, then the recorded
+  # projects') that is the bot $b_id (its bot-id) or holds $tok (the token line of its .env, compared here: never printed
+  # or passed on); "" for none. One bot, one session: two sessions on one token both answer.
+  b_set_up() {
+    local p f id l
+    b_where=""
+    while IFS= read -r p || [ -n "$p" ]; do
+      p=${p%$'\r'}
+      for f in "$p"/.claude/discord-agents/*/.env; do
+        [ -n "$p" ] && [ -f "$f" ] && ! { [ -n "${1:-}" ] && [ "${f%/.env}" -ef "$1" ]; } || continue
+        id=""; { read -r id < "${f%/.env}/bot-id"; } 2>/dev/null || :
+        [ "$id" != "$b_id" ] || b_where=${f%/.env}
+        { while IFS= read -r l || [ -n "$l" ]; do
+            case $l in DISCORD_BOT_TOKEN=*) l=${l#DISCORD_BOT_TOKEN=}; [ "${l%$'\r'}" != "$tok" ] || b_where=${f%/.env}; break;; esac
+          done < "$f"; } 2>/dev/null || :
+        l=""
+        [ -z "$b_where" ] || return 0
+      done
+    done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null)
+  }
   # b_dname <bot dir> <name>: Discord's name for the bot, as health keeps it (discord-name: "<read at> <name>").
   b_dname() { printf '%s %s\n' "$(date +%s)" "${2//[[:cntrl:]]/}" > "$1/discord-name" 2>/dev/null || :; }
   # b_log <bot dir> <what>: a line in the bot's access.log, as access set writes it (the token: the fact only).
@@ -3155,27 +3175,41 @@ if [ "${1:-}" = bot ]; then
     b_read
     b_me "copy it again (Developer Portal, the bot's Bot tab, Reset Token)"
     [ "$b_isbot" = true ] || { echo "claude-discord: bot: that token is no bot's (Discord says it is a user's); nothing was changed" >&2; exit 1; }
-    # The same bot: its id, kept in bot-id by health; with none kept here, its Discord name is this bot's name.
-    me=""; { read -r me < "$d/bot-id"; } 2>/dev/null || :
-    if c_match "$me" '^[0-9]{1,20}$'; then
-      [ "$me" = "$b_id" ] || { echo "claude-discord: bot: that token is the bot $b_shown ($b_id), not $bn ($me): a token of another bot is refused, it would make this another bot; nothing was changed" >&2; exit 1; }
-    elif [ "$b_user" != "$bot" ]; then
-      echo "claude-discord: bot: this machine does not know $bn's Discord id yet, and that token is the bot $b_shown ($b_id), another name: refused; nothing was changed" >&2; exit 1
-    fi
     b_keep="" b_old=""
     while IFS= read -r l || [ -n "$l" ]; do
       case $l in DISCORD_BOT_TOKEN=*) [ -n "$b_old" ] || b_old=${l#DISCORD_BOT_TOKEN=};; *) b_keep="$b_keep$l"$'\n';; esac
     done < "$d/.env"
-    [ "$b_old" != "$tok" ] || { echo "claude-discord: bot: that is $bn's token already; nothing to change"; exit 0; }
+    [ "$b_old" != "$tok" ] || { b_old=""; echo "claude-discord: bot: that is $bn's token already; nothing to change"; exit 0; }
+    # The same bot: its id, kept in bot-id (health keeps it), else the one Discord gives for the token in .env now (asked
+    # with that token as the new one was). Never its username, which another bot may have too.
+    me=""; { read -r me < "$d/bot-id"; } 2>/dev/null || :
+    if ! c_match "$me" '^[0-9]{1,20}$' && [ -n "$b_old" ]; then
+      b_new=$tok tok=$b_old
+      b_api GET users/@me
+      tok=$b_new b_new=""
+      case $status in 2*) me=$(printf '%s' "$resp" | jq -r 'objects | .id // "" | tostring' 2>/dev/null) || me="";; *) me="";; esac
+    fi
+    b_old="" b_unchecked=""
+    if c_match "$me" '^[0-9]{1,20}$'; then
+      [ "$me" = "$b_id" ] || { echo "claude-discord: bot: that token is the bot $b_shown ($b_id), not $bn ($me): a token of another bot is refused, it would make this another bot; nothing was changed" >&2; exit 1; }
+    else
+      # Neither (no bot-id, and Discord refuses the token in .env: it was reset): a bot set up on this machine is
+      # another bot; any other is said, in red, as unchecked.
+      b_set_up "$d"
+      [ -z "$b_where" ] || { echo "claude-discord: bot: that token is of the bot $b_shown ($b_id), set up in $b_where already: $bn's own id could not be checked, and a token of another bot is refused; nothing was changed" >&2; exit 1; }
+      b_unchecked=1
+    fi
     printf '%s\n' "claude-discord: bot: $bn on $b_host_name, $d/.env" \
       "    its token is replaced by this one, of $b_shown ($b_id); the old one is not kept" \
       "    a running session of $bn logs in with it within 10 s (one started before claude-discord 1.14.0: claude-discord refresh $bn --force)"
+    [ -z "$b_unchecked" ] || printf '\033[1;31m  ! %s\033[0m\n    %s\n' "this bot's id could not be checked: $b_id ($b_shown)" \
+      "no bot-id is kept for $bn and Discord refuses the token in its .env: that this is $bn is up to you"
     b_ask "Replace the token?"
     # By rename, never in place: the plugin re-reads .env every 10 s while it waits for a token, by its path.
     (umask 077; printf 'DISCORD_BOT_TOKEN=%s\n%s' "$tok" "$b_keep" > "$d/.env.cd.$$") && mv -f "$d/.env.cd.$$" "$d/.env" ||
       { rm -f "$d/.env.cd.$$"; echo "claude-discord: bot: could not write $d/.env; it is as it was" >&2; exit 1; }
     tok=""
-    c_match "$me" '^[0-9]{1,20}$' || printf '%s\n' "$b_id" > "$d/bot-id" 2>/dev/null || :
+    printf '%s\n' "$b_id" > "$d/bot-id" 2>/dev/null || :
     b_dname "$d" "$b_user"
     b_log "$d" "token: replaced (bot $b_id)"
     echo "claude-discord: bot: $d/.env written. A running session of $bn logs in with it within 10 s."

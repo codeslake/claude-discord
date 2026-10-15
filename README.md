@@ -489,10 +489,13 @@ claude-discord bot add [--mode none|dev-manager|autoresearchclaw] [--start]   # 
 
 - **token** reads the token with the terminal's echo off (`Token (hidden): `),
   asks Discord who it is (`GET /users/@me`, the token on curl's stdin), and
-  refuses a token of another bot: the id kept in `<bot dir>/bot-id`, or, with
-  none kept, Discord's name for it, must be this bot's. It shows what it will
-  do and asks once; `y` writes `.env` by rename (mode 600, its other lines
-  kept). A running session logs in with the new token within 10 s: the
+  refuses a token of another bot: its id must be the one kept in
+  `<bot dir>/bot-id`, or, with none kept, the one Discord gives for the token
+  in `.env` now (never a username: two bots may share one). When neither can be
+  had (no `bot-id`, and the token in `.env` was reset), a token of a bot set up
+  on this machine is refused, and any other is shown in red as `this bot's id
+  could not be checked`. It shows what it will do and asks once; `y` writes
+  `.env` by rename (mode 600, its other lines kept) and the id to `bot-id`. A running session logs in with the new token within 10 s: the
   plugin's login loop re-reads `.env` by its path, and since 1.14.0 it also
   waits for a new token when Discord closes the gateway with 4004 (a token
   reset in the Developer Portal), which discord.js never retries. A session

@@ -4324,6 +4324,23 @@ bt "$TOK_NEW" - acc token; A=$BRC$BO; bt "$TOK_NEW" - acc token
 [ "$BRC" = 2 ] && grep -q 'what was typed is no bot token' <<<"$BO" && [ ! -s "$CURL_LOG" ] && [[ $BO != *tokBad* ]] &&
   [ "$(<"$AD/.env")" = DISCORD_BOT_TOKEN=tokAccUnique ] ||
   { echo "FAIL: what was typed outside a token's characters is refused (exit 2) before Discord is asked, and never shown: rc=$BRC $BO"; exit 1; }
+# With no bot-id kept, the bot's id is the one Discord gives for the token in .env now: a token of another bot with this
+# bot's username is refused (two calls: the new token, then the current one). With the current one refused too (a reset
+# token), the new token must be of no bot set up on this machine (here mgr, by its bot-id); else its id is shown in red as
+# unchecked before the one question, and y writes it and its bot-id: the rename that needed a working token works then.
+mv "$AD/bot-id" "$HOME/acc.id"; printf '888\n' > "$MR/mgr/bot-id"
+: > "$CURL_REPLIES"; queue_line '200 {"id":"888","bot":true,"username":"acc"}'; queue_line "200 $TOK_ME"
+queue_line '200 {"id":"888","bot":true,"username":"mgrx"}'; queue_line '401 {"message":"401: Unauthorized"}'
+bt "$TOK_NEW" - acc token; A=$BRC$BO; bt "$TOK_NEW" - acc token; A2=$BRC$BO$(<"$AD/.env")
+rm -f "$MR/mgr/bot-id"; : > "$CURL_REPLIES"
+queue_line '200 {"id":"7771","bot":true,"username":"accX"}'; queue_line '401 {"message":"401: Unauthorized"}'; queue_line '200 {"id":"7771","bot":true,"username":"accX"}'
+bt "$TOK_NEW" y acc token; rc=0; out=$(bash "$S" bot acc rename accX </dev/null 2>&1) || rc=$?
+[[ $A == 1*"that token is the bot acc (888), not acc (777)"* ]] && [[ $A2 == 1*"that token is of the bot mgrx (888), set up in $MR/mgr already"*"DISCORD_BOT_TOKEN=tokAccUnique" ]] &&
+  [ "$BRC" = 0 ] && [[ $BO == *$'\n\033[1;31m  ! this bot\'s id could not be checked: 7771 (accX)\033[0m\n'*"Replace the token? [y/N] y"* ]] &&
+  [ "$(<"$AD/.env")" = "DISCORD_BOT_TOKEN=$TOK_NEW" ] && [ "$(<"$AD/bot-id")" = 7771 ] &&
+  [ "$rc" = 3 ] && grep -qx '    Discord: it is accX there already: Discord is not asked to change it' <<<"$out" && [[ $A$A2$BO$out != *"$TOK_NEW"* ]] ||
+  { echo "FAIL: with no bot-id, a token is checked against the id of the token in .env; with that one refused, a bot set up here is refused and any other is written after a red unchecked line (bot-id written, a rename works then): $A / $A2 / rc=$BRC $BO / rc=$rc $out"; exit 1; }
+printf 'DISCORD_BOT_TOKEN=tokAccUnique\n' > "$AD/.env"; mv "$HOME/acc.id" "$AD/bot-id"
 # The same bot, y: .env is replaced by rename (another inode), mode 600, its other lines kept; access.log says so, with
 # no token; the token went to curl on its stdin, never into an argument or anything printed.
 printf 'DISCORD_BOT_TOKEN=tokAccUnique\nKEEP=1\n' > "$AD/.env"; chmod 644 "$AD/.env"; ei=$(stat -c %i "$AD/.env")
