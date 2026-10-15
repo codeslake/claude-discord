@@ -511,7 +511,10 @@ claude-discord bot add [--mode none|dev-manager|autoresearchclaw] [--start]   # 
   `records/monitor/<bot>` is moved and its `state.json` names the new manager,
   its backend starts again (unless you had stopped it) and its watcher record
   on each ledger host is renamed over ssh; the session starts again under the
-  new name from its `handoff.md`. A failure before the directory moves
+  new name. Its conversation does not carry over: `rename` asks the session
+  for no handoff, so the new session starts with an empty context and catches
+  up from the channel (one that had a `handoff.md` in its directory starts
+  from it, as after `refresh`). A failure before the directory moves
   starts again what was stopped and changes nothing here; after it, what
   failed is said with the command that finishes it, and the last line is
   `renamed: <old> -> <new>` whatever the exit status (the TUI follows a
@@ -543,12 +546,15 @@ two names differ with `≠ Discord: <name>`; `=` on that row renames it here to
 Discord's name (Discord is not asked to change). In the TUI, `n` renames,
 `t` replaces the token and `a` on the Bots tab adds a bot, each through this
 verb on a pseudo-terminal the TUI holds: the token goes from a masked field
-(never copied, emptied when taken) to the command's hidden prompt only.
+(never copied, emptied when taken) to the command's hidden prompt only. The
+TUI's title line names the claude-discord version it runs; a renamed bot's
+row changes to the new name at once (from the command's last line), and the
+monitor's next pass confirms it within about a minute.
 
 | exit | means |
 |---|---|
 | 0 | done, or nothing to change |
-| 1 | it could not: Discord refused the token or the name, another bot's token, a name taken, a failed write; or a step after the rename failed (said, with its command) |
+| 1 | it could not: Discord refused the token or the name, another bot's token, a name taken, a failed write; one of several sessions would not stop: the others are stopped and named; or a step after the rename failed (said, with its command) |
 | 2 | usage, a name that is no name, a session renaming its own bot |
 | 3 | no terminal: nothing was read or changed |
 | 4 | answered no: nothing was changed |

@@ -30,6 +30,30 @@ Discord first, then everything here keyed by the name; a name that differs from
 Discord's is shown `≠ Discord: <name>` with `=` to take Discord's. Plan:
 `docs/superpowers/plans/2026-10-14-bot-1.14.0.md`.
 
+1.14.1 (2026-10-15, plan `docs/superpowers/plans/2026-10-15-bot-1.14.1.md`):
+the TUI's title names the claude-discord version (the wrapper hands it
+`--version-line`); a bot renamed from the TUI shows its new name in the Bots
+tab at once, from the CLI's `renamed: <old> -> <new>` line, the monitor's next
+pass confirming it; `rename`'s plan line and the README say that a running
+session's conversation is not carried over (the owner's option A: wording
+only, no handoff asked). From the 1.14.0 review's minor items: M1 (that
+wording), M2 (one of several sessions that will not stop: nothing is renamed
+or started, the stopped ones are named), M3 (a scratch directory of the new
+name already there: the bot's stays, said), M4 (`add` checks the name again
+after its question), M5 (`health` writes `discord-name` only for the bot's own
+id), M6b (`bot` turns xtrace off before the token is read), M6e (the pilot
+pins the token zeroed after esc and Cancel), M8 (the popup shows up to 16
+lines of the CLI's output, never its program line). Not done: M6a (`curl -q`
+would change every curl argv and override the user's own `~/.curlrc`), M6c (a
+`.env.cd.$$` left by SIGKILL between write and `mv`, mode 600, microseconds),
+M6d (1.14.0's decision 2), M9 (bash 3.2's `read` after a trapped SIGINT: no
+3.2 here beyond `bash -n`), M10 (jq 1.6: run here and on lmd42). **M7a
+deferred** to the next plugin-patch release: attaching the 4004 listener before
+`login` changes the patched `server.ts`, so every bot's plugin would be
+re-patched and the suite's patch-upgrade cases would grow by one generation;
+Discord rejects a reset token at `GET /gateway/bot` before any 4004 can
+arrive, so the window is theoretical.
+
 ## Owners' requirements (quoted)
 
 - dongyong22: "UI가 너무 구리다", "`host` 제목 행이 왜 둘인지", "`for 63m`,
@@ -168,7 +192,13 @@ symbol + word + colour.
 
 ## Constraints
 
-- Suite serial, stubs only, under 40 s.
+- Suite serial, stubs only. The budget (agreed 2026-10-15 with the peer): a
+  release is not slower than `main` on the same machine in the same hour (3
+  interleaved pairs; for 1.14.1 `main` is `8db5787`); the hard line stays 40 s
+  serial on lmd42; and when lmd42's serial time at a verification exceeds
+  38.5 s, the wrapper split (verb bodies sourced on demand) comes before the
+  next feature. Measured 2026-10-15: lmd42 `main` 37.8 s (load 4-9), lmd79
+  inside its container 31.8 s.
 - No OS scheduler. No token in state, log, TUI or message.
 - Each release (changed 2026-10-13 by dongyong22): DY-DevBot implements, one
   deep review of the whole branch by a separate review agent, junyong-dev-bot
