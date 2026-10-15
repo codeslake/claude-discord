@@ -54,6 +54,21 @@ re-patched and the suite's patch-upgrade cases would grow by one generation;
 Discord rejects a reset token at `GET /gateway/bot` before any 4004 can
 arrive, so the window is theoretical.
 
+1.15.0 (2026-10-15, plan `docs/superpowers/plans/2026-10-15-split-1.15.0.md`):
+no feature. `bin/claude-discord` is split into a top (header, `monitor`, the
+shared functions, the `--version` forms, one dispatcher, the launch) and
+`bin/lib/*.sh` sourced on demand, so a call parses only what its verb needs
+(`monitor` 6.05 -> 1.54 ms, a launch 5.57 -> 2.21 ms, `tui` 6.05 -> 2.19 ms,
+`bot` 5.88 -> 3.31 ms here). Every line moved as it was; two changed: `setup`
+with no name prints its usage line as is and exits 2 (bash's `${2:?}` prefix
+would have named `bin/lib/install.sh: line N:`), and `b_read`'s `local st` is a
+plain variable (a local is gone in an EXIT trap after an `exit` from a sourced
+file). A lib that is not beside the wrapper is refused by name. The suite lints
+`bin/lib/*.sh` too and runs `bot` through the project's directory link, the
+shim and from another cwd. Done first because lmd42's serial suite time
+reached 38.5 s at the 1.14.1 verification (the trigger agreed for 1.14.1). The
+recovery keys `f`/`F` are next.
+
 ## Owners' requirements (quoted)
 
 - dongyong22: "UI가 너무 구리다", "`host` 제목 행이 왜 둘인지", "`for 63m`,

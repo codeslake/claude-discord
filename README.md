@@ -124,6 +124,14 @@ the version installed for it, and a project with no install of its own (a new
 one, or one not yet migrated) still reaches `setup`, a launch, `update` and
 `--version` through the source clone. Put `~/.local/bin` on your `PATH`.
 
+The wrapper itself is `bin/claude-discord` plus `bin/lib/*.sh` (since 1.15.0):
+the verbs live in those files and the wrapper sources only the ones a call
+needs, so a call parses only what it runs. `bin/claude-discord` runs beside
+`bin/lib`; a copy of the one file is no install: it refuses, naming the file it
+cannot find (`--version` still answers from such a copy). Every install is a
+whole tree (a link to the source clone, or a clone), so only a hand copy can
+separate them.
+
 ### Update, version, patch
 
 ```
@@ -1618,7 +1626,9 @@ rest of Claude Code.
 
 `./test-claude-discord.sh ./bin/claude-discord` runs the wrapper against a
 throwaway HOME with a stub plugin and stub `claude`; it touches nothing real
-and prints `ALL PASS`. It runs on Linux only: it finds its stand-in plugin
+and prints `ALL PASS`. It first parses `bin/claude-discord`, `bin/lib/*.sh`, the
+shim, the hooks, the tools and the monitor with `bash -n` and refuses bash 4
+constructs in them (macOS runs them under bash 3.2). It runs on Linux only: it finds its stand-in plugin
 servers through `/proc`, and assumes GNU `wc`, `sed` and a `/tmp` that is not a
 symlink, none of which hold on macOS. A C compiler (`cc`) is optional: with
 one the suite builds a faster jq stub, without it a bash stub runs (about 1.5 s
