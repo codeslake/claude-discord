@@ -5455,7 +5455,11 @@ n=0; KP=""; while [ -z "$KP" ] && [ "$n" -lt 1000 ]; do for f in "$MB"/holders/k
 [ "$(ls "$MB/holders" | grep -c '^keeper-')" = 1 ] && grep -q "a keeper already runs for mgr" "$MB/monitor.log" ||
   { echo "FAIL: tui must not start a second keeper while one lives: $(ls "$MB/holders")"; exit 1; }
 # Stopped here, before the cases below that can fail: a keeper left running by a failing case outlived the suite.
-mp=$(mpid); (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null)
+# The monitor the keeper starts records its pid in state.json before its first pass; waited for here (1.15.0: a faster
+# tui call returned before it was written, and an empty pid read /proc/stat as a live process), so --stop has both to end.
+n=0; mp=$(mpid); while [ -z "$mp" ] && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n + 1)); mp=$(mpid); done
+[ -n "$mp" ] || { echo "FAIL: the monitor the keeper started must record its pid in state.json: $(cat "$MB/state.json" 2>&1 | cut -c1-200) / $(tail -3 "$MB/monitor.log")"; exit 1; }
+(cd "$MP" && bash "$S" monitor --stop mgr >/dev/null)
 n=0; while { running "$KP" || running "$mp"; } && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n + 1)); done
 ! running "$KP" && ! running "$mp" || { echo "FAIL: --stop must end the keeper tui started and its monitor"; exit 1; }
 rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1) || rc=$?
