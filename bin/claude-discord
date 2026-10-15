@@ -1565,8 +1565,9 @@ if [ "${1:-}" = health ]; then
         l=$(printf '%s' "$resp" | jq -r 'objects | [(.id // "" | tostring), (.username // "" | tostring | gsub("[[:cntrl:]]"; ""))] | join("\u001f")' 2>/dev/null) || l=""
         IFS=$'\x1f' read -r nme nn <<<"$l" || :
         if ! is_id "$me" && is_id "$nme"; then me=$nme; printf '%s\n' "$me" > "$d/bot-id" 2>/dev/null || :; fi
-        # A read that fails keeps the name it had, and is tried again in an hour, not at every run.
-        if is_id "$nme" && [ -n "$nn" ]; then dname=$nn; printf '%s %s\n' "$now_s" "$dname" > "$d/discord-name" 2>/dev/null || :
+        # A read that fails keeps the name it had, and is tried again in an hour, not at every run. So does one that
+        # answers as another bot (the token in .env replaced by some other bot's): that name is not this bot's (1.14.1).
+        if is_id "$nme" && [ "$nme" = "$me" ] && [ -n "$nn" ]; then dname=$nn; printf '%s %s\n' "$now_s" "$dname" > "$d/discord-name" 2>/dev/null || :
         elif [ -n "$dname" ]; then printf '%s %s\n' "$((now_s - 82800))" "$dname" > "$d/discord-name" 2>/dev/null || :; fi
       fi
       if ! is_id "$me"; then
@@ -1800,10 +1801,12 @@ live_sessions() {
 }
 # stop_sessions <name> <live_sessions' lines>: each stopped, a background one by `claude stop <id>`, a foreground one by
 # TERM (what closing its terminal sends); then up to 10 s for their pids to go, then 3 s for the gateway to let the token
-# go. Exit 1, the pids still running in `alive`, when one would not die: a start then would put two sessions on one token.
+# go. Exit 1, the pids still running in `alive`, when one would not die: a start then would put two sessions on one token;
+# `stopped_ids` then names the ones that did stop (their job ids; `pid <n>` for a foreground one), in the order stopped,
+# so the caller can say what it leaves stopped (1.14.1).
 stop_sessions() {
-  local id pid
-  pids=()
+  local id pid i
+  pids=() ids=() stopped_ids=""
   while read -r id pid; do
     [ -n "$id" ] || continue
     echo "claude-discord: stopping $1 ($id, pid $pid)"
@@ -1812,7 +1815,7 @@ stop_sessions() {
     else
       kill -TERM "$pid" 2>/dev/null || :
     fi
-    [ "$pid" = - ] || pids+=("$pid")
+    [ "$pid" = - ] || { pids+=("$pid"); ids+=("$id"); }
   done <<<"$2"
   # A stop that did not take leaves two sessions on one token, so wait for
   # every old pid to go before starting anything; a session that will not die
@@ -1822,6 +1825,11 @@ stop_sessions() {
     for pid in ${pids[@]+"${pids[@]}"}; do kill -0 "$pid" 2>/dev/null && alive+=("$pid") || :; done
     [ ${#alive[@]} -gt 0 ] || break
     sleep 0.5
+  done
+  i=0
+  for pid in ${pids[@]+"${pids[@]}"}; do
+    kill -0 "$pid" 2>/dev/null || { id=${ids[$i]}; [ "$id" != - ] || id="pid $pid"; stopped_ids="$stopped_ids${stopped_ids:+ }$id"; }
+    i=$((i + 1))
   done
   [ ${#alive[@]} = 0 ] || return 1
   # The stopped session's channel server needs a moment to release the token;
@@ -2997,6 +3005,7 @@ fi
 # none, or what was typed is no token; 3 no terminal: nothing read or changed; 4 answered no; 5 --host: no answer from
 # the host, or its claude-discord is older than 1.14.0.
 if [ "${1:-}" = bot ]; then
+  { set +x; } 2>/dev/null   # a token is read below: no xtrace (bash -x, SHELLOPTS=xtrace) may copy it into a transcript
   shift
   b_usage="usage: claude-discord bot [--host <alias> [--manager <bot>]] [--project <dir>] <bot> token | <bot> rename <new name> | add [--mode none|dev-manager|autoresearchclaw] [--start]"
   b_name_re='^[A-Za-z0-9_][A-Za-z0-9_-]{1,31}$'   # a bot's name: Discord's username, which it is; never an option's -
@@ -3189,6 +3198,9 @@ if [ "${1:-}" = bot ]; then
       "    mode: $b_mode$([ "$b_mode" != dev-manager ] || echo ": a hosts ledger (this machine) and its monitor, which posts in #bot-health-check")" \
       "    $([ -n "$b_start" ] && echo "it starts at once: claude-discord --bg --name $new" || echo "it is not started: claude-discord --bg --name $new starts it")"
     b_ask "Add this bot?"
+    # Checked again after the question: the one window a human leaves open, in which another terminal's add or setup
+    # may have made the bot (1.14.1).
+    [ ! -e "$root/$new" ] || { echo "claude-discord: bot: a bot '$new' appeared in $root while the question was open; nothing was changed" >&2; exit 1; }
     # setup, as at a terminal: its answers on its stdin (the token, Enter for the mention question, the mode, Enter for a
     # manager's peers and hosts), its install questions not asked. Whatever it wrote goes when it fails: the bot was not there.
     if ! printf '%s\n\n%s\n\n\n' "$tok" "$b_mode" | CLAUDE_DISCORD_SETUP_NOASK=1 "$self_path" setup "$new"; then
@@ -3298,7 +3310,7 @@ if [ "${1:-}" = bot ]; then
     echo "    here: $bn -> $new (its directory, and its line in the peers.json of this machine's projects)"
     if [ -z "$live" ]; then echo "    it is not running: renamed only (claude-discord --bg --name $new starts it)"
     elif [ -s "$d/handoff.md" ]; then echo "    it runs ($b_n session$([ "$b_n" = 1 ] || echo s)): stopped, renamed, started again as $new from its handoff.md"
-    else echo "    it runs ($b_n session$([ "$b_n" = 1 ] || echo s)): stopped, renamed, started again as $new with no handoff.md: an empty context that catches up from the channel"; fi
+    else echo "    it runs ($b_n session$([ "$b_n" = 1 ] || echo s)): stopped, renamed, started again as $new with no handoff.md: an empty context that catches up from the channel (its conversation is not carried over)"; fi
     [ -z "$mgr" ] || echo "    a manager: its keeper and monitor stop, its state, alerts and log move to $M/$new, its backend starts again as $new, and its record on each ledger host is renamed"
   fi
   [ -t 0 ] && [ -t 1 ] || { echo "claude-discord: bot: not a terminal (stdin and stdout), so nothing was changed: run it in a terminal to answer" >&2; exit 3; }
@@ -3320,7 +3332,9 @@ if [ "${1:-}" = bot ]; then
   [ "$new" != "$bot" ] || { echo "claude-discord: bot: Discord calls it $new now, as it is called here"; exit 0; }
   b_again=""; [ -z "$b_disc" ] || b_again=" (Discord calls it $new now: run this again to rename it here)"
   if [ -n "$live" ] && ! stop_sessions "$bn" "$live"; then
-    echo "claude-discord: bot: $bn still runs after stop (pid ${alive[*]}): nothing here was renamed$b_again. Stop it by hand first" >&2; exit 1
+    # Nothing is started again: a start beside a session that still runs puts two sessions on one token (the very thing
+    # stop_sessions guards). The ones that did stop are named, with the command that starts one.
+    echo "claude-discord: bot: $bn still runs after stop (pid ${alive[*]}): nothing here was renamed$b_again. Stop it by hand first${stopped_ids:+; stopped and not started again: $stopped_ids (claude-discord --bg --name $bot starts one)}" >&2; exit 1
   fi
   b_undo() {  # the directory did not move: what was stopped runs again; of the markers, only the one made here goes
     if [ -n "$mgr" ]; then
@@ -3353,6 +3367,8 @@ if [ "${1:-}" = bot ]; then
   done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null)
   if [ -d "$helpers/scratch/$bot" ] && { [ ! -e "$helpers/scratch/$new" ] || [ "$helpers/scratch/$new" -ef "$helpers/scratch/$bot" ]; }; then
     b_mv "$helpers/scratch/$bot" "$helpers/scratch/$new" 2>/dev/null || b_warn="$b_warn"$'\n'"    its scratch directory stays $helpers/scratch/$bot"
+  elif [ -d "$helpers/scratch/$bot" ]; then   # the new name's is there already (a bot of that name once): neither is touched, said (1.14.1)
+    b_warn="$b_warn"$'\n'"    its scratch directory stays $helpers/scratch/$bot: $helpers/scratch/$new is there already"
   fi
   if [ -n "$mgr" ]; then
     [ -z "$b_made" ] || rm -f "$M/$new/stopped"

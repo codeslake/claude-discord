@@ -3274,6 +3274,16 @@ read -r _ _ _ at < "$SD/channel-guild"; read -r dt dn < "$SD/discord-name"
   [ "$at" -gt "$(( SEED_S - 86401 ))" ] && [ "$(( $(date +%s) - at ))" -ge 82800 ] && [ "$(( $(date +%s) - at ))" -lt 82860 ] &&
   [ "$dn" = kept-dn ] && [ "$(field_of sbot discord_name "$out")" = kept-dn ] && [ "$(( $(date +%s) - dt ))" -ge 82800 ] && [ "$(( $(date +%s) - dt ))" -lt 82860 ] ||
   { echo "FAIL: a channel-guild line a day old is read again (the guild's list, then the channel when that fails), so is a Discord name; a failed read keeps the line, its name and the Discord name (read again in an hour) and fails nothing: $out / $(cat "$SD/channel-guild" "$SD/discord-name" 2>&1)"; exit 1; }
+# The name a day old again, and users/@me answers as another bot (888: the token in .env is some other bot's now): that
+# name is not this bot's (bot-id says 777), so discord-name keeps its name with the retry stamp, as after a failed read,
+# and the id kept stays (M5 of the 1.14.0 review). The guild line, an hour short of a day now, is not read.
+printf '%s kept-dn\n' "$(( SEED_S - 86401 ))" > "$SD/discord-name"
+queue '200 {"id":"888","username":"impostor"}' "200 $NONE" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+read -r dt dn < "$SD/discord-name"
+[ "$(verdict_of sbot "$out")" = ok ] && [ "$(<"$SD/bot-id")" = 777 ] && [ "$dn" = kept-dn ] && [ "$(field_of sbot discord_name "$out")" = kept-dn ] &&
+  [ "$(( $(date +%s) - dt ))" -ge 82800 ] && [ "$(( $(date +%s) - dt ))" -lt 82860 ] && [ ! -s "$CURL_REPLIES" ] ||
+  { echo "FAIL: a users/@me answer with another bot's id (888, not bot-id's 777) must not rename the bot's discord-name: kept, read again in an hour, the id kept: $out / $(cat "$SD/bot-id" "$SD/discord-name" 2>&1)"; exit 1; }
 # A read time with a leading zero (a damaged or hand-edited line: nothing writes one). bash takes 08 for an octal number
 # that is none, and that error ends the whole health block, not the one test: the script then ran on into the launcher
 # and STARTED the bot's session, from a monitor pass every 5 minutes. It is decimal 8: an old line, read again.
@@ -4304,7 +4314,7 @@ cat > "$HOME/drive.py" <<'EOF'
 import fcntl, os, select, signal, sys, termios
 for line in sys.stdin.buffer:
     f = line.rstrip(b"\n").split(b"\0")[:-1]
-    out, cwd, sends, cmd = f[0], f[1], [[b"Token (hidden): ", f[2]], [b"[y/N] ", f[3]]], f[4:]
+    out, cwd, sends, qcmd, cmd = f[0], f[1], [[b"Token (hidden): ", f[2]], [b"[y/N] ", f[3]]], f[4], f[5:]
     m, s = os.openpty()
     pid = os.fork()
     if pid == 0:   # the child: its own session, the pty its controlling terminal (a Ctrl-C there is its SIGINT)
@@ -4323,6 +4333,9 @@ for line in sys.stdin.buffer:
         buf += d
         for x in sends:
             if x[1] not in (b"", b"-") and buf.endswith(x[0]):
+                if x[0] == b"[y/N] " and qcmd:   # a shell command run in cwd while the question is open, before its answer
+                    os.chdir(cwd)
+                    os.system(qcmd.decode())
                 os.write(m, x[1][:-2] + b"\x03" if x[1].endswith(b"^C") else x[1] + b"\n")
                 x[1] = b""
     echo = "on" if termios.tcgetattr(m)[3] & termios.ECHO else "off"
@@ -4335,7 +4348,11 @@ for line in sys.stdin.buffer:
 EOF
 mkfifo "$HOME/bt.in" "$HOME/bt.rc"; python3 -S "$HOME/drive.py" < "$HOME/bt.in" > "$HOME/bt.rc" & BT_PID=$!
 exec {BT_IN}>"$HOME/bt.in" {BT_RC}<"$HOME/bt.rc"
-bt() { printf '%s\0' "$HOME/bt.out" "$PWD" "$1" "$2" bash "$S" bot "${@:3}" >&"$BT_IN"; printf '\n' >&"$BT_IN"; read -r BRC BECHO <&"$BT_RC"; BO=$(<"$HOME/bt.out"); BO=${BO//$'\r'/}; }
+bt() { printf '%s\0' "$HOME/bt.out" "$PWD" "$1" "$2" "" bash "$S" bot "${@:3}" >&"$BT_IN"; printf '\n' >&"$BT_IN"; read -r BRC BECHO <&"$BT_RC"; BO=$(<"$HOME/bt.out"); BO=${BO//$'\r'/}; }
+# btq <token> <answer> <command> <args>: as bt, the command run (a shell line, in this directory) when the driver sees the
+# question, before it answers it. btx <token> <answer> <args>: as bt, under xtrace from the environment (SHELLOPTS).
+btq() { printf '%s\0' "$HOME/bt.out" "$PWD" "$1" "$2" "$3" bash "$S" bot "${@:4}" >&"$BT_IN"; printf '\n' >&"$BT_IN"; read -r BRC BECHO <&"$BT_RC"; BO=$(<"$HOME/bt.out"); BO=${BO//$'\r'/}; }
+btx() { printf '%s\0' "$HOME/bt.out" "$PWD" "$1" "$2" "" env SHELLOPTS=xtrace bash "$S" bot "${@:3}" >&"$BT_IN"; printf '\n' >&"$BT_IN"; read -r BRC BECHO <&"$BT_RC"; BO=$(<"$HOME/bt.out"); BO=${BO//$'\r'/}; }
 TOK_NEW=tokNewAAAAbbbbCCCCdddd.eeeeFFFF_gggg-hh TOK_ME='{"id":"777","bot":true,"username":"acc"}'
 # No terminal: nothing is read and Discord is not asked (exit 3).
 : > "$CURL_LOG"; rc=0; out=$(printf '%s\n' "$TOK_NEW" | bash "$S" bot acc token 2>&1) || rc=$?
@@ -4397,6 +4414,14 @@ KEEP=1" ] && [ "$(stat -c %a "$AD/.env")" = 600 ] && [ "$(stat -c %i "$AD/.env")
   [[ $BO$(<"$AD/access.log") != *"$TOK_NEW"* ]] ||
   { echo "FAIL: bot token at a terminal, y: .env replaced by rename, mode 600, its other lines kept, a line in access.log, the token on curl's stdin only and never printed: rc=$BRC $BO / $(cat "$AD/.env" "$AD/access.log" "$CURL_LOG" 2>&1)"; exit 1; }
 printf 'DISCORD_BOT_TOKEN=tokAccUnique\n' > "$AD/.env"
+# The same under xtrace from the environment (SHELLOPTS=xtrace, as a `bash -x` or a debugging shell's transcript would
+# have it): the trace runs up to the bot verb, which turns it off before the token is read, so no trace line (`+ `)
+# follows the hidden prompt and the token is in none (M6b of the 1.14.0 review).
+: > "$CURL_REPLIES"; queue_line "200 $TOK_ME"
+btx "$TOK_NEW" y acc token
+[ "$BRC" = 0 ] && [[ $BO == *$'\n+ '* ]] && [[ ${BO#*"Token (hidden): "} != *$'\n+ '* ]] && [[ $BO != *"$TOK_NEW"* ]] && [ "$(<"$AD/.env")" = "DISCORD_BOT_TOKEN=$TOK_NEW" ] ||
+  { echo "FAIL: bot under xtrace (SHELLOPTS=xtrace) traces nothing from the token prompt on, so the token is in no trace line: rc=$BRC, $(grep -c '^+ ' <<<"$BO") trace lines, $(grep -c -F "$TOK_NEW" <<<"$BO") with the token, $(grep -c '^+ ' <<<"${BO#*"Token (hidden): "}") after the prompt"; exit 1; }
+printf 'DISCORD_BOT_TOKEN=tokAccUnique\n' > "$AD/.env"
 # --host: no terminal here, no ssh at all (exit 3); a host before 1.14.0 is exit 5 and is sent nothing but --version;
 # a 1.14.0 host gets the call under ssh -t, the project and the bot's name in hex, so the token goes to its terminal
 # (ssh's stdin) and never into the command. The host's side decodes --version --bot as --version --access.
@@ -4442,24 +4467,26 @@ sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; cp "$HOME/bin/claude" "$HOME/
 cat > "$HOME/claude.live" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
-  agents) echo '[{"id":"accl1111","pid":'"$(<"$HOME/old.pid")"',"name":"acc","cwd":"'"$PWD"'"},{"id":"oth22222","pid":45,"name":"acc","cwd":"/elsewhere"}]';;
-  stop) echo "STOP $2" >> "$HOME/claude.calls"; [ -e "$HOME/stop.fails" ] || kill "$(<"$HOME/old.pid")";;
+  agents) echo '[{"id":"accl1111","pid":'"$(<"$HOME/old.pid")"',"name":"acc","cwd":"'"$PWD"'"}'"$([ ! -e "$HOME/old2.pid" ] || echo ',{"id":"acc22222","pid":'"$(<"$HOME/old2.pid")"',"name":"acc","cwd":"'"$PWD"'"}')"',{"id":"oth22222","pid":45,"name":"acc","cwd":"/elsewhere"}]';;
+  stop) echo "STOP $2" >> "$HOME/claude.calls"; case $2 in acc22222) kill "$(<"$HOME/old2.pid")";; *) [ -e "$HOME/stop.fails" ] || kill "$(<"$HOME/old.pid")";; esac;;
   *) printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
 esac
 STUB
 chmod +x "$HOME/claude.live"; cp "$HOME/claude.live" "$HOME/bin/claude"; printf 'HANDOFF_ACC\n' > "$AD/handoff.md"; mkdir -p "$HOME/.claude-discord/scratch/acc"
-# It runs, and its workspace is not trusted (a start would be refused): refused before anything is stopped. Its session
-# does not stop (a stop that fails, here a session that outlives `claude stop`): nothing here is renamed and nothing is
-# started (two sessions on one token both answer), and what Discord was told is said. The 10 s wait for it is skipped.
+# It runs, and its workspace is not trusted (a start would be refused): refused before anything is stopped. One of its
+# two sessions does not stop (a stop that fails, here a session that outlives `claude stop`): nothing here is renamed
+# and nothing is started (two sessions on one token both answer), what Discord was told is said, and so is the session
+# that did stop, with the command that starts one (M2 of the 1.14.0 review). The 10 s wait for it is skipped.
 cp "$HOME/.claude.json" "$HOME/cj.keep"; jq --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted = false' "$HOME/cj.keep" > "$HOME/.claude.json"
 : > "$CURL_REPLIES"; queue_line "200 $TOK_ME"; rc=0; out=$(bash "$S" bot acc rename acc2 </dev/null 2>&1) || rc=$?; cp "$HOME/cj.keep" "$HOME/.claude.json"
+sleep 300 & OLD2=$!; echo "$OLD2" > "$HOME/old2.pid"
 cp "$HOME/bin/sleep" "$HOME/sleep.keep"; printf '#!/bin/sh\n' > "$HOME/bin/sleep"; : > "$HOME/stop.fails"
 queue_line "200 $TOK_ME"; queue_line '200 {"id":"777","bot":true,"username":"acc3"}'
-bt - y acc rename acc3; cp "$HOME/sleep.keep" "$HOME/bin/sleep"; rm -f "$HOME/stop.fails"
+bt - y acc rename acc3; cp "$HOME/sleep.keep" "$HOME/bin/sleep"; rm -f "$HOME/stop.fails" "$HOME/old2.pid"
 [ "$rc" = 1 ] && grep -q "is not a trusted workspace, so acc would not start again after the rename" <<<"$out" &&
-  [ "$BRC" = 1 ] && grep -q "acc still runs after stop (pid $OLD): nothing here was renamed (Discord calls it acc3 now: run this again to rename it here)" <<<"$BO" &&
-  [[ $BO != *LAUNCHER* ]] && [ -d "$AD" ] && [ ! -e "$MR/acc3" ] && kill -0 "$OLD" && [ "$(<"$HOME/claude.calls")" = "STOP accl1111" ] ||
-  { echo "FAIL: bot rename of a running bot refuses an untrusted workspace before it stops anything, and a stop that fails renames and starts nothing: rc=$rc $out / rc=$BRC $BO"; exit 1; }
+  [ "$BRC" = 1 ] && grep -q "acc still runs after stop (pid $OLD): nothing here was renamed (Discord calls it acc3 now: run this again to rename it here). Stop it by hand first; stopped and not started again: acc22222 (claude-discord --bg --name acc starts one)" <<<"$BO" &&
+  [[ $BO != *LAUNCHER* ]] && [ -d "$AD" ] && [ ! -e "$MR/acc3" ] && kill -0 "$OLD" && ! kill -0 "$OLD2" 2>/dev/null && [ "$(<"$HOME/claude.calls")" = $'STOP accl1111\nSTOP acc22222' ] ||
+  { echo "FAIL: bot rename of a running bot refuses an untrusted workspace before it stops anything, and a stop that fails renames and starts nothing and names the session that did stop: rc=$rc $out / rc=$BRC $BO / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
 rm -f "$HOME/claude.calls"
 : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_REPLIES"; queue_line "200 $TOK_ME"; queue_line '200 {"id":"777","bot":true,"username":"acc2"}'
 bt - y acc rename acc2
@@ -4473,13 +4500,18 @@ bt - y acc rename acc2
   [ "$(tail -n 2 "$MR/acc2/access.log" | cut -d' ' -f4-)" = "rename: on Discord acc -> acc2
 rename: acc -> acc2" ] || { echo "FAIL: bot rename of a running bot, y: Discord first, then the session stopped, the directory, its peers.json line by id and its scratch directory renamed, the session started again as the new name from its handoff: rc=$BRC $BO / $(cat "$HOME/claude.calls" "$CURL_LOG" "$MR/peers.json" 2>&1)"; exit 1; }
 # A step after the directory moved fails (here the start under the new name): exit 1, what failed said, and the last line
-# still names the move, which a program follows (the TUI, after a manager's rename).
+# still names the move, which a program follows (the TUI, after a manager's rename). Its handoff.md went with the start
+# above, so the plan says what a start with none means (M1). A scratch directory of the new name is there already: the
+# bot's stays, said (M3).
 sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; sed 's/"name":"acc"/"name":"acc2"/' "$HOME/claude.live" > "$HOME/bin/claude"; : > "$HOME/launch.fails"
 : > "$CURL_REPLIES"; queue_line '200 {"id":"777","bot":true,"username":"acc2"}'; queue_line '200 {"id":"777","bot":true,"username":"acc4"}'
+mkdir -p "$HOME/.claude-discord/scratch/acc4"
 bt - y acc2 rename acc4; rm -f "$HOME/launch.fails"
-[ "$BRC" = 1 ] && grep -qx '    acc4 did not start (above): claude-discord --bg --name acc4' <<<"$BO" && [ "${BO##*$'\n'}" = "renamed: acc2 -> acc4" ] && [ -d "$MR/acc4" ] ||
-  { echo "FAIL: bot rename whose start fails after the directory moved is exit 1 and still ends with the renamed line: rc=$BRC $BO"; exit 1; }
-mv "$MR/acc4" "$MR/acc2"; mv "$HOME/.claude-discord/scratch/acc4" "$HOME/.claude-discord/scratch/acc2"; rm -f "$HOME/claude.calls"
+[ "$BRC" = 1 ] && grep -qx '    acc4 did not start (above): claude-discord --bg --name acc4' <<<"$BO" && [ "${BO##*$'\n'}" = "renamed: acc2 -> acc4" ] && [ -d "$MR/acc4" ] &&
+  grep -qx '    it runs (1 session): stopped, renamed, started again as acc4 with no handoff.md: an empty context that catches up from the channel (its conversation is not carried over)' <<<"$BO" &&
+  grep -qx "    its scratch directory stays $HOME/.claude-discord/scratch/acc2: $HOME/.claude-discord/scratch/acc4 is there already" <<<"$BO" && [ -d "$HOME/.claude-discord/scratch/acc2" ] ||
+  { echo "FAIL: bot rename whose start fails after the directory moved is exit 1 and still ends with the renamed line; its plan says a session with no handoff starts empty; a scratch directory of the new name already there keeps the bot's, said: rc=$BRC $BO"; exit 1; }
+mv "$MR/acc4" "$MR/acc2"; rm -rf "$HOME/.claude-discord/scratch/acc4" "$HOME/claude.calls"
 cp "$HOME/claude.keep" "$HOME/bin/claude"
 # A manager whose name Discord has already (the TUI's `=`), here only its case: Discord is not asked to change it; its
 # directory and its backend's state move (through a temporary name, so a case-insensitive file system renames them too)
@@ -4553,6 +4585,13 @@ bt "$TOK_NEW" y add --mode autoresearchclaw --start
   jq -e '[.groups[]] | length == 1 and .[0].requireMention == true' "$MR/newbot/access.json" >/dev/null && grep -q '^LAUNCHER .* -n newbot ' <<<"$BO" &&
   [ "$(tail -n 1 "$MR/newbot/access.log" | cut -d' ' -f4-)" = "added (bot 999, mode autoresearchclaw)" ] && [ "${BO##*$'\n'}" = "claude-discord: bot: newbot added and started" ] &&
   [[ $BO != *"$TOK_NEW"* ]] || { echo "FAIL: bot add, y: setup writes the bot (token, channel, mention, mode), its id kept and logged, started; the token never printed: rc=$BRC $BO / $(ls "$MR/newbot" 2>&1)"; exit 1; }
+rm -rf "$MR/newbot"
+# A bot of that name made while the question was open (another terminal's add or setup): y changes nothing and setup
+# never runs (M4 of the 1.14.0 review). The driver runs the mkdir when it sees the question, before it answers it.
+: > "$CURL_REPLIES"; queue_line '200 {"id":"999","bot":true,"username":"newbot"}'
+btq "$TOK_NEW" y "mkdir -p $MR/newbot" add
+[ "$BRC" = 1 ] && grep -q "a bot 'newbot' appeared in $MR while the question was open; nothing was changed" <<<"$BO" && [ -d "$MR/newbot" ] && [ -z "$(ls -A "$MR/newbot")" ] ||
+  { echo "FAIL: bot add, y, with a bot of that name made while the question was open: refused (exit 1), setup never run (the directory as the mkdir left it): rc=$BRC $BO / $(ls -A "$MR/newbot" 2>&1)"; exit 1; }
 rm -rf "$MR/newbot"
 # --host at a terminal: run there under ssh -t, the word add in hex, the mode and --start as they are.
 printf 'claude-discord 1.14.0 (abc1234)\n' > "$MON/h1.out"

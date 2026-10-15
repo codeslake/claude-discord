@@ -1657,6 +1657,7 @@ class Asking:
     `secret`, which is zeroed then; its end goes to ended() with the last of what it printed. esc stops it before a y,
     never after one (it may be writing)."""
     run = None                 # its PtyRun while it runs
+    printed = ""               # what it printed after the answer, whole, once it ended (ended() gets the last of it)
     asked = stopped = False    # it asked its question; esc (or Cancel) stopped it
     yes: bool | None = None    # the answer written to it; None: none yet
     says = None                # the HostSays popup while it is open
@@ -1704,10 +1705,12 @@ class Asking:
             return self.app.push_screen(AccessAsk(ask_text(text)), self.step)
         rc, self.run = what, None
         self.forget()
-        lines = [l for l in ask_text(text).plain.split("\n") if l.strip()]
+        self.printed = ask_text(text).plain   # all of it, for a line a program reads (BotName: `renamed: <old> -> <new>`)
+        # What is said: every line after the answer's echo, 16 at most, never the program line (1.14.1).
+        lines = [l for l in self.printed.split("\n") if l.strip() and not RENAMED.match(l)]
         if self.yes is not None and lines and lines[0].strip() in ("y", "n"):
             lines.pop(0)   # the pty's echo of the answer
-        said = "\n".join(lines[-8:])
+        said = "\n".join(lines[-16:])
         self.ended(rc, f"\n{said}" if said else "")
 
     def forget(self) -> None:
@@ -2324,8 +2327,8 @@ class BotName(BotPopup):
     def ended(self, rc: int, said: str) -> None:
         # Once the CLI says the directory moved (its last line), whatever failed after that: the bot's row is the new
         # name's now (1.14.1), and for the manager itself its backend's state is the new name's too. Its exit status
-        # cannot say it: a start after the move may fail.
-        m, e = RENAMED.search(said), self.entry
+        # cannot say it: a start after the move may fail. The line is read from all it printed: `said` drops it.
+        m, e = RENAMED.search(self.printed), self.entry
         if m and m.group(1) == txt(e.get("bot")):
             self.app.renamed(txt(e.get("host")), txt(e.get("project")), m.group(1), m.group(2))
             if m.group(1) == self.app.bot and e.get("host") == "local":

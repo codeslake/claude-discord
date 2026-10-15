@@ -2027,7 +2027,7 @@ async def access_answered(app, pilot):
     await settle(app, pilot)
     msg = scr("#a-msg").split("\n")
     assert msg[0] == ("claude-discord access exited 1 after the answer y. The bot's access.log has a line for each thing it did "
-                      "(access.json written; the mode set, or failed):") and msg[1:] == [f"l{i}" for i in range(3, 10)] + [
+                      "(access.json written; the mode set, or failed):") and msg[1:] == [f"l{i}" for i in range(10)] + [   # 16 lines at most (1.14.1)
         "claude-discord: access: the mode was not changed (claude-discord setup photobot --mode, above); the changes to access.json stay"], msg
     # A short end: all it said after the answer, the echoed y left out.
     await pilot.press("s")
@@ -2106,15 +2106,23 @@ async def bot_retarget(app, pilot):
     ask = (f"claude-discord: bot: mgr on lmd79, /home/u/cd/.claude/discord-agents\r\n{tui.A_MARK}\r\nRename it to mgr2? [y/N] ", "ask")
     fake_pty(app, [ask, ("y\r\nclaude-discord: bot: mgr still runs after stop (pid 9): nothing here was renamed\r\n", 1)],
              [ask, ("y\r\nclaude-discord: bot: renamed: /home/u/cd/.claude/discord-agents/mgr2 (and on Discord)\r\n"
-                    "claude-discord: bot: not done:\r\n    mgr2 did not start (above): claude-discord --bg --name mgr2\r\nrenamed: mgr -> mgr2\r\n", 1)])
+                    "claude-discord: bot: not done:\r\n    mgr2 did not start (above): claude-discord --bg --name mgr2\r\nrenamed: mgr -> mgr2\r\n", 1)],
+             [ask, ("y\r\n" + "".join(f"line{i:02}\r\n" for i in range(1, 21)), 1)])   # 20 lines, before any move
     d = app.state_dir
-    for n in (0, 1):
-        app.push_screen(tui.BotName(entry, "mgr2"))
+    for n, new in enumerate(("mgr2", "mgr2", "mgr3")):
+        app.push_screen(tui.BotName(entry, new))
         await settle(app, pilot)
         await pilot.press("y")
         await settle(app, pilot)
-        assert app.runs[n].argv[-3:] == ["mgr", "rename", "mgr2"] and isinstance(app.screen, tui.BotName), (app.runs[n].argv, app.screen)
+        assert app.runs[n].argv[-3:] == ["mgr" if n < 2 else "mgr2", "rename", new] and isinstance(app.screen, tui.BotName), (app.runs[n].argv, app.screen)
         assert (app.bot, app.state_dir) == (("mgr", d) if n == 0 else ("mgr2", d.parent / "mgr2")), (n, app.bot, app.state_dir)
+        # What the popup says (M8): every line after the answer's echo, 16 at most, never the program line a program
+        # (this TUI) follows.
+        msg = text(app.screen, "#b-msg")
+        if n == 1:
+            assert "not done:" in msg and "mgr2 did not start" in msg and "renamed: mgr -> mgr2" not in msg, msg
+        elif n == 2:
+            assert msg.split("\n")[1:] == [f"line{i:02}" for i in range(5, 21)], msg
         app.pop_screen()
     app.ensure()
     assert (d / "args").read_text().splitlines()[-1] == f"monitor --ensure mgr2 --holder tui {os.getpid()}", (d / "args").read_text()
@@ -2209,6 +2217,29 @@ async def bot_token_unasked(app, pilot):
     await settle(app, pilot)
     assert held and held[0] == bytearray(len(FAKE_TOKEN)) and pop.secret is None and app.runs[0].written == [], (held, app.runs[0].written)
     assert text(pop, "#b-msg").startswith("the host did not answer, or its claude-discord is older than 1.14.0"), text(pop, "#b-msg")
+
+
+async def bot_token_stopped(app, pilot):
+    """A token taken from its field and not yet asked for (the run is still before its prompt) is zeroed when esc, or
+    Cancel, stops the run, and was never written (M6e of the 1.14.0 review)."""
+    fake_pty(app, [None], [None])   # each run waits until it is killed
+    for key in ("escape", "enter"):   # esc; enter on Cancel, which has the focus when the popup opens
+        await pilot.press("t")
+        await settle(app, pilot)
+        pop, held = app.screen, []
+        take = pop.take
+        pop.take = lambda: take() and not held.append(pop.secret)   # the buffer itself, as take() leaves it
+        pop.query_one("#b-field").value = FAKE_TOKEN
+        pop.go()
+        await pilot.pause()
+        assert pop.run is app.runs[-1] and held[0] == bytearray(FAKE_TOKEN.encode()) and pop.query_one("#b-field").value == "", held
+        await pilot.press(key)
+        await settle(app, pilot)
+        assert held[0] == bytearray(len(FAKE_TOKEN)) and pop.secret is None and app.runs[-1].written == [] and app.runs[-1].killed.is_set(), (held, app.runs[-1].written)
+        assert pop.run is None and text(pop, "#b-msg").startswith("stopped: nothing was changed"), text(pop, "#b-msg")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert len(app.screen_stack) == 1 and FAKE_TOKEN not in repr(app.__dict__)
 
 
 async def bot_add(app, pilot):
@@ -2324,6 +2355,7 @@ async def main():
     await case("bot_align", bot_align, state="renamed", wrapper=bot_cli)
     await case("bot_token", bot_token, state="all_ok", wrapper=bot_cli)
     await case("bot_token_unasked", bot_token_unasked, state="all_ok", wrapper=bot_cli)
+    await case("bot_token_stopped", bot_token_stopped, state="all_ok", wrapper=bot_cli)
     await case("bot_add", bot_add, state="all_ok", wrapper=bot_cli)
     await case("access_long_host_answered", access_long_host_answered, state="all_ok", wrapper=access_cli)
     await case("stopped", stopped)
