@@ -335,6 +335,20 @@ def pure():
     mon = lambda **kw: {"manager": "mgr", "monitor": dict({"pid": 1, "last_pass": iso(T - 80), "next_pass": iso(T + 220), "holders": [{"kind": "keeper", "pid": 9}]}, **kw)}
     t = tui.title_line(mon(), 100, T, True, False).plain
     assert t.startswith("◆ claude-discord  mgr ") and t.endswith("● live  keeper · checked 1m ago · next 4m") and cell_len(t) == 100, t
+    # 1.14.1: the version the wrapper passed (--version-line) follows the name; without one the title is as before.
+    v = tui.title_line(mon(), 100, T, True, False, "1.14.1 (abc1234)").plain
+    assert v.startswith("◆ claude-discord 1.14.1 (abc1234)  mgr ") and v.endswith("● live  keeper · checked 1m ago · next 4m") and cell_len(v) == 100, v
+    # main(): --version-line is the wrapper's --version line; the app keeps what follows `claude-discord ` (the tests
+    # above set it directly), a line of another shape whole, and nothing when none was passed (an older wrapper).
+    made, run, argv = [], tui.MonitorTUI.run, sys.argv
+    tui.MonitorTUI.run = lambda self: made.append(self)
+    try:
+        for line in ("claude-discord 1.14.1 (abc1234)", "odd 1.0", None):
+            sys.argv = ["tui", "--bot", "mgr", "--state-dir", "/nonexistent/x"] + ([] if line is None else ["--version-line", line])
+            tui.main()
+    finally:
+        tui.MonitorTUI.run, sys.argv = run, argv
+    assert [a.version for a in made] == ["1.14.1 (abc1234)", "odd 1.0", ""] and (made[0].bot, made[0].state_dir) == ("mgr", Path("/nonexistent/x")), [a.version for a in made]
     assert tui.title_line(mon(holders=[]), 100, T, True, False).plain.endswith("● live  checked 1m ago · next 4m")
     # next_pass is the pass's START plus the interval and state.json is written when the pass ENDS, so a pass under way
     # is not overdue: only one that is a tick (30 s) past the longer of 120 s and twice the last pass (pass_s; 0 when

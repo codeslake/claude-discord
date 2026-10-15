@@ -3838,6 +3838,8 @@ echo "ok: hosts: an alias is matched whole (web is not web2), a glob word of a l
 HID="$HOME/.claude-discord/host-id"; rm -f "$HID"
 bash "$S" --version > "$HOME/hid.0"
 [ ! -e "$HID" ] && [ "$(wc -l < "$HOME/hid.0")" = 1 ] || { echo "FAIL: a plain --version prints its one line and makes no host-id: $(<"$HOME/hid.0")"; exit 1; }
+VLINE=$(<"$HOME/hid.0")   # the version line, as the tui block below expects it passed to the TUI (1.14.1)
+[[ $VLINE =~ ^claude-discord\ [0-9]+\.[0-9]+\.[0-9]+\ \(([0-9a-f]{7,}|nogit)\)$ ]] || { echo "FAIL: --version prints 'claude-discord <version> (<short sha>|nogit)': $VLINE"; exit 1; }
 for i in 1 2 3 4 5 6 7 8; do bash "$S" --version --host-id > "$HOME/hid.$i" 2>&1 & done; wait
 L=$(cat "$HID" 2>/dev/null) || L=""
 [[ $L =~ ^[0-9a-f]{32}$ ]] && [ "$(wc -l < "$HID")" = 1 ] && [ "$(stat -c %a "$HID")" = 600 ] && [ "$(ls -A "$HOME/.claude-discord" | grep -c host-id)" = 1 ] ||
@@ -5371,7 +5373,7 @@ echo dev-manager > "$MR/mgr/mode"
 printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "$HOME/uv.args"; pwd -P > "$HOME/uv.cwd"\n' > "$HOME/bin/uv"; chmod +x "$HOME/bin/uv"
 mkdir -p "$MP/sub/dir"   # from a subdirectory: the project is found above it
 (cd "$MP/sub/dir" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui 2>/dev/null) || { echo "FAIL: tui from a subdirectory of the project must find the project above it"; exit 1; }
-[ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord" ] || { echo "FAIL: tui must run the script through uv with the bot, the state dir and the wrapper: $(cat "$HOME/uv.args" 2>&1)"; exit 1; }
+[ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord --version-line $VLINE" ] || { echo "FAIL: tui must run the script through uv with the bot, the state dir, the wrapper and the version line --version prints: $(cat "$HOME/uv.args" 2>&1)"; exit 1; }
 # It started a keeper, detached (a session of its own), so the monitor outlives the TUI; the next tui starts none.
 n=0; KP=""; while [ -z "$KP" ] && [ "$n" -lt 1000 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.002; n=$((n + 1)); done
 [ -n "$KP" ] && [ "$(ps -o sid= -p "$KP" | tr -d ' ')" = "$KP" ] || { echo "FAIL: tui must start a keeper in a session of its own: '$KP' $(ls "$MB/holders")"; exit 1; }
@@ -5400,7 +5402,7 @@ echo dev-manager > "$HOME/tuiproj2/.claude/discord-agents/mgr/mode"; echo local 
 printf '%s\n' "$HOME/gone" "$MP" > "$HOME/.claude-discord/records/projects"
 rm -f "$HOME/uv.args" "$HOME/uv.cwd"
 (cd "$NP" && bash "$S" tui 2>/dev/null </dev/null) || { echo "FAIL: tui outside a project must use the one recorded manager bot (a missing folder skipped)"; exit 1; }
-[ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord" ] && [ "$(<"$HOME/uv.cwd")" = "$(cd -P "$MP" && pwd -P)" ] || { echo "FAIL: tui outside a project must run the recorded bot from its project root: $(cat "$HOME/uv.args" "$HOME/uv.cwd" 2>&1)"; exit 1; }
+[ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord --version-line $VLINE" ] && [ "$(<"$HOME/uv.cwd")" = "$(cd -P "$MP" && pwd -P)" ] || { echo "FAIL: tui outside a project must run the recorded bot from its project root: $(cat "$HOME/uv.args" "$HOME/uv.cwd" 2>&1)"; exit 1; }
 # Inside a plain bot's project (no manager there): the recorded manager, as from outside any project.
 rm -f "$HOME/uv.args" "$HOME/uv.cwd"
 (cd "$P" && bash "$S" tui 2>/dev/null </dev/null) && [ "$(<"$HOME/uv.cwd")" = "$(cd -P "$MP" && pwd -P)" ] || { echo "FAIL: tui in a project with no manager bot must use the recorded manager: $(cat "$HOME/uv.args" "$HOME/uv.cwd" 2>&1)"; exit 1; }

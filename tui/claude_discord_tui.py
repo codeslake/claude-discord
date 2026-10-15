@@ -456,10 +456,12 @@ def render(items: list[tuple], cursor: str | None, width: int) -> tuple[Text, in
     return Text("\n").join(out), at[0], at[1]
 
 
-def title_line(state: dict, width: int, now: float, live: bool, stopped: bool) -> Text:
-    """`◆ claude-discord  <manager>` and, on the right, the backend's status: symbol + word + colour."""
+def title_line(state: dict, width: int, now: float, live: bool, stopped: bool, version: str = "") -> Text:
+    """`◆ claude-discord <version>  <manager>` and, on the right, the backend's status: symbol + word + colour. The
+    version is what follows `claude-discord ` in the wrapper's --version line (1.14.1), `1.14.1 (8db5787)`; a TUI
+    started without one (an older wrapper) shows none."""
     m, mgr = obj(state.get("monitor")), txt(state.get("manager")) or "?"
-    left = Text.assemble(("◆ claude-discord", f"bold {BRAND}"), ("  " + mgr, DIM))
+    left = Text.assemble(("◆ claude-discord", f"bold {BRAND}"), *([(" " + version, DIM)] if version else []), ("  " + mgr, DIM))
     due, took = epoch(m.get("next_pass")), m.get("pass_s")
     took = took if isinstance(took, (int, float)) and not isinstance(took, bool) else 0
     if stopped or m.get("stopped_by_user"):   # monitor --stop: nothing starts it until monitor --start
@@ -2411,9 +2413,9 @@ class MonitorTUI(App):
                 Binding("space", "toggle"), Binding("enter", "open"), Binding("c", "copy"), Binding("a", "add"), Binding("x", "remove"),
                 Binding("l", "laptop"), Binding("e", "edit"), Binding("n", "name"), Binding("t", "token"), Binding("equals_sign", "align")]
 
-    def __init__(self, state_dir: Path, bot: str, wrapper: str | None) -> None:
+    def __init__(self, state_dir: Path, bot: str, wrapper: str | None, version: str = "") -> None:
         super().__init__()
-        self.state_dir, self.bot, self.wrapper = state_dir, bot, wrapper
+        self.state_dir, self.bot, self.wrapper, self.version = state_dir, bot, wrapper, version
         self.home, self.ssh = Path.home(), "ssh"   # where ~/.ssh/config is, and the ssh that `ssh -G` runs (the tests set both)
         self.state: dict = {}
         self.names: dict = {}
@@ -2522,7 +2524,7 @@ class MonitorTUI(App):
     def paint(self) -> None:
         now, w, stopped = time.time(), self.width, self.stopped() is not None
         live = alive(obj(self.state.get("monitor")).get("pid"), self.bot)
-        self.show("#title", title_line(self.state, w, now, live, stopped))
+        self.show("#title", title_line(self.state, w, now, live, stopped, self.version))
         self.show("#tabs", tabs_lines(self.tab, len(open_alerts(self.state)), w))
         bar = bar_text(self.state, self.note, stopped, self.refused())
         b = self.query_one("#bar", Static)
@@ -2745,8 +2747,11 @@ def main() -> None:
     p.add_argument("--bot", required=True)
     p.add_argument("--state-dir", required=True, type=Path)
     p.add_argument("--claude-discord", default=None, help="the wrapper, for the holder record and --ensure")
+    p.add_argument("--version-line", default="", help="what claude-discord --version prints, for the title (1.14.1)")
     a = p.parse_args()
-    MonitorTUI(a.state_dir, a.bot, a.claude_discord).run()
+    # The title shows what follows the name (`1.14.1 (8db5787)`); a line of another shape is shown whole.
+    version = a.version_line[len("claude-discord "):] if a.version_line.startswith("claude-discord ") else a.version_line
+    MonitorTUI(a.state_dir, a.bot, a.claude_discord, version).run()
 
 
 if __name__ == "__main__":

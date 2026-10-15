@@ -294,6 +294,9 @@ plugin_version() {
   echo "?"
 }
 head_sha() { git -C "$1" rev-parse HEAD 2>/dev/null || :; }   # compat/VERSION's stamp (empty with no git)
+# The one version line: what --version prints (`hosts` and `access --host` parse it on other machines, so its shape
+# does not move) and, since 1.14.1, what the TUI is handed as --version-line for its title.
+version_line() { echo "claude-discord $(plugin_version "$self_root") ($(git -C "$self_root" rev-parse --short HEAD 2>/dev/null || echo nogit))"; }
 # ver_ge <a> <b>: a >= b for x.y.z versions; anything else is not.
 ver_ge() {
   local a1 a2 a3 b1 b2 b3
@@ -2031,7 +2034,7 @@ if [ "${1:-}" = --version ] && { [ "${2:-}" = --access ] || [ "${2:-}" = --bot ]
 fi
 # self_root is already the real clone (a link resolved through readlink and pwd -P).
 if [ "${1:-}" = --version ]; then
-  echo "claude-discord $(plugin_version "$self_root") ($(git -C "$self_root" rev-parse --short HEAD 2>/dev/null || echo nogit))"
+  version_line
   # What `hosts add` asks another machine over ssh (1.12.0). It rides on --version because a claude-discord before
   # 1.12.0 prints the line above and exits whatever follows, while any new verb would be read there as a bot name
   # and reach the launcher.
@@ -3498,7 +3501,7 @@ if [ "${1:-}" = tui ]; then
     bash "$self_root/monitor/monitor.sh" "$self_path" --keep "$bot" --detach </dev/null >/dev/null || :
   # The cwd stays the project root: the TUI's `monitor --ensure` call reads the ledger from there.
   exec "$uv" run --script "$self_root/tui/claude_discord_tui.py" --bot "$bot" \
-    --state-dir "$HOME/.claude-discord/records/monitor/$bot" --claude-discord "$self_path"
+    --state-dir "$HOME/.claude-discord/records/monitor/$bot" --claude-discord "$self_path" --version-line "$(version_line)"
 fi
 
 args=() name="" skip=0 want_name=0 named=0 positional=0 has_name=0 bare=0
