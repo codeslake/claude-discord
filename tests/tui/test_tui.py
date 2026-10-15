@@ -2049,6 +2049,15 @@ def notes(app):
     return "\n".join(n.message for n in app._notifications)
 
 
+async def safe_first(app, pilot):
+    """A bot popup opens on Cancel, its safe button; ← → move between Cancel and the button that runs it."""
+    assert app.focused.id == "b-no", app.focused
+    await pilot.press("right")
+    assert app.focused.id == "b-go", app.focused
+    await pilot.press("left")
+    assert app.focused.id == "b-no", app.focused
+
+
 async def bot_name(app, pilot):
     """n on a bot row: the name field holds its name; a name the CLI would refuse is refused here; enter runs
     `bot ... photobot rename <new>` on the pty, its question is a popup, y is written, and its end closes the popup."""
@@ -2058,6 +2067,8 @@ async def bot_name(app, pilot):
     await settle(app, pilot)
     pop = app.screen
     assert isinstance(pop, tui.BotName) and pop.query_one("#b-field").value == "photobot" and text(pop, "#b-title").startswith("Name · photobot"), text(pop, "#b-title")
+    await safe_first(app, pilot)
+    await pilot.press("shift+tab")
     assert app.focused.id == "b-field"
     pop.query_one("#b-field").value = "p"
     await pilot.press("enter")
@@ -2093,7 +2104,10 @@ async def bot_token(app, pilot):
     await pilot.press("t")
     await settle(app, pilot)
     pop = app.screen
-    assert isinstance(pop, tui.BotToken) and app.focused.id == "b-field" and app.focused.password, app.focused
+    assert isinstance(pop, tui.BotToken)
+    await safe_first(app, pilot)
+    await pilot.press("shift+tab")
+    assert app.focused.id == "b-field" and app.focused.password, app.focused
     await pilot.press("enter")
     assert "paste the token first" in text(pop, "#b-msg") and app.runs == []
     await pilot.press(*[{".": "full_stop", "-": "minus", "_": "underscore"}.get(c, c) for c in FAKE_TOKEN])
@@ -2120,7 +2134,10 @@ async def bot_add(app, pilot):
     await pilot.press("a")
     await settle(app, pilot)
     pop = app.screen
-    assert isinstance(pop, tui.BotAdd) and app.focused.id == "b-host", app.focused
+    assert isinstance(pop, tui.BotAdd)
+    await safe_first(app, pilot)
+    await pilot.press("tab", "tab")   # Add, then around to the first field
+    assert app.focused.id == "b-host", app.focused
     assert [c.value for c in pop.query(tui.Choice)] == ["local", "/home/u", "none"], [c.value for c in pop.query(tui.Choice)]
     await pilot.press("right")   # another host: the projects of its bots
     assert [c.value for c in pop.query(tui.Choice)][:2] == ["old", "/home/u/p"], [c.value for c in pop.query(tui.Choice)]
