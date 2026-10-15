@@ -123,6 +123,9 @@ plugin=discord@claude-plugins-official
 # and rules are named from here, resolved through any symlink to the real copy.
 self_path=$(readlink -f "$0" 2>/dev/null || echo "$0")
 self_root=$(cd "${self_path%/*}/.." && pwd -P)   # ${..%/*}, not dirname: one fork less on every call
+# reserved_name <name>: a word no bot may take as its name (setup, bot rename, bot add): claude-discord's subcommands,
+# `add` (`claude-discord bot add`), and the directories beside the bots.
+reserved_name() { case $1 in setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access|bot|add|hooks|checkin) return 0;; esac; return 1; }
 
 # access.json is written at setup time, so every answer lives in the file the
 # plugin reads and nothing else needs persisting. The run path below keeps a
@@ -806,8 +809,8 @@ if [ "${1:-}" = setup ]; then
   case $name in
     ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
     hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
-    setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access|bot) echo "claude-discord: bot name '$name' is reserved: 'claude-discord $name' is a subcommand" >&2; exit 2;;
   esac
+  ! reserved_name "$name" || { echo "claude-discord: bot name '$name' is reserved: 'claude-discord ${name/#add/bot add}' is a subcommand" >&2; exit 2; }
   if [ "${3:-}" = --mode ]; then
     [ -z "$scope$method" ] || { echo "claude-discord: --mode changes only the mode and installs nothing; --scope and --method do not apply" >&2; exit 2; }
   else
@@ -2963,7 +2966,7 @@ if [ "${1:-}" = access ]; then
 fi
 
 # bot: a bot's token and its name (1.14.0), for people and the TUI, which changes them through this verb only. A bot's
-# name here is its Discord username (b_name_re: 2 to 32 of A-Z a-z 0-9 _ -): its directory, its session's name and what
+# name here is its Discord username (b_name_re: 2 to 32 of A-Z a-z 0-9 _ -, not starting with -; no reserved_name): its directory, its session's name and what
 # the monitor and the TUI show.
 #   bot <name> token          the new token, read from the terminal with its echo off; Discord is asked who it is (GET
 #                             /users/@me as that token): a token Discord refuses, or one of another bot, is refused;
@@ -2987,7 +2990,7 @@ fi
 if [ "${1:-}" = bot ]; then
   shift
   b_usage="usage: claude-discord bot [--host <alias> [--manager <bot>]] [--project <dir>] <bot> token | <bot> rename <new name> | add [--mode none|dev-manager|autoresearchclaw] [--start]"
-  b_name_re='^[A-Za-z0-9_-]{2,32}$'   # a bot's name: Discord's username, which it is
+  b_name_re='^[A-Za-z0-9_][A-Za-z0-9_-]{1,31}$'   # a bot's name: Discord's username, which it is; never an option's -
   a_host="" a_proj="" hb=""
   while [ $# -gt 0 ]; do
     case $1 in
@@ -3019,7 +3022,7 @@ if [ "${1:-}" = bot ]; then
     rename)
       [ $# = 1 ] || { echo "$b_usage" >&2; exit 2; }
       new=$1
-      c_match "$new" "$b_name_re" || { echo "claude-discord: bot: the new name is 2 to 32 of A-Z a-z 0-9 _ - (Discord's username, which it becomes)" >&2; exit 2; };;
+      c_match "$new" "$b_name_re" || { echo "claude-discord: bot: the new name is 2 to 32 of A-Z a-z 0-9 _ -, not starting with - (Discord's username, which it becomes)" >&2; exit 2; };;
     *) echo "$b_usage" >&2; exit 2;;
   esac
   b_noterm() { echo "claude-discord: bot: $act reads the token from a terminal and asks there: run it in a terminal (stdin and stdout); nothing was read or changed" >&2; exit 3; }
@@ -3112,8 +3115,8 @@ if [ "${1:-}" = bot ]; then
     [ "$b_isbot" = true ] || { echo "claude-discord: bot: that token is no bot's (Discord says it is a user's); nothing was changed" >&2; exit 1; }
     new=$b_user
     # Its name here is its Discord username: one that is no name here is renamed on Discord first.
-    case $new in setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access|bot|hooks|checkin|add) new=" $new";; esac
-    c_match "$new" "$b_name_re" || { echo "claude-discord: bot: Discord calls this bot '$b_shown', and a bot's name here is its Discord username: 2 to 32 of A-Z a-z 0-9 _ -, and no name claude-discord itself uses. Rename it in the Developer Portal first (the bot's Bot tab, Username), then add it again; nothing was changed" >&2; exit 1; }
+    ! reserved_name "$new" || new=" $new"
+    c_match "$new" "$b_name_re" || { echo "claude-discord: bot: Discord calls this bot '$b_shown', and a bot's name here is its Discord username: 2 to 32 of A-Z a-z 0-9 _ -, not starting with -, and no name claude-discord itself uses. Rename it in the Developer Portal first (the bot's Bot tab, Username), then add it again; nothing was changed" >&2; exit 1; }
     [ ! -e "$root/$new" ] || { echo "claude-discord: bot: a bot '$new' is set up in $root already (claude-discord bot $new token replaces its token); nothing was changed" >&2; exit 1; }
     # One bot, one session: a bot set up on this machine already (its id kept in bot-id) is not set up twice.
     while IFS= read -r p || [ -n "$p" ]; do
@@ -3191,8 +3194,7 @@ if [ "${1:-}" = bot ]; then
   # name in their peers.json (they reach it by id); both are said. Before the directory moves, a failure undoes what was
   # stopped; after it, what fails is said and the rest goes on: the name here is the new one either way.
   nd=$root/$new
-  case $new in setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access|bot|hooks|checkin)
-    echo "claude-discord: bot: '$new' is a subcommand or a directory of claude-discord, so no bot may take the name" >&2; exit 2;; esac
+  ! reserved_name "$new" || { echo "claude-discord: bot: '$new' is a word of claude-discord (a subcommand, bot add, or a directory beside the bots), so no bot may take the name" >&2; exit 2; }
   [ ! -e "$nd" ] || [ "$nd" -ef "$d" ] || { echo "claude-discord: bot: a bot '$new' is set up in $root already" >&2; exit 1; }
   # The session that would run this is the one stopped on the way.
   [ -z "${DISCORD_STATE_DIR:-}" ] || ! [ "$DISCORD_STATE_DIR" -ef "$d" ] ||

@@ -476,7 +476,8 @@ A bot named `access`, set up before 1.13.0, is no longer launched by
 ## A bot's token and name: `bot`
 
 A bot's name here is its Discord username (1.14.0): 2 to 32 of `A-Z a-z 0-9 _ -`,
-and none of claude-discord's own words (`setup`, `access`, `bot`, ...). Its
+not starting with `-`, and none of claude-discord's own words (`setup`, `access`,
+`bot`, `add`, `hooks`, ...; `setup` refuses the same ones). Its
 token, its name and a new bot are written by one verb, at a terminal, as
 `access set` is (that is a speed bump, not a boundary):
 

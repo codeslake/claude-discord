@@ -1475,9 +1475,9 @@ QUESTION = re.compile(r"Apply (this change|these [1-9][0-9]* changes|this wideni
                       r"|[1-9][0-9]* changes, [1-9][0-9]* of them widening)\? \[y/N\] ")
 # 1.14.0, `claude-discord bot`: a bot's name (its Discord username, the CLI's b_name_re); the prompt `bot ... token|add`
 # reads the token with, its echo off; its questions, the whole line (BOT_Q takes the prompt too: asked for after the marker).
-BOT_NAME = re.compile(r"[A-Za-z0-9_-]{2,32}")
+BOT_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{1,31}")
 TOKEN_Q = "Token (hidden): "
-BOT_Q = re.compile(r"(Replace the token|Rename it to [A-Za-z0-9_-]{2,32}|Add this bot)\? \[y/N\] |" + re.escape(TOKEN_Q))
+BOT_Q = re.compile(r"(Replace the token|Rename it to [A-Za-z0-9_][A-Za-z0-9_-]{1,31}|Add this bot)\? \[y/N\] |" + re.escape(TOKEN_Q))
 
 
 def ask_text(raw: str) -> Text:
@@ -2315,7 +2315,7 @@ class BotName(BotPopup):
     def go(self) -> None:
         new = self.query_one("#b-field", Input).value
         if not BOT_NAME.fullmatch(new):
-            return self.say("a name is 2 to 32 of A-Z a-z 0-9 _ -", ALERT)
+            return self.say("a name is 2 to 32 of A-Z a-z 0-9 _ -, not starting with -", ALERT)
         self.new = new
         self.start(self.app.bot_argv(self.entry, txt(self.entry.get("bot")), "rename", new))
 

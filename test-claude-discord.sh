@@ -4042,9 +4042,9 @@ for bad in "" "acc frob" "--frob acc --json"; do
 done
 ac nosuch --json
 [ "$ARC" = 1 ] && grep -q "no bot 'nosuch' set up in $MR" <<<"$AE" || { echo "FAIL: a bot that is not set up is exit 1: rc=$ARC $AE"; exit 1; }
-for w in access bot; do
+for w in access bot add; do
   rc=0; out=$(printf '\n' | bash "$S" setup $w 2>&1) || rc=$?
-  [ "$rc" = 2 ] && grep -q "bot name '$w' is reserved" <<<"$out" || { echo "FAIL: '$w' is a subcommand now, so no bot may take the name: rc=$rc $out"; exit 1; }
+  [ "$rc" = 2 ] && grep -q "bot name '$w' is reserved" <<<"$out" || { echo "FAIL: '$w' is a word claude-discord uses (a subcommand, bot add), so no bot may take the name: rc=$rc $out"; exit 1; }
 done
 # A DISCORD_CHANNEL_ID that is no id (the bot's main channel when access.json does not say) is said, before Discord is asked.
 cp "$MR/config.env" "$HOME/acc.env.was"; printf "DISCORD_CHANNEL_ID='9 9'\nDISCORD_USER_ID='111'\n" > "$MR/config.env"; : > "$CURL_LOG"
@@ -4362,9 +4362,9 @@ echo "ok: bot token: read from the terminal with its echo off, only there (no te
 # bot rename: a name that is none, a name taken, a reserved one, and a session renaming its own bot are refused before
 # Discord is asked (exit 2, exit 1).
 : > "$CURL_LOG"; A=""
-for w in "acc rename a.b" "acc rename mgr" "acc rename hosts"; do BRC=0; bash "$S" bot $w </dev/null >/dev/null 2>&1 || BRC=$?; A="$A$BRC "; done
+for w in "acc rename a.b" "acc rename mgr" "acc rename hosts" "acc rename add" "acc rename hooks" "acc rename -ab"; do BRC=0; bash "$S" bot $w </dev/null >/dev/null 2>&1 || BRC=$?; A="$A$BRC "; done
 BRC=0; BO=$(DISCORD_STATE_DIR=$AD bash "$S" bot acc rename acc2 2>&1) || BRC=$?
-[ "$A$BRC" = "2 1 2 2" ] && grep -q 'a session cannot rename its own bot' <<<"$BO" && [ ! -s "$CURL_LOG" ] ||
+[ "$A$BRC" = "2 1 2 2 2 2 2" ] && grep -q 'a session cannot rename its own bot' <<<"$BO" && [ ! -s "$CURL_LOG" ] ||
   { echo "FAIL: bot rename refuses a name that is none, one taken, a reserved one and its own session's bot before asking Discord: $A$BRC $BO"; exit 1; }
 # No terminal: what it would do is printed, nothing is done (exit 3). Discord refusing the name (it allows about two
 # changes an hour) changes nothing here.

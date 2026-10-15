@@ -2070,9 +2070,10 @@ async def bot_name(app, pilot):
     await safe_first(app, pilot)
     await pilot.press("shift+tab")
     assert app.focused.id == "b-field"
-    pop.query_one("#b-field").value = "p"
-    await pilot.press("enter")
-    assert "2 to 32" in text(pop, "#b-msg") and app.runs == [], text(pop, "#b-msg")
+    for bad in ("p", "-ab"):   # too short; an option's leading -
+        pop.query_one("#b-field").value = bad
+        await pilot.press("enter")
+        assert "2 to 32" in text(pop, "#b-msg") and app.runs == [], (bad, text(pop, "#b-msg"))
     pop.query_one("#b-field").value = "photo2"
     await pilot.press("enter")
     await settle(app, pilot)
