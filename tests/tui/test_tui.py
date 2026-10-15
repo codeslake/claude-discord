@@ -2148,6 +2148,22 @@ async def bot_token(app, pilot):
     assert FAKE_TOKEN not in drawn(app) and FAKE_TOKEN not in repr(app.__dict__)
 
 
+async def bot_token_unasked(app, pilot):
+    """A token taken from its field but never asked for (the run ended first: a host older than 1.14.0, exit 5) is
+    zeroed all the same, and never written."""
+    fake_pty(app, [("claude-discord: bot: h2 runs claude-discord 1.13.1; bot needs 1.14.0\r\n", 5)])
+    await pilot.press("t")
+    await settle(app, pilot)
+    pop, held = app.screen, []
+    take = pop.take
+    pop.take = lambda: take() and not held.append(pop.secret)   # the buffer itself, as take() leaves it
+    pop.query_one("#b-field").value = FAKE_TOKEN
+    pop.go()
+    await settle(app, pilot)
+    assert held and held[0] == bytearray(len(FAKE_TOKEN)) and pop.secret is None and app.runs[0].written == [], (held, app.runs[0].written)
+    assert text(pop, "#b-msg").startswith("the host did not answer, or its claude-discord is older than 1.14.0"), text(pop, "#b-msg")
+
+
 async def bot_add(app, pilot):
     """a on the Bots tab: the host, a project of that host's bots, the mode, start now [✓] and the token; enter in
     the token field runs `bot ... add --mode <m> --start`, the token written when it is asked for."""
@@ -2259,6 +2275,7 @@ async def main():
     await case("bot_retarget", bot_retarget, state="all_ok", wrapper=bot_cli)
     await case("bot_align", bot_align, state="renamed", wrapper=bot_cli)
     await case("bot_token", bot_token, state="all_ok", wrapper=bot_cli)
+    await case("bot_token_unasked", bot_token_unasked, state="all_ok", wrapper=bot_cli)
     await case("bot_add", bot_add, state="all_ok", wrapper=bot_cli)
     await case("access_long_host_answered", access_long_host_answered, state="all_ok", wrapper=access_cli)
     await case("stopped", stopped)
