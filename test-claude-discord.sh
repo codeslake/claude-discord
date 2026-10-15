@@ -4376,12 +4376,13 @@ rc=0; out=$(cd "$HOME" && bash "$S" --version --bot "$(a_hex "$MP")" "$(a_hex ac
   [[ $(<"$HOME/ssh.log") != *"$TOK_NEW"* ]] || { echo "FAIL: bot --host token: no terminal is exit 3 with no ssh, a host before 1.14.0 exit 5 sent only --version, a 1.14.0 host gets it under ssh -t in hex; the host decodes --version --bot: $A $BRC $rc $out / $(cat "$HOME/ssh.log" 2>&1)"; exit 1; }
 rm -f "$HOME/ssh.log" "$MON"/h1.* "$MON"/h2.*
 echo "ok: bot token: read from the terminal with its echo off, only there (no terminal: exit 3, nothing read); Discord asked who it is with it on curl's stdin; a token of another bot or one Discord refuses changes nothing; y replaces .env by rename, mode 600, its other lines kept, and logs the fact; the token is never printed; --host runs it on the bot's host under ssh -t (a host before 1.14.0: exit 5)"
-# bot rename: a name that is none, a name taken, a reserved one, and a session renaming its own bot are refused before
-# Discord is asked (exit 2, exit 1).
+# bot rename: a name that is none, a name taken, a reserved one, one of another bot of this machine but for its case
+# (this project's mgr, another project's b1ok), and a session renaming its own bot are refused before Discord is asked
+# (exit 2, exit 1).
 : > "$CURL_LOG"; A=""
-for w in "acc rename a.b" "acc rename mgr" "acc rename hosts" "acc rename add" "acc rename hooks" "acc rename -ab"; do BRC=0; bash "$S" bot $w </dev/null >/dev/null 2>&1 || BRC=$?; A="$A$BRC "; done
+for w in "acc rename a.b" "acc rename mgr" "acc rename hosts" "acc rename add" "acc rename hooks" "acc rename -ab" "acc rename MGR" "acc rename B1OK"; do BRC=0; bash "$S" bot $w </dev/null >/dev/null 2>&1 || BRC=$?; A="$A$BRC "; done
 BRC=0; BO=$(DISCORD_STATE_DIR=$AD bash "$S" bot acc rename acc2 2>&1) || BRC=$?
-[ "$A$BRC" = "2 1 2 2 2 2 2" ] && grep -q 'a session cannot rename its own bot' <<<"$BO" && [ ! -s "$CURL_LOG" ] ||
+[ "$A$BRC" = "2 1 2 2 2 2 1 1 2" ] && grep -q 'a session cannot rename its own bot' <<<"$BO" && [ ! -s "$CURL_LOG" ] ||
   { echo "FAIL: bot rename refuses a name that is none, one taken, a reserved one and its own session's bot before asking Discord: $A$BRC $BO"; exit 1; }
 # No terminal: what it would do is printed, nothing is done (exit 3). Discord refusing the name (it allows about two
 # changes an hour) changes nothing here.
@@ -4397,7 +4398,7 @@ rc=0; out=$(bash "$S" bot acc rename acc2 2>&1 </dev/null) || rc=$?; bt - y acc 
 # its line in peers.json (by its id) and its scratch directory with it, and the session started again under the new
 # name from its handoff (the suite's launcher stub prints the start).
 sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; cp "$HOME/bin/claude" "$HOME/claude.keep"; rm -f "$HOME/claude.calls"
-cat > "$HOME/bin/claude" <<'STUB'
+cat > "$HOME/claude.live" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
   agents) echo '[{"id":"accl1111","pid":'"$(<"$HOME/old.pid")"',"name":"acc","cwd":"'"$PWD"'"},{"id":"oth22222","pid":45,"name":"acc","cwd":"/elsewhere"}]';;
@@ -4405,7 +4406,7 @@ case "$1" in
   *) printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
 esac
 STUB
-chmod +x "$HOME/bin/claude"; printf 'HANDOFF_ACC\n' > "$AD/handoff.md"; mkdir -p "$HOME/.claude-discord/scratch/acc"
+chmod +x "$HOME/claude.live"; cp "$HOME/claude.live" "$HOME/bin/claude"; printf 'HANDOFF_ACC\n' > "$AD/handoff.md"; mkdir -p "$HOME/.claude-discord/scratch/acc"
 : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_REPLIES"; queue_line "200 $TOK_ME"; queue_line '200 {"id":"777","bot":true,"username":"acc2"}'
 bt - y acc rename acc2
 [ "$BRC" = 0 ] && grep -qx '    it runs (1 session): stopped, renamed, started again as acc2 from its handoff.md' <<<"$BO" &&
@@ -4418,19 +4419,31 @@ bt - y acc rename acc2
   [ "$(tail -n 2 "$MR/acc2/access.log" | cut -d' ' -f4-)" = "rename: on Discord acc -> acc2
 rename: acc -> acc2" ] || { echo "FAIL: bot rename of a running bot, y: Discord first, then the session stopped, the directory, its peers.json line by id and its scratch directory renamed, the session started again as the new name from its handoff: rc=$BRC $BO / $(cat "$HOME/claude.calls" "$CURL_LOG" "$MR/peers.json" 2>&1)"; exit 1; }
 cp "$HOME/claude.keep" "$HOME/bin/claude"
-# A manager whose name Discord has already (the TUI's `=`): Discord is not asked to change it; its backend's state moves
-# with it and names the new manager, stopped as its owner left it, and its watcher record on each ledger host is renamed.
+# A manager whose name Discord has already (the TUI's `=`), here only its case: Discord is not asked to change it; its
+# directory and its backend's state move (through a temporary name, so a case-insensitive file system renames them too)
+# and name the new manager, stopped as its owner left it, and its watcher record on each ledger host is renamed.
 MB2=$HOME/.claude-discord/records/monitor; mkdir -p "$MB2/acc2"; : > "$MB2/acc2/stopped"; printf '{"version":1,"manager":"acc2","bots":{}}\n' > "$MB2/acc2/state.json"
 echo dev-manager > "$MR/acc2/mode"; printf '# ledger\nlocal\nh1 X=1\n' > "$MR/acc2/hosts"; HID=$(bash "$S" --version --host-id | sed -n 's/^host-id //p')
-: > "$MON/h1.out"; rm -f "$MON/h1.rc" "$HOME/ssh.log"; : > "$CURL_LOG"; : > "$CURL_REPLIES"; queue_line '200 {"id":"777","bot":true,"username":"accZ"}'
-bt - y acc2 rename accZ
-[ "$BRC" = 0 ] && grep -qx '    Discord: it is accZ there already: Discord is not asked to change it' <<<"$BO" && [ "$(wc -l < "$CURL_LOG")" = 1 ] &&
-  [ -d "$MR/accZ" ] && [ ! -e "$MB2/acc2" ] && [ -e "$MB2/accZ/stopped" ] && [ "$(jq -r .manager "$MB2/accZ/state.json")" = accZ ] &&
-  grep -q 'its backend stays stopped, as you left it: claude-discord monitor --start accZ' <<<"$BO" &&
-  [ "$(cut -d' ' -f5- "$HOME/ssh.log")" = "-- h1 ~/.local/bin/claude-discord --version --watch accZ $HID h1
+: > "$MON/h1.out"; rm -f "$MON/h1.rc" "$HOME/ssh.log"; : > "$CURL_LOG"; : > "$CURL_REPLIES"; queue_line '200 {"id":"777","bot":true,"username":"ACC2"}'
+bt - y acc2 rename ACC2
+[ "$BRC" = 0 ] && grep -qx '    Discord: it is ACC2 there already: Discord is not asked to change it' <<<"$BO" && [ "$(wc -l < "$CURL_LOG")" = 1 ] &&
+  [ -d "$MR/ACC2" ] && [ ! -e "$MR/acc2" ] && [ ! -e "$MB2/acc2" ] && [ -e "$MB2/ACC2/stopped" ] && [ "$(jq -r .manager "$MB2/ACC2/state.json")" = ACC2 ] &&
+  grep -q 'its backend stays stopped, as you left it: claude-discord monitor --start ACC2' <<<"$BO" && [ -z "$(find "$MR" "$MB2" -name '.*.cd.*')" ] &&
+  [ "$(cut -d' ' -f5- "$HOME/ssh.log")" = "-- h1 ~/.local/bin/claude-discord --version --watch ACC2 $HID h1
 -- h1 ~/.local/bin/claude-discord --version --unwatch acc2 $HID" ] ||
   { echo "FAIL: bot rename of a manager to the name Discord has: no PATCH, its backend's records moved and renamed, stopped as left, its watcher records renamed: rc=$BRC $BO / $(cat "$HOME/ssh.log" "$CURL_LOG" 2>&1) / $(ls "$MB2")"; exit 1; }
-mv "$MR/accZ" "$AD"; echo none > "$AD/mode"; rm -rf "$AD/hosts" "$AD/handoff.md" "$AD/handoff.prev.md" "$MB2/accZ" "$HOME/.claude-discord/scratch/acc2" "$HOME/ssh.log" "$HOME/claude.calls"
+mv "$MR/ACC2" "$AD"; echo none > "$AD/mode"; rm -rf "$AD/hosts" "$AD/handoff.md" "$AD/handoff.prev.md" "$MB2/ACC2" "$HOME/.claude-discord/scratch/acc2" "$HOME/ssh.log" "$HOME/claude.calls"
+# The directory's rename(2) fails (the project's directory unwritable here): what was stopped runs again, and a manager's
+# stopped marker its owner left stays. On a case-insensitive file system ACC and acc are one directory (a symlink here):
+# the marker under the new name is then the owner's, and the rename made none to take back.
+echo dev-manager > "$AD/mode"; printf '# ledger\nlocal\n' > "$AD/hosts"; mkdir -p "$MB2/acc"; : > "$MB2/acc/stopped"; ln -s acc "$MB2/ACC"
+sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; cp "$HOME/claude.live" "$HOME/bin/claude"
+: > "$CURL_REPLIES"; queue_line '200 {"id":"777","bot":true,"username":"ACC"}'; chmod 555 "$MR"
+bt - y acc rename ACC; chmod 755 "$MR"
+[ "$BRC" = 1 ] && grep -q "could not rename $AD: nothing here was renamed" <<<"$BO" && [ -d "$AD" ] && [ ! -e "$MR/ACC" ] && [ -e "$MB2/acc/stopped" ] &&
+  [[ $BO == *"stopping acc (accl1111, pid $OLD)"$'\n'*"LAUNCHER "*" -n acc "* ]] && [ "$(<"$HOME/claude.calls")" = "STOP accl1111" ] ||
+  { echo "FAIL: a failed rename(2) of the directory starts the stopped session again and keeps the owner's stopped marker: rc=$BRC $BO / $(ls -a "$MB2/acc" 2>&1)"; exit 1; }
+cp "$HOME/claude.keep" "$HOME/bin/claude"; echo none > "$AD/mode"; rm -rf "$AD/hosts" "$MB2/acc" "$MB2/ACC" "$HOME/claude.calls"
 # --host with no terminal here: the host prints what it would do and refuses (exit 3), passed on; the new name travels
 # as it is (a name is plain), the bot's in hex.
 printf 'claude-discord 1.14.0 (abc1234)\n    Discord: acc -> acc2\033[2J\n' > "$MON/h1.out"; echo 3 > "$MON/h1.rc"; : > "$MON/h1.both"
@@ -4451,10 +4464,11 @@ bt "$TOK_NEW" - add; A=$BRC$BO; bt "$TOK_NEW" - add
 # token is its name), and by its token (the same token under another Discord name), compared in-process, never shown.
 TOK_TWIN=tokTwinAAAAbbbbCCCCdddd.eeee; mkdir -p "$MR/twin"; printf 'DISCORD_BOT_TOKEN=%s\n' "$TOK_NEW" > "$MR/twin/.env"
 : > "$CURL_REPLIES"; queue_line '200 {"id":"991","bot":true,"username":"twin"}'; queue_line '200 {"id":"992","bot":true,"username":"newbot"}'
-bt "$TOK_TWIN" - add; A=$BRC$BO; bt "$TOK_NEW" - add
-[[ $A == 1*"a bot 'twin' is set up in $MR already"* ]] && [ "$BRC" = 1 ] && grep -q "that token is the token of $MR/twin already: two sessions on one token both answer; nothing was changed" <<<"$BO" &&
+queue_line '200 {"id":"993","bot":true,"username":"ACC"}'
+bt "$TOK_TWIN" - add; A=$BRC$BO; bt "$TOK_NEW" - add; A2=$BRC$BO; bt "$TOK_TWIN" - add
+[[ $A == 1*"a bot 'twin' is set up in $MR already"* ]] && [[ $BRC$BO == 1*"'ACC' is the name of $AD but for its case"* ]] && BRC=${A2%%[!0-9]*} BO=$A2 && [ "$BRC" = 1 ] && grep -q "that token is the token of $MR/twin already: two sessions on one token both answer; nothing was changed" <<<"$BO" &&
   [ ! -e "$MR/newbot" ] && [[ $A$BO != *tok[TN]* ]] ||
-  { echo "FAIL: bot add refuses a bot set up here with no bot-id, by its directory and by its token: $A / rc=$BRC $BO"; exit 1; }
+  { echo "FAIL: bot add refuses a bot set up here with no bot-id, by its directory and by its token, and a name of another bot but for its case: $A / $A2 / rc=$BRC $BO"; exit 1; }
 rm -rf "$MR/twin"
 # y, a mode, --start: setup writes it as at a terminal (the token in .env, the project's channel with an @mention
 # required, the mode), its id is kept, access.log says so, and it is started; the token is never printed.

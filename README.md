@@ -515,7 +515,11 @@ claude-discord bot add [--mode none|dev-manager|autoresearchclaw] [--start]   # 
   starts again what was stopped and changes nothing here; after it, what
   failed is said with the command that finishes it. Peers on other machines
   keep the old name in their `peers.json` and still reach the bot by its id;
-  their owner runs `setup <their bot> --mode` to show the new name. A session
+  their owner runs `setup <their bot> --mode` to show the new name. A name
+  that differs only in case from another bot's on this machine is refused (on
+  a case-insensitive file system both are one directory, and the hooks compare
+  names without case; `add` refuses it too); a case-only rename of the bot
+  itself goes through a temporary name there. A session
   cannot rename its own bot (it would be stopped on the way): run it from a
   terminal outside that session.
 - **add** needs a project whose channel and owner are set (`config.env`): its

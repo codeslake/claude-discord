@@ -3118,6 +3118,34 @@ if [ "${1:-}" = bot ]; then
       done
     done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null)
   }
+  # b_case_free <name> [<this bot's dir>]: no other bot of this machine (a bot directory of this project or a recorded
+  # one, or a manager's records/monitor/<name>) has that name but for its case, or exit 1 naming it: on a
+  # case-insensitive file system the two are one directory, and the hooks compare names without case. The bot itself
+  # (its directory, a manager's own records) is none other.
+  b_case_free() {
+    local p f n
+    shopt -s nocasematch
+    while IFS= read -r p || [ -n "$p" ]; do
+      p=${p%$'\r'}
+      for f in "$p"/.claude/discord-agents/*/.env "$M"/*/; do
+        f=${f%/}; f=${f%/.env}; n=${f##*/}
+        [ -n "$p" ] && [ -d "$f" ] && [[ $n == "$1" ]] && [ "$n" != "$1" ] || continue
+        if [ "$f" = "$M/$n" ]; then [ -n "$mgr" ] && [ "$n" = "$bot" ] && continue; else [ -n "${2:-}" ] && [ "$f" -ef "$2" ] && continue; fi
+        shopt -u nocasematch
+        echo "claude-discord: bot: '$1' is the name of $f but for its case: on a case-insensitive file system they are one directory, and the hooks compare names without case; nothing was changed" >&2; exit 1
+      done
+    done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null)
+    shopt -u nocasematch
+  }
+  # b_mv <from> <to>: rename(2); when both are one directory (a case-only rename on a case-insensitive file system),
+  # through a temporary name beside it, and back to <from> when the second step fails.
+  b_mv() {
+    if [ -e "$2" ] && [ "$1" -ef "$2" ]; then
+      perl -e 'rename $ARGV[0], $ARGV[2] or exit 1; rename $ARGV[2], $ARGV[1] and exit 0; rename $ARGV[2], $ARGV[0]; exit 1' "$1" "$2" "${2%/*}/.${2##*/}.cd.$$"
+    else
+      perl -e 'rename $ARGV[0], $ARGV[1] or exit 1' "$1" "$2"
+    fi
+  }
   # b_dname <bot dir> <name>: Discord's name for the bot, as health keeps it (discord-name: "<read at> <name>").
   b_dname() { printf '%s %s\n' "$(date +%s)" "${2//[[:cntrl:]]/}" > "$1/discord-name" 2>/dev/null || :; }
   # b_log <bot dir> <what>: a line in the bot's access.log, as access set writes it (the token: the fact only).
@@ -3138,6 +3166,7 @@ if [ "${1:-}" = bot ]; then
     ! reserved_name "$new" || new=" $new"
     c_match "$new" "$b_name_re" || { echo "claude-discord: bot: Discord calls this bot '$b_shown', and a bot's name here is its Discord username: 2 to 32 of A-Z a-z 0-9 _ -, not starting with -, and no name claude-discord itself uses. Rename it in the Developer Portal first (the bot's Bot tab, Username), then add it again; nothing was changed" >&2; exit 1; }
     [ ! -e "$root/$new" ] || { echo "claude-discord: bot: a bot '$new' is set up in $root already (claude-discord bot $new token replaces its token); nothing was changed" >&2; exit 1; }
+    mgr=""; b_case_free "$new"
     # One bot, one session: a bot set up on this machine already (its id in a bot-id, or its token in a .env) is not set
     # up twice.
     b_set_up
@@ -3235,6 +3264,7 @@ if [ "${1:-}" = bot ]; then
   mode=""; { read -r mode < "$d/mode"; } 2>/dev/null || :
   mgr=""; [ "$mode" != dev-manager ] || [ ! -f "$d/hosts" ] || [ "$new" = "$bot" ] || mgr=1
   [ -z "$mgr" ] || b_mgr_free "$new" "$bot"
+  b_case_free "$new" "$d"
   tok=""
   { while IFS= read -r l || [ -n "$l" ]; do case $l in DISCORD_BOT_TOKEN=*) tok=${l#DISCORD_BOT_TOKEN=}; break;; esac; done < "$d/.env"; } 2>/dev/null || :
   [ -n "$tok" ] || { echo "claude-discord: bot: no token in $d/.env (claude-discord bot $bn token)" >&2; exit 1; }
@@ -3283,22 +3313,25 @@ if [ "${1:-}" = bot ]; then
   if [ -n "$live" ] && ! stop_sessions "$bn" "$live"; then
     echo "claude-discord: bot: $bn still runs after stop (pid ${alive[*]}): nothing here was renamed$b_again. Stop it by hand first" >&2; exit 1
   fi
-  b_undo() {  # the directory did not move: what was stopped runs again
+  b_undo() {  # the directory did not move: what was stopped runs again; of the markers, only the one made here goes
     if [ -n "$mgr" ]; then
-      rm -f "$M/$new/stopped"; rmdir "$M/$new" 2>/dev/null || :
+      [ -z "$b_made" ] || { rm -f "$M/$new/stopped"; rmdir "$M/$new" 2>/dev/null || :; }
       [ -n "$was_stopped" ] || bash "$self_root/monitor/monitor.sh" "$self_path" --start "$bot" </dev/null >/dev/null 2>&1 || :
     fi
     [ -z "$live" ] || start_fresh "$self_path" "$bot" "$d" "Catch up on the channel and continue from your handoff." || :
   }
-  was_stopped=""
+  was_stopped="" b_made=""
   if [ -n "$mgr" ]; then
     [ ! -e "$M/$bot/stopped" ] || was_stopped=1
     bash "$self_root/monitor/monitor.sh" "$self_path" --stop "$bot" </dev/null >/dev/null 2>&1 || :
-    # A marker under the new name before the directory has it: no session's hook starts a backend for it meanwhile.
-    mkdir -p "$M" && mkdir "$M/$new" && : > "$M/$new/stopped" ||
-      { b_undo; echo "claude-discord: bot: could not make $M/$new: nothing here was renamed$b_again" >&2; exit 1; }
+    # A marker under the new name before the directory has it: no session's hook starts a backend for it meanwhile. One
+    # directory for both names (a case-only rename on a case-insensitive file system): the marker --stop wrote is it.
+    if ! { [ -e "$M/$new" ] && [ "$M/$new" -ef "$M/$bot" ]; }; then
+      mkdir -p "$M" && mkdir "$M/$new" && b_made=1 && : > "$M/$new/stopped" ||
+        { b_undo; echo "claude-discord: bot: could not make $M/$new: nothing here was renamed$b_again" >&2; exit 1; }
+    fi
   fi
-  perl -e 'rename $ARGV[0], $ARGV[1] or exit 1' "$d" "$nd" ||
+  b_mv "$d" "$nd" ||
     { b_undo; echo "claude-discord: bot: could not rename $d: nothing here was renamed$b_again" >&2; exit 1; }
   b_log "$nd" "rename: $bn -> $new"
   b_rc=0 b_warn=""
@@ -3309,14 +3342,14 @@ if [ "${1:-}" = bot ]; then
     jq_edit "$p/.claude/discord-agents/peers.json" --arg id "$b_id" --arg n "$new" \
       'if (.peers | type) == "array" then .peers |= map(if type == "object" and ((.bot_id // "") | tostring) == $id then .name = $n else . end) else . end'
   done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null)
-  if [ -d "$helpers/scratch/$bot" ] && [ ! -e "$helpers/scratch/$new" ]; then
-    mv "$helpers/scratch/$bot" "$helpers/scratch/$new" 2>/dev/null || b_warn="$b_warn"$'\n'"    its scratch directory stays $helpers/scratch/$bot"
+  if [ -d "$helpers/scratch/$bot" ] && { [ ! -e "$helpers/scratch/$new" ] || [ "$helpers/scratch/$new" -ef "$helpers/scratch/$bot" ]; }; then
+    b_mv "$helpers/scratch/$bot" "$helpers/scratch/$new" 2>/dev/null || b_warn="$b_warn"$'\n'"    its scratch directory stays $helpers/scratch/$bot"
   fi
   if [ -n "$mgr" ]; then
-    rm -f "$M/$new/stopped"
+    [ -z "$b_made" ] || rm -f "$M/$new/stopped"
     if [ ! -d "$M/$bot" ]; then
-      rmdir "$M/$new" 2>/dev/null || :
-    elif rmdir "$M/$new" 2>/dev/null && perl -e 'rename $ARGV[0], $ARGV[1] or exit 1' "$M/$bot" "$M/$new"; then
+      [ -z "$b_made" ] || rmdir "$M/$new" 2>/dev/null || :
+    elif { [ -z "$b_made" ] || rmdir "$M/$new" 2>/dev/null; } && b_mv "$M/$bot" "$M/$new"; then
       # The monitor starts from a state.json only when it names this manager: else it would post standing findings again.
       { jq -c --arg m "$new" '.manager = $m' "$M/$new/state.json" > "$M/$new/state.json.tmp" && mv -f "$M/$new/state.json.tmp" "$M/$new/state.json"; } 2>/dev/null || rm -f "$M/$new/state.json.tmp"
     else
