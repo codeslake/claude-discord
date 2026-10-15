@@ -5894,7 +5894,7 @@ grep -qE '^claude-discord [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]{7,}\)$' <<<"$v" && [
 # The upstream moves: a new commit in the stand-in repo, with a new plugin version.
 # The pulled commit also changes what the patch verb prints, so the test can tell the pulled patch code from the code update was started with.
 jq '.version = "9.9.9"' "$SRC/.claude-plugin/plugin.json" > "$SRC/p.json" && mv "$SRC/p.json" "$SRC/.claude-plugin/plugin.json" &&
-  sed -i 's/^if \[ "\${1:-}" = patch \]; then$/& echo PATCH-CODE-V2 >\&2/' "$SRC/bin/claude-discord" && grep -q PATCH-CODE-V2 "$SRC/bin/claude-discord" &&
+  sed -i 's/^if \[ "\${1:-}" = patch \]; then$/& echo PATCH-CODE-V2 >\&2/' "$SRC/bin/lib/patch.sh" && grep -q PATCH-CODE-V2 "$SRC/bin/lib/patch.sh" &&
   git -C "$SRC" -c user.email=t@t -c user.name=t commit -qam bump || { echo "FAIL: could not bump the stand-in repo"; exit 1; }
 rm -rf "$HOME/.claude-discord/runtime" "$HOME/.claude-discord/compat"; echo stale > "$HOME/.local/bin/claude-discord"
 out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || { echo "FAIL: update failed: $out"; exit 1; }
