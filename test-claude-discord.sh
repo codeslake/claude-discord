@@ -154,6 +154,11 @@ if bash4_lint "$S" "$D"/bin/lib/*.sh "$D/shim/claude-discord" "$D"/hooks/*/* "$D
 fi
 # 1.15.0: the wrapper sources bin/lib/*.sh on demand; each is parsed on the Mac too.
 for f in "$D"/bin/lib/*.sh; do bash -n "$f"; done
+# A lib is sourced, never run: no shebang and no execute bit, or `bin/lib/x.sh` run by hand defines its functions with an
+# empty $1 and exits 0 saying nothing.
+for f in "$D"/bin/lib/*.sh; do
+  [ ! -x "$f" ] && [ "$(head -c 2 "$f")" != "#!" ] || { echo "FAIL: $f is a sourced lib: no shebang, no execute bit"; exit 1; }
+done
 bash -n "$D/hooks/lib/discord.sh"
 bash -n "$D/hooks/lib/old-hooks.sh"
 bash -n "$D/hooks/turn/on-prompt"

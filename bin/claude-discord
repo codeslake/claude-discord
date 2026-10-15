@@ -129,8 +129,6 @@ case $0 in /*) self_path=$0;; *) self_path=$PWD/$0;; esac
 cd_here=$PWD self_root=""
 ! { cd -- "${self_path%/*}/.." && cd -P .; } 2>/dev/null || self_root=$PWD   # ${..%/*}, not dirname: one fork less
 cd -- "$cd_here" 2>/dev/null || { echo "claude-discord: could not return to $cd_here" >&2; exit 1; }
-# reserved_name <name>: a word no bot may take as its name (setup, bot rename, bot add): claude-discord's subcommands,
-# `add` (`claude-discord bot add`), and the directories beside the bots.
 
 # monitor: the backend health monitor of a manager bot (monitor/monitor.sh has
 # the whole story). --keep and --stop are for people; --ensure is the TUI's and the hooks'.
@@ -159,6 +157,8 @@ if [ "${1:-}" = monitor ]; then
   esac
   exec bash "$self_root/monitor/monitor.sh" "$self_path" "$@"
 fi
+# reserved_name <name>: a word no bot may take as its name (setup, bot rename, bot add): claude-discord's subcommands,
+# `add` (`claude-discord bot add`), and the directories beside the bots.
 reserved_name() { case $1 in setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access|bot|add|hooks|checkin) return 0;; esac; return 1; }
 
 # access.json is written at setup time, so every answer lives in the file the
@@ -473,7 +473,6 @@ for l in $libs; do
 done
 [ -r "$lib/patch.sh" ] || { echo "claude-discord: $lib/patch.sh is missing: bin/claude-discord runs beside bin/lib/ (a copy of the one file is no install)" >&2; exit 1; }
 . "$lib/patch.sh"   # patch_official, run at every start
-
 
 args=() name="" skip=0 want_name=0 named=0 positional=0 has_name=0 bare=0
 # With a --name anywhere, a bare word is an argument for claude, not the bot
