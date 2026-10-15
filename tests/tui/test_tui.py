@@ -2101,20 +2101,33 @@ async def bot_name(app, pilot):
 
 async def bot_retarget(app, pilot):
     """A rename of the manager itself: this TUI follows the name the CLI reports as moved (its last line, `renamed: <old>
-    -> <new>`), whatever its exit status, and only then: a run that failed before the directory moved changes nothing."""
-    entry = app.state["bots"][MGRBOT]
+    -> <new>`), whatever its exit status, and only then: a run that failed before the directory moved changes nothing.
+    Its row is the new name's at once too (1.14.1, review I1): the moved state.json, which still names it by the old
+    name, is read first and the rename applied to what it gave."""
+    top = app.state_dir
+    # The CLI moves records/monitor/mgr to records/monitor/mgr2 and names the new manager in its state.json (its bots
+    # keep the old name until the next pass): here the state dir is a directory of its own, so that its sibling mgr2
+    # is under the case's directory.
+    app.state_dir, app.holder, app.mtime = top / "mgr", top / "mgr" / "holders" / f"tui-{os.getpid()}", None
+    for n in ("mgr", "mgr2"):
+        (top / n / "holders").mkdir(parents=True)
+        s = json.loads((top / "state.json").read_text())
+        s["manager"] = n
+        (top / n / "state.json").write_text(json.dumps(s))
+    app.refresh_state()
+    d = app.state_dir
     ask = (f"claude-discord: bot: mgr on lmd79, /home/u/cd/.claude/discord-agents\r\n{tui.A_MARK}\r\nRename it to mgr2? [y/N] ", "ask")
     fake_pty(app, [ask, ("y\r\nclaude-discord: bot: mgr still runs after stop (pid 9): nothing here was renamed\r\n", 1)],
              [ask, ("y\r\nclaude-discord: bot: renamed: /home/u/cd/.claude/discord-agents/mgr2 (and on Discord)\r\n"
                     "claude-discord: bot: not done:\r\n    mgr2 did not start (above): claude-discord --bg --name mgr2\r\nrenamed: mgr -> mgr2\r\n", 1)],
              [ask, ("y\r\n" + "".join(f"line{i:02}\r\n" for i in range(1, 21)), 1)])   # 20 lines, before any move
-    d = app.state_dir
-    for n, new in enumerate(("mgr2", "mgr2", "mgr3")):
-        app.push_screen(tui.BotName(entry, new))
+    rows = lambda: [l[2:].split()[0] for l in body(app) if l[:2] in ("▸ ", "▾ ")]
+    for n, (old, new) in enumerate((("mgr", "mgr2"), ("mgr", "mgr2"), ("mgr2", "mgr3"))):
+        app.push_screen(tui.BotName(app.state["bots"]["|".join(("local", "/home/u/cd", old))], new))
         await settle(app, pilot)
         await pilot.press("y")
         await settle(app, pilot)
-        assert app.runs[n].argv[-3:] == ["mgr" if n < 2 else "mgr2", "rename", new] and isinstance(app.screen, tui.BotName), (app.runs[n].argv, app.screen)
+        assert app.runs[n].argv[-3:] == [old, "rename", new] and isinstance(app.screen, tui.BotName), (app.runs[n].argv, app.screen)
         assert (app.bot, app.state_dir) == (("mgr", d) if n == 0 else ("mgr2", d.parent / "mgr2")), (n, app.bot, app.state_dir)
         # What the popup says (M8): every line after the answer's echo, 16 at most, never the program line a program
         # (this TUI) follows.
@@ -2124,8 +2137,11 @@ async def bot_retarget(app, pilot):
         elif n == 2:
             assert msg.split("\n")[1:] == [f"line{i:02}" for i in range(5, 21)], msg
         app.pop_screen()
+        await pilot.pause()
+        # The Bots tab: mgr's row until the move, mgr2's from it on (the third run fails before any move).
+        assert ("mgr2" in rows()) == (n >= 1) and ("mgr" in rows()) == (n == 0) and app.state.get("manager") == ("mgr" if n == 0 else "mgr2"), (n, rows(), app.state.get("manager"))
     app.ensure()
-    assert (d / "args").read_text().splitlines()[-1] == f"monitor --ensure mgr2 --holder tui {os.getpid()}", (d / "args").read_text()
+    assert (top / "args").read_text().splitlines()[-1] == f"monitor --ensure mgr2 --holder tui {os.getpid()}", (top / "args").read_text()
 
 
 async def bot_renamed_row(app, pilot):

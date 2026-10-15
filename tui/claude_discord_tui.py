@@ -2327,12 +2327,14 @@ class BotName(BotPopup):
     def ended(self, rc: int, said: str) -> None:
         # Once the CLI says the directory moved (its last line), whatever failed after that: the bot's row is the new
         # name's now (1.14.1), and for the manager itself its backend's state is the new name's too. Its exit status
-        # cannot say it: a start after the move may fail. The line is read from all it printed: `said` drops it.
+        # cannot say it: a start after the move may fail. The line is read from all it printed: `said` drops it. The
+        # manager's own: retarget first (it reads the moved state.json, whose bots still carry the old name: the
+        # monitor renames them at its next pass), then the row renamed in what that gave (review I1).
         m, e = RENAMED.search(self.printed), self.entry
         if m and m.group(1) == txt(e.get("bot")):
-            self.app.renamed(txt(e.get("host")), txt(e.get("project")), m.group(1), m.group(2))
             if m.group(1) == self.app.bot and e.get("host") == "local":
                 self.app.retarget(m.group(2))
+            self.app.renamed(txt(e.get("host")), txt(e.get("project")), m.group(1), m.group(2))
         super().ended(rc, said)
 
 
