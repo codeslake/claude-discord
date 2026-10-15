@@ -259,7 +259,7 @@ FAKEDIR="$HOME/.claude/plugins/cache/claude-plugins-official/discord/0.0.4"
 mkdir -p "$FAKEDIR" "$HOME/bin"; ln -s "$FAKEDIR" "$HOME/fakeplugin"
 printf 'client.on(%s, msg => {\n  if (msg.author.bot) return\n  handleInbound(msg)\n})\nfunction isAddressed(msg) {\n  if (client.user && msg.mentions.has(client.user)) return true\n}\nasync function reply(text, limit, mode) {\n        const chunks = chunk(text, limit, mode)\n}\n      meta: {\n        user_id: msg.author.id,\n        ts: x,\n      },\nconst TOKEN = process.env.DISCORD_BOT_TOKEN\nif (!TOKEN) {\n  process.stderr.write("no token")\n  process.exit(1)\n}\nclient.login(TOKEN).catch(err => {\n  process.exit(1)\n})\n' "'messageCreate'" > "$HOME/fakeplugin/server.ts"
 cp "$HOME/fakeplugin/server.ts" "$HOME/server.ts.pristine"
-printf '#!/bin/bash\necho "LAUNCHER $*"\n' > "$HOME/bin/claude-launcher"; chmod +x "$HOME/bin/claude-launcher"
+printf '#!/bin/bash\necho "LAUNCHER $*"\n[ ! -e "$HOME/launch.fails" ]\n' > "$HOME/bin/claude-launcher"; chmod +x "$HOME/bin/claude-launcher"
 printf '#!/bin/bash\ncase $1 in agents) exit 1;; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"; chmod +x "$HOME/bin/claude"
 CURL_LOG="$HOME/curl.log"; : > "$CURL_LOG"
 CURL_STDIN_LOG="$HOME/curl.stdin.log"; : > "$CURL_STDIN_LOG"
@@ -4470,6 +4470,14 @@ bt - y acc rename acc2
   [[ $BO == *"stopping acc (accl1111, pid $OLD)"$'\n'"LAUNCHER "*" -n acc2 --append-system-prompt "*HANDOFF_ACC*" --bg Catch up on the channel and continue from your handoff."$'\n'* ]] &&
   [ "$(tail -n 2 "$MR/acc2/access.log" | cut -d' ' -f4-)" = "rename: on Discord acc -> acc2
 rename: acc -> acc2" ] || { echo "FAIL: bot rename of a running bot, y: Discord first, then the session stopped, the directory, its peers.json line by id and its scratch directory renamed, the session started again as the new name from its handoff: rc=$BRC $BO / $(cat "$HOME/claude.calls" "$CURL_LOG" "$MR/peers.json" 2>&1)"; exit 1; }
+# A step after the directory moved fails (here the start under the new name): exit 1, what failed said, and the last line
+# still names the move, which a program follows (the TUI, after a manager's rename).
+sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; sed 's/"name":"acc"/"name":"acc2"/' "$HOME/claude.live" > "$HOME/bin/claude"; : > "$HOME/launch.fails"
+: > "$CURL_REPLIES"; queue_line '200 {"id":"777","bot":true,"username":"acc2"}'; queue_line '200 {"id":"777","bot":true,"username":"acc4"}'
+bt - y acc2 rename acc4; rm -f "$HOME/launch.fails"
+[ "$BRC" = 1 ] && grep -qx '    acc4 did not start (above): claude-discord --bg --name acc4' <<<"$BO" && [ "${BO##*$'\n'}" = "renamed: acc2 -> acc4" ] && [ -d "$MR/acc4" ] ||
+  { echo "FAIL: bot rename whose start fails after the directory moved is exit 1 and still ends with the renamed line: rc=$BRC $BO"; exit 1; }
+mv "$MR/acc4" "$MR/acc2"; mv "$HOME/.claude-discord/scratch/acc4" "$HOME/.claude-discord/scratch/acc2"; rm -f "$HOME/claude.calls"
 cp "$HOME/claude.keep" "$HOME/bin/claude"
 # A manager whose name Discord has already (the TUI's `=`), here only its case: Discord is not asked to change it; its
 # directory and its backend's state move (through a temporary name, so a case-insensitive file system renames them too)
