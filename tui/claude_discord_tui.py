@@ -2192,7 +2192,7 @@ class Check(Static, can_focus=True):
 
 class BotPopup(Asking, ModalScreen):
     """What the three bot popups share: the frame, the message line, the buttons (← → between them, the safe one
-    first), the run of `claude-discord bot ...` on the TUI's pty and what its end says. Dismissed with what there is
+    first and focused when it opens), the run of `claude-discord bot ...` on the TUI's pty and what its end says. Dismissed with what there is
     to say (the monitor is then asked for a pass), or None."""
     CSS = f"""BotPopup {{ align: center middle; }}
     #bot {{ width: 104; max-width: 96%; height: auto; border: round {BRAND}; padding: 1 2; }}
@@ -2307,8 +2307,8 @@ class BotName(BotPopup):
         e = self.entry
         self.query_one("#b-title", Static).update(Text.assemble(("Name", f"bold {BRAND}"), (" · ", DIM), (txt(e.get("bot")), f"bold {BRAND}"),
                                                                 (f"    {host_label(self.app.state, e.get('host'))} · Discord allows about 2 changes an hour", DIM)))
-        self.query_one("#b-field", Input).focus()
-        self.say("enter renames: Discord first, then here (a running bot is stopped and started again) · esc closes")
+        self.query_one("#b-no", Button).focus()
+        self.say("shift+tab to the name · enter in it renames: Discord first, then here (a running bot is stopped and started again) · esc closes")
         if self.preset:
             self.go()
 
@@ -2339,8 +2339,8 @@ class BotToken(BotPopup):
         e = self.entry
         self.query_one("#b-title", Static).update(Text.assemble(("Token", f"bold {BRAND}"), (" · ", DIM), (txt(e.get("bot")), f"bold {BRAND}"),
                                                                 (f"    {host_label(self.app.state, e.get('host'))} · a running session logs in with it within 10 s", DIM)))
-        self.query_one("#b-field", Input).focus()
-        self.say("enter checks it with Discord, then asks · esc closes")
+        self.query_one("#b-no", Button).focus()
+        self.say("shift+tab to the token field · enter in it checks it with Discord, then asks · esc closes")
 
     def go(self) -> None:
         if not self.take():
@@ -2370,7 +2370,7 @@ class BotAdd(BotPopup):   # not a BotToken: Textual runs each class's on_mount
     def on_mount(self) -> None:
         self.query_one("#b-title", Static).update(Text.assemble(("Add a bot", f"bold {BRAND}"),
                                                                 ("    its name is its Discord username, read with its token", DIM)))
-        self.query_one("#b-host", Choice).focus()
+        self.query_one("#b-no", Button).focus()
         self.say("tab moves · ← → or space choose · enter in the token field adds · esc closes")
 
     def changed(self, choice: Choice) -> None:
