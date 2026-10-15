@@ -2149,7 +2149,9 @@ async def bot_renamed_row(app, pilot):
     its exit status after the move: no wait for the pass the popup asks for. Its `≠ Discord` line goes (both names are
     the new one now), the cursor and the opened set follow its key; the next state.json replaces it all (here the old
     name again: the fixture as it was)."""
-    NEW = "local|/home/u/rcps|photo2"
+    NEW, TWIN = "local|/home/u/rcps|photo2", "wmac|/Users/u/q|photobot"
+    # The same name on another host (TWIN): another bot, which the rename leaves as it is, its `≠ Discord` line too.
+    app.state["bots"][TWIN] = dict(app.state["bots"][PHOTO], host="wmac", project="/Users/u/q")
     fake_pty(app, [(BOT_HEAD + f"{tui.A_MARK}\r\nRename it to photo2? [y/N] ", "ask"),
                    ("y\r\nclaude-discord: bot: renamed: /home/u/rcps/.claude/discord-agents/photo2 (and on Discord)\r\n"
                     "claude-discord: bot: not done:\r\n    photo2 did not start (above): claude-discord --bg --name photo2\r\nrenamed: photobot -> photo2\r\n", 1)])
@@ -2158,7 +2160,7 @@ async def bot_renamed_row(app, pilot):
     app.state["bots"][MGRBOT]["verdict"] = "down"
     app.paint()
     await pilot.press("space")   # the row open: it stays open under its new key
-    assert app.cursor["bots"] == PHOTO and app.opened == {PHOTO} and "≠ Discord: photo_x" in text(app, "#body"), body(app)
+    assert app.cursor["bots"] == PHOTO and app.opened == {PHOTO} and text(app, "#body").count("≠ Discord: photo_x") == 2, body(app)
     assert [l[2:].split()[0] for l in body(app) if l[:2] in ("▸ ", "▾ ")][:2] == ["mgr", "photobot"], body(app)
     await pilot.press("n")
     await settle(app, pilot)
@@ -2172,11 +2174,12 @@ async def bot_renamed_row(app, pilot):
     assert isinstance(app.screen, tui.BotName) and "photo2 did not start" in text(pop, "#b-msg"), text(pop, "#b-msg")   # exit 1: the popup stays, with the warning
     assert NEW in app.state["bots"] and PHOTO not in app.state["bots"] and app.cursor["bots"] == NEW and app.opened == {NEW}, (list(app.state["bots"]), app.cursor, app.opened)
     assert app.state["bots"][NEW]["bot"] == app.state["bots"][NEW]["discord_name"] == "photo2" and app.state["bots"][NEW]["verdict"] == "down", app.state["bots"][NEW]
+    assert app.state["bots"][TWIN] == dict(app.state["bots"][NEW], host="wmac", project="/Users/u/q", bot="photobot", discord_name="photo_x"), app.state["bots"][TWIN]
     app.pop_screen()
     await pilot.pause()
-    # The row is photo2's, open; no row is photobot's; its `≠ Discord` line is gone. The monitor's own texts (the
-    # verdict, the fix: `--bg --name photobot`) are kept as they are until its next pass.
-    assert row_of(app, "photo2").startswith("▾ photo2") and not [l for l in body(app) if l[2:].startswith("photobot")] and "≠ Discord" not in text(app, "#body"), body(app)
+    # The row is photo2's, open; the one row named photobot is the twin's (wmac), and so is the one `≠ Discord` line
+    # left. The monitor's own texts (the verdict, the fix: `--bg --name photobot`) are kept as they are until its next pass.
+    assert row_of(app, "photo2").startswith("▾ photo2") and len([l for l in body(app) if l[2:].startswith("photobot")]) == 1 and text(app, "#body").count("≠ Discord: photo_x") == 1, body(app)
     os.utime(app.state_dir / "state.json", (1, 1))   # the next pass wrote state.json: the fixture, with the old name
     app.refresh_state()
     assert PHOTO in app.state["bots"] and NEW not in app.state["bots"] and app.cursor["bots"] == PHOTO and row_of(app, "photobot").startswith("▸ photobot"), (list(app.state["bots"]), app.cursor)

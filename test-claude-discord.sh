@@ -3174,7 +3174,7 @@ start_server "$SD"
 # one call and heals itself rather than poisoning every later run.
 # The two caches are independent files read in a fixed order (bot id, messages, guild, threads), so each run below
 # exercises both: A neither cached, B both cached, C both stale (one run for each of the id's and the guild's cases).
-rm -f "$SD/bot-id" "$SD/channel-guild"
+rm -f "$SD/bot-id" "$SD/channel-guild" "$SD/discord-name"   # no name kept either: the first users/@me answer writes both
 # 1.11.1: the names come from the guild's channel list, so the first read ever is two calls (the channel for its guild,
 # then that list) and every later daily one is the list alone. dcalls counts a run's calls to one path, anchored at its end.
 GLIST='200 [{"id":"900","name":"general"}]'
@@ -4335,7 +4335,7 @@ for line in sys.stdin.buffer:
             if x[1] not in (b"", b"-") and buf.endswith(x[0]):
                 if x[0] == b"[y/N] " and qcmd:   # a shell command run in cwd while the question is open, before its answer
                     os.chdir(cwd)
-                    os.system(qcmd.decode())
+                    os.system(qcmd.decode() + " >/dev/null </dev/null")   # not on this driver's fifos (its stdin and stdout)
                 os.write(m, x[1][:-2] + b"\x03" if x[1].endswith(b"^C") else x[1] + b"\n")
                 x[1] = b""
     echo = "on" if termios.tcgetattr(m)[3] & termios.ECHO else "off"
@@ -4422,6 +4422,12 @@ btx "$TOK_NEW" y acc token
 [ "$BRC" = 0 ] && [[ $BO == *$'\n+ '* ]] && [[ ${BO#*"Token (hidden): "} != *$'\n+ '* ]] && [[ $BO != *"$TOK_NEW"* ]] && [ "$(<"$AD/.env")" = "DISCORD_BOT_TOKEN=$TOK_NEW" ] ||
   { echo "FAIL: bot under xtrace (SHELLOPTS=xtrace) traces nothing from the token prompt on, so the token is in no trace line: rc=$BRC, $(grep -c '^+ ' <<<"$BO") trace lines, $(grep -c -F "$TOK_NEW" <<<"$BO") with the token, $(grep -c '^+ ' <<<"${BO#*"Token (hidden): "}") after the prompt"; exit 1; }
 printf 'DISCORD_BOT_TOKEN=tokAccUnique\n' > "$AD/.env"
+# Under xtrace again, rename: it reads .env's token itself, with no prompt, before Discord is asked (a refusal queued:
+# .env's token is some other bot's). The trace stops where the verb starts, so no trace line holds that token either.
+: > "$CURL_REPLIES"; queue_line '200 {"id":"888","bot":true,"username":"other"}'
+btx - - acc rename acc2
+[ "$BRC" = 1 ] && grep -q "holds the token of the bot other (888), not acc's (777)" <<<"$BO" && [[ $BO == *$'\n+ '* ]] && [[ $BO != *tokAccUnique* ]] && [ "$(grep -c '^+ ' <<<"${BO#*claude-discord: bot:}")" = 0 ] ||
+  { echo "FAIL: bot rename under xtrace (SHELLOPTS=xtrace) traces nothing of the verb, so .env's token is in no trace line: rc=$BRC, $(grep -c '^+ ' <<<"$BO") trace lines, $(grep -c tokAccUnique <<<"$BO") with the token, $(grep -c '^+ ' <<<"${BO#*claude-discord: bot:}") after the refusal"; exit 1; }
 # --host: no terminal here, no ssh at all (exit 3); a host before 1.14.0 is exit 5 and is sent nothing but --version;
 # a 1.14.0 host gets the call under ssh -t, the project and the bot's name in hex, so the token goes to its terminal
 # (ssh's stdin) and never into the command. The host's side decodes --version --bot as --version --access.
@@ -4485,7 +4491,7 @@ queue_line "200 $TOK_ME"; queue_line '200 {"id":"777","bot":true,"username":"acc
 bt - y acc rename acc3; cp "$HOME/sleep.keep" "$HOME/bin/sleep"; rm -f "$HOME/stop.fails" "$HOME/old2.pid"
 [ "$rc" = 1 ] && grep -q "is not a trusted workspace, so acc would not start again after the rename" <<<"$out" &&
   [ "$BRC" = 1 ] && grep -q "acc still runs after stop (pid $OLD): nothing here was renamed (Discord calls it acc3 now: run this again to rename it here). Stop it by hand first; stopped and not started again: acc22222 (claude-discord --bg --name acc starts one)" <<<"$BO" &&
-  [[ $BO != *LAUNCHER* ]] && [ -d "$AD" ] && [ ! -e "$MR/acc3" ] && kill -0 "$OLD" && ! kill -0 "$OLD2" 2>/dev/null && [ "$(<"$HOME/claude.calls")" = $'STOP accl1111\nSTOP acc22222' ] ||
+  [[ $BO != *LAUNCHER* ]] && [[ $BO != *"renamed: acc -> acc3"* ]] && [ -d "$AD" ] && [ ! -e "$MR/acc3" ] && kill -0 "$OLD" && ! kill -0 "$OLD2" 2>/dev/null && [ "$(<"$HOME/claude.calls")" = $'STOP accl1111\nSTOP acc22222' ] ||
   { echo "FAIL: bot rename of a running bot refuses an untrusted workspace before it stops anything, and a stop that fails renames and starts nothing and names the session that did stop: rc=$rc $out / rc=$BRC $BO / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
 rm -f "$HOME/claude.calls"
 : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_REPLIES"; queue_line "200 $TOK_ME"; queue_line '200 {"id":"777","bot":true,"username":"acc2"}'
