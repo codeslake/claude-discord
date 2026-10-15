@@ -521,7 +521,9 @@ claude-discord bot add [--mode none|dev-manager|autoresearchclaw] [--start]   # 
 - **add** needs a project whose channel and owner are set (`config.env`): its
   name is the token's Discord username. A username that is no name here is
   refused, with the advice to rename the bot in the Developer Portal first; a
-  bot already set up on this machine (its id in some `bot-id`) is refused.
+  bot already set up on this machine (its id in some `bot-id`, or its token in
+  some bot's `.env`, compared there and never printed) is refused, as is a name
+  whose directory is there.
   `y` runs `setup <name>` with its answers on its stdin (the mode, Enter for
   the rest), keeps the id, and `--start` starts it (`--bg --name`).
 - `--host <alias> [--manager <bot>] --project <dir>` runs any of them on a

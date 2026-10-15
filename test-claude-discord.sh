@@ -4447,6 +4447,15 @@ bt "$TOK_NEW" - add; A=$BRC$BO; bt "$TOK_NEW" - add
 [ "$rc" = 3 ] && [[ $A == 1*"Discord calls this bot 'New Bot', and a bot's name here is its Discord username"*"Rename it in the Developer Portal first"* ]] &&
   [ "$BRC" = 1 ] && grep -q "that token's bot (777) is set up in $AD already" <<<"$BO" && [ "$(ls "$MR")" = "$was" ] ||
   { echo "FAIL: bot add reads nothing without a terminal (exit 3), and refuses a bot whose Discord name is no name here and one set up already: rc=$rc $out / $A / rc=$BRC $BO"; exit 1; }
+# A bot set up here with no bot-id (health never saw it) is still found: by its directory (Discord's name for the new
+# token is its name), and by its token (the same token under another Discord name), compared in-process, never shown.
+TOK_TWIN=tokTwinAAAAbbbbCCCCdddd.eeee; mkdir -p "$MR/twin"; printf 'DISCORD_BOT_TOKEN=%s\n' "$TOK_NEW" > "$MR/twin/.env"
+: > "$CURL_REPLIES"; queue_line '200 {"id":"991","bot":true,"username":"twin"}'; queue_line '200 {"id":"992","bot":true,"username":"newbot"}'
+bt "$TOK_TWIN" - add; A=$BRC$BO; bt "$TOK_NEW" - add
+[[ $A == 1*"a bot 'twin' is set up in $MR already"* ]] && [ "$BRC" = 1 ] && grep -q "that token is the token of $MR/twin already: two sessions on one token both answer; nothing was changed" <<<"$BO" &&
+  [ ! -e "$MR/newbot" ] && [[ $A$BO != *tok[TN]* ]] ||
+  { echo "FAIL: bot add refuses a bot set up here with no bot-id, by its directory and by its token: $A / rc=$BRC $BO"; exit 1; }
+rm -rf "$MR/twin"
 # y, a mode, --start: setup writes it as at a terminal (the token in .env, the project's channel with an @mention
 # required, the mode), its id is kept, access.log says so, and it is started; the token is never printed.
 : > "$CURL_REPLIES"; queue_line '200 {"id":"999","bot":true,"username":"newbot"}'

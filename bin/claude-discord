@@ -3100,10 +3100,10 @@ if [ "${1:-}" = bot ]; then
   }
   # b_set_up [<a bot dir to skip>]: b_where, the first bot directory of this machine (this project's, then the recorded
   # projects') that is the bot $b_id (its bot-id) or holds $tok (the token line of its .env, compared here: never printed
-  # or passed on); "" for none. One bot, one session: two sessions on one token both answer.
+  # or passed on); "" for none. b_how says which: id or token. One bot, one session: two sessions on one token both answer.
   b_set_up() {
     local p f id l
-    b_where=""
+    b_where="" b_how=id
     while IFS= read -r p || [ -n "$p" ]; do
       p=${p%$'\r'}
       for f in "$p"/.claude/discord-agents/*/.env; do
@@ -3111,7 +3111,7 @@ if [ "${1:-}" = bot ]; then
         id=""; { read -r id < "${f%/.env}/bot-id"; } 2>/dev/null || :
         [ "$id" != "$b_id" ] || b_where=${f%/.env}
         { while IFS= read -r l || [ -n "$l" ]; do
-            case $l in DISCORD_BOT_TOKEN=*) l=${l#DISCORD_BOT_TOKEN=}; [ "${l%$'\r'}" != "$tok" ] || b_where=${f%/.env}; break;; esac
+            case $l in DISCORD_BOT_TOKEN=*) l=${l#DISCORD_BOT_TOKEN=}; [ -n "$b_where" ] || [ "${l%$'\r'}" != "$tok" ] || b_where=${f%/.env} b_how=token; break;; esac
           done < "$f"; } 2>/dev/null || :
         l=""
         [ -z "$b_where" ] || return 0
@@ -3138,14 +3138,13 @@ if [ "${1:-}" = bot ]; then
     ! reserved_name "$new" || new=" $new"
     c_match "$new" "$b_name_re" || { echo "claude-discord: bot: Discord calls this bot '$b_shown', and a bot's name here is its Discord username: 2 to 32 of A-Z a-z 0-9 _ -, not starting with -, and no name claude-discord itself uses. Rename it in the Developer Portal first (the bot's Bot tab, Username), then add it again; nothing was changed" >&2; exit 1; }
     [ ! -e "$root/$new" ] || { echo "claude-discord: bot: a bot '$new' is set up in $root already (claude-discord bot $new token replaces its token); nothing was changed" >&2; exit 1; }
-    # One bot, one session: a bot set up on this machine already (its id kept in bot-id) is not set up twice.
-    while IFS= read -r p || [ -n "$p" ]; do
-      p=${p%$'\r'}
-      for f in "$p"/.claude/discord-agents/*/bot-id; do
-        id=""; { read -r id < "$f"; } 2>/dev/null || :
-        [ "$id" != "$b_id" ] || { echo "claude-discord: bot: that token's bot ($b_id) is set up in ${f%/bot-id} already: two sessions on one token both answer; nothing was changed" >&2; exit 1; }
-      done
-    done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null)
+    # One bot, one session: a bot set up on this machine already (its id in a bot-id, or its token in a .env) is not set
+    # up twice.
+    b_set_up
+    if [ "$b_how" = token ] && [ -n "$b_where" ]; then
+      echo "claude-discord: bot: that token is the token of $b_where already: two sessions on one token both answer; nothing was changed" >&2; exit 1
+    fi
+    [ -z "$b_where" ] || { echo "claude-discord: bot: that token's bot ($b_id) is set up in $b_where already: two sessions on one token both answer; nothing was changed" >&2; exit 1; }
     [ "$b_mode" != dev-manager ] || b_mgr_free "$new"
     printf '%s\n' "claude-discord: bot: add $new (Discord $b_id) on $b_host_name, $root/$new" \
       "    it listens in channel $DISCORD_CHANNEL_ID (config.env): an @mention required, from $DISCORD_USER_ID${DISCORD_ALLOW_IDS:+ and $DISCORD_ALLOW_IDS}" \
