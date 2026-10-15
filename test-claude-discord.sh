@@ -4319,6 +4319,11 @@ bt "$TOK_NEW" - acc token; A=$BRC$BO; bt "$TOK_NEW" - acc token
 [[ $A == 1*"that token is the bot other (888), not acc (777): a token of another bot is refused"* ]] && [ "$BRC" = 1 ] &&
   grep -q 'Discord refused the token (HTTP 401): copy it again' <<<"$BO" && [[ $A$BO != *"$TOK_NEW"* ]] && [ "$(<"$AD/.env")" = DISCORD_BOT_TOKEN=tokAccUnique ] ||
   { echo "FAIL: a token of another bot, and one Discord refuses, change nothing (exit 1) and are never shown: $A / rc=$BRC $BO"; exit 1; }
+# What was typed outside a token's characters (here a space and a quote) is no token: exit 2, Discord not asked, not shown.
+: > "$CURL_LOG"; bt "tokBadAAAA bbbbCCCC'dddd" - acc token
+[ "$BRC" = 2 ] && grep -q 'what was typed is no bot token' <<<"$BO" && [ ! -s "$CURL_LOG" ] && [[ $BO != *tokBad* ]] &&
+  [ "$(<"$AD/.env")" = DISCORD_BOT_TOKEN=tokAccUnique ] ||
+  { echo "FAIL: what was typed outside a token's characters is refused (exit 2) before Discord is asked, and never shown: rc=$BRC $BO"; exit 1; }
 # The same bot, y: .env is replaced by rename (another inode), mode 600, its other lines kept; access.log says so, with
 # no token; the token went to curl on its stdin, never into an argument or anything printed.
 printf 'DISCORD_BOT_TOKEN=tokAccUnique\nKEEP=1\n' > "$AD/.env"; chmod 644 "$AD/.env"; ei=$(stat -c %i "$AD/.env")
