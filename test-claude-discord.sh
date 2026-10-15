@@ -4068,10 +4068,10 @@ for bad in "" "acc frob" "--frob acc --json"; do
 done
 ac nosuch --json
 [ "$ARC" = 1 ] && grep -q "no bot 'nosuch' set up in $MR" <<<"$AE" || { echo "FAIL: a bot that is not set up is exit 1: rc=$ARC $AE"; exit 1; }
-for w in access bot add; do
-  rc=0; out=$(printf '\n' | bash "$S" setup $w 2>&1) || rc=$?
-  [ "$rc" = 2 ] && grep -q "bot name '$w' is reserved" <<<"$out" || { echo "FAIL: '$w' is a word claude-discord uses (a subcommand, bot add), so no bot may take the name: rc=$rc $out"; exit 1; }
-done
+# One run (bot); access and add are asserted on the wrapper's reserved_name case line, which that run proves is used (1.14.1: review cut 4).
+rc=0; out=$(printf '\n' | bash "$S" setup bot 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -q "bot name 'bot' is reserved" <<<"$out" && grep -q '^reserved_name() { case \$1 in .*|hosts|access|bot|add|hooks|checkin) return 0;; esac; return 1; }$' "$S" ||
+  { echo "FAIL: access, bot and add are words claude-discord uses (a subcommand, bot add), so no bot may take the name: rc=$rc $out / $(grep -n '^reserved_name()' "$S")"; exit 1; }
 # A DISCORD_CHANNEL_ID that is no id (the bot's main channel when access.json does not say) is said, before Discord is asked.
 cp "$MR/config.env" "$HOME/acc.env.was"; printf "DISCORD_CHANNEL_ID='9 9'\nDISCORD_USER_ID='111'\n" > "$MR/config.env"; : > "$CURL_LOG"
 ac acc --json; cp "$HOME/acc.env.was" "$MR/config.env"; rm -f "$HOME/acc.env.was"
