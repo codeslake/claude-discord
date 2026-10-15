@@ -2085,6 +2085,27 @@ async def bot_name(app, pilot):
     assert "photobot is now photo2" in notes(app), notes(app)
 
 
+async def bot_retarget(app, pilot):
+    """A rename of the manager itself: this TUI follows the name the CLI reports as moved (its last line, `renamed: <old>
+    -> <new>`), whatever its exit status, and only then: a run that failed before the directory moved changes nothing."""
+    entry = app.state["bots"][MGRBOT]
+    ask = (f"claude-discord: bot: mgr on lmd79, /home/u/cd/.claude/discord-agents\r\n{tui.A_MARK}\r\nRename it to mgr2? [y/N] ", "ask")
+    fake_pty(app, [ask, ("y\r\nclaude-discord: bot: mgr still runs after stop (pid 9): nothing here was renamed\r\n", 1)],
+             [ask, ("y\r\nclaude-discord: bot: renamed: /home/u/cd/.claude/discord-agents/mgr2 (and on Discord)\r\n"
+                    "claude-discord: bot: not done:\r\n    mgr2 did not start (above): claude-discord --bg --name mgr2\r\nrenamed: mgr -> mgr2\r\n", 1)])
+    d = app.state_dir
+    for n in (0, 1):
+        app.push_screen(tui.BotName(entry, "mgr2"))
+        await settle(app, pilot)
+        await pilot.press("y")
+        await settle(app, pilot)
+        assert app.runs[n].argv[-3:] == ["mgr", "rename", "mgr2"] and isinstance(app.screen, tui.BotName), (app.runs[n].argv, app.screen)
+        assert (app.bot, app.state_dir) == (("mgr", d) if n == 0 else ("mgr2", d.parent / "mgr2")), (n, app.bot, app.state_dir)
+        app.pop_screen()
+    app.ensure()
+    assert (d / "args").read_text().splitlines()[-1] == f"monitor --ensure mgr2 --holder tui {os.getpid()}", (d / "args").read_text()
+
+
 async def bot_align(app, pilot):
     """= on a row whose name is not Discord's: the name popup opens with Discord's name and runs at once."""
     fake_pty(app, [(BOT_HEAD + f"{tui.A_MARK}\r\nRename it to photo_x? [y/N] ", "ask"), ("n\r\nclaude-discord: bot: answered no; nothing was changed\r\n", 4)])
@@ -2235,6 +2256,7 @@ async def main():
     await case("access_pty", access_pty, state="all_ok", wrapper=lambda d: access_cli(d) and stub(d, ACCESS_CLI + PTY_CLI + CHECK_STUB))
     pty_runs()
     await case("bot_name", bot_name, state="all_ok", wrapper=bot_cli)
+    await case("bot_retarget", bot_retarget, state="all_ok", wrapper=bot_cli)
     await case("bot_align", bot_align, state="renamed", wrapper=bot_cli)
     await case("bot_token", bot_token, state="all_ok", wrapper=bot_cli)
     await case("bot_add", bot_add, state="all_ok", wrapper=bot_cli)

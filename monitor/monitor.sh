@@ -75,6 +75,9 @@ dir=$PWD/.claude/discord-agents/$bot
 M=$HOME/.claude-discord/records/monitor/$bot
 # The ledger is the on/off switch: no hosts file, no monitor. --stop needs none: it stops what runs.
 [ -n "$stop" ] || { [ -f "$dir/hosts" ] && [ -f "$dir/.env" ]; } || { echo "claude-discord: monitor: $dir has no hosts ledger (claude-discord setup $bot --mode writes one)" >&2; exit 1; }
+# --stop of a name with neither a bot directory here nor records (a manager renamed away, a TUI still on its old name):
+# nothing runs under it, and no record is made for it.
+[ -z "$stop" ] || [ -d "$dir" ] || [ -d "$M" ] || { echo "claude-discord: monitor: no bot $bot here and no backend records of it: nothing to stop"; exit 0; }
 umask 077
 mkdir -p "$M/holders" || exit 1
 

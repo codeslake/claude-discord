@@ -513,7 +513,9 @@ claude-discord bot add [--mode none|dev-manager|autoresearchclaw] [--start]   # 
   on each ledger host is renamed over ssh; the session starts again under the
   new name from its `handoff.md`. A failure before the directory moves
   starts again what was stopped and changes nothing here; after it, what
-  failed is said with the command that finishes it. Peers on other machines
+  failed is said with the command that finishes it, and the last line is
+  `renamed: <old> -> <new>` whatever the exit status (the TUI follows a
+  renamed manager by that line). Peers on other machines
   keep the old name in their `peers.json` and still reach the bot by its id;
   their owner runs `setup <their bot> --mode` to show the new name. A name
   that differs only in case from another bot's on this machine is refused (on

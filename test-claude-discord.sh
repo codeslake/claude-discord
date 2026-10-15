@@ -4410,7 +4410,7 @@ chmod +x "$HOME/claude.live"; cp "$HOME/claude.live" "$HOME/bin/claude"; printf 
 : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_REPLIES"; queue_line "200 $TOK_ME"; queue_line '200 {"id":"777","bot":true,"username":"acc2"}'
 bt - y acc rename acc2
 [ "$BRC" = 0 ] && grep -qx '    it runs (1 session): stopped, renamed, started again as acc2 from its handoff.md' <<<"$BO" &&
-  grep -qx "claude-discord: bot: renamed: $MR/acc2 (and on Discord)" <<<"$BO" && grep -qx '    its session runs again as acc2' <<<"$BO" &&
+  grep -qx "claude-discord: bot: renamed: $MR/acc2 (and on Discord)" <<<"$BO" && grep -qx '    its session runs again as acc2' <<<"$BO" && [ "${BO##*$'\n'}" = "renamed: acc -> acc2" ] &&
   [ ! -e "$AD" ] && [ -f "$MR/acc2/.env" ] && [ -d "$HOME/.claude-discord/scratch/acc2" ] && ! kill -0 "$OLD" 2>/dev/null &&
   [ "$(jq -c '[.peers[] | [.name, .bot_id]]' "$MR/peers.json")" = '[["peerbot","555"],["acc2","777"]]' ] &&
   [ "$(sed -n '2s/ .*//p' "$CURL_LOG")" = "-s" ] && grep -q -- "-X PATCH -H @- -H Content-Type: application/json --data-binary {\"username\":\"acc2\"} https://discord.com/api/v10/users/@me$" "$CURL_LOG" &&
@@ -4429,9 +4429,13 @@ bt - y acc2 rename ACC2
 [ "$BRC" = 0 ] && grep -qx '    Discord: it is ACC2 there already: Discord is not asked to change it' <<<"$BO" && [ "$(wc -l < "$CURL_LOG")" = 1 ] &&
   [ -d "$MR/ACC2" ] && [ ! -e "$MR/acc2" ] && [ ! -e "$MB2/acc2" ] && [ -e "$MB2/ACC2/stopped" ] && [ "$(jq -r .manager "$MB2/ACC2/state.json")" = ACC2 ] &&
   grep -q 'its backend stays stopped, as you left it: claude-discord monitor --start ACC2' <<<"$BO" && [ -z "$(find "$MR" "$MB2" -name '.*.cd.*')" ] &&
+  [ "${BO##*$'\n'}" = "renamed: acc2 -> ACC2" ] &&
   [ "$(cut -d' ' -f5- "$HOME/ssh.log")" = "-- h1 ~/.local/bin/claude-discord --version --watch ACC2 $HID h1
 -- h1 ~/.local/bin/claude-discord --version --unwatch acc2 $HID" ] ||
   { echo "FAIL: bot rename of a manager to the name Discord has: no PATCH, its backend's records moved and renamed, stopped as left, its watcher records renamed: rc=$BRC $BO / $(cat "$HOME/ssh.log" "$CURL_LOG" 2>&1) / $(ls "$MB2")"; exit 1; }
+# What a TUI still on the old name runs (its periodic --ensure, its Q's --stop) makes no record for that name again.
+bash "$S" monitor --ensure acc2 --holder tui $$ >/dev/null 2>&1 || :; bash "$S" monitor --stop acc2 >/dev/null 2>&1 || :
+[ ! -e "$MB2/acc2" ] || { echo "FAIL: monitor --ensure and --stop of a name whose bot directory and records moved away make no records/monitor for it: $(ls -R "$MB2/acc2")"; exit 1; }
 mv "$MR/ACC2" "$AD"; echo none > "$AD/mode"; rm -rf "$AD/hosts" "$AD/handoff.md" "$AD/handoff.prev.md" "$MB2/ACC2" "$HOME/.claude-discord/scratch/acc2" "$HOME/ssh.log" "$HOME/claude.calls"
 # The directory's rename(2) fails (the project's directory unwritable here): what was stopped runs again, and a manager's
 # stopped marker its owner left stays. On a case-insensitive file system ACC and acc are one directory (a symlink here):

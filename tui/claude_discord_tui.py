@@ -1477,6 +1477,7 @@ QUESTION = re.compile(r"Apply (this change|these [1-9][0-9]* changes|this wideni
 # reads the token with, its echo off; its questions, the whole line (BOT_Q takes the prompt too: asked for after the marker).
 BOT_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{1,31}")
 TOKEN_Q = "Token (hidden): "
+RENAMED = re.compile(r"^renamed: (.+) -> ([A-Za-z0-9_][A-Za-z0-9_-]{1,31})$", re.M)   # `bot rename`'s last line once the directory moved
 BOT_Q = re.compile(r"(Replace the token|Rename it to [A-Za-z0-9_][A-Za-z0-9_-]{1,31}|Add this bot)\? \[y/N\] |" + re.escape(TOKEN_Q))
 
 
@@ -2292,7 +2293,7 @@ class BotName(BotPopup):
 
     def __init__(self, entry: dict, preset: str = "") -> None:
         super().__init__(entry)
-        self.preset, self.new = preset, ""
+        self.preset = preset
 
     def body(self) -> ComposeResult:
         e = self.entry
@@ -2316,12 +2317,14 @@ class BotName(BotPopup):
         new = self.query_one("#b-field", Input).value
         if not BOT_NAME.fullmatch(new):
             return self.say("a name is 2 to 32 of A-Z a-z 0-9 _ -, not starting with -", ALERT)
-        self.new = new
         self.start(self.app.bot_argv(self.entry, txt(self.entry.get("bot")), "rename", new))
 
     def ended(self, rc: int, said: str) -> None:
-        if rc == 0 and not self.stopped and txt(self.entry.get("bot")) == self.app.bot and self.entry.get("host") == "local":
-            self.app.retarget(self.new)   # the manager itself: its backend's state is the new name's now
+        # The manager itself, once the CLI says its directory moved (its last line), whatever failed after that: its
+        # backend's state is the new name's now. Its exit status cannot say it: a start after the move may fail.
+        m = RENAMED.search(said)
+        if m and m.group(1) == txt(self.entry.get("bot")) == self.app.bot and self.entry.get("host") == "local":
+            self.app.retarget(m.group(2))
         super().ended(rc, said)
 
 

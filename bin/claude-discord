@@ -3388,6 +3388,8 @@ if [ "${1:-}" = bot ]; then
   echo "    the monitor shows $new from its next pass; the row of $bn leaves it then, unannounced"
   [ "$mode" != dev-manager ] || echo "    peers on other machines list it as $bn in their peers.json, by its id $b_id, so they still reach it; to show the new name there, their owner runs claude-discord setup <their bot> --mode, with the peer $new:$b_id:<owner id>:<machine>"
   [ -z "$b_warn" ] || printf 'claude-discord: bot: not done:%s\n' "$b_warn" >&2
+  # The last line, for a program (the TUI follows a renamed manager by it): the directory moved, whatever failed after.
+  echo "renamed: $bn -> $new"
   exit "$b_rc"
 fi
 
