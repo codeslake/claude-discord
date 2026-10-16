@@ -338,7 +338,10 @@ if [ "${1:-}" = bot ]; then
       [ "$id" != - ] && b_stops="$b_stops${b_stops:+, }claude stop $id" || b_stops="$b_stops${b_stops:+, }kill $pid"
     done <<<"$b_rows"
     if [ -n "$b_id" ]; then b_found="its last session $b_id ($b_how) is listed by claude agents (state $b_state, pid $b_pid)"
-    elif [ "$b_n" = 1 ]; then read -r b_id b_pid <<<"$b_rows"; b_found="its session $b_id is listed by claude agents (by its name or its job record, pid $b_pid)"
+    elif [ "$b_n" = 1 ]; then
+      read -r b_id b_pid <<<"$b_rows"
+      if [ "$b_id" = - ]; then b_found="its one listed session is a foreground one (pid $b_pid, no job id)"
+      else b_found="its session $b_id is listed by claude agents (by its name or its job record, pid $b_pid)"; fi
     elif [ -n "$b_pin$b_sid" ]; then b_found="its last session ${b_pin:-$b_sid} ($([ -n "$b_pin" ] && echo pinned-job || echo plugin-sessions)) is not listed by claude agents as started in $PWD, and no session of $bn started there is"
     else b_found="it has no last session on record (no pinned-job, no plugin-sessions marker), and no session of $bn started in $PWD is listed"; fi
     if [ -n "$b_fresh" ]; then b_do=fresh b_cmd="claude-discord --bg --name $bn"

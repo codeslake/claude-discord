@@ -4612,6 +4612,12 @@ bt - n acc recover; A=$BRC; [ -e "$HOME/claude.calls" ] || A="$A none"; bt - y a
   [ "$BRC" = 1 ] && grep -q 'claude-discord: bot: ran claude respawn acc11111 (exit 7)' <<<"$BO" && [[ $B$BO != *LAUNCHER* ]] &&
   [ "$(<"$HOME/claude.calls")" = $'RESPAWN acc11111\nRESPAWN acc11111' ] && [ "$(cut -d' ' -f4- "$AD/recover.log")" = $'recover: claude respawn acc11111 (exit 0)\nrecover: claude respawn acc11111 (exit 7)' ] ||
   { echo "FAIL: bot recover respawns the listed last session after its one question, logs it, and passes the status on: $A / $B / rc=$BRC $BO / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
+# --fresh with exactly one listed session (I3 of the review): it is stopped (STOP before the start) and gone before the
+# fresh start.
+rm -f "$HOME/claude.calls"; bt - y acc recover --fresh; A="$BRC $BO"; kill -0 "$OLD" 2>/dev/null || A="$A gone1"
+[[ $A == 0*"    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc"*"stopping acc (acc11111, pid $OLD)"*"LAUNCHER "*" -n acc "*"ran claude-discord --bg --name acc (exit 0)"*" gone1" ]] &&
+  [ "$(<"$HOME/claude.calls")" = "STOP acc11111" ] || { echo "FAIL: bot recover --fresh with one listed session stops it before the fresh start: $A / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
+sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; rm -f "$HOME/claude.calls"
 # Its last session is not listed as started here (its pinned job runs in another project, and the newest plugin-sessions
 # marker names a session that is not listed): a fresh --bg start, after the question. An untrusted workspace is refused
 # before the marker, nothing asked. With no pinned-job, the marker whose session IS listed finds the session.
@@ -4624,7 +4630,7 @@ rc=0; out=$(bash "$S" bot acc recover </dev/null 2>&1) || rc=$?; cp "$HOME/cj.ke
 rm -f "$AD/pinned-job"; cp "$HOME/claude.live" "$HOME/bin/claude"; BRC=0; BO=$(bash "$S" bot acc recover </dev/null 2>&1) || BRC=$?
 [[ $A == 0*"its last session 0e1a2222 (pinned-job) is not listed by claude agents"*"    run: cd $MP && claude-discord --bg --name acc"*$'\n'"$MK"$'\n'"Recover acc? [y/N] y"*"LAUNCHER "*" -n acc "*"claude-discord: bot: ran claude-discord --bg --name acc (exit 0)"* ]] &&
   [[ $A != *RESPAWN* ]] && [ ! -e "$HOME/claude.calls" ] && [ "$(tail -n 1 "$AD/recover.log" | cut -d' ' -f4-)" = "recover: claude-discord --bg --name acc (exit 0)" ] &&
-  [ "$rc" = 1 ] && grep -q "$MP is not a trusted workspace, so a --bg start would refuse" <<<"$out" && [[ $out != *"$MK"* ]] && [[ $out != *"run: "* ]] && [ "$(wc -l < "$AD/recover.log" | tr -d ' ')" = 3 ] &&
+  [ "$rc" = 1 ] && grep -q "$MP is not a trusted workspace, so a --bg start would refuse" <<<"$out" && [[ $out != *"$MK"* ]] && [[ $out != *"run: "* ]] && [ "$(wc -l < "$AD/recover.log" | tr -d ' ')" = 4 ] &&
   [ "$BRC" = 3 ] && grep -q 'its last session acc11111 (plugin-sessions) is listed by claude agents' <<<"$BO" && grep -q '^    run: claude respawn acc11111' <<<"$BO" ||
   { echo "FAIL: bot recover starts a fresh --bg session when no last session is listed, refuses an untrusted workspace before asking, and finds the session by its plugin-sessions marker: $A / rc=$rc $out / rc=$BRC $BO / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
 # Two listed sessions: refused before the question, both named (exit 1), nothing run; --fresh stops every one, then
@@ -4657,9 +4663,11 @@ printf '#!/bin/sh\n[ "$1" != agents ] || exit 1\necho "PLAIN $*" >> "$HOME/claud
 rc=0; out=$(bash "$S" bot acc recover </dev/null 2>&1) || rc=$?
 printf '#!/bin/sh\ncase "$1" in agents) echo %s;; *) echo "PLAIN $*" >> "$HOME/claude.calls";; esac\n' "'"'[{"pid":4242,"name":"acc","cwd":"'"$PWD"'"}]'"'" > "$HOME/bin/claude"
 rc2=0; out2=$(bash "$S" bot acc recover </dev/null 2>&1) || rc2=$?
+rc3=0; out3=$(bash "$S" bot acc recover --fresh </dev/null 2>&1) || rc3=$?   # --fresh names it as a foreground session (M4 of the review)
 [ "$rc" = 1 ] && grep -q "'claude agents --json' failed, so what is running is unknown" <<<"$out" && [ ! -e "$HOME/claude.calls" ] && [[ $out != *"run: "* ]] &&
-  [ "$rc2" = 1 ] && grep -q 'the one listed session of acc is a foreground one (pid 4242, no job id), which claude respawn cannot restart' <<<"$out2" && [[ $out2 != *"run: "* ]] && [ ! -e "$HOME/claude.calls" ] ||
-  { echo "FAIL: bot recover with a failing claude agents, or with only a foreground session listed, runs nothing (exit 1): rc=$rc $out / rc=$rc2 $out2"; exit 1; }
+  [ "$rc2" = 1 ] && grep -q 'the one listed session of acc is a foreground one (pid 4242, no job id), which claude respawn cannot restart' <<<"$out2" && [[ $out2 != *"run: "* ]] && [ ! -e "$HOME/claude.calls" ] &&
+  [ "$rc3" = 3 ] && grep -qx '    its one listed session is a foreground one (pid 4242, no job id)' <<<"$out3" && grep -q "^    run: kill 4242, then cd $MP && claude-discord --bg --name acc" <<<"$out3" ||
+  { echo "FAIL: bot recover with a failing claude agents, or with only a foreground session listed, runs nothing (exit 1), and --fresh names that session as a foreground one: rc=$rc $out / rc=$rc2 $out2 / rc=$rc3 $out3"; exit 1; }
 cp "$HOME/claude.keep" "$HOME/bin/claude"; kill "$OLD" 2>/dev/null || :; rm -rf "$AD/pinned-job" "$AD/plugin-sessions" "$AD/recover.log" "$HOME/claude.calls" "$HOME/old2.pid"
 echo "ok: bot recover: a bad word and its own session refused (exit 2); no terminal prints the plan (exit 3); its last session (pinned-job, then the newest plugin-sessions marker) listed as started here is respawned after the one question, logged, its status passed on; none listed: a fresh --bg start, an untrusted workspace refused before the question; two listed refused, --fresh stops every one then starts one, a stop that fails starts nothing; a failed listing runs nothing; --host needs 1.16.0 and sends the act under ssh -t"
 # bot add: no terminal, nothing is read (exit 3). A bot whose Discord name is no name here (it is renamed on Discord
