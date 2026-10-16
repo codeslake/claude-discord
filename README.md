@@ -826,7 +826,19 @@ Which plugin runs them:
   worktree of that project (a bot started with `--worktree`) is. Only then
   does a hook run `git worktree list`: a session in the project itself forks
   nothing for this, and a `git` that fails (a `$HOME` project that is no repo)
-  means not the bot. Which bots each hook acts for is its row's "Who" above:
+  means not the bot. Nor is a `claude -p` started from the bot's Bash (1.17.0):
+  it inherits the bot's `DISCORD_STATE_DIR` and `CLAUDE_JOB_DIR`, and every
+  run left a marker, a turn and an identity text of its own. A hook acts for a
+  session it has no marker for only when its Claude Code process
+  (`$CLAUDE_PID`) is the bot's own: that process's
+  `~/.claude/sessions/<pid>.json` carries this job's `jobId` (a background bot)
+  or, with no `CLAUDE_JOB_DIR` (a foreground bot), is no `sdk-cli` child's (a
+  child's record has entrypoint `sdk-cli` and no `jobId`). No `CLAUDE_PID`, or
+  no record of that process (on Linux its `procStart` is checked against
+  `/proc`), leaves the hooks on as before: a Claude Code that stops writing
+  either must not silence every bot. Only "the bot" is remembered (the
+  marker); a child is decided again at each event, at no fork. Which bots each
+  hook acts for is its row's "Who" above:
   the peer checks of `thread-guard` and `on-reply` and all of `edit-gate` do
   nothing in a session whose bot is not a dev-manager, and also nothing
   without `peers.json`.

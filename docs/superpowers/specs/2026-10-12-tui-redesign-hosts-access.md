@@ -88,6 +88,24 @@ pasted `bot ... recover`); `--host` needs 1.16.0 for this act (exit 5 below).
 Task 0 (the owner's yes) measured `claude respawn`: same id and sessionId, a
 new pid, hooks run again, 0.8 s; `No job matching` exit 1 for an unknown id.
 
+1.17.0 (2026-10-16, plan `docs/superpowers/plans/2026-10-16-gate-1.17.0.md`,
+decisions 1, 4 and 5 of 13:01Z, Task 0 on lmd42): the hook gate, the marker
+sweep and the hook audit. A hook acts for a session it has no marker for only
+when its Claude Code process (`$CLAUDE_PID`) is the bot's own: its
+`~/.claude/sessions/<pid>.json` carries this job's `jobId`, or (a foreground
+bot) is no `sdk-cli` child's; no `CLAUDE_PID` or no record: open, as before.
+A start sweeps its bot's `plugin-sessions/`, `turns/` (and the project's
+`checkin/`) of sessions `claude agents --json --all` no longer lists, only for
+a bot the listing shows; `update`'s compat step sweeps every recorded project.
+`setup` and `update` strip the pre-1.9 hook entries from the user-global
+`settings.json` and symlinked project settings files (lmd79's five global
+entries). `checkin` merged into `on-reply`, `mention-guard` into
+`thread-guard` (one process per reply on each side). The People line is in id
+order (41 of 107 injections were order flips). The README's hooks are a
+seven-column table per purpose with measured context costs, and a Mods
+section. The suite's `mstop` waits 10 s and tells a slow exit from a TERM not
+taken.
+
 ## Owners' requirements (quoted)
 
 - dongyong22: "UI가 너무 구리다", "`host` 제목 행이 왜 둘인지", "`for 63m`,
@@ -213,6 +231,10 @@ symbol + word + colour.
 
 ## Next after 1.13.0
 
+- 1.17.1 (plan `docs/superpowers/plans/2026-10-16-gate-1.17.0.md`, decision 1):
+  the state move out of `<project>/.claude/discord-agents/` with per-bot links
+  for running jobs, many bots per project, and the remaining removals (the
+  `hooks` link, `compat/`, `patch --compat`).
 - Recovery fix keys `f`/`F`: shipped in 1.16.0 (above).
 - The posted fix line (the monitor's alert text) -> `claude-discord bot <bot>
   recover [--fresh]`, once every host is at 1.16.0 (decision 5 of 1.16.0).
