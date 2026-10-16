@@ -52,7 +52,7 @@ deny() {
 
 [ -n "$bot_name" ] || exit 0   # not a bot session (a global plugin reaches every session on the machine)
 resolve_channel
-input=$(cat 2>/dev/null) || exit 0
+hook_stdin || exit 0
 
 # A turn with no Discord message in it (typed in the terminal, or woken by a
 # peer, a timer or a watch) may post too. It used to be denied outright, which

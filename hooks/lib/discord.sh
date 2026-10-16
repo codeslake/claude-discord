@@ -10,6 +10,7 @@ bot_channel=""
 bot_access_ids=""
 bot_token=""
 bot_mode=""
+unset hook_input   # set by hook_session only, never from the environment
 
 # The plugin root, from this file's own location (hooks/lib/discord.sh), with
 # symlinks resolved: tools and rules are named by absolute path in the text a
@@ -208,6 +209,12 @@ plugin_gate() {
   . "$plugin_root/hooks/lib/old-hooks.sh" 2>/dev/null && migrate_project
   return 0
 }
+# hook_stdin: sets input to the hook's stdin: what hook_session read, or a cat
+# when it did not run (a builtin read is no cheaper: bash reads a pipe a byte
+# per call, 1.5 ms for 500 bytes against cat's 2 ms, 30 ms for 50 kB).
+hook_stdin() {
+  if [ -n "${hook_input+x}" ]; then input=$hook_input; else input=$(cat 2>/dev/null); fi
+}
 # bot_process: whether the Claude Code process that ran this hook ($CLAUDE_PID,
 # set by Claude Code per process: a child's hooks get the child's pid) is the
 # bot's own. 0: it is (its record was found and matched); 1: it is not; 2: no
@@ -244,11 +251,14 @@ bot_process() {
   fi
 }
 # hook_session: sets sid from the hook's stdin JSON and hands the same input
-# back on stdin for the hook to read. The top-level session_id comes first in
-# the object Claude Code writes, and the leftmost match wins.
+# back on stdin for the hook to read, and in hook_input, which a hook that
+# wants it whole takes instead of a second cat (hook_stdin). The top-level
+# session_id comes first in the object Claude Code writes, and the leftmost
+# match wins.
 hook_session() {
   local re='"session_id"[[:space:]]*:[[:space:]]*"([^"/\\]+)"' input
   input=$(cat 2>/dev/null) || input=""
+  hook_input=$input
   exec <<<"$input"
   [[ $input =~ $re ]] || return 1
   sid=${BASH_REMATCH[1]}

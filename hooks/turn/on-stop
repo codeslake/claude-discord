@@ -15,7 +15,7 @@ plugin_gate || exit 0
 [ -n "$bot_name" ] || exit 0
 any=""; for f in "$DISCORD_STATE_DIR"/turns/*; do case $f in *.primed) ;; *) [ ! -e "$f" ] || any=1;; esac; done
 [ -n "$any" ] || exit 0
-input=$(cat 2>/dev/null) || exit 0
+hook_stdin || exit 0
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || exit 0
 if [ -n "$session_id" ] && [ -n "$bot_name" ]; then
   turns="$DISCORD_STATE_DIR/turns/$session_id"

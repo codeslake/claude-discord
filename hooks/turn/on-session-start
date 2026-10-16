@@ -66,9 +66,8 @@ fi
 tools=$plugin_root/tools
 ctx="CLAUDE_DISCORD_TOOLS=$tools"
 if [ "$bot_mode" = dev-manager ] && [ -f "$plugin_root/rules/dev-manager.md" ]; then
-  # Escape \, & and | so any path is a literal sed replacement.
-  esc=$(printf '%s' "$tools" | sed 's/[\\&|]/\\&/g')
-  rule=$(sed "s|@TOOLS@|$esc|g" "$plugin_root/rules/dev-manager.md") && ctx="$rule
+  # Builtins, no sed: the replacement quoted, so any path is literal (an & too, under bash 5.2's patsub_replacement).
+  { rule=$(<"$plugin_root/rules/dev-manager.md"); } 2>/dev/null && rule=${rule//@TOOLS@/"$tools"} && ctx="$rule
 
 $ctx"
 fi
