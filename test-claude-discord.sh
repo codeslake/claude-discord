@@ -1791,9 +1791,19 @@ rm -rf "$PL" "$HOME/dotrepo/cl" "$P2/cl.before"
 # marker gates nothing an entry in a file setup never edits runs on a machine sharing it, and lmd79's five global
 # entries ran on-session-start twice at every start (2026-10-16). Through the link (its target renamed in), the
 # link kept, a foreign hook and key kept.
+# Those files serve every bot on this machine, and every machine sharing them: they are stripped only once every bot of
+# every recorded project here has loaded the plugin (a plugin-sessions/ marker, as the first run's migration asks of a
+# project's bots); until then left, said in one line.
 i0=$(ls -i "$HOME/dotrepo/settings.json" | awk '{print $1}')
 FOREIGN='{"model":"x","hooks":{"Stop":[{"hooks":[{"type":"command","command":"mine"}]}]}}'
-printf '%s\n' "$FOREIGN" > "$HOME/.claude/settings.json"; plant_old "$HOME/.claude/settings.json"
+printf '%s\n' "$FOREIGN" > "$HOME/.claude/settings.json"; plant_old "$HOME/.claude/settings.json"; cp "$HOME/.claude/settings.json" "$P2/global.before"
+STPF="$HOME/.claude-discord/records/projects"; mv "$STPF" "$STPF.strip"; printf '%s\n' "$(cd "$P2" && pwd -P)" "$HOME/gone project" > "$STPF"   # these only, put back after
+mkdir -p "$P2/.claude/discord-agents/unrun"; : > "$P2/.claude/discord-agents/unrun/.env"   # set up, never ran the plugin
+err=$(printf '\nn\n\n' | bash "$S" setup gamma 2>&1 >/dev/null)
+cmp -s "$HOME/.claude/settings.json" "$P2/global.before" && cmp -s "$HOME/dotrepo/settings.json" "$P2/dot.before" &&
+  [ "$(grep -c 'old claude-discord hook entries left in' <<<"$err")" = 1 ] && grep -qF "/unrun" <<<"$err" ||
+  { echo "FAIL: setup leaves the user-global and symlinked entries while a recorded bot has not loaded the plugin, and says so once: $err"; exit 1; }
+rm -rf "$P2/.claude/discord-agents/unrun"
 err=$(printf '\nn\n\n' | bash "$S" setup gamma 2>&1 >/dev/null)
 ! grep -q '/.claude/discord-agents/hooks/' "$HOME/dotrepo/settings.json" "$HOME/.claude/settings.json" && [ -L "$P2/.claude/settings.json" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] &&
   [ "$(jq -c . "$HOME/.claude/settings.json")" = "$(jq -c . <<<"$FOREIGN")" ] && ! grep -qF 'old claude-discord hook entries' <<<"$err" ||
@@ -1804,6 +1814,7 @@ printf '%s\n' "$FOREIGN" > "$HOME/dotrepo/global.json"; plant_old "$HOME/dotrepo
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat must exit 0 here: $out"; exit 1; }
 [ -L "$HOME/.claude/settings.json" ] && [ "$(jq -c . "$HOME/dotrepo/global.json")" = "$(jq -c . <<<"$FOREIGN")" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] ||
   { echo "FAIL: update strips the old hook entries from the user-global settings, through its symlink, and from a recorded project's symlinked one: $(<"$HOME/dotrepo/global.json") / $(<"$HOME/dotrepo/settings.json")"; exit 1; }
+mv "$STPF.strip" "$STPF"
 # By hand from the link's own directory: a bare name with a relative target resolves from there.
 echo '{}' > "$HOME/dotrepo/settings.json"; plant_old "$HOME/dotrepo/settings.json"; ln -s dotrepo/settings.json "$HOME/rel.json"
 (cd "$HOME" && bash "$PC/hooks/lib/old-hooks.sh" rel.json) && [ -L "$HOME/rel.json" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] || { echo "FAIL: by hand, a bare-name link with a relative target must edit that target"; exit 1; }

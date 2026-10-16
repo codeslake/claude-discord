@@ -195,7 +195,9 @@ those files: the user-global one, and a symlinked `settings.json` or
 `settings.local.json` of this project and of every recorded one, through the
 link (a new copy is renamed over the target, so the link stays; commit the
 change where that file lives). On every machine sharing such a file the entries
-go too. A file that is not JSON or not writable is named and left; `bash
+go too, so they are stripped only once every bot of every project recorded on
+this machine has run with the plugin (a `<bot dir>/plugin-sessions/` marker);
+until then they stay and one line names the bots that have not. A file that is not JSON or not writable is named and left; `bash
 <plugin>/hooks/lib/old-hooks.sh <file>...` removes the entries by hand.
 
 For this release `~/.claude-discord/hooks/{turn,peers,lib,autoresearchclaw}`,

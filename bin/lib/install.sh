@@ -192,15 +192,32 @@ sweep_recorded() {
 # (lmd79's five global entries ran on-session-start twice at every start, 2026-10-16), and they go on every machine
 # sharing the file too: there they ran only through a per-project hooks link to the compat copy. A project's own
 # regular files are still left to that first hook run (R15: setup cannot know the plugin will load there). Run by
-# setup and by compat (every update). A file left as it was (not JSON, not writable) is named, and fails nothing.
+# setup and by compat (every update), and only once every bot of every recorded project here has run with the plugin
+# (a plugin-sessions/ marker): until then one line says why they stay. A file left as it was (not JSON, not
+# writable) is named, and fails nothing.
 strip_one() { strip_old_hooks "$1" || echo "claude-discord: old claude-discord hook entries left in '$1' (not JSON, or not writable); remove them by hand" >&2; }
 strip_settings() {
-  local p f
+  local p f b targets=() miss=""
   . "$self_root/hooks/lib/old-hooks.sh" 2>/dev/null || return 0
-  strip_one "$HOME/.claude/settings.json"
-  { printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null || :; } | while IFS= read -r p || [ -n "$p" ]; do
-    p=${p%$'\r'}
-    for f in "$p/.claude/settings.json" "$p/.claude/settings.local.json"; do [ -z "$p" ] || [ ! -L "$f" ] || strip_one "$f"; done
+  while IFS= read -r p || [ -n "$p" ]; do
+    p=${p%$'\r'}; [ -n "$p" ] || continue
+    for f in "$p/.claude/settings.json" "$p/.claude/settings.local.json"; do [ ! -L "$f" ] || targets+=("$f"); done
+    # Those files serve every bot here (and on every machine sharing them): a bot set up but never run with the plugin
+    # (no plugin-sessions/ marker) still runs on these entries, as migrate_project weighs a project's own files.
+    for b in "$p"/.claude/discord-agents/*/; do
+      [ -f "$b.env" ] || continue
+      set -- "$b"plugin-sessions/*
+      [ -e "$1" ] || miss="$miss ${b%/}"
+    done
+  done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null || :)
+  targets=("$HOME/.claude/settings.json" ${targets[@]+"${targets[@]}"})
+  for f in "${targets[@]}"; do
+    grep -qF /.claude/discord-agents/hooks/ "$f" 2>/dev/null || continue
+    if [ -n "$miss" ]; then
+      echo "claude-discord: old claude-discord hook entries left in the user-global or a symlinked settings file: they still serve bots that have not run with the plugin yet:$miss (a session of each removes the need; the next setup or update strips them)" >&2
+      return 0
+    fi
+    strip_one "$f"
   done
   return 0
 }
