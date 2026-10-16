@@ -51,7 +51,9 @@ deny() {
 }
 
 [ -n "$bot_name" ] || exit 0   # not a bot session (a global plugin reaches every session on the machine)
-resolve_channel
+# The channel by resolve_channel's rule: config.env's here, access.json's single group key inside the one jq below
+# (a process less per reply; only a file of several JSON documents, which the plugin cannot read either, differs).
+config_channel
 hook_stdin || exit 0
 
 # A turn with no Discord message in it (typed in the terminal, or woken by a
@@ -78,15 +80,19 @@ BARE_Q='.tool_input.text // "" | tostring | [splits("```")] | to_entries | map(s
 # Then, for a dev-manager (0b): whether the peer answer check applies (not an edit, no reply_to), the deny line for a
 # named but unmentioned peer, and one "<bot_id> <deny line>" per peer (only these need the turn's sender, read below).
 # peers.json is read raw and parsed inside (try): a broken one costs only these, never the checks above.
-pf="$DISCORD_STATE_DIR/../peers.json" pa=(--arg pr "")
+pf="$DISCORD_STATE_DIR/../peers.json" pa=(--arg pr "") af="$DISCORD_STATE_DIR/access.json" aa=(--arg acc "")
 [ "$bot_mode" = dev-manager ] && [ -f "$pf" ] && pa=(--rawfile pr "$pf")
-peerlines=()
-{ read -r noreply; read -r mentions; read -r bare; read -r turn; read -r chat; read -r arrow; read -r table; read -r over; read -r peerq; IFS= read -r named
-  while IFS= read -r l; do peerlines+=("$l"); done; } < <(printf '%s' "$input" | jq -r --arg ch "$bot_channel" --arg re "$BARE" --arg self "$bot_name" "${pa[@]}" '
+[ -f "$af" ] && [ -r "$af" ] && aa=(--rawfile acc "$af")
+peerlines=() ch=""
+{ IFS= read -r ch; read -r noreply; read -r mentions; read -r bare; read -r turn; read -r chat; read -r arrow; read -r table; read -r over; read -r peerq; IFS= read -r named
+  while IFS= read -r l; do peerlines+=("$l"); done; } < <(printf '%s' "$input" | jq -r --arg fb "$bot_channel" --arg re "$BARE" --arg self "$bot_name" "${pa[@]}" "${aa[@]}" '
   def line: tostring | (split("\n")[0] // "") | sub("^[ \t]+"; "") | sub("[ \t]+$"; "");
   def bare: '"$BARE_Q"';
   def deny: sub("\n+\\z"; "") | {hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: .}} | tojson;
-  (.tool_input.text // "" | tostring) as $t
+  ($acc | try (fromjson | ((.groups | objects | keys) // []) as $k
+    | if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) catch $fb) as $ch
+  | $ch,
+  ((.tool_input.text // "" | tostring) as $t
   | ((.tool_name // "" | line) != "mcp__plugin_discord_discord__edit_message") as $rp
   | ((.tool_name // "" | line) == "mcp__plugin_discord_discord__reply" and (.tool_input.reply_to // "" | line) == ""),
     ($t | test("<@[!&]?[0-9]+>")), bare,
@@ -107,7 +113,8 @@ peerlines=()
         (([.[] | select(named and (mentioned | not))][0] // empty
           | "Mention \(.name) as <@\(.bot_id)>; a bot only receives messages that mention it." | deny) // ""),
         (.[] | select(.bot_id | test("\\A[0-9]+\\z"))
-          | "\(.bot_id) \("You are answering \(.name); mention it as <@\(.bot_id)> or it never sees this." | deny)") end)' 2>/dev/null) || :
+          | "\(.bot_id) \("You are answering \(.name); mention it as <@\(.bot_id)> or it never sees this." | deny)") end))' 2>/dev/null) || :
+[ -z "$ch" ] || bot_channel=$ch
 # Mirror lines say which way they went in words. The old arrows ("-> name:",
 # "<- name:", a session or bot name) told a reader neither direction nor that
 # the line was a copy. A Korean label ("-> 수정: ...") is prose, not a name.

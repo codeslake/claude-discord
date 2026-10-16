@@ -23,9 +23,20 @@ if [[ $input != *'<channel source=\"plugin:discord:discord\" chat_id=\"'* ]]; th
   [ -n "$any" ] || exit 0
   prompt=""
 else
-  out=$(printf '%s' "$input" | jq -r '(.session_id // ""), (.prompt // empty)' 2>/dev/null) || exit 0
-  session_id=${out%%$'\n'*}; prompt=${out#*$'\n'}
-  [ "$out" != "$session_id" ] || prompt=""
+  # The same jq answers resolve_channel (hooks/lib/discord.sh) from access.json, read raw: the channel and its ids
+  # on one line between the session id and the prompt (US, then RS between ids), a process less per Discord prompt.
+  # Only a file of several JSON documents, which the plugin cannot read either, reads as none here.
+  config_channel; af=$DISCORD_STATE_DIR/access.json aa=(--arg acc "")
+  [ -f "$af" ] && [ -r "$af" ] && aa=(--rawfile acc "$af")
+  out=$(printf '%s' "$input" | jq -r --arg fb "$bot_channel" "${aa[@]}" '(.session_id // ""),
+    ($acc | try (fromjson | ((.groups | objects | keys) // []) as $k
+      | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) as $ch
+      | "\($ch)\u001f\([try ((.groups[$ch].allowFrom // [])[], (.allowFrom // [])[]) catch empty]
+          | map(if type == "string" then gsub("\u001e"; "\u001f") | gsub("\n"; "\u001e") else tojson end) | join("\u001e"))") catch "\($fb)\u001f"),
+    (.prompt // empty)' 2>/dev/null) || exit 0
+  session_id=${out%%$'\n'*} out=${out#*$'\n'}
+  chl=${out%%$'\n'*} prompt=${out#*$'\n'}
+  [ "$out" != "$chl" ] || prompt=""
 fi
 # A Discord turn is a prompt that OPENS with the plugin's tag,
 # `<channel source="plugin:discord:discord" chat_id=".." message_id=".."
@@ -142,7 +153,9 @@ fi
 # a compaction or /clear, so the next Discord turn re-primes.
 context=""
 primed="$DISCORD_STATE_DIR/turns/$session_id.primed"
-[ -z "$session_id" ] || resolve_channel
+if [ -n "$session_id" ]; then   # resolve_channel's answers, from the jq above
+  bot_channel=${chl%%$'\x1f'*} bot_access_ids=${chl#*$'\x1f'}; bot_access_ids=${bot_access_ids//$'\x1e'/$'\n'}
+fi
 if [ -n "$session_id" ]; then
   identity="Discord turn. You are $bot_name, the Claude Code session behind the Discord bot $bot_name in channel $bot_channel. Answer a Discord message with the discord reply tool; a question typed in the terminal in the same turn is answered in the terminal. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀, ✅ and ☑️ reactions are added automatically (☑️: read, no reply). One request, one thread: $thread_tool start \"[<area>] <short title>\" posts its channel line and prints the thread id (in a message write a channel or thread as <#id>, a user or bot you only name as plain @name, one who must answer or decide as <@id>, which is how you reach them; a bare id is denied, an id in backticks shows the number), thread close <id> \"<closing line>\" posts the line it lands with inside the thread and ends it; the channel holds only the title line. Unless your mode's rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id."
   # Whoever the bot's channel lets in, so a bot can call a person who is not in

@@ -185,7 +185,7 @@ remove_old_install() {
 # writable) is named, and fails nothing.
 strip_one() { strip_old_hooks "$1" || echo "claude-discord: old claude-discord hook entries left in '$1' (not JSON, or not writable); remove them by hand" >&2; }
 strip_settings() {
-  local p f b targets=() miss="" ps=("$PWD")
+  local p f b targets=() miss="" scanned="" ps=("$PWD")
   . "$self_root/hooks/lib/old-hooks.sh" 2>/dev/null || return 0
   # Builtins only (every setup runs this): the records read by read, a file's text by $(<), no cat, no grep.
   if [ -f "$helpers/records/projects" ]; then
@@ -194,18 +194,25 @@ strip_settings() {
   for p in "${ps[@]}"; do
     p=${p%$'\r'}; [ -n "$p" ] || continue
     for f in "$p/.claude/settings.json" "$p/.claude/settings.local.json"; do [ ! -L "$f" ] || targets+=("$f"); done
-    # Those files serve every bot here (and on every machine sharing them): a bot set up but never run with the plugin
-    # (no plugin-sessions/ marker) still runs on these entries, as migrate_project weighs a project's own files.
-    for b in "$p"/.claude/discord-agents/*/; do
-      [ -f "$b.env" ] || continue
-      set -- "$b"plugin-sessions/*
-      [ -e "$1" ] || miss="$miss ${b%/}"
-    done
   done
   targets=("$HOME/.claude/settings.json" ${targets[@]+"${targets[@]}"})
   for f in "${targets[@]}"; do
     [ -f "$f" ] || continue
     { case $(<"$f") in */.claude/discord-agents/hooks/*) ;; *) continue;; esac; } 2>/dev/null   # 2>: bash warns of a NUL byte
+    # Those files serve every bot here (and on every machine sharing them): a bot set up but never run with the plugin
+    # (no plugin-sessions/ marker) still runs on these entries, as migrate_project weighs a project's own files. Looked
+    # for once, and only when a file has entries to strip.
+    if [ -z "$scanned" ]; then
+      scanned=1
+      for p in "${ps[@]}"; do
+        p=${p%$'\r'}; [ -n "$p" ] || continue
+        for b in "$p"/.claude/discord-agents/*/; do
+          [ -f "$b.env" ] || continue
+          set -- "$b"plugin-sessions/*
+          [ -e "$1" ] || miss="$miss ${b%/}"
+        done
+      done
+    fi
     if [ -n "$miss" ]; then
       echo "claude-discord: old claude-discord hook entries left in the user-global or a symlinked settings file: they still serve bots that have not run with the plugin yet:$miss (a session of each removes the need; the next setup or update strips them)" >&2
       return 0

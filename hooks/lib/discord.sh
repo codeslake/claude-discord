@@ -30,15 +30,8 @@ thread_tool=$plugin_root/tools/thread
 # several) it is config.env's DISCORD_CHANNEL_ID. The start path in
 # claude-discord applies the same rule.
 resolve_channel() {
-  local config="$DISCORD_STATE_DIR/../config.env" out line
-  bot_channel="" bot_access_ids=""
-  if [ -f "$config" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      case $line in DISCORD_CHANNEL_ID=*) bot_channel=${line#DISCORD_CHANNEL_ID=}; break;; esac
-    done < "$config"
-    bot_channel=${bot_channel#\'}
-    bot_channel=${bot_channel%\'}
-  fi
+  local out
+  config_channel
   # One jq for both answers (a jq start is 10 ms with jq 1.6, and every prompt asks): the channel on the first line,
   # then the ids that channel's group and the top-level allowFrom name, one a line. An allowFrom of the wrong shape
   # costs only the ids, never the channel (try), and a file jq reads as nothing (empty) leaves config.env's channel.
@@ -47,6 +40,21 @@ resolve_channel() {
     | $ch, try ((.groups[$ch].allowFrom // [])[], (.allowFrom // [])[]) catch empty' "$DISCORD_STATE_DIR/access.json" 2>/dev/null) && [ -n "$out" ] || return 0
   bot_channel=${out%%$'\n'*}
   case $out in *$'\n'*) bot_access_ids=${out#*$'\n'};; esac
+}
+
+# config_channel: sets bot_channel to config.env's DISCORD_CHANNEL_ID (empty
+# without one) and empties bot_access_ids: resolve_channel's fallback, read
+# with builtins. thread-guard applies the access.json half inside its own jq.
+config_channel() {
+  local config="$DISCORD_STATE_DIR/../config.env" line
+  bot_channel="" bot_access_ids=""
+  if [ -f "$config" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case $line in DISCORD_CHANNEL_ID=*) bot_channel=${line#DISCORD_CHANNEL_ID=}; break;; esac
+    done < "$config"
+    bot_channel=${bot_channel#\'}
+    bot_channel=${bot_channel%\'}
+  fi
 }
 
 # A bot is the session its state dir belongs to: a `claude -p` started from a
