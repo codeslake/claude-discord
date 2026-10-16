@@ -2058,6 +2058,51 @@ grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out
 [ ! -s "$HOME/rm.log" ] || { echo "FAIL: a failing 'agents' call must remove nothing: $(<"$HOME/rm.log")"; exit 1; }
 echo "ok: a listing that is not JSON, one that is empty and one that fails each leave the start untouched and remove nothing"
 
+# The marker sweep: a start sweeps its own bot's plugin-sessions/ and turns/ (and the project's checkin/ when every bot of
+# the project is one this daemon lists) of sessions `claude agents --json --all` no longer lists, from the listing the
+# dead-session reap already fetched; done and stopped rows are listed, so kept. A bot the listing names neither by name
+# nor by its pinned job belongs to the other side of a shared home: nothing of it goes. `compat` (every update) does
+# the same for every bot of every recorded project, with one listing.
+DB="$PD/.claude/discord-agents/dead" DCK="$PD/.claude/discord-agents/checkin"
+plant_markers() {
+  rm -rf "$DB/plugin-sessions" "$DB/turns" "$DCK"; mkdir -p "$DB/plugin-sessions" "$DB/turns" "$DCK"
+  : > "$DB/plugin-sessions/live1"; : > "$DB/plugin-sessions/done2"; : > "$DB/plugin-sessions/gone3"; : > "$DB/plugin-sessions/child4"
+  : > "$DB/turns/live1"; : > "$DB/turns/live1.primed"; : > "$DB/turns/gone3"; : > "$DB/turns/gone3.replied"; : > "$DB/turns/gone3.primed"
+  : > "$DCK/live1"; : > "$DCK/gone3"
+}
+markers() { (cd "$PD/.claude/discord-agents" && for f in dead/plugin-sessions/* dead/turns/* checkin/*; do [ ! -e "$f" ] || printf '%s ' "$f"; done); }
+ALL_MARKERS="dead/plugin-sessions/child4 dead/plugin-sessions/done2 dead/plugin-sessions/gone3 dead/plugin-sessions/live1 dead/turns/gone3 dead/turns/gone3.primed dead/turns/gone3.replied dead/turns/live1 dead/turns/live1.primed checkin/gone3 checkin/live1 "
+: > "$HOME/agents.rc"
+printf '[{"name":"dead","id":"aaaa0001","sessionId":"live1","state":"working"},{"name":"dead","id":"dddd0002","sessionId":"done2","state":"done"}]\n' > "$HOME/agents.json"
+plant_markers; start_dead
+grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: a sweeping start must still reach the exec: $out"; exit 1; }
+[ "$(markers)" = "dead/plugin-sessions/done2 dead/plugin-sessions/live1 dead/turns/live1 dead/turns/live1.primed checkin/live1 " ] ||
+  { echo "FAIL: a start sweeps its bot's markers of sessions claude agents no longer lists, and keeps done ones: $(markers)"; exit 1; }
+printf '[{"name":"other","id":"eeee0001","sessionId":"live1","state":"working"}]\n' > "$HOME/agents.json"
+plant_markers; start_dead
+[ "$(markers)" = "$ALL_MARKERS" ] || { echo "FAIL: a sweep never touches a bot this daemon cannot see: $(markers)"; exit 1; }
+echo eeee0001 > "$DB/pinned-job"; start_dead; rm -f "$DB/pinned-job"
+[ "$(markers)" = "dead/plugin-sessions/live1 dead/turns/live1 dead/turns/live1.primed checkin/live1 " ] ||
+  { echo "FAIL: a bot whose pinned job is listed is seen (another name in the agent view): $(markers)"; exit 1; }
+printf '[{"name":"dead","id":"aaaa0001","sessionId":"live1","state":"working"}]\n' > "$HOME/agents.json"; echo 1 > "$HOME/agents.rc"
+plant_markers; start_dead
+[ "$(markers)" = "$ALL_MARKERS" ] && ! grep -q '^claude-discord: ' <<<"$out" || { echo "FAIL: a listing that failed sweeps nothing and fails no start: $(markers) / $out"; exit 1; }
+: > "$HOME/agents.rc"; printf '{}\n' > "$HOME/agents.json"; start_dead
+[ "$(markers)" = "$ALL_MARKERS" ] || { echo "FAIL: a listing that is no array sweeps nothing: $(markers)"; exit 1; }
+# compat: two recorded projects, one bot each; only the visible one is swept, checkin/ too, and the other left whole.
+PU2="$HOME/project_unseen"; mkdir -p "$PU2/.claude/discord-agents/unseen/plugin-sessions" "$PU2/.claude/discord-agents/checkin"
+: > "$PU2/.claude/discord-agents/unseen/.env"; : > "$PU2/.claude/discord-agents/unseen/plugin-sessions/gone9"; : > "$PU2/.claude/discord-agents/checkin/gone9"
+SWPF="$HOME/.claude-discord/records/projects"; mv "$SWPF" "$SWPF.sweep"; printf '%s\n%s\n' "$PDP" "$PU2" > "$SWPF"   # these two only, put back after
+printf '[{"name":"dead","id":"aaaa0001","sessionId":"live1","state":"working"},{"name":"dead","id":"dddd0002","sessionId":"done2","state":"done"}]\n' > "$HOME/agents.json"
+plant_markers; : > "$HOME/agents.calls"
+bash "$S" compat >/dev/null 2>&1 || { echo "FAIL: compat must exit 0 here"; exit 1; }
+[ "$(markers)" = "dead/plugin-sessions/done2 dead/plugin-sessions/live1 dead/turns/live1 dead/turns/live1.primed checkin/live1 " ] &&
+  [ -e "$PU2/.claude/discord-agents/unseen/plugin-sessions/gone9" ] && [ -e "$PU2/.claude/discord-agents/checkin/gone9" ] &&
+  [ "$(<"$HOME/agents.calls")" = "agents --json --all" ] ||
+  { echo "FAIL: update's compat step sweeps every visible bot of every recorded project, once: $(markers) / $(ls -R "$PU2/.claude/discord-agents") / $(<"$HOME/agents.calls")"; exit 1; }
+mv "$SWPF.sweep" "$SWPF"; cp "$HOME/agents.full.json" "$HOME/agents.json"
+echo "ok: a start sweeps its bot's plugin-sessions/ and turns/ markers (and checkin/) of sessions claude agents no longer lists, keeps done ones, never a bot the listing does not show (by name or pinned job), nothing on a failed or non-array listing; compat sweeps every recorded project once"
+
 # tools/local-bots: not a hook, run by hand, reusing the "dead"
 # project's still-active claude stub ("agents" cats agents.json, or
 # agents.all.json for --all, exits agents.rc) and more real directories beside

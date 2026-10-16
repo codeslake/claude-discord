@@ -1,4 +1,4 @@
-# sourced by bin/claude-discord: select_one git_net src_link prune_installs install_plugin remove_old_install, the compat verb, report_old_hooks write_hosts parse_install_flags check_install_scope coexist install_all; the install, setup and update verbs
+# sourced by bin/claude-discord: select_one git_net src_link prune_installs install_plugin remove_old_install sweep_recorded, the compat verb, report_old_hooks write_hosts parse_install_flags check_install_scope coexist install_all; the install, setup and update verbs
 
 # select_one <label> <default> <option>...: prints the chosen option's first
 # word (an option is "<name>  <hint>"). On a terminal, an @clack-style picker
@@ -172,8 +172,24 @@ remove_old_install() {
 
 # same_tree <a> <b>: same files and the same executables (diff -r ignores modes,
 # and an old settings entry skips a hook that is not -x).
+# sweep_recorded: the marker sweep (bin/lib/state.sh) over every bot of every recorded project, from one listing.
+# Optional like the start's: no claude, no jq, a listing that fails or is no array sweeps nothing, silently.
+sweep_recorded() {
+  local l p t=()
+  command -v jq >/dev/null 2>&1 && command -v claude >/dev/null 2>&1 && [ -f "$helpers/records/projects" ] || return 0
+  if command -v timeout >/dev/null 2>&1; then t=(timeout 5); fi
+  l=$(${t[@]+"${t[@]}"} claude agents --json --all 2>/dev/null) && . "$self_root/bin/lib/state.sh" && sweep_list "$l" || return 0
+  while IFS= read -r p || [ -n "$p" ]; do
+    p=${p%$'\r'}
+    [ -z "$p" ] || [ ! -d "$p/.claude/discord-agents" ] || sweep_project "$p/.claude/discord-agents" 2>/dev/null || :
+  done < "$helpers/records/projects"
+}
 # Run by update from the freshly pulled code (this process holds the old functions).
-if [ "${1:-}" = compat ]; then remove_old_install; exit $?; fi
+if [ "${1:-}" = compat ]; then
+  crc=0; remove_old_install || crc=1
+  sweep_recorded
+  exit "$crc"
+fi
 
 # setup tells, once, of old entries in a settings file nothing here edits: a
 # symlink (often into a dotfiles repo) or the user-global settings.json. The
