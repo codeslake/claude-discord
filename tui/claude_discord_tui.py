@@ -18,7 +18,7 @@ row edits who may drive that bot (its channels, senders, DM policy and mode),
 read through `claude-discord access ... --json` and written by
 `claude-discord access ... set`, run on a pty the TUI holds (1.13.1): its
 question is shown in a popup and the answer written back. Since 1.14.0 `n`
-renames a bot (on Discord and here, `=` takes Discord's name here), `t` replaces
+renames a bot (on Discord and here; `=` renames it here to Discord's name, restarting it if it runs), `t` replaces
 its token and `a` on the Bots tab adds a bot, each through `claude-discord bot`
 on such a pty; a token typed here is written to that pty when the CLI asks for
 it (its echo off), never to an argument, a file or the screen. Nothing else:
@@ -420,7 +420,10 @@ def bots_items(state: dict, names: dict, width: int, opened: set, now: float) ->
             hint = ("   f runs it · F runs every recovery · c copies it" if width >= WIDE else "   f runs · F all · c copies") if recoverable(state, b) else "   c copies it"
             items.append((None, [Text.assemble(("     fix  ", DIM), (fix_of(state, b), BRAND), (hint, DIM))]))
         if discord_name(b):   # 1.14.0: a bot's name is its Discord username; the two differ here
-            items.append((None, [Text.assemble(("     name ", DIM), (f"≠ Discord: {discord_name(b)}", WARN), ("   = takes Discord's name here", DIM))]))
+            # Both names, `=` as a key, and what it does: a running session is stopped and started again by the rename.
+            # Below WIDE the restart note goes, never a name.
+            items.append((None, [Text.assemble(("     name ", DIM), (f"differs: here {txt(b.get('bot'))} · Discord {discord_name(b)}", WARN), ("   ", DIM), ("=", f"bold {BRAND}"),
+                                               (" rename here to Discord's" + (" (restarts it if running)" if width >= WIDE else ""), DIM))]))
         if o:   # what can be done to the bot, under an opened row (the foot has no room for all of it)
             items.append((None, [Text("     keys  e access · n name · t token · f recover · enter all fields", DIM)]))
     return items
@@ -2935,7 +2938,7 @@ class MonitorTUI(App):
 
     def renamed(self, host: str, project: str, old: str, new: str) -> None:
         """`bot rename` moved a bot's directory (the CLI's last line): its row is the new name's now, without waiting
-        for the pass the popup asked for. Both names are the new one, so the `≠ Discord` line goes. The next
+        for the pass the popup asked for. Both names are the new one, so the `name differs` line goes. The next
         state.json replaces all of this. The key is the monitor's reducer's, `host|project|bot` (a remote bot's project
         is the path on that host, as the entry holds it)."""
         bots = obj(self.state.get("bots"))

@@ -677,7 +677,15 @@ def pure():
     s = base()
     s["bots"][PHOTO]["discord_name"], s["bots"][MGRBOT]["discord_name"] = "photo_x", "mgr"
     got = [l.plain.rstrip() for k, ls in tui.bots_items(s, NAMES, 137, {MGRBOT}, time.time()) if k is None for l in ls]
-    assert "     name ≠ Discord: photo_x   = takes Discord's name here" in got and sum("≠ Discord" in l for l in got) == 1, got
+    assert "     name differs: here photobot · Discord photo_x   = rename here to Discord's (restarts it if running)" in got and sum("name differs" in l for l in got) == 1, got
+    # Both names, `=` drawn as a key (bold BRAND), the differing part WARN; below WIDE the restart note goes, never a name.
+    line = next(ls[0] for k, ls in tui.bots_items(s, NAMES, 137, set(), time.time()) if k is None and ls[0].plain.startswith("     name differs"))
+    at = line.plain.index("   = ") + 3
+    assert any(sp.start <= at < sp.end and "bold" in str(sp.style) and tui.BRAND in str(sp.style) for sp in line.spans), line.spans
+    assert any(tui.WARN in str(sp.style) and "photo_x" in line.plain[sp.start:sp.end] for sp in line.spans), line.spans
+    s["bots"][HBOT]["discord_name"] = "photo_x"   # the longest fixture name (22 cells) beside Discord's
+    narrow = [l.plain.rstrip() for k, ls in tui.bots_items(s, NAMES, 100, set(), time.time()) if k is None for l in ls if l.plain.startswith("     name differs")]
+    assert f"     name differs: here {HANGUL} · Discord photo_x   = rename here to Discord's" in narrow and all(cell_len(l) <= 100 and "restarts" not in l for l in narrow), narrow
     assert got.count("     keys  e access · n name · t token · f recover · enter all fields") == 1, got
     assert tui.discord_name(s["bots"][PHOTO]) == "photo_x" and tui.discord_name(s["bots"][MGRBOT]) == tui.discord_name(s["bots"][OLDBOT]) == ""
     print("ok: a name that is not Discord's is shown with = to align it; an opened row names the bot keys")
@@ -2176,11 +2184,11 @@ async def bot_retarget(app, pilot):
 
 async def bot_renamed_row(app, pilot):
     """A renamed bot's row is the new name's at once, from the CLI's last line (`renamed: <old> -> <new>`), whatever
-    its exit status after the move: no wait for the pass the popup asks for. Its `≠ Discord` line goes (both names are
+    its exit status after the move: no wait for the pass the popup asks for. Its `name differs` line goes (both names are
     the new one now), the cursor and the opened set follow its key; the next state.json replaces it all (here the old
     name again: the fixture as it was)."""
     NEW, TWIN = "local|/home/u/rcps|photo2", "wmac|/Users/u/q|photobot"
-    # The same name on another host (TWIN): another bot, which the rename leaves as it is, its `≠ Discord` line too.
+    # The same name on another host (TWIN): another bot, which the rename leaves as it is, its `name differs` line too.
     app.state["bots"][TWIN] = dict(app.state["bots"][PHOTO], host="wmac", project="/Users/u/q")
     fake_pty(app, [(BOT_HEAD + f"{tui.A_MARK}\r\nRename it to photo2? [y/N] ", "ask"),
                    ("y\r\nclaude-discord: bot: renamed: /home/u/rcps/.claude/discord-agents/photo2 (and on Discord)\r\n"
@@ -2190,7 +2198,7 @@ async def bot_renamed_row(app, pilot):
     app.state["bots"][MGRBOT]["verdict"] = "down"
     app.paint()
     await pilot.press("space")   # the row open: it stays open under its new key
-    assert app.cursor["bots"] == PHOTO and app.opened == {PHOTO} and text(app, "#body").count("≠ Discord: photo_x") == 2, body(app)
+    assert app.cursor["bots"] == PHOTO and app.opened == {PHOTO} and text(app, "#body").count("Discord photo_x   =") == 2, body(app)
     assert [l[2:].split()[0] for l in body(app) if l[:2] in ("▸ ", "▾ ")][:2] == ["mgr", "photobot"], body(app)
     await pilot.press("n")
     await settle(app, pilot)
@@ -2207,9 +2215,9 @@ async def bot_renamed_row(app, pilot):
     assert app.state["bots"][TWIN] == dict(app.state["bots"][NEW], host="wmac", project="/Users/u/q", bot="photobot", discord_name="photo_x"), app.state["bots"][TWIN]
     app.pop_screen()
     await pilot.pause()
-    # The row is photo2's, open; the one row named photobot is the twin's (wmac), and so is the one `≠ Discord` line
+    # The row is photo2's, open; the one row named photobot is the twin's (wmac), and so is the one `name differs` line
     # left. The monitor's own texts (the verdict, the fix: `--bg --name photobot`) are kept as they are until its next pass.
-    assert row_of(app, "photo2").startswith("▾ photo2") and len([l for l in body(app) if l[2:].startswith("photobot")]) == 1 and text(app, "#body").count("≠ Discord: photo_x") == 1, body(app)
+    assert row_of(app, "photo2").startswith("▾ photo2") and len([l for l in body(app) if l[2:].startswith("photobot")]) == 1 and text(app, "#body").count("Discord photo_x   =") == 1, body(app)
     os.utime(app.state_dir / "state.json", (1, 1))   # the next pass wrote state.json: the fixture, with the old name
     app.refresh_state()
     assert PHOTO in app.state["bots"] and NEW not in app.state["bots"] and app.cursor["bots"] == PHOTO and row_of(app, "photobot").startswith("▸ photobot"), (list(app.state["bots"]), app.cursor)
@@ -2218,7 +2226,7 @@ async def bot_renamed_row(app, pilot):
 async def bot_align(app, pilot):
     """= on a row whose name is not Discord's: the name popup opens with Discord's name and runs at once."""
     fake_pty(app, [(BOT_HEAD + f"{tui.A_MARK}\r\nRename it to photo_x? [y/N] ", "ask"), ("n\r\nclaude-discord: bot: answered no; nothing was changed\r\n", 4)])
-    assert "     name ≠ Discord: photo_x   = takes Discord's name here" in body(app), body(app)
+    assert "     name differs: here photobot · Discord photo_x   = rename here to Discord's (restarts it if running)" in body(app), body(app)
     await pilot.press("=")
     await settle(app, pilot)
     assert app.runs[0].argv[-3:] == ["photobot", "rename", "photo_x"] and isinstance(app.screen, tui.AccessAsk), app.runs

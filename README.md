@@ -579,8 +579,11 @@ claude-discord bot <bot> recover [--fresh]   # a down bot brought back: its last
 
 `health --json` gives each bot's `discord_name`, Discord's username for it,
 asked once a day (kept in `<bot dir>/discord-name`). The TUI shows a bot whose
-two names differ with `≠ Discord: <name>`; `=` on that row renames it here to
-Discord's name (Discord is not asked to change). In the TUI, `n` renames,
+two names differ with `name differs: here <name> · Discord <name>   = rename here
+to Discord's (restarts it if running)` (the last words dropped below 110
+columns); `=` on that row renames it here to Discord's name (Discord is not
+asked to change; a running session is stopped and started again under the new
+name, a stopped one only renamed). In the TUI, `n` renames,
 `t` replaces the token, `a` on the Bots tab adds a bot and `f` / `F` recover
 one or every down or stuck bot, each through this
 verb on a pseudo-terminal the TUI holds: the token goes from a masked field
