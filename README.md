@@ -829,15 +829,18 @@ Which plugin runs them:
   means not the bot. Nor is a `claude -p` started from the bot's Bash (1.17.0):
   it inherits the bot's `DISCORD_STATE_DIR` and `CLAUDE_JOB_DIR`, and every
   run left a marker, a turn and an identity text of its own. A hook acts for a
-  session it has no marker for only when its Claude Code process
-  (`$CLAUDE_PID`) is the bot's own: that process's
-  `~/.claude/sessions/<pid>.json` carries this job's `jobId` (a background bot)
-  or, with no `CLAUDE_JOB_DIR` (a foreground bot), is no `sdk-cli` child's (a
-  child's record has entrypoint `sdk-cli` and no `jobId`). No `CLAUDE_PID`, or
-  no record of that process (on Linux its `procStart` is checked against
-  `/proc`), leaves the hooks on as before: a Claude Code that stops writing
-  either must not silence every bot. Only "the bot" is remembered (the
-  marker); a child is decided again at each event, at no fork. Which bots each
+  session only when its Claude Code process (`$CLAUDE_PID`) is the bot's own,
+  decided on that process's `~/.claude/sessions/<pid>.json`, not on the
+  environment a child inherits: a record with a `jobId` (a background bot)
+  must name this job (`CLAUDE_JOB_DIR`); a record with none is a foreground
+  session, the bot (even one started from a bot's shell) unless its entrypoint
+  is `sdk-cli`, a `claude -p` child. No record of that process (none yet:
+  Claude Code runs SessionStart hooks before writing it; or a dead process's
+  that had the pid, by its `procStart` on Linux) leaves that one event on,
+  remembered for nothing; no `CLAUDE_PID` at all leaves the hooks on as before
+  1.17.0. "The bot" is remembered in `plugin-sessions/<sid>`, which holds the
+  pid it was decided for: a `claude -p --resume` of the bot's own session is
+  another process, and is decided again (no fork either way). Which bots each
   hook acts for is its row's "Who" above:
   the peer checks of `thread-guard` and `on-reply` and all of `edit-gate` do
   nothing in a session whose bot is not a dev-manager, and also nothing

@@ -1870,9 +1870,11 @@ echo "ok: an old-path hook runs with no marker (no marker directory, or another 
 # h6b. the gate by process (Task 0, measured on lmd42, CC 2.1.301): a `claude -p` started from a bot's Bash inherits
 # DISCORD_STATE_DIR and CLAUDE_JOB_DIR, but its hooks get CLAUDE_PID = its own pid, whose ~/.claude/sessions/<pid>.json
 # says entrypoint sdk-cli and has no jobId; a background bot's says kind bg, entrypoint cli and its jobId; a foreground
-# bot's has no jobId. Only a positive verdict is cached (the marker); no CLAUDE_PID or no record of that process (a
-# record of a dead process that had the pid) leaves the gate open, as before 1.17.0.
-SESS="$HOME/.claude/sessions"; mkdir -p "$SESS"; sleep 30 & CPID=$!; KILL_AT_EXIT="$KILL_AT_EXIT $CPID"
+# bot's has no jobId. Only a verdict from a record that matched is cached: the marker, holding that process's pid (a
+# `claude -p --resume` of the bot's session reuses its id in another process); no record of that process (none yet,
+# or a dead process's that had the pid) leaves the gate open for that event, uncached; no CLAUDE_PID at all is open
+# and cached, as before 1.17.0.
+SESS="$HOME/.claude/sessions"; mkdir -p "$SESS"; sleep 30 & CPID=$!; sleep 30 & CPID2=$!; KILL_AT_EXIT="$KILL_AT_EXIT $CPID $CPID2"
 CPS=$(awk '{ sub(/.*\) /, ""); print $20 }' "/proc/$CPID/stat")
 rec() { printf '{"pid":%s,"procStart":"%s","kind":"%s","entrypoint":"%s"%s}\n' "$CPID" "${4:-$CPS}" "$1" "$2" "${3:+,\"jobId\":\"$3\"}" > "$SESS/$CPID.json"; }
 J1="$HOME/.claude/jobs/5e55a0b1"
@@ -1897,19 +1899,36 @@ out=$(gh c3 605 "$HOME/.claude/jobs/0ddba11e")
 rec interactive cli
 out=$(gh c4 606 "")
 [ -n "$out" ] && isbot c4 || { echo "FAIL: a foreground bot (entrypoint cli, no jobId, no CLAUDE_JOB_DIR) is the bot: $out"; exit 1; }
+out=$(gh c9 611 "$J1")
+[ -n "$out" ] && isbot c9 || { echo "FAIL: a foreground bot started under a bot's environment (CLAUDE_JOB_DIR inherited, its record: cli, no jobId) is the bot: $out"; exit 1; }
 rec interactive sdk-cli "" 1
 out=$(gh c5 607 "$J1")
-[ -n "$out" ] && isbot c5 || { echo "FAIL: a session record of another process that had this pid is no record of this one: the gate stays open: $out"; exit 1; }
+[ -n "$out" ] && [ -e "$GD/turns/c5" ] && [ ! -e "$GD/plugin-sessions/c5" ] || { echo "FAIL: a session record of another process that had this pid is no record of this one: the gate stays open, and caches nothing: $out"; exit 1; }
 rm -f "$SESS/$CPID.json"
 out=$(gh c6 608 "$J1")
-[ -n "$out" ] && isbot c6 || { echo "FAIL: with no session record the gate stays open: $out"; exit 1; }
+[ -n "$out" ] && [ -e "$GD/turns/c6" ] && [ ! -e "$GD/plugin-sessions/c6" ] || { echo "FAIL: with no session record yet (a SessionStart before Claude Code writes it) the gate stays open for that event, and caches nothing: $out"; exit 1; }
 out=$(tagged c7 609 | CLAUDE_JOB_DIR="$J1" CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$PC/hooks/turn/on-prompt")
 [ -n "$out" ] && isbot c7 || { echo "FAIL: with no CLAUDE_PID (an older or newer Claude Code) the gate stays open: $out"; exit 1; }
-rec interactive sdk-cli
+# The bot's session c1 is marked for $CPID. A `claude -p --resume c1` from the bot's Bash: another process, sdk-cli.
+rec bg cli 5e55a0b1
+[ "$(<"$GD/plugin-sessions/c1")" = "$CPID" ] || { echo "FAIL: the marker holds the pid of the process it was written for: $(<"$GD/plugin-sessions/c1")"; exit 1; }
+printf '{"pid":%s,"procStart":"%s","kind":"interactive","entrypoint":"sdk-cli"}\n' "$CPID2" "$(awk '{ sub(/.*\) /, ""); print $20 }' "/proc/$CPID2/stat")" > "$SESS/$CPID2.json"
+out=$(tagged c1 612 | CLAUDE_JOB_DIR="$J1" CLAUDE_PID="$CPID2" CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$PC/hooks/turn/on-prompt")
+[ -z "$out" ] && ! command grep -q ' 612 ' "$GD/turns/c1" && [ "$(<"$GD/plugin-sessions/c1")" = "$CPID" ] ||
+  { echo "FAIL: a claude -p child resuming the bot's session (its marker present, another CLAUDE_PID) is not the bot: $out / $(cat "$GD/turns/c1")"; exit 1; }
 gh c1 610 "$J1" >/dev/null
 [ "$(cut -d' ' -f2 "$GD/turns/c1" | tail -1)" = 610 ] || { echo "FAIL: the bot's later events trust its marker: $(cat "$GD/turns/c1")"; exit 1; }
-kill "$CPID" 2>/dev/null || :; rm -rf "$SESS" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"
-echo "ok: the gate by process: a claude -p child (sdk-cli, no jobId) is not the bot whatever CLAUDE_JOB_DIR it inherited, nor a worker of another job; a background bot of its own job and a foreground bot are; no CLAUDE_PID or no record of this process leaves it open; only a positive verdict is cached"
+out=$(gh c8 613 "$J1")   # the bot after /clear: the same process, a new session id
+[ -n "$out" ] && isbot c8 && [ "$(<"$GD/plugin-sessions/c8")" = "$CPID" ] || { echo "FAIL: the bot after /clear (same pid, new session id) is the bot, and caches it: $out"; exit 1; }
+# X05: a hook input with no session id still goes through the process check (thread-guard's arrow deny says it ran).
+tg() { printf '{"tool_name":"mcp__plugin_discord_discord__reply","tool_input":{"chat_id":"1","text":"-> x: hi"}}' | CLAUDE_JOB_DIR="$J1" CLAUDE_PID="$1" CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$PC/hooks/peers/thread-guard"; }
+[ -n "$(tg "$CPID")" ] && [ -z "$(tg "$CPID2")" ] || { echo "FAIL: an input with no session id passes the gate for the bot's process, not for a child's"; exit 1; }
+# X04: an old-path hook (a settings entry) of a child goes through the process check too.
+rm -rf "$GD/plugin-sessions"
+out=$(tagged c10 614 | CLAUDE_JOB_DIR="$J1" CLAUDE_PID="$CPID2" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt")
+[ -z "$out" ] && [ ! -e "$GD/turns/c10" ] || { echo "FAIL: an old-path hook of a claude -p child is not the bot either: $out"; exit 1; }
+kill "$CPID" "$CPID2" 2>/dev/null || :; rm -rf "$SESS" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"
+echo "ok: the gate by process: a claude -p child (sdk-cli, no jobId) is not the bot whatever CLAUDE_JOB_DIR it inherited, nor a worker of another job, nor when it resumes the bot's session; a background bot of its own job and a foreground bot (CLAUDE_JOB_DIR inherited or not) are; no record of this process leaves one event open, uncached; the marker holds the pid it was written for; the bot after /clear caches again; an input with no session id and an old-path hook are decided the same way"
 
 # h7. one migration per session however many of its hooks start at once (noclobber on the marker). A migration's jq
 # holds it until the eleven other hooks have ended (3 s at most), so they all passed the marker check while the first

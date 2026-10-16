@@ -163,16 +163,16 @@ peers() {
 # dir, and was taken for the bot (a turn, a marker, a context) until 1.17.0.
 # Only that positive verdict is cached, as the marker.
 plugin_gate() {
-  local m=${DISCORD_STATE_DIR:-}/plugin-sessions root=${CLAUDE_PLUGIN_ROOT:-} sid old=1 won=""
+  local m=${DISCORD_STATE_DIR:-}/plugin-sessions root=${CLAUDE_PLUGIN_ROOT:-} sid old=1 won="" mp="" rc
   [ -n "$bot_name" ] || return 0
   case $0 in
     */.claude/discord-agents/hooks/*|"$HOME"/.claude-discord/hooks/*) ;;
     *) [ -z "$root" ] || case $0 in "$root"/*) old="";; esac ;;
   esac
   if [ -n "$old" ]; then
-    [ -d "$m" ] || { bot_process; return; }
-    hook_session || { bot_process; return; }
-    [ -e "$m/$sid" ] || { bot_process; return; }
+    [ -d "$m" ] || { bot_process; [ $? != 1 ]; return; }
+    hook_session || { bot_process; [ $? != 1 ]; return; }
+    [ -e "$m/$sid" ] || { bot_process; [ $? != 1 ]; return; }
     # A marked session whose plugin install is gone again (rolled back) has no
     # plugin hooks left: the old path is all it has, so it runs.
     [ -e "$bot_project/.claude/skills/claude-discord/hooks/hooks.json" ] ||
@@ -180,48 +180,67 @@ plugin_gate() {
     [ $? != 0 ]
     return
   fi
-  hook_session || { bot_process; return; }
+  hook_session || { bot_process; [ $? != 1 ]; return; }
+  # The marker holds the pid of the process it was written for: a `claude -p
+  # --continue` or `--resume <the bot's session>` reuses the bot's session id
+  # in a process of its own, which is decided again (and a respawned bot, a new
+  # pid on the same id, is decided again once). Builtins only: no fork.
   if [ -e "$m/$sid" ]; then
-    : > "$m/$sid" 2>/dev/null   # a live session keeps its marker fresh (no fork), so the month-old prune never takes it
-    return 0
+    { IFS= read -r mp < "$m/$sid"; } 2>/dev/null || :
+    if [ -z "${CLAUDE_PID:-}" ] || [ "$mp" = "$CLAUDE_PID" ]; then
+      printf '%s\n' "$mp" 2>/dev/null > "$m/$sid"   # a live session keeps its marker fresh, so the month-old prune never takes it
+      return 0
+    fi
+    bot_process; rc=$?
+    [ "$rc" != 0 ] || printf '%s\n' "$CLAUDE_PID" 2>/dev/null > "$m/$sid"
+    [ "$rc" != 1 ]
+    return
   fi
-  bot_process || return 1
+  bot_process; rc=$?
+  [ "$rc" != 1 ] || return 1
+  # Open for want of evidence (CLAUDE_PID set, but no record of that process yet: Claude Code 2.1.301 runs
+  # SessionStart hooks before it writes the record): this event acts, and nothing is cached.
+  [ "$rc" = 0 ] || return 0
   mkdir -p "$m" 2>/dev/null || return 0
-  set -C; { : > "$m/$sid"; } 2>/dev/null && won=1; set +C   # noclobber: of the event's parallel hooks, one migrates
+  set -C; { printf '%s\n' "${CLAUDE_PID:-}" > "$m/$sid"; } 2>/dev/null && won=1; set +C   # noclobber: of the event's parallel hooks, one migrates
   [ -n "$won" ] || return 0
   find "$m" -type f -mtime +30 -exec rm -f {} + 2>/dev/null   # markers no hook has touched for a month
   . "$plugin_root/hooks/lib/old-hooks.sh" 2>/dev/null && migrate_project
   return 0
 }
-# bot_process: the Claude Code process that ran this hook ($CLAUDE_PID, set by
-# Claude Code per process: a child's hooks get the child's pid) is the bot's own.
-# Its ~/.claude/sessions/<pid>.json (measured 2.1.296-2.1.301, Linux and macOS
-# alike): a background worker's has kind bg, entrypoint cli and its jobId; a
-# `claude -p` child's has entrypoint sdk-cli and no jobId, while it inherits the
-# bot's CLAUDE_JOB_DIR. So with CLAUDE_JOB_DIR set, the record's jobId must be
-# that job's; without it (a foreground bot), the record must not be sdk-cli. On
-# Linux the record's procStart must be the process's (field 22 of its stat), or
-# it is a dead process's that had this pid: no record of this one. No
-# CLAUDE_PID or no record: open, as before 1.17.0 (a Claude Code that stops
-# writing either must not silence every bot). No fork: two reads and two regexes.
+# bot_process: whether the Claude Code process that ran this hook ($CLAUDE_PID,
+# set by Claude Code per process: a child's hooks get the child's pid) is the
+# bot's own. 0: it is (its record was found and matched); 1: it is not; 2: no
+# evidence either way, so open, uncached. Decided on its
+# ~/.claude/sessions/<pid>.json (measured 2.1.296-2.1.301, Linux and macOS
+# alike), not on the environment, which a child inherits: a background
+# worker's record has kind bg, entrypoint cli and its jobId, which must be
+# this job's (${CLAUDE_JOB_DIR##*/}); a record with no jobId is a foreground
+# session, the bot (even one started under a bot's environment, CLAUDE_JOB_DIR
+# inherited) unless its entrypoint is sdk-cli, a `claude -p` child. On Linux the
+# record's procStart must be the process's (field 22 of its stat), or it is a
+# dead process's that had this pid: no record of this one. No CLAUDE_PID at all
+# (a Claude Code that does not set it): 0, as before 1.17.0, cached as then, so
+# the old-entry gate and migration keep working there. No fork: two reads and
+# two regexes.
 bot_process() {
   local p=${CLAUDE_PID:-} j="" s re
   [ -n "$p" ] || return 0
-  case $p in *[!0-9]*) return 0;; esac
+  case $p in *[!0-9]*) return 2;; esac
   { IFS= read -r -d '' j < "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$p.json"; } 2>/dev/null
-  [ -n "$j" ] || return 0
+  [ -n "$j" ] || return 2
   if [ -r "/proc/$p/stat" ]; then
-    { IFS= read -r s < "/proc/$p/stat"; } 2>/dev/null || return 0
+    { IFS= read -r s < "/proc/$p/stat"; } 2>/dev/null || return 2
     s=${s##*) }; set -f; set -- $s; set +f
     re='"procStart"[[:space:]]*:[[:space:]]*"?([0-9]+)'
-    [[ $j =~ $re ]] && [ "${BASH_REMATCH[1]}" = "${20:-}" ] || return 0
+    [[ $j =~ $re ]] && [ "${BASH_REMATCH[1]}" = "${20:-}" ] || return 2
   fi
-  if [ -n "${CLAUDE_JOB_DIR:-}" ]; then
-    re='"jobId"[[:space:]]*:[[:space:]]*"([^"]*)"'
-    [[ $j =~ $re ]] && [ "${BASH_REMATCH[1]}" = "${CLAUDE_JOB_DIR##*/}" ]
+  re='"jobId"[[:space:]]*:[[:space:]]*"([^"]*)"'
+  if [[ $j =~ $re ]]; then
+    [ -n "${CLAUDE_JOB_DIR:-}" ] && [ "${BASH_REMATCH[1]}" = "${CLAUDE_JOB_DIR##*/}" ] || return 1
   else
     re='"entrypoint"[[:space:]]*:[[:space:]]*"sdk-cli"'
-    ! [[ $j =~ $re ]]
+    ! [[ $j =~ $re ]] || return 1
   fi
 }
 # hook_session: sets sid from the hook's stdin JSON and hands the same input
