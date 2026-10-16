@@ -2,10 +2,17 @@
 # PreToolUse hook (matcher: mcp__plugin_discord_discord__reply|
 # mcp__plugin_discord_discord__edit_message: an edit puts text in Discord
 # too): mirror lines, answering a bot, table format and channel length,
-# every bot. Prints
+# every bot, and a dev-manager's peers. Prints
 # nothing unless it rewrites a table or denies:
 #
 # 0. Arrows: see the check right after the input is read.
+# 0b. Peers (mention-guard's checks until 1.17.0, one process per reply now),
+#    a dev-manager with a peers.json only, the reply tool only (an edit is no
+#    new message): a bot only receives messages that mention it (<@bot_id> or
+#    <@!bot_id>), so a reply that answers a peer without mentioning anyone (the
+#    author of the turn's last recorded message; a reply_to its message counts
+#    as a mention, the plugin's isMentioned) is denied, and so is one that names
+#    a peer (as a whole word, case-insensitive) without its mention.
 # 1. Tables, every bot and every chat. Discord renders no GFM table: its rows
 #    arrive as raw pipes. A table (a separator row |-|-|: two columns or more,
 #    a hyphen or more each, as GFM allows; the header row just above it; the
@@ -68,10 +75,19 @@ input=$(cat 2>/dev/null) || exit 0
 BARE='(?<![0-9A-Za-z/@#!&:_.-])[0-9]{17,20}(?![0-9])'
 BARE_Q='.tool_input.text // "" | tostring | [splits("```")] | to_entries | map(select(.key % 2 == 0).value | [splits("`")] | to_entries | map(select(.key % 2 == 0).value)) | flatten
   | [.[] | match($re; "g").string] | unique | join(" ")'
-{ read -r noreply; read -r mentions; read -r bare; read -r turn; read -r chat; read -r arrow; read -r table; read -r over; } < <(printf '%s' "$input" | jq -r --arg ch "$bot_channel" --arg re "$BARE" '
+# Then, for a dev-manager (0b): whether the peer answer check applies (not an edit, no reply_to), the deny line for a
+# named but unmentioned peer, and one "<bot_id> <deny line>" per peer (only these need the turn's sender, read below).
+# peers.json is read raw and parsed inside (try): a broken one costs only these, never the checks above.
+pf="$DISCORD_STATE_DIR/../peers.json" pa=(--arg pr "")
+[ "$bot_mode" = dev-manager ] && [ -f "$pf" ] && pa=(--rawfile pr "$pf")
+peerlines=()
+{ read -r noreply; read -r mentions; read -r bare; read -r turn; read -r chat; read -r arrow; read -r table; read -r over; read -r peerq; IFS= read -r named
+  while IFS= read -r l; do peerlines+=("$l"); done; } < <(printf '%s' "$input" | jq -r --arg ch "$bot_channel" --arg re "$BARE" --arg self "$bot_name" "${pa[@]}" '
   def line: tostring | (split("\n")[0] // "") | sub("^[ \t]+"; "") | sub("[ \t]+$"; "");
   def bare: '"$BARE_Q"';
+  def deny: sub("\n+\\z"; "") | {hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: .}} | tojson;
   (.tool_input.text // "" | tostring) as $t
+  | ((.tool_name // "" | line) != "mcp__plugin_discord_discord__edit_message") as $rp
   | ((.tool_name // "" | line) == "mcp__plugin_discord_discord__reply" and (.tool_input.reply_to // "" | line) == ""),
     ($t | test("<@[!&]?[0-9]+>")), bare,
     .session_id // "", (.tool_input.chat_id // "" | tostring),
@@ -80,7 +96,18 @@ BARE_Q='.tool_input.text // "" | tostring | [splits("```")] | to_entries | map(s
      | map(select(.key % 2 == 0 or (.key == ($p | length) - 1 and ($p | length) % 2 == 0)).value)
      | join("\n") | split("\n")
      | any(test("^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)+\\|?\\s*$"))),
-    (if (.tool_input.chat_id // "" | tostring) == $ch and ($t | length) > 500 then "over" else "" end)' 2>/dev/null) || :
+    (if (.tool_input.chat_id // "" | tostring) == $ch and ($t | length) > 500 then "over" else "" end),
+    ($rp and (.tool_input.reply_to // "" | tostring) == ""),
+    (if $pr == "" or ($rp | not) then "" else
+      [($pr | try fromjson catch null) | try .peers[] catch empty | {name: (.name // "" | tostring), bot_id: (.bot_id // "" | tostring)}
+       | select(.name != "" and (.bot_id | test("^[0-9]+$")) and (.name | ascii_downcase) != ($self | ascii_downcase))]
+      | def mentioned: . as $p | $t | contains("<@\($p.bot_id)>") or contains("<@!\($p.bot_id)>");
+        def named: . as $p | ($t | ascii_downcase | split($p.name | ascii_downcase)) as $s
+          | any(range(1; $s | length); ($s[. - 1] | test("[a-z0-9_-]$") | not) and ($s[.] | test("^[a-z0-9_-]") | not));
+        (([.[] | select(named and (mentioned | not))][0] // empty
+          | "Mention \(.name) as <@\(.bot_id)>; a bot only receives messages that mention it." | deny) // ""),
+        (.[] | select(.bot_id | test("\\A[0-9]+\\z"))
+          | "\(.bot_id) \("You are answering \(.name); mention it as <@\(.bot_id)> or it never sees this." | deny)") end)' 2>/dev/null) || :
 # Mirror lines say which way they went in words. The old arrows ("-> name:",
 # "<- name:", a session or bot name) told a reader neither direction nor that
 # the line was a copy. A Korean label ("-> 수정: ...") is prose, not a name.
@@ -92,8 +119,8 @@ BARE_Q='.tool_input.text // "" | tostring | [splits("```")] | to_entries | map(s
 # reply_to one of its messages counts as a mention (the plugin's isMentioned),
 # so only a reply without reply_to is checked, against the turn's last
 # recorded message (on-prompt writes "chat_id message_id user_id" lines), as
-# in mention-guard; whether its author is a bot comes from is_bot_user. That
-# guard is a dev-manager's and knows only peers.json, so two mode-none bots
+# in 0b; whether its author is a bot comes from is_bot_user. 0b is a
+# dev-manager's and knows only peers.json, so two mode-none bots
 # (one session each in a shared channel) answered each other unmentioned and
 # never heard the answer (owner, 2026-10-07). A human is not held to it, and
 # an edit is no new message, so nobody would receive it either way.
@@ -101,11 +128,16 @@ BARE_Q='.tool_input.text // "" | tostring | [splits("```")] | to_entries | map(s
 # turning from one bot to call another is not held to the first's mention.
 from=""
 case ${turn:-} in ''|*[!A-Za-z0-9_-]*) ;; *)
-  if [ -f "${DISCORD_STATE_DIR:-}/turns/$turn" ] && [ "${noreply:-}" = true ]; then
+  if [ -f "${DISCORD_STATE_DIR:-}/turns/$turn" ] && { [ "${noreply:-}" = true ] || [ "${peerq:-}" = true ]; }; then
     while read -r _ m u _ || [ -n "${m:-}" ]; do from=$u; done < "$DISCORD_STATE_DIR/turns/$turn"
   fi ;;
 esac
-if [ -n "$from" ] && is_bot_user "$from" && [ "${mentions:-}" != true ]; then
+# 0b: answering a peer without mentioning anyone comes first, then a named peer.
+if [ -n "$from" ] && [ "${peerq:-}" = true ] && [ "${mentions:-}" = false ]; then
+  for l in ${peerlines[@]+"${peerlines[@]}"}; do [ "${l%% *}" != "$from" ] || { printf '%s\n' "${l#* }"; exit 0; }; done
+fi
+[ -z "${named:-}" ] || { printf '%s\n' "$named"; exit 0; }
+if [ -n "$from" ] && [ "${noreply:-}" = true ] && is_bot_user "$from" && [ "${mentions:-}" != true ]; then
   deny "You are answering a bot; mention it as <@$from> or it never sees this."
 fi
 

@@ -165,8 +165,6 @@ bash -n "$D/hooks/turn/on-prompt"
 bash -n "$D/hooks/turn/on-reply"
 bash -n "$D/hooks/turn/on-stop"
 bash -n "$D/hooks/turn/on-session-start"
-bash -n "$D/hooks/peers/mention-guard"
-bash -n "$D/hooks/peers/checkin"
 bash -n "$D/hooks/peers/thread-guard"
 bash -n "$D/hooks/peers/edit-gate"
 bash -n "$D/tools/thread"
@@ -181,7 +179,12 @@ bash -n "$D/monitor/monitor.sh"
 # hook command names a script that exists in the repo and is executable.
 jq -e '.name == "discord-agents" and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$D/.claude-plugin/plugin.json" >/dev/null || { echo "FAIL: plugin.json needs name discord-agents and a semver version"; exit 1; }
 cmds=$(jq -r '.hooks[][] .hooks[] .command' "$D/hooks/hooks.json") || { echo "FAIL: hooks.json is not valid"; exit 1; }
-[ "$(printf '%s\n' "$cmds" | wc -l | tr -d ' ')" = 9 ] || { echo "FAIL: hooks.json must register the nine hooks: $cmds"; exit 1; }
+[ "$(printf '%s\n' "$cmds" | wc -l | tr -d ' ')" = 7 ] || { echo "FAIL: hooks.json must register the seven hooks: $cmds"; exit 1; }
+# One process per reply on each side: on-reply alone after it (checkin merged into it), thread-guard alone before it
+# (mention-guard merged into it).
+[ "$(jq -c '[.hooks.PostToolUse[] | select(.matcher as $m | "mcp__plugin_discord_discord__reply" | test("^(" + $m + ")$")) | .hooks[].command],
+  [.hooks.PreToolUse[] | select(.matcher as $m | "mcp__plugin_discord_discord__reply" | test("^(" + $m + ")$")) | .hooks[].command]' "$D/hooks/hooks.json" | tr '\n' ' ')" = '["\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-reply\""] ["\"${CLAUDE_PLUGIN_ROOT}/hooks/peers/thread-guard\""] ' ] ||
+  { echo "FAIL: one process per reply: hooks.json runs on-reply alone after a reply and thread-guard alone before it"; exit 1; }
 while IFS= read -r c; do
   # quoted, so a plugin root with a space in its path still runs
   case $c in '"${CLAUDE_PLUGIN_ROOT}/hooks/'*'"') ;; *) echo "FAIL: hook command must be \"\${CLAUDE_PLUGIN_ROOT}/hooks/...\" (quoted): $c"; exit 1;; esac
@@ -1106,7 +1109,7 @@ out=$(printf '' | DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt"); rc=$?
 echo "ok: on-prompt exits 0 with no output on invalid JSON and on empty stdin"
 
 mv "$PC/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh.bak"
-for hookname in turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/mention-guard peers/checkin peers/thread-guard peers/edit-gate autoresearchclaw/on-start; do
+for hookname in turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/thread-guard peers/edit-gate autoresearchclaw/on-start; do
   out=$(DISCORD_STATE_DIR="$DSD" bash "$R/hooks/$hookname" <<<'{"session_id":"sX","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\">\nhi\n</channel>"}'); rc=$?
   [ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: $hookname with a missing lib must exit 0 with no output"; exit 1; }
 done
@@ -1203,7 +1206,7 @@ echo "ok: the bot names 'hooks' and 'checkin' are reserved and rejected by both 
 # Every hook's first line: no DISCORD_STATE_DIR, no source of the lib (here a lib that says so), no fork;
 # edit-gate also stops before it for a bot that is not a dev-manager.
 FL="$HOME/firstline"; mkdir -p "$FL/hooks/lib" "$FL/bot"; printf 'echo SOURCED\nplugin_gate() { exit 0; }\n' > "$FL/hooks/lib/discord.sh"; echo none > "$FL/bot/mode"
-for h in turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/checkin peers/edit-gate peers/mention-guard peers/thread-guard autoresearchclaw/on-start; do
+for h in turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/edit-gate peers/thread-guard autoresearchclaw/on-start; do
   mkdir -p "$FL/hooks/${h%/*}"; cp "$D/hooks/$h" "$FL/hooks/$h"
   out=$(bash "$FL/hooks/$h" <<<'{"session_id":"x"}' 2>&1)
   [ -z "$out" ] || { echo "FAIL: $h must exit before sourcing anything in a non-bot session: $out"; exit 1; }
@@ -2235,7 +2238,7 @@ echo "ok: a first run takes every hook an earlier version registered out of both
 
 # Peers hooks, through the project's symlinked copy.
 G="$R4/hooks/peers"
-guard() { DISCORD_STATE_DIR="$R4/${2:-mgr}" CLAUDE_PROJECT_DIR="$P4" bash "$G/mention-guard" <<<"$1"; }
+guard() { DISCORD_STATE_DIR="$R4/${2:-mgr}" CLAUDE_PROJECT_DIR="$P4" bash "$G/thread-guard" <<<"$1"; }   # mention-guard's checks, merged into it
 # jesc <string>: sets _je to the JSON string body of it (no jq: the tests below build ~40 inputs).
 jesc() { _je=$1; _je=${_je//\\/\\\\}; _je=${_je//\"/\\\"}; _je=${_je//$'\n'/\\n}; _je=${_je//$'\t'/\\t}; _je=${_je//$'\r'/\\r}; }
 # reason: the deny reason of a guard's output, empty for anything else. The guards print exactly one object of this shape (jq -nc),
@@ -2263,7 +2266,7 @@ out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"<@123> dong
 out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"MGR here, all done"}}')
 [ -z "$out" ] || { echo "FAIL: the bot naming itself must pass (self skipped by name): $out"; exit 1; }
 out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"Dong, please review"}}' plain)
-[ -z "$out" ] || { echo "FAIL: mention-guard must be a no-op for a bot that is not a dev-manager: $out"; exit 1; }
+[ -z "$out" ] || { echo "FAIL: thread-guard's peer checks must be a no-op for a bot that is not a dev-manager: $out"; exit 1; }
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g2","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"555\" user=\"junyong\" user_id=\"901\" ts=\"t\">\nlooks good\n</channel>"}')
 [ "$(<"$R4/mgr/turns/g2")" = "42 555 901" ] || { echo "FAIL: on-prompt must record the triggering user_id"; exit 1; }
 ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")
@@ -2292,11 +2295,14 @@ out=$(guard '{"session_id":"g4","tool_input":{"chat_id":"42","reply_to":"558","t
 [ -z "$out" ] || { echo "FAIL: a reply_to the human's message must not be held to the peer's mention: $out"; exit 1; }
 out=$(guard '{"session_id":"g4","tool_input":{"chat_id":"42","reply_to":"557","text":"thanks"}}')
 [ -z "$out" ] || { echo "FAIL: a reply_to the peer's message reaches it unmentioned and must pass: $out"; exit 1; }
-out=$(printf 'not json' | DISCORD_STATE_DIR="$R4/mgr" bash "$G/mention-guard" 2>&1) || { echo "FAIL: mention-guard must exit 0 on invalid JSON"; exit 1; }
-[ -z "$out" ] || { echo "FAIL: mention-guard must print nothing on invalid JSON"; exit 1; }
-echo "ok: mention-guard denies a named peer (word boundaries, Korean suffix ok) without its <@id> or <@!id>, and an answer mentioning nobody to the peer that wrote the turn's last message; passes for self, a non-dev-manager, dongyong22, a reply to a human, a reply_to, and invalid JSON; on-prompt adds the peers context for a dev-manager only"
+out=$(printf 'not json' | DISCORD_STATE_DIR="$R4/mgr" bash "$G/thread-guard" 2>&1) || { echo "FAIL: thread-guard must exit 0 on invalid JSON"; exit 1; }
+[ -z "$out" ] || { echo "FAIL: thread-guard must print nothing on invalid JSON"; exit 1; }
+# mention-guard ran on the reply tool only (its matcher): an edit is no new message and is not held to a peer's name.
+out=$(guard '{"session_id":"g1","tool_name":"mcp__plugin_discord_discord__edit_message","tool_input":{"chat_id":"42","message_id":"5","text":"Dong, please review"}}')
+[ -z "$out" ] || { echo "FAIL: an edit naming a peer is not held to its mention (as mention-guard's reply-only matcher): $out"; exit 1; }
+echo "ok: thread-guard (mention-guard merged) denies a named peer (word boundaries, Korean suffix ok) without its <@id> or <@!id>, and an answer mentioning nobody to the peer that wrote the turn's last message; passes for self, a non-dev-manager, dongyong22, a reply to a human, a reply_to, and invalid JSON; on-prompt adds the peers context for a dev-manager only"
 
-checkin() { DISCORD_STATE_DIR="$R4/mgr" CLAUDE_PROJECT_DIR="$P4" bash "$G/checkin" <<<"$1"; }
+checkin() { DISCORD_STATE_DIR="$R4/mgr" CLAUDE_PROJECT_DIR="$P4" bash "$R4/hooks/turn/on-reply" <<<"$1"; }   # checkin, merged into on-reply
 out=$(checkin '{"session_id":"c1","tool_input":{"text":"no mention here"}}')
 [ -z "$out" ] && [ ! -e "$R4/checkin/c1" ] || { echo "FAIL: a reply without a peer mention is no check-in"; exit 1; }
 checkin '{"session_id":"c2","tool_input":{"text":"<@902> note to self"}}' >/dev/null
@@ -2305,7 +2311,7 @@ out=$(checkin '{"session_id":"c1","tool_input":{"text":"<@901> I will change on-
 [ -z "$out" ] && [ -f "$R4/checkin/c1" ] || { echo "FAIL: a reply mentioning a peer must touch checkin/<session_id>, silently"; exit 1; }
 checkin '{"session_id":"c3","tool_input":{"text":"<@!900> I will change on-stop"}}' >/dev/null
 [ -f "$R4/checkin/c3" ] || { echo "FAIL: a <@!id> mention of a peer is a check-in too"; exit 1; }
-echo "ok: checkin touches checkin/<session_id> only for a reply that mentions a peer (<@id> or <@!id>), and prints nothing"
+echo "ok: on-reply (checkin merged) touches checkin/<session_id> only for a reply that mentions a peer (<@id> or <@!id>), and prints nothing"
 
 # edit-gate, against a claude-discord checkout that is a git repo with the
 # gitignored bot state inside it (the refresh handoff is written there).
@@ -5729,7 +5735,7 @@ echo '{}' > "$UP/.claude/settings.local.json"; plant_old "$UP/.claude/settings.l
 jq -n --arg p "$OP" --arg p5 "$PHOME/project5" '{projects: {($p): {hasTrustDialogAccepted: true}, ($p5): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
 (cd "$OP" && printf '\n900\n111\n\ntokO\nn\ndev-manager\n\n' | bash "$S" setup obot --scope project >/dev/null)
 [ ! -e "$OH/rules" ] || { echo "FAIL: the old rule copies must go"; exit 1; }
-for f in hooks/turn/on-prompt hooks/turn/on-reply hooks/turn/on-stop hooks/turn/on-session-start hooks/peers/mention-guard hooks/peers/checkin hooks/peers/thread-guard hooks/peers/edit-gate hooks/autoresearchclaw/on-start hooks/autoresearchclaw/events hooks/lib/discord.sh hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events discord-chunk.ts discord-proxy.ts; do
+for f in hooks/turn/on-prompt hooks/turn/on-reply hooks/turn/on-stop hooks/turn/on-session-start hooks/peers/thread-guard hooks/peers/edit-gate hooks/autoresearchclaw/on-start hooks/autoresearchclaw/events hooks/lib/discord.sh hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events discord-chunk.ts discord-proxy.ts; do
   # The hooks and tools go through the compat copy of the plugin, the .ts links through the stable runtime copy.
   case $f in hooks/tools/*) want=$PHOME/.claude-discord/compat/tools/${f##*/}; src=$PC/tools/${f##*/};; hooks/autoresearchclaw/events) want=$PHOME/.claude-discord/compat/tools/arc-events; src=$PC/tools/arc-events;; hooks/*) want=$PHOME/.claude-discord/compat/$f; src=$PC/$f;; *) want=$PHOME/.claude-discord/runtime/$f; src=$PC/runtime/$f;; esac
   [ -f "$OH/$f" ] && [ "$(readlink -f "$OH/$f")" = "$want" ] && cmp -s "$OH/$f" "$src" || { echo "FAIL: ~/.claude-discord/$f must resolve to $want, a copy of the real plugin's file: $(readlink -f "$OH/$f")"; exit 1; }

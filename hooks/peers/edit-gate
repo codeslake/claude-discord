@@ -3,7 +3,7 @@
 # edit whose realpath (its directory's, for a file not created yet) contains
 # /claude-discord/, and that git does not ignore, is denied unless this
 # session checked in with a peer on Discord (checkin/<session_id>, touched by
-# the checkin hook) within the last 60 minutes; an allowed edit re-touches
+# on-reply) within the last 60 minutes; an allowed edit re-touches
 # it, so the window slides. Prints nothing unless it denies; a no-op without
 # peers.json. Must never fail a turn.
 [ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced

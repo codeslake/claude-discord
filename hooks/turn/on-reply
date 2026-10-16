@@ -2,15 +2,35 @@
 # PostToolUse hook (matcher: mcp__plugin_discord_discord__reply): marks that
 # this turn actually sent a Discord reply, so on-stop knows to react ✅ on
 # it. .replied holds how many of the turn's messages were recorded at the
-# latest reply: one recorded after it was not answered and gets ☑️. Must
-# never block or fail a turn.
+# latest reply: one recorded after it was not answered and gets ☑️.
+# A dev-manager's reply that mentions a peer (<@bot_id> or <@!bot_id>) is also
+# a check-in: it touches the project's checkin/<session_id>, which edit-gate
+# reads (the checkin hook's work until 1.17.0, one process per reply now; a
+# no-op without peers.json). Prints nothing. Must never block or fail a turn.
 [ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
 set -u
 . "${0%/*}/../lib/discord.sh" 2>/dev/null || exit 0
 plugin_gate || exit 0
 
 [ -n "$bot_name" ] || exit 0
-session_id=$(jq -r '.session_id // empty' 2>/dev/null) || exit 0
-[ -n "$session_id" ] && [ -n "$bot_name" ] || exit 0
+# One jq: whether this is a check-in on the first line, the session id after it. peers.json is read raw and parsed
+# inside (try), so a broken one costs only the check-in, never the .replied mark.
+pf="$DISCORD_STATE_DIR/../peers.json" pa=(--arg pr "")
+[ "$bot_mode" = dev-manager ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -f "$pf" ] && pa=(--rawfile pr "$pf")
+out=$(jq -r --arg self "$bot_name" "${pa[@]}" '
+  (.tool_input.text // "" | tostring) as $text
+  | (if $pr == "" then "" else
+      [($pr | try fromjson catch null) | try .peers[] catch empty | {name: (.name // "" | tostring), bot_id: (.bot_id // "" | tostring)}
+       | select(.name != "" and (.bot_id | test("^[0-9]+$")) and (.name | ascii_downcase) != ($self | ascii_downcase))]
+      | if any(.[]; . as $p | $text | contains("<@\($p.bot_id)>") or contains("<@!\($p.bot_id)>")) then "checkin" else "" end end),
+    (.session_id // empty)' 2>/dev/null) || exit 0
+case $out in *$'\n'*) ;; *) exit 0;; esac
+ck=${out%%$'\n'*} session_id=${out#*$'\n'}
+[ -n "$session_id" ] || exit 0
 { [ -d "$DISCORD_STATE_DIR/turns" ] || mkdir -p "$DISCORD_STATE_DIR/turns" 2>/dev/null; } && { grep -c '' < "$DISCORD_STATE_DIR/turns/$session_id" > "$DISCORD_STATE_DIR/turns/$session_id.replied"; } 2>/dev/null
+if [ "$ck" = checkin ]; then
+  case $session_id in ''|*[!A-Za-z0-9_-]*) exit 0 ;; esac
+  d="$DISCORD_STATE_DIR/../checkin"   # the bot project's, also from a worktree session
+  mkdir -p "$d" 2>/dev/null && touch "$d/$session_id" 2>/dev/null
+fi
 exit 0

@@ -3,7 +3,7 @@
 # wraps it in a <channel source="plugin:discord:discord" ...> tag) must be
 # answered through the discord reply tool only, not also typed into the CLI.
 # Also records the turn's chat_id/message_id so on-stop can react to it (and
-# the sender's user_id, which mention-guard reads), and offers a "refresh"
+# the sender's user_id, which thread-guard reads), and offers a "refresh"
 # handoff trigger. Must never block or fail a turn: any parse failure,
 # missing field or unrelated prompt is silent success.
 [ -n "${DISCORD_STATE_DIR:-}" ] || exit 0   # not a bot session: no fork, nothing sourced
