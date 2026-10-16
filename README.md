@@ -493,6 +493,7 @@ token, its name and a new bot are written by one verb, at a terminal, as
 claude-discord bot <bot> token          # a new token for the bot; the current one is never read
 claude-discord bot <bot> rename <new>   # Discord first, then everything here keyed by the name
 claude-discord bot add [--mode none|dev-manager|autoresearchclaw] [--start]   # a new bot, named by its token
+claude-discord bot <bot> recover [--fresh]   # a down bot brought back: its last session respawned, or a fresh start
 ```
 
 - **token** reads the token with the terminal's echo off (`Token (hidden): `),
@@ -543,10 +544,38 @@ claude-discord bot add [--mode none|dev-manager|autoresearchclaw] [--start]   # 
   whose directory is there.
   `y` runs `setup <name>` with its answers on its stdin (the mode, Enter for
   the rest), keeps the id, and `--start` starts it (`--bg --name`).
+- **recover** (1.16.0; the TUI's `f` and `F`) brings a `down` bot back, and
+  decides on the bot's own machine, the only place that can look: it reads
+  `<bot dir>/pinned-job` (the job id of the last background session the bot
+  pinned, written at every startup and resume), else the newest marker in
+  `<bot dir>/plugin-sessions/` (one per session, named by its session id,
+  touched by every hook event), else `claude agents` by the bot's name or job
+  record, and keeps only a session `claude agents --json` still lists as
+  started in this project (no `--all`: a retired one is not listed; `state
+  done` is not dead). One listed: `run: claude respawn <id>`, which brings the
+  session back under the same id and sessionId with a new process, its
+  conversation kept and its hooks run again (on-session-start starts the
+  keeper and primes it; a respawned worker may sit idle until the next
+  message). None listed: `run: cd <project> && claude-discord --bg --name
+  <bot>` (a fresh session; `handoff.md` is folded in when there is one),
+  refused before the question when the workspace is not trusted (a `claude
+  --bg` start would refuse). Two or more listed: refused, both named (two on
+  one token both answer; which copy to stop is yours). `--fresh`, for a
+  `stale` bot, is `refresh --force` in the foreground: every listed session
+  stopped (a stop that fails starts nothing and names what did stop), then
+  `--bg --name` with `Catch up on the channel.` as its first turn; the
+  conversation is lost unless a `handoff.md` is there. It prints its plan
+  with the `run:` line, asks once (`Recover <bot>? [y/N]`, after the marker),
+  runs the command and passes its status on; nothing runs on `n` or without a
+  terminal, and it does not wait for the plugin server: the monitor's next
+  pass says whether the bot answers. `<bot dir>/recover.log` gets `<time>
+  <user> <host> recover[ --fresh]: <command> (exit <n>)` per run. A session
+  cannot recover its own bot.
 - `--host <alias> [--manager <bot>] --project <dir>` runs any of them on a
   host of a manager's ledger, under `ssh -t`, as `access --host` does: the
   token is typed into that terminal and read there, never put in a command
-  line. The host needs claude-discord 1.14.0 (exit 5 otherwise).
+  line. The host needs claude-discord 1.14.0 (exit 5 otherwise; `recover`
+  needs 1.16.0).
 
 `health --json` gives each bot's `discord_name`, Discord's username for it,
 asked once a day (kept in `<bot dir>/discord-name`). The TUI shows a bot whose
@@ -562,11 +591,11 @@ monitor's next pass confirms it within about a minute.
 | exit | means |
 |---|---|
 | 0 | done, or nothing to change |
-| 1 | it could not: Discord refused the token or the name, another bot's token, a name taken, a failed write; one of several sessions would not stop: the others are stopped and named; or a step after the rename failed (said, with its command) |
-| 2 | usage, a name that is no name, a session renaming its own bot |
-| 3 | no terminal: nothing was read or changed |
+| 1 | it could not: Discord refused the token or the name, another bot's token, a name taken, a failed write; one of several sessions would not stop: the others are stopped and named; or a step after the rename failed (said, with its command). `recover`: the listing failed (what runs is unknown), two or more sessions listed, an untrusted workspace, a stop that failed, or the command it ran exited non-zero (said with its status) |
+| 2 | usage, a name that is no name, a session renaming or recovering its own bot |
+| 3 | no terminal: nothing was read, changed or run (`rename` and `recover` print their plan first) |
 | 4 | answered no: nothing was changed |
-| 5 | `--host`: the host did not answer, or its claude-discord is older than 1.14.0 |
+| 5 | `--host`: the host did not answer, or its claude-discord is older than 1.14.0 (`recover`: 1.16.0) |
 
 ## AutoResearchClaw reports
 

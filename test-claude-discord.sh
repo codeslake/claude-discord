@@ -4507,8 +4507,9 @@ sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; cp "$HOME/bin/claude" "$HOME/
 cat > "$HOME/claude.live" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
-  agents) echo '[{"id":"accl1111","pid":'"$(<"$HOME/old.pid")"',"name":"acc","cwd":"'"$PWD"'"}'"$([ ! -e "$HOME/old2.pid" ] || echo ',{"id":"acc22222","pid":'"$(<"$HOME/old2.pid")"',"name":"acc","cwd":"'"$PWD"'"}')"',{"id":"oth22222","pid":45,"name":"acc","cwd":"/elsewhere"}]';;
+  agents) echo '[{"id":"acc11111","pid":'"$(<"$HOME/old.pid")"',"name":"acc","cwd":"'"$PWD"'","sessionId":"0123abcd-1111-2222-3333-444444444444"}'"$([ ! -e "$HOME/old2.pid" ] || echo ',{"id":"acc22222","pid":'"$(<"$HOME/old2.pid")"',"name":"acc","cwd":"'"$PWD"'"}')"',{"id":"0e1a2222","pid":45,"name":"acc","cwd":"/elsewhere"}]';;
   stop) echo "STOP $2" >> "$HOME/claude.calls"; case $2 in acc22222) kill "$(<"$HOME/old2.pid")";; *) [ -e "$HOME/stop.fails" ] || kill "$(<"$HOME/old.pid")";; esac;;
+  respawn) echo "RESPAWN $2" >> "$HOME/claude.calls"; [ ! -e "$HOME/respawn.fails" ] || exit 7;;
   *) printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
 esac
 STUB
@@ -4525,7 +4526,7 @@ queue_line "200 $TOK_ME"; queue_line '200 {"id":"777","bot":true,"username":"acc
 bt - y acc rename acc3; cp "$HOME/sleep.keep" "$HOME/bin/sleep"; rm -f "$HOME/stop.fails" "$HOME/old2.pid"
 [ "$rc" = 1 ] && grep -q "is not a trusted workspace, so acc would not start again after the rename" <<<"$out" &&
   [ "$BRC" = 1 ] && grep -q "acc still runs after stop (pid $OLD): nothing here was renamed (Discord calls it acc3 now: run this again to rename it here). Stop it by hand first; stopped and not started again: acc22222 (claude-discord --bg --name acc starts one)" <<<"$BO" &&
-  [[ $BO != *LAUNCHER* ]] && [[ $BO != *"renamed: acc -> acc3"* ]] && [ -d "$AD" ] && [ ! -e "$MR/acc3" ] && kill -0 "$OLD" && ! kill -0 "$OLD2" 2>/dev/null && [ "$(<"$HOME/claude.calls")" = $'STOP accl1111\nSTOP acc22222' ] ||
+  [[ $BO != *LAUNCHER* ]] && [[ $BO != *"renamed: acc -> acc3"* ]] && [ -d "$AD" ] && [ ! -e "$MR/acc3" ] && kill -0 "$OLD" && ! kill -0 "$OLD2" 2>/dev/null && [ "$(<"$HOME/claude.calls")" = $'STOP acc11111\nSTOP acc22222' ] ||
   { echo "FAIL: bot rename of a running bot refuses an untrusted workspace before it stops anything, and a stop that fails renames and starts nothing and names the session that did stop: rc=$rc $out / rc=$BRC $BO / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
 rm -f "$HOME/claude.calls"
 : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_REPLIES"; queue_line "200 $TOK_ME"; queue_line '200 {"id":"777","bot":true,"username":"acc2"}'
@@ -4535,8 +4536,8 @@ bt - y acc rename acc2
   [ ! -e "$AD" ] && [ -f "$MR/acc2/.env" ] && [ -d "$HOME/.claude-discord/scratch/acc2" ] && ! kill -0 "$OLD" 2>/dev/null &&
   [ "$(jq -c '[.peers[] | [.name, .bot_id]]' "$MR/peers.json")" = '[["peerbot","555"],["acc2","777"]]' ] &&
   [ "$(sed -n '2s/ .*//p' "$CURL_LOG")" = "-s" ] && grep -q -- "-X PATCH -H @- -H Content-Type: application/json --data-binary {\"username\":\"acc2\"} https://discord.com/api/v10/users/@me$" "$CURL_LOG" &&
-  [ "$(sort -u "$CURL_STDIN_LOG")" = "Authorization: Bot tokAccUnique" ] && [ "$(<"$HOME/claude.calls")" = "STOP accl1111" ] &&
-  [[ $BO == *"stopping acc (accl1111, pid $OLD)"$'\n'"LAUNCHER "*" -n acc2 --append-system-prompt "*HANDOFF_ACC*" --bg Catch up on the channel and continue from your handoff."$'\n'* ]] &&
+  [ "$(sort -u "$CURL_STDIN_LOG")" = "Authorization: Bot tokAccUnique" ] && [ "$(<"$HOME/claude.calls")" = "STOP acc11111" ] &&
+  [[ $BO == *"stopping acc (acc11111, pid $OLD)"$'\n'"LAUNCHER "*" -n acc2 --append-system-prompt "*HANDOFF_ACC*" --bg Catch up on the channel and continue from your handoff."$'\n'* ]] &&
   [ "$(tail -n 2 "$MR/acc2/access.log" | cut -d' ' -f4-)" = "rename: on Discord acc -> acc2
 rename: acc -> acc2" ] || { echo "FAIL: bot rename of a running bot, y: Discord first, then the session stopped, the directory, its peers.json line by id and its scratch directory renamed, the session started again as the new name from its handoff: rc=$BRC $BO / $(cat "$HOME/claude.calls" "$CURL_LOG" "$MR/peers.json" 2>&1)"; exit 1; }
 # A step after the directory moved fails (here the start under the new name): exit 1, what failed said, and the last line
@@ -4579,7 +4580,7 @@ sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; cp "$HOME/claude.live" "$HOME
 : > "$CURL_REPLIES"; queue_line '200 {"id":"777","bot":true,"username":"ACC"}'; chmod 555 "$MR"
 bt - y acc rename ACC; chmod 755 "$MR"
 [ "$BRC" = 1 ] && grep -q "could not rename $AD: nothing here was renamed" <<<"$BO" && [ -d "$AD" ] && [ ! -e "$MR/ACC" ] && [ -e "$MB2/acc/stopped" ] &&
-  [[ $BO == *"stopping acc (accl1111, pid $OLD)"$'\n'*"LAUNCHER "*" -n acc "* ]] && [ "$(<"$HOME/claude.calls")" = "STOP accl1111" ] ||
+  [[ $BO == *"stopping acc (acc11111, pid $OLD)"$'\n'*"LAUNCHER "*" -n acc "* ]] && [ "$(<"$HOME/claude.calls")" = "STOP acc11111" ] ||
   { echo "FAIL: a failed rename(2) of the directory starts the stopped session again and keeps the owner's stopped marker: rc=$BRC $BO / $(ls -a "$MB2/acc" 2>&1)"; exit 1; }
 cp "$HOME/claude.keep" "$HOME/bin/claude"; echo none > "$AD/mode"; rm -rf "$AD/hosts" "$MB2/acc" "$MB2/ACC" "$HOME/claude.calls"
 # --host with no terminal here: the host prints what it would do and refuses (exit 3), passed on; the new name travels
@@ -4590,6 +4591,73 @@ rc=0; out=$(bash "$S" bot --host h1 --manager mgr --project /p acc rename acc2 2
   { echo "FAIL: bot --host rename with no terminal is passed on from the host cleaned, exit 3: rc=$rc $out / $(cat "$HOME/ssh.log")"; exit 1; }
 rm -f "$HOME/ssh.log" "$MON"/h1.*
 echo "ok: bot rename: a name that is none, taken or reserved, and a session's own bot, refused before Discord is asked; no terminal prints what it would do; Discord first (a refusal changes nothing here), then a running session stopped, the directory, its peers.json line (by id) and scratch directory renamed, the session started again from its handoff; a manager's backend records move and name it, and its watcher records on its ledger hosts are renamed; a name Discord has already is not asked of it; --host passes on what the host printed"
+# bot recover [--fresh] (1.16.0, the TUI's f and F): a bad word, and a session recovering its own bot, are refused (exit 2)
+# before `claude agents` is asked, and nothing runs. The stub's listing is the rename block's (acc11111 of acc here, with
+# a sessionId for the plugin-sessions case below; 0e1a2222 of /elsewhere); its respawn is logged and fails on demand.
+cp "$HOME/claude.live" "$HOME/bin/claude"; rm -f "$HOME/claude.calls" "$AD/recover.log"; sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"
+printf 'acc11111\n' > "$AD/pinned-job"
+rc=0; out=$(bash "$S" bot acc recover --x </dev/null 2>&1) || rc=$?; A=$rc; BRC=0; bash "$S" bot acc recover x </dev/null >/dev/null 2>&1 || BRC=$?; A="$A $BRC"
+BRC=0; BO=$(DISCORD_STATE_DIR=$AD bash "$S" bot acc recover 2>&1) || BRC=$?
+[ "$A $BRC" = "2 2 2" ] && grep -q 'recover \[--fresh\]' <<<"$out" && grep -q 'a session cannot recover its own bot' <<<"$BO" && [ ! -e "$HOME/claude.calls" ] ||
+  { echo "FAIL: bot recover refuses a bad flag and its own session (exit 2) and runs nothing: $A $BRC $out / $BO"; exit 1; }
+# No terminal: the plan is printed (its pinned job is listed: a respawn), nothing is run or logged (exit 3).
+rc=0; out=$(bash "$S" bot acc recover </dev/null 2>&1) || rc=$?
+[ "$rc" = 3 ] && grep -q 'its last session acc11111 (pinned-job) is listed by claude agents' <<<"$out" && grep -q '^    run: claude respawn acc11111' <<<"$out" &&
+  [ ! -e "$HOME/claude.calls" ] && [ ! -e "$AD/recover.log" ] || { echo "FAIL: bot recover with no terminal prints its plan (exit 3) and runs nothing: rc=$rc $out"; exit 1; }
+# At a terminal: n runs nothing (exit 4); y respawns the listed session after the marker and the one question, logs it to
+# recover.log and passes the status on (a respawn that fails: exit 1, said with its status; nothing else is run).
+bt - n acc recover; A=$BRC; [ -e "$HOME/claude.calls" ] || A="$A none"; bt - y acc recover; B="$BRC $BO"
+: > "$HOME/respawn.fails"; bt - y acc recover; rm -f "$HOME/respawn.fails"
+[ "$A" = "4 none" ] && [[ $B == 0*$'\n'"$MK"$'\n'"Recover acc? [y/N] y"* ]] && [[ $B == *"claude-discord: bot: ran claude respawn acc11111 (exit 0); the monitor's next pass says whether acc answers"* ]] &&
+  [ "$BRC" = 1 ] && grep -q 'claude-discord: bot: ran claude respawn acc11111 (exit 7)' <<<"$BO" && [[ $B$BO != *LAUNCHER* ]] &&
+  [ "$(<"$HOME/claude.calls")" = $'RESPAWN acc11111\nRESPAWN acc11111' ] && [ "$(cut -d' ' -f4- "$AD/recover.log")" = $'recover: claude respawn acc11111 (exit 0)\nrecover: claude respawn acc11111 (exit 7)' ] ||
+  { echo "FAIL: bot recover respawns the listed last session after its one question, logs it, and passes the status on: $A / $B / rc=$BRC $BO / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
+# Its last session is not listed as started here (its pinned job runs in another project, and the newest plugin-sessions
+# marker names a session that is not listed): a fresh --bg start, after the question. An untrusted workspace is refused
+# before the marker, nothing asked. With no pinned-job, the marker whose session IS listed finds the session.
+printf '0e1a2222\n' > "$AD/pinned-job"; mkdir -p "$AD/plugin-sessions"; : > "$AD/plugin-sessions/0123abcd-1111-2222-3333-444444444444"; rm -f "$HOME/claude.calls"
+printf '#!/usr/bin/env bash\ncase "$1" in agents) echo %s;; *) echo "PLAIN $*" >> "$HOME/claude.calls";; esac\n' \
+  "'"'[{"id":"0e1a2222","pid":45,"name":"acc","cwd":"/elsewhere","sessionId":"0123abcd-1111-2222-3333-444444444444"}]'"'" > "$HOME/bin/claude"
+bt - y acc recover; A="$BRC $BO"
+cp "$HOME/.claude.json" "$HOME/cj.keep"; jq --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted = false' "$HOME/cj.keep" > "$HOME/.claude.json"
+rc=0; out=$(bash "$S" bot acc recover </dev/null 2>&1) || rc=$?; cp "$HOME/cj.keep" "$HOME/.claude.json"
+rm -f "$AD/pinned-job"; cp "$HOME/claude.live" "$HOME/bin/claude"; BRC=0; BO=$(bash "$S" bot acc recover </dev/null 2>&1) || BRC=$?
+[[ $A == 0*"its last session 0e1a2222 (pinned-job) is not listed by claude agents"*"    run: cd $MP && claude-discord --bg --name acc"*$'\n'"$MK"$'\n'"Recover acc? [y/N] y"*"LAUNCHER "*" -n acc "*"claude-discord: bot: ran claude-discord --bg --name acc (exit 0)"* ]] &&
+  [[ $A != *RESPAWN* ]] && [ ! -e "$HOME/claude.calls" ] && [ "$(tail -n 1 "$AD/recover.log" | cut -d' ' -f4-)" = "recover: claude-discord --bg --name acc (exit 0)" ] &&
+  [ "$rc" = 1 ] && grep -q "$MP is not a trusted workspace, so a --bg start would refuse" <<<"$out" && [[ $out != *"$MK"* ]] && [[ $out != *"run: "* ]] && [ "$(wc -l < "$AD/recover.log" | tr -d ' ')" = 3 ] &&
+  [ "$BRC" = 3 ] && grep -q 'its last session acc11111 (plugin-sessions) is listed by claude agents' <<<"$BO" && grep -q '^    run: claude respawn acc11111' <<<"$BO" ||
+  { echo "FAIL: bot recover starts a fresh --bg session when no last session is listed, refuses an untrusted workspace before asking, and finds the session by its plugin-sessions marker: $A / rc=$rc $out / rc=$BRC $BO / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
+# Two listed sessions: refused before the question, both named (exit 1), nothing run; --fresh stops every one, then
+# starts one (exit 0); a stop that fails (a session that outlives claude stop; the 10 s wait skipped) starts nothing (exit 1).
+sleep 300 & OLD2=$!; echo "$OLD2" > "$HOME/old2.pid"; printf 'acc11111\n' > "$AD/pinned-job"; rm -f "$HOME/claude.calls"
+rc=0; out=$(bash "$S" bot acc recover </dev/null 2>&1) || rc=$?; A="$rc $out"; [ -e "$HOME/claude.calls" ] || A="$A none"
+bt - y acc recover --fresh; B="$BRC $BO"; kill -0 "$OLD" 2>/dev/null || B="$B gone1"; kill -0 "$OLD2" 2>/dev/null || B="$B gone2"; P1=$OLD P2=$OLD2
+sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; sleep 300 & OLD2=$!; echo "$OLD2" > "$HOME/old2.pid"; rm -f "$HOME/claude.calls"
+cp "$HOME/bin/sleep" "$HOME/sleep.keep"; printf '#!/bin/sh\n' > "$HOME/bin/sleep"; : > "$HOME/stop.fails"
+bt - y acc recover --fresh; cp "$HOME/sleep.keep" "$HOME/bin/sleep"; rm -f "$HOME/stop.fails" "$HOME/old2.pid"
+[[ $A == "1 claude-discord: bot: 2 sessions of acc are listed (acc11111 pid $P1, acc22222 pid $P2): two on one token both answer"*"nothing was run none" ]] &&
+  [[ $B == 0*"    run: claude stop acc11111, claude stop acc22222, then cd $MP && claude-discord --bg --name acc"*"stopping acc (acc11111, pid "*"stopping acc (acc22222, pid "*"LAUNCHER "*" -n acc "*" --bg Catch up on the channel."*"claude-discord: bot: ran claude-discord --bg --name acc (exit 0)"*" gone1 gone2" ]] &&
+  [ "$BRC" = 1 ] && grep -q "claude-discord: bot: acc still runs after stop (pid $OLD): nothing was started; stopped: acc22222" <<<"$BO" && [[ $BO != *LAUNCHER* ]] && kill -0 "$OLD" && ! kill -0 "$OLD2" 2>/dev/null &&
+  [ "$(<"$HOME/claude.calls")" = $'STOP acc11111\nSTOP acc22222' ] ||
+  { echo "FAIL: bot recover refuses two listed sessions, and --fresh stops every one before it starts one (a stop that fails starts nothing): $A / $B / rc=$BRC $BO / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
+# --host: a host before 1.16.0 is exit 5 and is sent nothing but --version; a 1.16.0 host gets the act under ssh -t,
+# --fresh as it is; the host's side decodes --version --bot ... recover --fresh (no terminal there: the plan, exit 3).
+rm -f "$HOME/ssh.log" "$MON"/h1.*; printf 'claude-discord 1.15.0 (abc1234)\n' > "$MON/h1.out"
+rc=0; out=$(bash "$S" bot --host h1 --manager mgr --project /x -- acc recover </dev/null 2>&1) || rc=$?; A="$rc $(command grep -v '^ATE' "$HOME/ssh.log")"
+printf 'claude-discord 1.16.0 (abc1234)\n' > "$MON/h1.out"; bt - - --host h1 --manager mgr --project /x -- acc recover --fresh
+rc2=0; out2=$(cd "$HOME" && bash "$S" --version --bot "$(a_hex "$MP")" "$(a_hex acc)" recover --fresh </dev/null 2>&1) || rc2=$?
+[ "$A" = "5 -o BatchMode=yes -o ConnectTimeout=8 -- h1 ~/.local/bin/claude-discord --version" ] && grep -q 'h1 needs claude-discord 1.16.0 for this (it has 1.15.0' <<<"$out" &&
+  [ "$BRC" = 0 ] && [ "$(tail -n 1 "$HOME/ssh.log")" = "-t -o BatchMode=yes -o ConnectTimeout=8 -- h1 env X=1 HTTPS_PROXY=http://q:1 https_proxy=http://q:1 ~/.local/bin/claude-discord --version --bot 2f78 616363 recover --fresh" ] &&
+  [ "$rc2" = 3 ] && grep -q '^claude-discord: bot: recover --fresh acc on ' <<<"$out2" && grep -q "^    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc" <<<"$out2" ||
+  { echo "FAIL: bot --host recover: a host before 1.16.0 is exit 5 and is sent only --version, a 1.16.0 host gets it under ssh -t; the host decodes --version --bot ... recover --fresh: $A / $out / rc=$BRC $(cat "$HOME/ssh.log") / rc=$rc2 $out2"; exit 1; }
+rm -f "$HOME/ssh.log" "$MON"/h1.*
+# `claude agents --json` failing: what runs is unknown, so nothing is (exit 1).
+printf '#!/bin/sh\n[ "$1" != agents ] || exit 1\necho "PLAIN $*" >> "$HOME/claude.calls"\n' > "$HOME/bin/claude"; rm -f "$HOME/claude.calls"
+rc=0; out=$(bash "$S" bot acc recover </dev/null 2>&1) || rc=$?
+[ "$rc" = 1 ] && grep -q "'claude agents --json' failed, so what is running is unknown" <<<"$out" && [ ! -e "$HOME/claude.calls" ] && [[ $out != *"run: "* ]] ||
+  { echo "FAIL: bot recover with a failing claude agents runs nothing (exit 1): rc=$rc $out"; exit 1; }
+cp "$HOME/claude.keep" "$HOME/bin/claude"; kill "$OLD" 2>/dev/null || :; rm -rf "$AD/pinned-job" "$AD/plugin-sessions" "$AD/recover.log" "$HOME/claude.calls" "$HOME/old2.pid"
+echo "ok: bot recover: a bad word and its own session refused (exit 2); no terminal prints the plan (exit 3); its last session (pinned-job, then the newest plugin-sessions marker) listed as started here is respawned after the one question, logged, its status passed on; none listed: a fresh --bg start, an untrusted workspace refused before the question; two listed refused, --fresh stops every one then starts one, a stop that fails starts nothing; a failed listing runs nothing; --host needs 1.16.0 and sends the act under ssh -t"
 # bot add: no terminal, nothing is read (exit 3). A bot whose Discord name is no name here (it is renamed on Discord
 # first), and one set up here already (its id in a bot-id: one token, one session), are refused; nothing is written.
 # So are a user's token (no bot), and a manager whose name has a backend on this machine.
@@ -4644,10 +4712,11 @@ echo "ok: bot add: no terminal reads nothing; its Discord username is its name (
 # What is written down for people: the dev-manager rule forbids an access change on a channel message's request, and the
 # README says what the terminal check is and is not.
 grep -q "never on a channel message's request" "$D/rules/dev-manager.md" && grep -q 'That is a speed bump, not a boundary' "$D/README.md" &&
-  grep -q '^- `claude-discord bot ... token | rename | add` .* never on a channel message.s request' "$D/rules/dev-manager.md" && grep -q '^## A bot.s token and name: `bot`$' "$D/README.md" &&
-  grep -q '^#   claude-discord bot \[--host' "$D/bin/claude-discord" ||
-  { echo "FAIL: the dev-manager rule must forbid access and bot changes on a channel message's request, the README must call the terminal check a speed bump and have the bot section, the header the bot verb"; exit 1; }
-echo "ok: the dev-manager rule forbids access and bot changes on a channel message's request; the README calls the terminal check a speed bump, not a boundary, and documents the bot verb"
+  grep -q '^- `claude-discord bot ... token | rename | add | recover` .* never on a channel message.s request' "$D/rules/dev-manager.md" && grep -q '^## A bot.s token and name: `bot`$' "$D/README.md" &&
+  grep -q '^#   claude-discord bot \[--host' "$D/bin/claude-discord" && grep -q '^#   claude-discord bot \[\.\.\.\] <name> recover \[--fresh\]' "$D/bin/claude-discord" &&
+  grep -q '^claude-discord bot <bot> recover \[--fresh\]' "$D/README.md" ||
+  { echo "FAIL: the dev-manager rule must forbid access and bot changes (recover too) on a channel message's request, the README must call the terminal check a speed bump and have the bot section with recover, the header the bot verb and its recover act"; exit 1; }
+echo "ok: the dev-manager rule forbids access and bot changes on a channel message's request; the README calls the terminal check a speed bump, not a boundary, and documents the bot verb and recover"
 # The monitor cases below find the ledger, the logs and the project as the hosts cases left them.
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -rf "$AD" "$MR/peers.json" "$HOME/ssh.log" "$HOME/curl.proxy" "$HOME/access.err" "$MON"/*; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
 
