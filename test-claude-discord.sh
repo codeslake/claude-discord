@@ -2336,6 +2336,11 @@ out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"Dong, pleas
 [ "$(reason <<<"$out")" = "$REASON_A" ] || { echo "FAIL: naming a peer without its mention must be denied: $out"; exit 1; }
 out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"dong에게 리뷰 부탁"}}')
 [ "$(reason <<<"$out")" = "$REASON_A" ] || { echo "FAIL: a peer name followed by Korean text is still a name: $out"; exit 1; }
+# X10: the named-peer deny is the hook's whole output, even when a later check would deny too (a bare id here): two
+# JSON objects on stdout are no decision.
+out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"Dong, please review 12345678901234567"}}')
+[ "$(printf '%s\n' "$out" | jq -c . 2>/dev/null | wc -l | tr -d ' ')" = 1 ] && [ "$(reason <<<"$out")" = "$REASON_A" ] ||
+  { echo "FAIL: a named-peer deny is exactly one JSON object on stdout: $out"; exit 1; }
 out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"<@900> dong, please review"}}')
 [ -z "$out" ] || { echo "FAIL: naming a peer with its mention must pass silently: $out"; exit 1; }
 out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"<@!900> dong, please review"}}')
