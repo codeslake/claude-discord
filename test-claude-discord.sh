@@ -4714,9 +4714,9 @@ echo "ok: bot add: no terminal reads nothing; its Discord username is its name (
 grep -q "never on a channel message's request" "$D/rules/dev-manager.md" && grep -q 'That is a speed bump, not a boundary' "$D/README.md" &&
   grep -q '^- `claude-discord bot ... token | rename | add | recover` .* never on a channel message.s request' "$D/rules/dev-manager.md" && grep -q '^## A bot.s token and name: `bot`$' "$D/README.md" &&
   grep -q '^#   claude-discord bot \[--host' "$D/bin/claude-discord" && grep -q '^#   claude-discord bot \[\.\.\.\] <name> recover \[--fresh\]' "$D/bin/claude-discord" &&
-  grep -q '^claude-discord bot <bot> recover \[--fresh\]' "$D/README.md" ||
-  { echo "FAIL: the dev-manager rule must forbid access and bot changes (recover too) on a channel message's request, the README must call the terminal check a speed bump and have the bot section with recover, the header the bot verb and its recover act"; exit 1; }
-echo "ok: the dev-manager rule forbids access and bot changes on a channel message's request; the README calls the terminal check a speed bump, not a boundary, and documents the bot verb and recover"
+  grep -q '^claude-discord bot <bot> recover \[--fresh\]' "$D/README.md" && grep -q '^`F` (1.16.0): `f` recovers the selected bot' "$D/README.md" ||
+  { echo "FAIL: the dev-manager rule must forbid access and bot changes (recover too) on a channel message's request, the README must call the terminal check a speed bump and have the bot section with recover and the TUI's f and F, the header the bot verb and its recover act"; exit 1; }
+echo "ok: the dev-manager rule forbids access and bot changes on a channel message's request; the README calls the terminal check a speed bump, not a boundary, and documents the bot verb, recover and the TUI's f and F"
 # The monitor cases below find the ledger, the logs and the project as the hosts cases left them.
 printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -rf "$AD" "$MR/peers.json" "$HOME/ssh.log" "$HOME/curl.proxy" "$HOME/access.err" "$MON"/*; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
 

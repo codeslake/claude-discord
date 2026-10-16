@@ -581,7 +581,8 @@ claude-discord bot <bot> recover [--fresh]   # a down bot brought back: its last
 asked once a day (kept in `<bot dir>/discord-name`). The TUI shows a bot whose
 two names differ with `≠ Discord: <name>`; `=` on that row renames it here to
 Discord's name (Discord is not asked to change). In the TUI, `n` renames,
-`t` replaces the token and `a` on the Bots tab adds a bot, each through this
+`t` replaces the token, `a` on the Bots tab adds a bot and `f` / `F` recover
+one or every down or stuck bot, each through this
 verb on a pseudo-terminal the TUI holds: the token goes from a masked field
 (never copied, emptied when taken) to the command's hidden prompt only. The
 TUI's title line names the claude-discord version it runs; a renamed bot's
@@ -1441,7 +1442,24 @@ none of the counts; opened, the row says `last seen <status> <N> ago`), then
 `working` and `ok`, then `no token`; by bot name, then host, within each.
 A problem row has its recovery command on a line of its own under it, and `c`
 copies it (OSC 52, so over ssh too, in a terminal that allows it; no other
-row has one to copy). `space` opens a row, and several may be
+row has one to copy). On a `down` or `STUCK` row the line also names `f` and
+`F` (1.16.0): `f` recovers the selected bot through `claude-discord bot <bot>
+recover` (`recover --fresh` for a stuck one) on the bot's host, run at once on
+a pseudo-terminal the TUI holds; the host decides what runs (`claude respawn`
+of the bot's last session while `claude agents` still lists it, else `--bg
+--name`; `--fresh` stops every listed session first), prints it, and its one
+question is the popup: `y` runs it, `n` or `esc` runs nothing. `F` lists every
+row `f` would take, in the table's order (the problem rows it refuses are
+listed as skipped), asks once, runs them one after the other, answering each
+command's own question itself, runs to the end, lists `✓ <bot>` and `✕ <bot>
+(exit N)` with the command's last lines, and asks the monitor for one pass;
+`esc` before a run's `y` stops it and skips the rest, after a `y` the run is
+waited for. Neither changes the row: the next pass says whether the bot
+answers (a respawned worker may sit idle until the next message). `f` refuses
+every other row with a notification: `DUPLICATE` (which copy to stop is
+yours), `UNREACHABLE` (the token), a warning, a bot with no token, and a bot
+of a host the last pass could not reach. A host before 1.16.0 answers exit 5
+and is sent nothing but `--version`. `space` opens a row, and several may be
 open: the status column gains the reason and `posted Nm ago`, `not posted
 yet` or `not posted (warning only)`; the channel column every channel of the
 bot's `access.json` (by name, `#<id>` for one health has no name for; the manager's own row adds
@@ -1632,7 +1650,8 @@ rest of Claude Code.
 | `refresh` says `handoff.md is missing or empty` | the session did not write it; ask it to, or pass `--force` |
 | `refresh` says `<dir> is not a trusted workspace` | `claude --bg` refuses to start in a workspace whose trust was never accepted, and the foreground path does not, so a bot moved to the background with `/bg` can run for weeks without meeting that gate. Run `claude` in the project once and accept the prompt, then retry; `--force` refreshes anyway. The check reads `hasTrustDialogAccepted` and fails **open**, so anything but an explicit `false` proceeds |
 | `refresh` says `start failed, so <bot>'s handoff was put back` | the fresh session did not come up (the line above it says why). The launch consumes `handoff.md` before starting claude, so it is moved back and the retry is not refused for want of one |
-| `claude-discord health: <bot> stale — ... hooks or its turn are stuck` | the plugin server is up and the bot still is not answering: the hooks died (see the upgrade row above) or a turn is wedged. `claude-discord refresh <bot> --force` |
+| `claude-discord health: <bot> down` / `[down] <bot>` in `#bot-health-check` | no plugin server for the bot: its session is gone or its worker died. The pasted fix is `cd <project> && claude-discord --bg --name <bot>`; `claude-discord bot <bot> recover` (the TUI's `f` on the row) respawns the bot's last session instead when `claude agents` still lists it (its conversation kept), and starts a fresh one only otherwise |
+| `claude-discord health: <bot> stale — ... hooks or its turn are stuck` | the plugin server is up and the bot still is not answering: the hooks died (see the upgrade row above) or a turn is wedged. `claude-discord refresh <bot> --force`; or `claude-discord bot <bot> recover --fresh` (the TUI's `f` on the row), which is the same stop-then-start with the plan shown first |
 | `claude-discord health: <bot> duplicate` | two plugin servers share one token, so every reply is sent twice. `/bg` from a foreground session and a fleet spare both respawn a session without going through the wrapper. `claude agents` lists them; stop the one that is not the bot's |
 | `claude-discord health: <bot> unreachable` | Discord answered 401 or 403: the token was refused, or the bot cannot read the channel. Check `DISCORD_BOT_TOKEN` in `<bot>/.env` and the bot's channel permissions |
 | `claude-discord health: <bot> throttled` / `apierror` | Discord rate-limited (429) or did not answer (000, 5xx). The token was *not* rejected, so nothing is said about the bot this run — these are deliberately not reported as a credential problem |

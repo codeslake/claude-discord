@@ -66,8 +66,27 @@ plain variable (a local is gone in an EXIT trap after an `exit` from a sourced
 file). A lib that is not beside the wrapper is refused by name. The suite lints
 `bin/lib/*.sh` too and runs `bot` through the project's directory link, the
 shim and from another cwd. Done first because lmd42's serial suite time
-reached 38.5 s at the 1.14.1 verification (the trigger agreed for 1.14.1). The
-recovery keys `f`/`F` are next.
+reached 38.5 s at the 1.14.1 verification (the trigger agreed for 1.14.1).
+
+1.16.0 (2026-10-16, plan `docs/superpowers/plans/2026-10-16-recover-1.16.0.md`,
+the owner's six decisions 00:29Z): the recovery keys. `f` recovers the selected
+`down` or `stale` bot and `F` every one, through one new act of the `bot` verb,
+`claude-discord bot <bot> recover [--fresh]`, which decides on the bot's host:
+`claude respawn <id>` of its last session (pinned-job, then the newest
+plugin-sessions marker, then live_sessions) while `claude agents --json` lists
+it as started in the project, else `--bg --name`; two or more listed are
+refused; `--fresh` (stale) stops every listed session first, as `refresh
+--force`. It prints its plan with the `run:` line, asks once after the marker,
+passes the command's status on, appends a line to `<bot dir>/recover.log`,
+and never waits for the plugin server: the row changes at the monitor's next
+pass, which the TUI asks for. `F` asks once in its own popup, answers each
+run's CLI question itself, runs to the end and lists `✓`/`✕` per bot with the
+command's last lines; esc before a y stops the run and skips the rest. `f`
+refuses every other verdict and a cut-off host. The monitor's fix lines and
+the alert text are unchanged (mixed versions: a host at 1.15.0 would fail the
+pasted `bot ... recover`); `--host` needs 1.16.0 for this act (exit 5 below).
+Task 0 (the owner's yes) measured `claude respawn`: same id and sessionId, a
+new pid, hooks run again, 0.8 s; `No job matching` exit 1 for an unknown id.
 
 ## Owners' requirements (quoted)
 
@@ -194,10 +213,9 @@ symbol + word + colour.
 
 ## Next after 1.13.0
 
-- Recovery fix keys: `f` (one bot) and `F` (several): show the commands, ask
-  once, run; a batch runs to the end and lists failures. `down` prefers
-  `claude respawn <id>` when the bot's last session (plugin-sessions) is still
-  in `claude agents`, else `--bg --name`.
+- Recovery fix keys `f`/`F`: shipped in 1.16.0 (above).
+- The posted fix line (the monitor's alert text) -> `claude-discord bot <bot>
+  recover [--fresh]`, once every host is at 1.16.0 (decision 5 of 1.16.0).
 - Manager band (task #22): backend status above the prompt of a manager
   session.
 - Decided 20:02Z (option A, in 1.10.3): every bot session on the machine,
