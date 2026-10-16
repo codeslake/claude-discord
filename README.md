@@ -186,18 +186,17 @@ On each machine, once:
    untrusted project, a `/reload-plugins` not yet run) keeps its old hooks.
 3. `claude-discord --version` and `claude-discord health` confirm.
 
-A settings file the plugin never edits keeps its old entries: a symlinked
-`settings.json` (a dotfiles repo, say) and the user-global
-`~/.claude/settings.json`. In a session the plugin runs in they exit at once,
-but the first event of every new session still runs them once beside the
-plugin's. `setup` names such a file with the command that removes the entries
-by hand (`bash <plugin>/hooks/lib/old-hooks.sh <file>...`; for a symlink it
-renames a new copy over the target, so the link stays); commit the change
-where that file lives. **Those entries still serve every bot on this machine,
-and on every machine sharing that file (a dotfiles repo), whose plugin is not
-loaded yet:** removing them early silently takes ✅, mention-guard, edit-gate
-and thread-guard from those bots. Run the command only once each of them has a
-`<bot dir>/plugin-sessions/` marker.
+A settings file the plugin never edits (a symlinked `settings.json`, in a
+dotfiles repo say, and the user-global `~/.claude/settings.json`) kept its old
+entries until 1.17.0, and the first event of every new session ran them once
+beside the plugin's (on lmd79, the dev-manager rule was injected twice at every
+start). Since 1.17.0 `setup` and `update` (its `compat` step) take them out of
+those files: the user-global one, and a symlinked `settings.json` or
+`settings.local.json` of this project and of every recorded one, through the
+link (a new copy is renamed over the target, so the link stays; commit the
+change where that file lives). On every machine sharing such a file the entries
+go too. A file that is not JSON or not writable is named and left; `bash
+<plugin>/hooks/lib/old-hooks.sh <file>...` removes the entries by hand.
 
 For this release `~/.claude-discord/hooks/{turn,peers,lib,autoresearchclaw}`,
 `hooks/tools/*` and the two `.ts` files stay as links, so a project not yet
@@ -679,6 +678,19 @@ of `rm` calls; the next start takes the next 20. Both `claude agents --json
 `CLAUDE_DISCORD_LAUNCHER`: they are local daemon bookkeeping and start no
 session.
 
+The same listing sweeps the files the hooks leave per session (1.17.0): a
+start removes its bot's `plugin-sessions/<sid>` and `turns/<sid>*`, and the
+project's `checkin/<sid>`, for every session id that no row of `claude agents
+--json --all` names (as its `sessionId` or its `id`). Stopped and done rows are
+listed, so their files stay; a `claude -p` run from a bot's Bash left one marker
+each, and one bot dir had 633 of them. Only in a bot dir this daemon can see,
+one whose name or pinned job the listing has: the other side of a shared home
+(a container and its host) lists none of the other's sessions, so it sweeps
+nothing of them; `checkin/` only when every bot of the project is seen. A
+listing that failed or is no array sweeps nothing. `claude-discord update`
+(its `compat` step) sweeps every bot of every recorded project the same way,
+with one listing.
+
 ## Expected behaviour
 
 - In the channel, `@alpha do X` reaches session alpha only. A reply to one of
@@ -741,27 +753,63 @@ session.
 
 A message that arrives over Discord should be answered through the discord
 reply tool only, not also typed into the CLI (that would waste a reply on a
-channel nobody types into). Four hooks handle that, plus identity, a
+channel nobody types into). The hooks handle that, plus identity, a
 "refresh" handoff trigger, and a ✅ (replied) or ☑️ (no reply) reaction at the end of a turn.
-The plugin's `hooks/hooks.json` registers all nine, each as
-`"${CLAUDE_PLUGIN_ROOT}/hooks/<topic>/<name>"` with no shell wrapper; no hook
-entry is written into a project's settings files. Scripts live
-under `hooks/<topic>/<name>` (paths below are relative to `hooks/`);
-`lib/discord.sh` and the scripts in `tools/` are not registered:
-the first is sourced by every script below, the others are run by the
-session (see Modes and Expected behaviour above).
+The plugin's `hooks/hooks.json` registers seven, each as
+`"${CLAUDE_PLUGIN_ROOT}/hooks/<topic>/<name>"` with no shell wrapper, and one
+process per event and matcher (1.17.0 merged `peers/checkin` into
+`turn/on-reply` and `peers/mention-guard` into `peers/thread-guard`: a reply
+ran two processes on each side before); no hook entry is written into a
+project's settings files. Scripts live under `hooks/<topic>/<name>` (paths
+below are relative to `hooks/`); `lib/discord.sh` and the scripts in `tools/`
+are not registered: the first is sourced by every script below, the others are
+run by the session (see Modes and Expected behaviour above).
 
-| Event | Matcher | Script | What |
-|---|---|---|---|
-| UserPromptSubmit | | `turn/on-prompt` | On a Discord turn (a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag), records that tag's chat_id/message_id/user_id for `on-stop` and `mention-guard` and the sender's display name per id in `user-names` (it labels that id in the People line) (only the leading tag is trusted: the plugin does not escape `<` in message text, so anything after it could be forged; a message arriving mid-turn comes as a prompt of its own and is appended) and, once per session (see below), adds an additionalContext entry with the bot's identity, the mention rule, the thread rule, the orchestrator rule and a People line (every id the channel lets in, from `access.json`, config.env's owner and the 20 who wrote here most recently (`user-names`), as `<@id>`, named once that id has written), so a bot can call a person who is not in the turn; silent on a plain CLI turn and on a second-or-later turn in an already-primed session. A message that is exactly "refresh" (case-insensitive, mentions stripped, trimmed) also appends handoff instructions pointing at `claude-discord refresh <bot>` -- every time, primed or not. |
-| PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Marks that this turn actually sent a Discord reply. |
-| Stop | | `turn/on-stop` | Never blocks a turn: a session has read a Discord message the moment it receives it. Reacts on every message `on-prompt` recorded for the turn: ✅ if the turn sent a reply (`thread start` or a closing line counts) after the message was recorded, else ☑️ (read, no reply; `on-reply` writes the turn's message count into `.replied`, so a message that arrived after the last reply gets ☑️). ☑️ cannot tell "nothing was owed" from "the answer went only to the terminal", so a person who sees ☑️ and expected an answer should ask again. Then clears the per-turn files. |
-| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Runs `claude-discord patch` (a respawn, or an auto-update of the official plugin since the last start, is covered), and gives the session `CLAUDE_DISCORD_TOOLS=<path>` as additionalContext, plus `rules/dev-manager.md` for a dev-manager bot. After a compact or `/clear`, clears the per-session "primed" flag, so the next Discord turn injects the identity context again. At a startup or resume, clears the per-turn files a turn whose Stop never ran (an interrupt, a kill) left behind, keeping the primed flag (a resumed conversation still holds that context), then pins a background session's job (see Background sessions below). |
-| PreToolUse | `mcp__plugin_discord_discord__reply` | `peers/mention-guard` | dev-manager only. Denies a reply that names a peer (a whole word, case-insensitive) without its `<@bot_id>` or `<@!bot_id>`, or that answers a peer without mentioning it: the author of the message in `reply_to` when that is set, else of the turn's last message. A bot only receives messages that mention it. |
-| PostToolUse | `mcp__plugin_discord_discord__reply` | `peers/checkin` | dev-manager only. A reply that mentions a peer (`<@bot_id>` or `<@!bot_id>`) touches `.claude/discord-agents/checkin/<session_id>`. |
-| PreToolUse | `mcp__plugin_discord_discord__reply\|mcp__plugin_discord_discord__edit_message` | `peers/thread-guard` | Every bot; an edit is checked like a reply, since it puts text in Discord too. A turn with no Discord message in it may post (it was denied until 2026-10-07). First denies a mirror line that opens with an arrow and a session or bot name (`-> name:`, `<- name:`; a Korean label such as `-> 수정:` is prose), every bot: it says `[sent to name]` or `[received from name]`. No bare ids: a 17-20 digit number outside code, a mention, a URL or a word (a file name) denies the reply, naming each one, with no lookup: the bot that wrote it knows what it is and rewrites it as `<#id>` (a channel or thread, its name linked), plain `@name` (a user or bot it only names; it pings nobody), `<@id>` (one who must answer or decide) or the number in backticks (shown as is). Discord renders no markdown table, so a table outside a fenced code block is rewritten into a fenced code block with its columns aligned by display width (a Korean character counts 2), alignment colons honoured and `**`, `__` and backticks stripped from the cells; a table with a line over 72 columns (a guess at a phone's code-block width) becomes one `header: value · ...` line per row instead, also in a fenced code block. The reply goes out through `updatedInput`, the whole input with only `text` changed. Then, for every bot but autoresearchclaw, whose rule posts one report per iteration in the channel: denies a reply to the CHANNEL (a `chat_id` equal to the bot's channel; a thread has an id of its own) longer than 500 characters once converted, counted in characters and not bytes, so the long text goes in the request's thread and the channel keeps one line. |
-| PreToolUse | `Edit\|Write\|MultiEdit` | `peers/edit-gate` | dev-manager only. Denies an edit under a path whose realpath contains `/claude-discord/` unless the session checked in within the last 60 minutes; an allowed edit renews the check-in. Paths git ignores (a bot's state such as the refresh `handoff.md`, `.superpowers/`) pass. Bash and git edits are not seen; the rule asks for the same announcement by hand. |
-| SessionStart | `startup\|resume\|compact\|clear` | `autoresearchclaw/on-start` | autoresearchclaw only. Prints the plugin's `rules/autoresearchclaw.md` as the session's additionalContext (nothing when the file is missing); starts no process. See AutoResearchClaw reports above. |
+The tables are grouped by purpose, so a script that does two jobs has a row in
+each. "Context cost" is what the hook puts into the session's context, measured
+on lmd79 (2026-10-16, 51 transcripts with bot traffic, 814 Discord turns; all
+hook text is ASCII, so tokens are about bytes / 4). A hook's additionalContext
+and a deny reason are rows appended to the conversation after the cached
+prompt prefix: they cost their bytes once and invalidate no prompt cache
+(https://code.claude.com/docs/en/prompt-caching). "Who" says which bots a hook
+acts for: every bot, or only some.
+
+#### Turn bookkeeping
+
+| Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
+|---|---|---|---|---|---|---|
+| UserPromptSubmit | | `turn/on-prompt` | Why: `on-stop` reacts on the messages a turn received, `thread-guard` needs the turn's last sender, health needs what was delivered. When: a Discord turn, a prompt that opens with the plugin's `<channel source="plugin:discord:discord" ...>` tag (only the leading tag is trusted: the plugin does not escape `<` in message text); a message arriving mid-turn comes as a prompt of its own. | Appends `chat_id message_id user_id` to `turns/<sid>`, writes `last-message-id`, the sender's display name per id in `user-names` (the 20 most recent; `< > @ " ( ) ,` dropped, 32 characters kept), and every delivered message id in `delivered` (200 kept). Silent on a plain CLI turn. | 0 B | every bot |
+| PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Why: ✅ means the turn answered. When: after each reply. | Writes the turn's recorded message count into `turns/<sid>.replied`: a message recorded after the last reply gets ☑️. | 0 B | every bot |
+| Stop | | `turn/on-stop` | Why: a person sees the message was read, and whether it was answered. When: the end of every turn; never blocks one (a session has read a Discord message the moment it receives it). | Reacts on every message `on-prompt` recorded for the turn (a detached `curl`, the token on its stdin): ✅ if a reply (a `thread start` or a closing line counts) came after it, else ☑️ (read, no reply: "nothing was owed" and "the answer went only to the terminal" look the same, so ask again if you expected an answer). Then removes `turns/<sid>` and its `.replied`. | 0 B | every bot |
+
+#### Identity and rules context
+
+| Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
+|---|---|---|---|---|---|---|
+| UserPromptSubmit | | `turn/on-prompt` | Why: the session must know which bot it is, how to answer and whom it can reach. When: the first Discord turn of a session, and again after a compaction or `/clear` (`on-session-start` removes the key) or when the text changes (mode, channel, people, peers, an update); a message that is exactly "refresh" (case-insensitive, mentions stripped) every time. | additionalContext: the bot's identity and channel, the mention rule, the thread rule, the orchestrator rule, and a People line (every id the channel lets in, from `access.json`, config.env's owner and `user-names`, as `<@id>`, named once that id has written, **in id order**: until 1.17.0 the order followed the latest writer and two people taking turns re-sent the text at every message); a dev-manager also gets its Peers line and working rule. The key it was sent under is `turns/<sid>.primed`. On "refresh": handoff instructions pointing at `claude-discord refresh <bot>`. | ~1.2 KB per injection (358-1,617 B, mean 1,243): 107 injections over 814 Discord turns, 41 of them only a People-line reorder (fixed in 1.17.0) | every bot; Peers line: dev-manager |
+| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Why: the tools' path, and a dev-manager's rules, are not in the prompt. When: every start, resume, compaction and `/clear`. | additionalContext `CLAUDE_DISCORD_TOOLS=<path>`, plus `rules/dev-manager.md` for a dev-manager. After a compaction or `/clear` it removes `turns/<sid>.primed`, so the next Discord turn injects the identity again. | 62 B per source; a dev-manager 5,756 B per source | every bot; the rule: dev-manager |
+| SessionStart | `startup\|resume\|compact\|clear` | `autoresearchclaw/on-start` | Why: the report rule of AutoResearchClaw reports (above). When: every source. | additionalContext `rules/autoresearchclaw.md` (nothing when the file is missing); starts no process. | 3,103 B per source (no such bot on lmd79) | autoresearchclaw bots |
+
+#### Reply guards
+
+| Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
+|---|---|---|---|---|---|---|
+| PreToolUse | `mcp__plugin_discord_discord__reply\|mcp__plugin_discord_discord__edit_message` | `peers/thread-guard` | Why: what reaches Discord follows the channel's rules. When: before every reply and every edit (an edit puts text in Discord too); a turn with no Discord message in it may post. | Denies, in this order: a mirror line that opens with an arrow and a name (`-> name:`, `<- name:`; a Korean label such as `-> 수정:` is prose); a reply without `reply_to` that answers a bot (the turn's last recorded sender, a `peers.json` id or one Discord says is a bot, cached in `user-kinds`) mentioning nobody; a bare 17-20 digit id outside code, a mention, a URL or a word (write `<#id>`, plain `@name`, `<@id>` or the number in backticks). Rewrites a markdown table outside a code block into an aligned code block (display width; a line over 72 columns becomes one `header: value · ...` line per row) through `updatedInput`, the whole input with only `text` changed; a table with unpaired ``` (or no python3) is denied. Denies a reply to the channel itself (a thread has its own `chat_id`) over 500 characters once converted. | 0 B unless it denies: 93 B (answering a bot), 184 B (over 500 characters) | every bot; the 500 rule: not an autoresearchclaw bot, and only with a channel |
+
+#### Peer coordination
+
+| Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
+|---|---|---|---|---|---|---|
+| PreToolUse | `mcp__plugin_discord_discord__reply` (an edit is not held to it) | `peers/thread-guard` | Why: a bot only receives messages that mention it (`<@bot_id>` or `<@!bot_id>`). When: before a reply (mention-guard's work until 1.17.0). | Denies a reply without `reply_to` that answers a peer (the turn's last recorded sender) mentioning nobody, naming the peer and its mention; then a reply that names a peer (a whole word, case-insensitive; self skipped) without its mention. | 0 B unless it denies: 93 B | dev-manager with a `peers.json` |
+| PostToolUse | `mcp__plugin_discord_discord__reply` | `turn/on-reply` | Why: `edit-gate` lets a session change claude-discord only after it told its peers. When: after a reply (checkin's work until 1.17.0). | Touches `.claude/discord-agents/checkin/<sid>` when the reply mentions a peer. | 0 B | dev-manager with a `peers.json` |
+| PreToolUse | `Edit\|Write\|MultiEdit` | `peers/edit-gate` | Why: peers sharing a codebase hear of a change before it lands. When: before an edit tool. | Denies an edit whose realpath contains `/claude-discord/` and that git does not ignore, unless `checkin/<sid>` was touched within 60 minutes; an allowed edit renews it. Paths git ignores (a bot's state, a refresh `handoff.md`, `.superpowers/`) pass. Bash and git edits are not seen; the rule asks for the same announcement by hand. | 0 B unless it denies: 145 B | dev-manager; denies only in the claude-discord project |
+
+#### Session upkeep
+
+| Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
+|---|---|---|---|---|---|---|
+| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Why: a respawn or an auto-update of the official plugin since the last start, a turn whose Stop never ran, a daemon that would retire an idle bot, a manager's backend killed by a restart. When: every source; the patch, the clean-up and the pin at startup and resume only. | Runs `claude-discord patch --compat` (a failure goes to `health.log`); clears the per-turn files a turn whose Stop never ran left behind, keeping the primed key; pins a background session's job (`~/.claude/jobs/pins.json` and `pinned-job`, see Background sessions); starts a dev-manager's keeper when none runs and its owner did not stop it. | 0 B | every bot; the keeper: dev-managers with a hosts ledger |
+| UserPromptSubmit | | `turn/on-prompt` | Why: as above, a backend killed by a restart comes back with the first bot that wakes. When: every prompt. | Starts a dev-manager's keeper when none runs (builtins only when all run: no fork on Linux). | 0 B | every bot (the keepers of this machine's managers) |
 
 Which plugin runs them:
 
@@ -778,14 +826,10 @@ Which plugin runs them:
   worktree of that project (a bot started with `--worktree`) is. Only then
   does a hook run `git worktree list`: a session in the project itself forks
   nothing for this, and a `git` that fails (a `$HOME` project that is no repo)
-  means not the bot. The
-  four `turn/` hooks and `peers/thread-guard` are for every bot; `mention-guard`,
-  `checkin` and `edit-gate` do nothing in a session whose bot is not a
-  dev-manager, and also nothing without `peers.json`; `thread-guard` guards
-  every channel reply but an autoresearchclaw bot's; `autoresearchclaw/on-start`
-  does nothing for a bot in another mode. `on-prompt` also records each
-  message's sender (`user_id`) for `mention-guard`, and gives a dev-manager its
-  peers' mentions and the working rule once per session.
+  means not the bot. Which bots each hook acts for is its row's "Who" above:
+  the peer checks of `thread-guard` and `on-reply` and all of `edit-gate` do
+  nothing in a session whose bot is not a dev-manager, and also nothing
+  without `peers.json`.
 - Hooks, tools and the launcher resolve their real directory (`cd -P`,
   `readlink -f`) instead of trusting `${CLAUDE_PLUGIN_ROOT}`, which is why the
   link method works.
@@ -793,7 +837,8 @@ Which plugin runs them:
   release registered in the project (the entries under
   `.claude/discord-agents/hooks/` in a regular `settings.json` and
   `settings.local.json`, and the `claude-discord-*.md` rule files); `setup` and
-  a start remove nothing (see Migrating). Every other key and hook in either
+  a start remove none of these (`setup` and `update` take the entries only out
+  of the user-global and symlinked settings files, see Migrating). Every other key and hook in either
   file stays, and a `hooks` key left empty is dropped. `.claude/discord-agents/hooks` in the project stays a symlink to the
   plugin's `hooks/` for this release (a peer's committed settings may still
   name it; the next release removes it). To switch the hooks off, uninstall the
@@ -825,6 +870,22 @@ boilerplate.
 The 👀 reaction on receipt is not a hook: it is the plugin's own
 `ackReaction` in `access.json`, added the same never-overwrite-when-present
 way (an explicit `""` means the owner disabled it, and is kept).
+
+### Mods
+
+A mod (Claude Code's `plugin-authoring` skill, built into 2.1.301: a plugin
+whose `hooks/hooks.json` names a TypeScript module) can put text into a
+session's context too: once per conversation (`prompt.context`), per prompt
+(`prompt.submit`, which can tell a channel message from the composer), or in
+the system prompt (`prompt.compose`, where a changed answer rewrites the
+cache). No mod ships; the three hook texts that could be one were weighed
+(2026-10-16) and stay hooks:
+
+| Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
+|---|---|---|---|---|---|---|
+| (mod: `prompt.context`) | | `turn/on-session-start`'s dev-manager rule | Not now: the same bytes either way, an API its declaration file calls early access, `--bg` sessions not mentioned for mods (unverified), and a second plugin to install on every machine. | none: stays a SessionStart hook | 5,756 B per source, as now | dev-manager |
+| (mod: `prompt.context`) | | `autoresearchclaw/on-start` | Not now, for the same reasons. | none: stays a SessionStart hook | 3,103 B per source, as now | autoresearchclaw bots |
+| (mod: `prompt.submit`, `origin.kind == "channel"`) | | `turn/on-prompt`'s identity text | The best fit (it would gate on a channel message without parsing the tag), but its inputs (`access.json`, `user-names`, `peers.json`) and the turn files `on-stop` reads are the shell hooks' files, and the turn bookkeeping must stay a hook. Revisit when the mods API leaves early access. | none: stays a UserPromptSubmit hook | ~1.2 KB per injection, as now | every bot |
 
 ## Bots hearing each other
 

@@ -191,6 +191,14 @@ while IFS= read -r c; do
   f=${c#'"${CLAUDE_PLUGIN_ROOT}/'}; f=$D/${f%'"'}
   [ -x "$f" ] || { echo "FAIL: hooks.json names a missing or non-executable $f"; exit 1; }
 done <<<"$cmds"
+# The README's Hooks section: the seven-column table in every purpose group and the Mods section, and a row for every
+# script hooks.json registers.
+hdr='| Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |'
+[ "$(command grep -cxF "$hdr" "$D/README.md")" = 6 ] && command grep -qx '### Mods' "$D/README.md" || { echo "FAIL: the README's hooks are one seven-column table per purpose group, and a Mods section"; exit 1; }
+while IFS= read -r c; do
+  f=${c#'"${CLAUDE_PLUGIN_ROOT}/hooks/'}; f=${f%'"'}
+  command grep -qF "| \`$f\` | Why: " "$D/README.md" || { echo "FAIL: the README's hook table has no row for $f"; exit 1; }
+done <<<"$cmds"
 jq -e '.hooks.PreToolUse[] | select(.matcher == "mcp__plugin_discord_discord__reply|mcp__plugin_discord_discord__edit_message") | .hooks[] | select(.command | endswith("peers/thread-guard\""))' "$D/hooks/hooks.json" >/dev/null || { echo "FAIL: thread-guard must cover reply and edit_message"; exit 1; }
 ! jq -e '.hooks.PostToolUse[] | select(.matcher | test("react"))' "$D/hooks/hooks.json" >/dev/null || { echo "FAIL: no hook may run after a react (the Stop hook reacts by itself)"; exit 1; }
 echo "ok: plugin.json and hooks.json are valid and every hook command exists"
