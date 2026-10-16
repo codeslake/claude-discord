@@ -1768,20 +1768,30 @@ plugin_hook "$PL" lb l1
 [ -e "$HOME/dotrepo/cl/discord-agents/lb/plugin-sessions/l1" ] && cmp -s "$HOME/dotrepo/cl/settings.local.json" "$P2/cl.before" && [ -e "$HOME/dotrepo/cl/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: a first run must not edit through a symlinked .claude"; exit 1; }
 rm -rf "$PL" "$HOME/dotrepo/cl" "$P2/cl.before"
 ! grep -q '/.claude/discord-agents/hooks/' "$P2/.claude/settings.local.json" || { echo "FAIL: the regular settings.local.json beside them must still be migrated"; exit 1; }
-err=$(printf '\nn\n\n' | bash "$S" setup gamma 2>&1 >/dev/null)
-grep -qF "old claude-discord hook entries stay in '$P2/.claude/settings.json' '$HOME/.claude/settings.json'" <<<"$err" && grep -qF "old-hooks.sh'" <<<"$err" || { echo "FAIL: setup must name the files it will not touch, with the command: $err"; exit 1; }
-grep -qF "They still serve every bot on this machine, and on every machine sharing that file, whose plugin is not loaded yet: only when each of those bots has a <bot dir>/plugin-sessions/ marker" <<<"$err" || { echo "FAIL: the hint must warn that the entries still serve unmigrated bots: $err"; exit 1; }
+# setup and compat (which every update runs on the pulled code) take them out of those files too: the plugin's
+# marker gates nothing an entry in a file setup never edits runs on a machine sharing it, and lmd79's five global
+# entries ran on-session-start twice at every start (2026-10-16). Through the link (its target renamed in), the
+# link kept, a foreign hook and key kept.
 i0=$(ls -i "$HOME/dotrepo/settings.json" | awk '{print $1}')
-cmd=${err##*remove them by hand: }; eval "$cmd"
-! grep -q '/.claude/discord-agents/hooks/' "$HOME/dotrepo/settings.json" "$HOME/.claude/settings.json" && [ -L "$P2/.claude/settings.json" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] || { echo "FAIL: the printed command must remove the entries, through the symlink: $(<"$HOME/dotrepo/settings.json")"; exit 1; }
-[ "$(ls -i "$HOME/dotrepo/settings.json" | awk '{print $1}')" != "$i0" ] || { echo "FAIL: by hand, a symlink's target must be replaced by a rename, not written in place"; exit 1; }
+FOREIGN='{"model":"x","hooks":{"Stop":[{"hooks":[{"type":"command","command":"mine"}]}]}}'
+printf '%s\n' "$FOREIGN" > "$HOME/.claude/settings.json"; plant_old "$HOME/.claude/settings.json"
+err=$(printf '\nn\n\n' | bash "$S" setup gamma 2>&1 >/dev/null)
+! grep -q '/.claude/discord-agents/hooks/' "$HOME/dotrepo/settings.json" "$HOME/.claude/settings.json" && [ -L "$P2/.claude/settings.json" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] &&
+  [ "$(jq -c . "$HOME/.claude/settings.json")" = "$(jq -c . <<<"$FOREIGN")" ] && ! grep -qF 'old claude-discord hook entries' <<<"$err" ||
+  { echo "FAIL: setup strips the old hook entries from a symlinked settings file and the user-global one, through the link: $(<"$HOME/dotrepo/settings.json") / $(<"$HOME/.claude/settings.json") / $err"; exit 1; }
+[ "$(ls -i "$HOME/dotrepo/settings.json" | awk '{print $1}')" != "$i0" ] || { echo "FAIL: a symlink's target must be replaced by a rename, not written in place"; exit 1; }
+rm -f "$HOME/.claude/settings.json"; ln -s "$HOME/dotrepo/global.json" "$HOME/.claude/settings.json"
+printf '%s\n' "$FOREIGN" > "$HOME/dotrepo/global.json"; plant_old "$HOME/dotrepo/global.json"; plant_old "$HOME/dotrepo/settings.json"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat must exit 0 here: $out"; exit 1; }
+[ -L "$HOME/.claude/settings.json" ] && [ "$(jq -c . "$HOME/dotrepo/global.json")" = "$(jq -c . <<<"$FOREIGN")" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] ||
+  { echo "FAIL: update strips the old hook entries from the user-global settings, through its symlink, and from a recorded project's symlinked one: $(<"$HOME/dotrepo/global.json") / $(<"$HOME/dotrepo/settings.json")"; exit 1; }
 # By hand from the link's own directory: a bare name with a relative target resolves from there.
 echo '{}' > "$HOME/dotrepo/settings.json"; plant_old "$HOME/dotrepo/settings.json"; ln -s dotrepo/settings.json "$HOME/rel.json"
 (cd "$HOME" && bash "$PC/hooks/lib/old-hooks.sh" rel.json) && [ -L "$HOME/rel.json" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] || { echo "FAIL: by hand, a bare-name link with a relative target must edit that target"; exit 1; }
 rm -f "$HOME/rel.json"
 rm -f "$P2/.claude/settings.json" "$HOME/.claude/settings.json" "$P2/dot.before" "$P2/global.before"; rm -rf "$HOME/dotrepo"
 echo '{"enabledPlugins":{"x":true}}' > "$P2/.claude/settings.json"
-echo "ok: a first run never edits a symlinked settings.json, the user-global one (a bot in \$HOME included) or anything under a symlinked .claude; setup names them, warns they still serve unmigrated bots, and its command renames a new target in under the link"
+echo "ok: a first run never edits a symlinked settings.json, the user-global one (a bot in \$HOME included) or anything under a symlinked .claude; setup and compat (update) strip them, through a link (a new target renamed in under it), keeping foreign hooks and keys; old-hooks.sh by hand edits a relative link's target"
 
 # h6. the gate. An old-path hook (run through .claude/discord-agents/hooks or ~/.claude-discord/hooks, or with
 # no CLAUDE_PLUGIN_ROOT) runs in a session with no marker and exits 0 doing nothing in a marked one; the

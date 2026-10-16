@@ -1,13 +1,11 @@
 # The hook entries earlier releases wrote into settings files (a command under
 # .claude/discord-agents/hooks/) and the rule copies they put in .claude/rules.
 # Sourced by discord.sh on a plugin hook's first run in a bot session
-# (plugin_gate), which takes this project's own copies out. Run as a script,
-# `bash old-hooks.sh <settings file>...` removes the entries from the files
-# named, symlinks included (their target is edited): the command setup prints
-# for a file the hook never edits (a symlink into a dotfiles repo, the
-# user-global settings.json). Those entries serve every bot not yet running the
-# plugin, on this machine and on any machine sharing the file: run it only once
-# each of them has a <bot dir>/plugin-sessions/ marker.
+# (plugin_gate), which takes this project's own copies out, and by setup and
+# compat (bin/lib/install.sh strip_settings), which take them out of the files
+# the hook never edits too: a symlink into a dotfiles repo, the user-global
+# settings.json. Run as a script, `bash old-hooks.sh <settings file>...` removes
+# the entries from the files named, symlinks included (their target is edited).
 
 # Drops every entry whose command is ours, then a matcher group or an event left
 # empty by that, then a hooks key we emptied; every other entry stays.

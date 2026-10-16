@@ -1,4 +1,4 @@
-# sourced by bin/claude-discord: select_one git_net src_link prune_installs install_plugin remove_old_install sweep_recorded, the compat verb, report_old_hooks write_hosts parse_install_flags check_install_scope coexist install_all; the install, setup and update verbs
+# sourced by bin/claude-discord: select_one git_net src_link prune_installs install_plugin remove_old_install sweep_recorded, the compat verb, strip_settings write_hosts parse_install_flags check_install_scope coexist install_all; the install, setup and update verbs
 
 # select_one <label> <default> <option>...: prints the chosen option's first
 # word (an option is "<name>  <hint>"). On a terminal, an @clack-style picker
@@ -184,27 +184,34 @@ sweep_recorded() {
     [ -z "$p" ] || [ ! -d "$p/.claude/discord-agents" ] || sweep_project "$p/.claude/discord-agents" 2>/dev/null || :
   done < "$helpers/records/projects"
 }
+
+# strip_settings: the hook entries releases before 1.9 wrote (a command under .claude/discord-agents/hooks/) taken out
+# of the files the plugin's first hook run never edits: the user-global settings.json, and a symlinked
+# .claude/settings.json or settings.local.json (often into a dotfiles repo) in this project or a recorded one, through
+# the link (strip_old_hooks renames a new target in; the link stays). They kept running beside the plugin's hooks
+# (lmd79's five global entries ran on-session-start twice at every start, 2026-10-16), and they go on every machine
+# sharing the file too: there they ran only through a per-project hooks link to the compat copy. A project's own
+# regular files are still left to that first hook run (R15: setup cannot know the plugin will load there). Run by
+# setup and by compat (every update). A file left as it was (not JSON, not writable) is named, and fails nothing.
+strip_one() { strip_old_hooks "$1" || echo "claude-discord: old claude-discord hook entries left in '$1' (not JSON, or not writable); remove them by hand" >&2; }
+strip_settings() {
+  local p f
+  . "$self_root/hooks/lib/old-hooks.sh" 2>/dev/null || return 0
+  strip_one "$HOME/.claude/settings.json"
+  { printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null || :; } | while IFS= read -r p || [ -n "$p" ]; do
+    p=${p%$'\r'}
+    for f in "$p/.claude/settings.json" "$p/.claude/settings.local.json"; do [ -z "$p" ] || [ ! -L "$f" ] || strip_one "$f"; done
+  done
+  return 0
+}
+
 # Run by update from the freshly pulled code (this process holds the old functions).
 if [ "${1:-}" = compat ]; then
   crc=0; remove_old_install || crc=1
+  strip_settings
   sweep_recorded
   exit "$crc"
 fi
-
-# setup tells, once, of old entries in a settings file nothing here edits: a
-# symlink (often into a dotfiles repo) or the user-global settings.json. The
-# plugin's first hook run removes the project's own regular files' entries;
-# these keep running beside the plugin's, as no-ops in a session it runs in.
-report_old_hooks() {
-  local f found=""
-  for f in "$PWD/.claude/settings.json" "$PWD/.claude/settings.local.json" "$HOME/.claude/settings.json"; do
-    [ -L "$f" ] || [ "$f" -ef "$HOME/.claude/settings.json" ] || continue
-    grep -qF /.claude/discord-agents/hooks/ "$f" 2>/dev/null || continue
-    case $found in *"'$f'"*) continue;; esac   # in $HOME, the project's settings.json is the global one
-    found="$found '$f'"
-  done
-  [ -z "$found" ] || echo "claude-discord: old claude-discord hook entries stay in$found (a symlink or the user-global file, never edited here; a session the plugin runs in skips them). They still serve every bot on this machine, and on every machine sharing that file, whose plugin is not loaded yet: only when each of those bots has a <bot dir>/plugin-sessions/ marker, remove them by hand: bash '$self_root/hooks/lib/old-hooks.sh'$found" >&2
-}
 
 # write_hosts <bot dir>: the manager's host ledger (<bot dir>/hosts), which
 # the backend monitor reads and which is also its on/off switch. One line per
@@ -328,7 +335,7 @@ install_all() {
   install_plugin || return $?
   self_root=$plugin_target   # from here on, everything points at the real install
   remove_old_install || return $?
-  report_old_hooks
+  strip_settings
 }
 pdir=$PWD/.claude/skills/claude-discord gdir=$HOME/.claude/skills/claude-discord
 if [ "${1:-}" = install ]; then

@@ -147,8 +147,8 @@ peers() {
 # plugin_gate: every hook calls it right after sourcing this file (a tool never
 # does: it would read the terminal). Returns 1 when the hook must exit 0 at once.
 # Hooks earlier releases wrote into settings files keep running beside the
-# plugin's where setup cannot remove them (the user-global settings.json, a
-# symlinked one), and a hook run twice records a turn twice. So the plugin's
+# plugin's until setup or update strips them (a file it could not rewrite, a
+# machine not updated yet), and a hook run twice records a turn twice. So the plugin's
 # own hook (CLAUDE_PLUGIN_ROOT set and $0 under it) leaves a marker,
 # <state dir>/plugin-sessions/<session id>, on its first run in a session, and
 # an old one (run from .claude/discord-agents/hooks/ or ~/.claude-discord/hooks/,
