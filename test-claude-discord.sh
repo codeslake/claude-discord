@@ -5743,11 +5743,12 @@ SB="$HOME/swapfail-stubs"; mkdir -p "$SB"; RP=$(command -v perl); cp -R "$OH/com
 cat > "$SB/hook" <<'EOF'
 #!/bin/sh
 case ${0##*/} in mv) s=$1 d=$2 r=/bin/mv;; mkdir) case $TC:$1 in dual:*/compat.lock) "$TMK" -p "$1"; exit;; esac; exec "$TMK" "$@";; *) s=$3 d=$4 r=$TRP;; esac
-w() { i=0; until [ -e "$TSB/$1" ] || [ $i = 300 ]; do sleep 0.01; i=$((i+1)); done; }
+w() { i=0; until [ -e "$TSB/$1" ] || [ $i = 1000 ]; do sleep 0.01; i=$((i+1)); done; [ -e "$TSB/$1" ] || : > "$TSB/capped.$1"; }   # a cap that ends a wait is said, never silent
 case $TC:$s:$d in
   two:"$TOH/compat":*old) echo >> "$TSB/swaps"; w b2done;;   # compat/ going aside: a swap
   two:*:*/compat.lock.broken.*) mkdir "$TSB/b1" 2>/dev/null && { w b2; exec "$r" "$@"; }; : > "$TSB/b2"; i=0
-    until { [ -s "$TOH/compat.lock/owner" ] && [ "$(cat "$TOH/compat.lock/owner")" != dead ]; } || [ $i = 300 ]; do sleep 0.01; i=$((i+1)); done
+    until { [ -s "$TOH/compat.lock/owner" ] && [ "$(cat "$TOH/compat.lock/owner")" != dead ]; } || [ $i = 1000 ]; do sleep 0.01; i=$((i+1)); done
+    [ $i != 1000 ] || : > "$TSB/capped.owner"
     o=$(cat "$TOH/compat.lock/owner" 2>/dev/null); "$r" "$@"; x=$?; [ "$(cat "$TOH/compat.lock/owner" 2>/dev/null)" = "$o" ] || : > "$TSB/overlap"; : > "$TSB/b2done"; exit $x;;
   dual:"$TOH/compat":*old) case $d in */compat.new.*/old) ;; *) : > "$TSB/shared";; esac; mkdir "$TSB/a1" 2>/dev/null && { w at2; exec "$r" "$@"; }   # aside
     : > "$TSB/at2"; w landed; "$r" "$@"; x=$?; : > "$TSB/aside2"; exit $x;;
@@ -5756,9 +5757,10 @@ esac; exec "$r" "$@"
 EOF
 chmod +x "$SB/hook"; for t in perl mv mkdir; do ln -s hook "$SB/$t"; done; export TSB="$SB" TOH="$OH" TRP="$RP" TMK="$(command -v mkdir)"
 mkdir "$OH/compat.lock"; echo dead > "$OH/compat.lock/owner"; touch -d '1 minute ago' "$OH/compat.lock" "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
-for _ in 1 2; do { PATH="$SB:$PATH" TC=two bash "$S" patch --compat >/dev/null 2>&1 || : > "$SB/failed"; } & done; wait
+for k in 1 2; do { PATH="$SB:$PATH" TC=two bash "$S" patch --compat >/dev/null 2>"$SB/err.$k" || : > "$SB/failed"; } & done; wait
+[ -z "$(ls "$SB"/capped.* 2>/dev/null)" ] || { echo "FAIL: two breakers: the stub lost its forced order (a wait ran out: $(ls "$SB"/capped.*)); this says nothing about the code"; exit 1; }
 [ -e "$SB/b2done" ] && [ ! -e "$SB/overlap" ] && [ ! -e "$SB/failed" ] && [ "$(wc -l < "$SB/swaps")" -eq 1 ] && cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/hooks/turn/on-prompt" ] && [ -z "$(ls -d "$OH"/compat.* "$OH"/compat/compat* 2>/dev/null)" ] ||
-  { echo "FAIL: of two breakers of one stale lock only one may break it, the other waits; one swap, both succeed, one complete compat/: $(wc -l < "$SB/swaps"; ls -d "$SB"/* "$OH"/compat* "$OH"/compat/compat* 2>&1)"; exit 1; }
+  { echo "FAIL: of two breakers of one stale lock only one may break it, the other waits; one swap, both succeed, one complete compat/: swaps=$(wc -l < "$SB/swaps") current=$(cmp "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" 2>&1 && echo yes) exec=$([ -x "$OH/hooks/turn/on-prompt" ] && echo yes; ls -ld "$OH/hooks/turn" "$OH/hooks/turn/on-prompt" 2>&1) stderr=$(cat "$SB"/err.* 2>&1) $(ls -d "$SB"/* "$OH"/compat* "$OH"/compat/compat* 2>&1)"; exit 1; }
 # Two holders at once (a lock broken under a stalled holder; the stub lets both past it), worst order: A takes compat/ aside,
 # lands, B takes that aside, A exits, B lands. Nothing nested, absent or old again; no old copy goes to a name writers share.
 touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
