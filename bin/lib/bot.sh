@@ -344,6 +344,9 @@ if [ "${1:-}" = bot ]; then
     if [ -n "$b_fresh" ]; then b_do=fresh b_cmd="claude-discord --bg --name $bn"
     elif [ "$b_n" -ge 2 ]; then
       echo "claude-discord: bot: $b_n sessions of $bn are listed ($b_names): two on one token both answer. Stop the copy by hand (claude stop <id>), or recover --fresh stops every one and starts one; nothing was run" >&2; exit 1
+    elif [ "$b_n" = 1 ] && [ "$b_id" = - ]; then
+      # A foreground session (no job record: started at a terminal, or /bg'd) is not the daemon's to respawn.
+      echo "claude-discord: bot: the one listed session of $bn is a foreground one (pid $b_pid, no job id), which claude respawn cannot restart: stop it by hand, or recover --fresh stops it and starts a background one; nothing was run" >&2; exit 1
     elif [ "$b_n" = 1 ]; then b_do=respawn b_cmd="claude respawn $b_id"
     else b_do=start b_cmd="claude-discord --bg --name $bn"; fi
     # Trust before anything is stopped: a `claude --bg` start refuses an untrusted workspace (fail-open, as refresh).

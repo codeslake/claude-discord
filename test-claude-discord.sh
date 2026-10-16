@@ -4651,11 +4651,15 @@ rc2=0; out2=$(cd "$HOME" && bash "$S" --version --bot "$(a_hex "$MP")" "$(a_hex 
   [ "$rc2" = 3 ] && grep -q '^claude-discord: bot: recover --fresh acc on ' <<<"$out2" && grep -q "^    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc" <<<"$out2" ||
   { echo "FAIL: bot --host recover: a host before 1.16.0 is exit 5 and is sent only --version, a 1.16.0 host gets it under ssh -t; the host decodes --version --bot ... recover --fresh: $A / $out / rc=$BRC $(cat "$HOME/ssh.log") / rc=$rc2 $out2"; exit 1; }
 rm -f "$HOME/ssh.log" "$MON"/h1.*
-# `claude agents --json` failing: what runs is unknown, so nothing is (exit 1).
+# `claude agents --json` failing: what runs is unknown, so nothing is (exit 1). The one listed session a foreground one
+# (no job id): claude respawn cannot restart it, so nothing is run (exit 1) and --fresh is named.
 printf '#!/bin/sh\n[ "$1" != agents ] || exit 1\necho "PLAIN $*" >> "$HOME/claude.calls"\n' > "$HOME/bin/claude"; rm -f "$HOME/claude.calls"
 rc=0; out=$(bash "$S" bot acc recover </dev/null 2>&1) || rc=$?
-[ "$rc" = 1 ] && grep -q "'claude agents --json' failed, so what is running is unknown" <<<"$out" && [ ! -e "$HOME/claude.calls" ] && [[ $out != *"run: "* ]] ||
-  { echo "FAIL: bot recover with a failing claude agents runs nothing (exit 1): rc=$rc $out"; exit 1; }
+printf '#!/bin/sh\ncase "$1" in agents) echo %s;; *) echo "PLAIN $*" >> "$HOME/claude.calls";; esac\n' "'"'[{"pid":4242,"name":"acc","cwd":"'"$PWD"'"}]'"'" > "$HOME/bin/claude"
+rc2=0; out2=$(bash "$S" bot acc recover </dev/null 2>&1) || rc2=$?
+[ "$rc" = 1 ] && grep -q "'claude agents --json' failed, so what is running is unknown" <<<"$out" && [ ! -e "$HOME/claude.calls" ] && [[ $out != *"run: "* ]] &&
+  [ "$rc2" = 1 ] && grep -q 'the one listed session of acc is a foreground one (pid 4242, no job id), which claude respawn cannot restart' <<<"$out2" && [[ $out2 != *"run: "* ]] && [ ! -e "$HOME/claude.calls" ] ||
+  { echo "FAIL: bot recover with a failing claude agents, or with only a foreground session listed, runs nothing (exit 1): rc=$rc $out / rc=$rc2 $out2"; exit 1; }
 cp "$HOME/claude.keep" "$HOME/bin/claude"; kill "$OLD" 2>/dev/null || :; rm -rf "$AD/pinned-job" "$AD/plugin-sessions" "$AD/recover.log" "$HOME/claude.calls" "$HOME/old2.pid"
 echo "ok: bot recover: a bad word and its own session refused (exit 2); no terminal prints the plan (exit 3); its last session (pinned-job, then the newest plugin-sessions marker) listed as started here is respawned after the one question, logged, its status passed on; none listed: a fresh --bg start, an untrusted workspace refused before the question; two listed refused, --fresh stops every one then starts one, a stop that fails starts nothing; a failed listing runs nothing; --host needs 1.16.0 and sends the act under ssh -t"
 # bot add: no terminal, nothing is read (exit 3). A bot whose Discord name is no name here (it is renamed on Discord
