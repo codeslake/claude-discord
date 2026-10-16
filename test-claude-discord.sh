@@ -4851,13 +4851,42 @@ wait_tick() {
   while [ -e "$f" ] && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done
   [ ! -e "$f" ] || { echo "FAIL: the monitor ran no holder check within 3 s: $(tail -3 "$MB/monitor.log")"; exit 1; }
 }
-mstop() {  # the holder goes and the monitor is TERMed (it does not end for want of a holder); gone at once
-  local p n=0; p=$(mpid)
+# mstop: the holder goes and the monitor is TERMed (it does not end for want of a holder). A monitor mid-pass takes the
+# TERM only once its foreground command (a jq, a curl) is done (bash defers a trapped signal), which under load 32 on
+# lmd42 ran past the 1 s this waited until 1.16.0: up to 10 s now (MSTOP_CAP polls of 2 ms), each call returning at the
+# first poll that sees it gone. Past that, two verdicts, as f4dcdff's two-breakers case: its trap logged `exit
+# reason=signal` since the TERM (slow to leave: load) or not (a code fault, or a pass stuck in one command).
+mstop() {
+  local p n=0 cap=${MSTOP_CAP:-5000} sig=0; p=$(mpid)
   kill "$HPID" 2>/dev/null || :; wait "$HPID" 2>/dev/null || :
+  sig=$(command grep -c 'exit reason=signal' "$MB/monitor.log" 2>/dev/null) || :
   [ -z "$p" ] || kill "$p" 2>/dev/null || :
-  while [ -n "$p" ] && running "$p" && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
-  [ -z "$p" ] || ! running "$p" || { echo "FAIL: the monitor must exit on a TERM: $(tail -3 "$MB/monitor.log")"; exit 1; }
+  while [ -n "$p" ] && running "$p" && [ "$n" -lt "$cap" ]; do nap 0.002; n=$((n + 1)); done
+  [ -z "$p" ] || ! running "$p" || {
+    if [ "$(command grep -c 'exit reason=signal' "$MB/monitor.log" 2>/dev/null)" -gt "${sig:-0}" ]; then
+      echo "FAIL: the monitor took the TERM (exit reason=signal logged) but was still running $((cap / 500)) s later (load?): $(ps -o pid=,stat=,etime=,args= -p "$p" 2>/dev/null)"
+    else
+      echo "FAIL: the monitor did not take a TERM within $((cap / 500)) s (a code fault, or a pass stuck in one command): $(tail -3 "$MB/monitor.log")"
+    fi
+    exit 1; }
 }
+# mstop's verdicts, without a monitor or a wall-clock wait: `running` says yes for a number of polls (writing the trap's
+# log line at the first when asked), `nap` waits nothing. A monitor slow to leave (still there after 600 polls, past
+# the 1.16.0 cap of 500) passes; one past the cap is a FAIL that says whether it took the TERM.
+mstop_case() {  # <polls it stays> <1: the trap's line is logged> [MSTOP_CAP]
+  ( MB=$HOME/mstop-case HPID="" left=$1 lg=$2 MSTOP_CAP=${3:-}; [ -n "$MSTOP_CAP" ] || unset MSTOP_CAP
+    mkdir -p "$MB"; printf 'x\n' > "$MB/monitor.log"; sleep 30 & sp=$!; printf '{"monitor":{"pid":%s}}\n' "$sp" > "$MB/state.json"
+    nap() { :; }
+    running() { [ "$lg" != 1 ] || { echo "2026-10-16T00:00:00Z exit reason=signal" >> "$MB/monitor.log"; lg=""; }; left=$((left - 1)); [ "$left" -ge 0 ]; }
+    mstop; kill "$sp" 2>/dev/null || : ) 2>&1
+}
+out=$(mstop_case 600 1) && [ -z "$out" ] || { echo "FAIL: a monitor still there 600 polls (1.2 s) after its TERM is slow, not broken: mstop waits 10 s: $out"; exit 1; }
+out=$(mstop_case 99999 1 50) && { echo "FAIL: mstop must fail past its cap"; exit 1; }
+grep -q '^FAIL: the monitor took the TERM (exit reason=signal logged) but was still running 0 s later (load?): ' <<<"$out" || { echo "FAIL: past the cap with the trap's line logged, mstop says the monitor was slow to leave: $out"; exit 1; }
+out=$(mstop_case 99999 0 50) && { echo "FAIL: mstop must fail past its cap"; exit 1; }
+grep -q '^FAIL: the monitor did not take a TERM within 0 s (a code fault, or a pass stuck in one command): ' <<<"$out" || { echo "FAIL: past the cap with no trap line, mstop says the TERM was not taken: $out"; exit 1; }
+rm -rf "$HOME/mstop-case"
+echo "ok: mstop waits up to 10 s for a TERMed monitor and, past that, says whether it took the TERM (exit reason=signal logged: slow, load) or not (a code fault)"
 # backend_gone, after a --stop and before its marker is removed: no process of this bot's backend is left. --stop TERMs
 # the keeper and the monitor it can name; a monitor the keeper's last --ensure was still starting (the lock waiter, or
 # one that has not written its pid yet) leaves on the marker by itself a moment later, and stays for good when the
