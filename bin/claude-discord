@@ -779,7 +779,9 @@ ensure_hooks_symlink
 agents_list=""
 prune_dead_sessions || :   # even its last line (a warning on a closed stderr) may not fail the start
 # This bot's markers of sessions the listing no longer names (bin/lib/state.sh says which); no listing, no sweep.
-[ -z "$agents_list" ] || { . "$lib/state.sh" && sweep_list "$agents_list" && sweep_project "$root" "$name"; } 2>/dev/null || :
+# Nothing to sweep (no marker of this bot, no check-in), no jq.
+sw=""; for f in "$dir"/plugin-sessions/* "$dir"/turns/* "$root"/checkin/*; do [ ! -e "$f" ] || { sw=1; break; }; done
+[ -z "$agents_list" ] || [ -z "$sw" ] || { . "$lib/state.sh" && sweep_list "$agents_list" && sweep_project "$root" "$name"; } 2>/dev/null || :
 # worktree.bgIsolation "none" turns off Claude Code's background-isolation
 # guard for this session: measured on two machines, a session started with
 # --bg is refused Edit/Write in the checkout by that guard while a session
