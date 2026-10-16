@@ -1,4 +1,5 @@
-# sourced by bin/claude-discord: sweep_list sweep_project (the start, the compat verb)
+# sourced by bin/claude-discord (the compat verb) and monitor/monitor.sh (a pass): sweep_recorded. No here-string or
+# here-document: monitor.sh leaves nothing in /tmp, and bash 3.2 backs both with a temp file.
 
 # The marker sweep. A hook leaves a file per session: <bot dir>/plugin-sessions/<sid> (plugin_gate), turns/<sid> and
 # turns/<sid>.{replied,primed,pending} (the turn hooks), and the project's checkin/<sid> (on-reply). Nothing removed a
@@ -16,7 +17,8 @@ sweep_list() {
     | ([$r[] | .sessionId, .id | strings | select(test("\\A[A-Za-z0-9_-]+\\z"))] | join(" ")),
       ([$r[] | .name | strings | gsub("[\t\n]"; " ")] | join("\t")),
       ([$r[] | .id | strings | select(test("\\A[A-Za-z0-9_-]+\\z"))] | join("\t")) end' 2>/dev/null) || return 1
-  { IFS= read -r sw_keep; IFS= read -r sw_names; IFS= read -r sw_jobs; } <<<"$out"
+  sw_keep=${out%%$'\n'*} out=${out#*$'\n'}
+  sw_names=${out%%$'\n'*} sw_jobs=${out#*$'\n'}
   sw_keep=" $sw_keep " sw_names=$'\t'$sw_names$'\t' sw_jobs=$'\t'$sw_jobs$'\t'
 }
 # sweep_seen <bot dir>: the listing names this bot or its pinned job.
@@ -50,4 +52,17 @@ sweep_project() {
     fi
   done
   [ -z "$all" ] || sweep_files "$r"/checkin/*
+}
+# sweep_recorded <projects file>: every bot of every project the file lists (records/projects), from one listing.
+# Optional: no claude, no jq, a listing that fails, hangs past 5 s or is no array sweeps nothing, silently.
+sweep_recorded() {
+  local l p t=()
+  command -v jq >/dev/null 2>&1 && command -v claude >/dev/null 2>&1 && [ -f "$1" ] || return 0
+  if command -v timeout >/dev/null 2>&1; then t=(timeout 5); else t=(perl -e 'alarm 5; exec @ARGV or exit 127'); fi   # macOS: no timeout(1)
+  l=$(${t[@]+"${t[@]}"} claude agents --json --all 2>/dev/null) && sweep_list "$l" || return 0
+  while IFS= read -r p || [ -n "$p" ]; do
+    p=${p%$'\r'}
+    [ -z "$p" ] || [ ! -d "$p/.claude/discord-agents" ] || sweep_project "$p/.claude/discord-agents" 2>/dev/null || :
+  done < "$1"
+  return 0
 }

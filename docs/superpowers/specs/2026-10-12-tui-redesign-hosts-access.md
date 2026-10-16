@@ -94,9 +94,10 @@ sweep and the hook audit. A hook acts for a session it has no marker for only
 when its Claude Code process (`$CLAUDE_PID`) is the bot's own: its
 `~/.claude/sessions/<pid>.json` carries this job's `jobId`, or (a foreground
 bot) is no `sdk-cli` child's; no `CLAUDE_PID` or no record: open, as before.
-A start sweeps its bot's `plugin-sessions/`, `turns/` (and the project's
-`checkin/`) of sessions `claude agents --json --all` no longer lists, only for
-a bot the listing shows; `update`'s compat step sweeps every recorded project.
+The backend monitor's pass (hourly at most, a ledger with a `local` line) and
+`update`'s compat step sweep every recorded project's `plugin-sessions/`,
+`turns/` (and `checkin/`) of sessions `claude agents --json --all` no longer
+lists, only for a bot the listing shows; a start never does.
 `setup` and `update` strip the pre-1.9 hook entries from the user-global
 `settings.json` and symlinked project settings files (lmd79's five global
 entries). `checkin` merged into `on-reply`, `mention-guard` into

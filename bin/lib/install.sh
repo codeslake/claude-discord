@@ -1,4 +1,4 @@
-# sourced by bin/claude-discord: select_one git_net src_link prune_installs install_plugin remove_old_install sweep_recorded, the compat verb, strip_settings write_hosts parse_install_flags check_install_scope coexist install_all; the install, setup and update verbs
+# sourced by bin/claude-discord: select_one git_net src_link prune_installs install_plugin remove_old_install, the compat verb, strip_settings write_hosts parse_install_flags check_install_scope coexist install_all; the install, setup and update verbs
 
 # select_one <label> <default> <option>...: prints the chosen option's first
 # word (an option is "<name>  <hint>"). On a terminal, an @clack-style picker
@@ -172,18 +172,6 @@ remove_old_install() {
 
 # same_tree <a> <b>: same files and the same executables (diff -r ignores modes,
 # and an old settings entry skips a hook that is not -x).
-# sweep_recorded: the marker sweep (bin/lib/state.sh) over every bot of every recorded project, from one listing.
-# Optional like the start's: no claude, no jq, a listing that fails or is no array sweeps nothing, silently.
-sweep_recorded() {
-  local l p t=()
-  command -v jq >/dev/null 2>&1 && command -v claude >/dev/null 2>&1 && [ -f "$helpers/records/projects" ] || return 0
-  if command -v timeout >/dev/null 2>&1; then t=(timeout 5); fi
-  l=$(${t[@]+"${t[@]}"} claude agents --json --all 2>/dev/null) && . "$self_root/bin/lib/state.sh" && sweep_list "$l" || return 0
-  while IFS= read -r p || [ -n "$p" ]; do
-    p=${p%$'\r'}
-    [ -z "$p" ] || [ ! -d "$p/.claude/discord-agents" ] || sweep_project "$p/.claude/discord-agents" 2>/dev/null || :
-  done < "$helpers/records/projects"
-}
 
 # strip_settings: the hook entries releases before 1.9 wrote (a command under .claude/discord-agents/hooks/) taken out
 # of the files the plugin's first hook run never edits: the user-global settings.json, and a symlinked
@@ -231,7 +219,7 @@ strip_settings() {
 if [ "${1:-}" = compat ]; then
   crc=0; remove_old_install || crc=1
   strip_settings
-  sweep_recorded
+  { . "$self_root/bin/lib/state.sh" && sweep_recorded "$helpers/records/projects"; } || :
   exit "$crc"
 fi
 

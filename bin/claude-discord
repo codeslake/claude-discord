@@ -746,7 +746,6 @@ prune_dead_sessions() {
   command -v jq >/dev/null 2>&1 || return 0
   if command -v timeout >/dev/null 2>&1; then t=(timeout 5); fi
   list=$(${t[@]+"${t[@]}"} "$bin" agents --json --all 2>/dev/null) || return 0
-  agents_list=$list   # the marker sweep below reads the same listing
   # jq's regex engine (Oniguruma) treats `$` as matching before a single
   # trailing newline, so test("^[0-9a-fA-F]{8}$") alone lets an `.id` of
   # "8705916e\n" through: measured, jq -n '"8705916e\n"|test("^[0-9a-fA-F]{8}$")'
@@ -776,12 +775,7 @@ prune_dead_sessions() {
 }
 
 ensure_hooks_symlink
-agents_list=""
 prune_dead_sessions || :   # even its last line (a warning on a closed stderr) may not fail the start
-# This bot's markers of sessions the listing no longer names (bin/lib/state.sh says which); no listing, no sweep.
-# Nothing to sweep (no marker of this bot, no check-in), no jq.
-sw=""; for f in "$dir"/plugin-sessions/* "$dir"/turns/* "$root"/checkin/*; do [ ! -e "$f" ] || { sw=1; break; }; done
-[ -z "$agents_list" ] || [ -z "$sw" ] || { . "$lib/state.sh" && sweep_list "$agents_list" && sweep_project "$root" "$name"; } 2>/dev/null || :
 # worktree.bgIsolation "none" turns off Claude Code's background-isolation
 # guard for this session: measured on two machines, a session started with
 # --bg is refused Edit/Write in the checkout by that guard while a session

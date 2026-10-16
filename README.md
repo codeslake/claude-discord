@@ -680,18 +680,19 @@ of `rm` calls; the next start takes the next 20. Both `claude agents --json
 `CLAUDE_DISCORD_LAUNCHER`: they are local daemon bookkeeping and start no
 session.
 
-The same listing sweeps the files the hooks leave per session (1.17.0): a
-start removes its bot's `plugin-sessions/<sid>` and `turns/<sid>*`, and the
-project's `checkin/<sid>`, for every session id that no row of `claude agents
---json --all` names (as its `sessionId` or its `id`). Stopped and done rows are
-listed, so their files stay; a `claude -p` run from a bot's Bash left one marker
-each, and one bot dir had 633 of them. Only in a bot dir this daemon can see,
-one whose name or pinned job the listing has: the other side of a shared home
-(a container and its host) lists none of the other's sessions, so it sweeps
-nothing of them; `checkin/` only when every bot of the project is seen. A
-listing that failed or is no array sweeps nothing. `claude-discord update`
-(its `compat` step) sweeps every bot of every recorded project the same way,
-with one listing.
+The files the hooks leave per session are swept elsewhere (1.17.0), never at a
+start: the backend monitor's pass (every hour at most, when its ledger has a
+`local` line) and `claude-discord update` (its `compat` step) each remove, in
+every bot of every recorded project on this machine, `plugin-sessions/<sid>`
+and `turns/<sid>*`, and the project's `checkin/<sid>`, for every session id
+that no row of one `claude agents --json --all` names (as its `sessionId` or
+its `id`). Stopped and done rows are listed, so their files stay; a `claude -p`
+run from a bot's Bash left one marker each, and one bot dir had 633 of them.
+Only in a bot dir this daemon can see, one whose name or pinned job the listing
+has: the other side of a shared home (a container and its host) lists none of
+the other's sessions, so it sweeps nothing of them, and a remote host's markers
+are its own monitor's; `checkin/` only when every bot of the project is seen.
+A listing that failed, took over 5 seconds or is no array sweeps nothing.
 
 ## Expected behaviour
 
@@ -810,7 +811,7 @@ acts for: every bot, or only some.
 
 | Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
 |---|---|---|---|---|---|---|
-| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Why: a respawn or an auto-update of the official plugin since the last start, a turn whose Stop never ran, a daemon that would retire an idle bot, a manager's backend killed by a restart. When: every source; the patch, the clean-up and the pin at startup and resume only. | Runs `claude-discord patch --compat` (a failure goes to `health.log`); clears the per-turn files a turn whose Stop never ran left behind, keeping the primed key; pins a background session's job (`~/.claude/jobs/pins.json` and `pinned-job`, see Background sessions); starts a dev-manager's keeper when none runs and its owner did not stop it. | 0 B | every bot; the keeper: dev-managers with a hosts ledger |
+| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Why: a respawn or an auto-update of the official plugin since the last start, a turn whose Stop never ran, a daemon that would retire an idle bot, a manager's backend killed by a restart. When: every source; the patch, the clean-up and the pin at startup and resume only. | Runs `claude-discord patch --compat` (a failure goes to `health.log`); clears the per-turn files a turn whose Stop never ran left behind, keeping the primed key; pins a background session's job (`~/.claude/jobs/pins.json` and `pinned-job`, see Background sessions); starts a dev-manager's keeper when none runs and its owner did not stop it. No marker sweep and no `claude agents` here (the monitor's pass and update sweep). | 0 B | every bot; the keeper: dev-managers with a hosts ledger |
 | UserPromptSubmit | | `turn/on-prompt` | Why: as above, a backend killed by a restart comes back with the first bot that wakes. When: every prompt. | Starts a dev-manager's keeper when none runs (builtins only when all run: no fork on Linux). | 0 B | every bot (the keepers of this machine's managers) |
 
 Which plugin runs them:

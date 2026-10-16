@@ -312,6 +312,8 @@ tick=${CLAUDE_DISCORD_MONITOR_TICK:-30}        # holder check, seconds
 pass=${CLAUDE_DISCORD_MONITOR_PASS:-300}       # a pass at most this often, but for one asked for (--check):
 gap=${CLAUDE_DISCORD_MONITOR_CHECK_GAP:-60}    # that one this long after the last pass began, at the earliest
 cap=${CLAUDE_DISCORD_MONITOR_HOST_CAP:-90}     # per host, enforced here (no timeout(1) on macOS)
+sweep=${CLAUDE_DISCORD_MONITOR_SWEEP:-3600}    # the marker sweep, in a pass at most this often (whole seconds)
+swept=$SECONDS                                 # the first one a whole interval after the start
 # Fractional values are for the suite; bash counts in whole steps. A running
 # host is polled every step (1 s, or a fifth of a tick shorter than 5 s).
 read -r step pass_n cap_n tick_n gap_n < <(awk -v t="$tick" -v p="$pass" -v c="$cap" -v g="$gap" 'BEGIN {
@@ -765,7 +767,7 @@ apply='
 run_pass() {
   local t0=$SECONDS now_s start line w host laptop hname hkeys remote doc results="" out l rest hosts=0 nb=0 mowner ts="" hj k=0 \
     lang scope key lk knd verdict payload st posts="" findings=0 posted=0 inflight=""
-  local envs=()
+  local envs=() has_local=""
   local_env=()   # a ledger that lost its local line: POSTs with the monitor's own env
   rotate
   # The pass's time is its start: holds then count between pass starts, which are PASS apart, whatever the hosts take.
@@ -794,7 +796,7 @@ run_pass() {
         *) envs+=("$w");;
       esac
     done
-    [ "$host" != local ] || local_env=(${envs[@]+"${envs[@]}"})
+    [ "$host" != local ] || { local_env=(${envs[@]+"${envs[@]}"}); has_local=1; }
     remote="env $([ ${#envs[@]} = 0 ] || printf '%q ' "${envs[@]}")~/.local/bin/claude-discord health --all --json --patch"
     run_host
     doc=$(< "$M/pass.out") 2>/dev/null || doc=""
@@ -844,6 +846,13 @@ run_pass() {
       log "pass failed: could not apply the post results"
   fi
   write_state
+  # The marker sweep (bin/lib/state.sh) of this machine's recorded projects, when the ledger watches this machine (a
+  # local line): never at a session start, which every startup, resume, clear and compact runs. A remote host's
+  # markers are its own monitor's; on a shared home, the bots this side's `claude agents` does not list are left.
+  if [ -n "$has_local" ] && [ $((SECONDS - swept)) -ge "${sweep%%.*}" ]; then
+    swept=$SECONDS
+    { . "${BASH_SOURCE[0]%/*}/../bin/lib/state.sh" && sweep_recorded "$HOME/.claude-discord/records/projects"; } 2>/dev/null 9>&- || :
+  fi
   log "pass hosts=$hosts bots=$nb findings=$findings posted=$posted $(( SECONDS - t0 ))s"
 }
 

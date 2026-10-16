@@ -2161,11 +2161,12 @@ grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out
 [ ! -s "$HOME/rm.log" ] || { echo "FAIL: a failing 'agents' call must remove nothing: $(<"$HOME/rm.log")"; exit 1; }
 echo "ok: a listing that is not JSON, one that is empty and one that fails each leave the start untouched and remove nothing"
 
-# The marker sweep: a start sweeps its own bot's plugin-sessions/ and turns/ (and the project's checkin/ when every bot of
-# the project is one this daemon lists) of sessions `claude agents --json --all` no longer lists, from the listing the
-# dead-session reap already fetched; done and stopped rows are listed, so kept. A bot the listing names neither by name
-# nor by its pinned job belongs to the other side of a shared home: nothing of it goes. `compat` (every update) does
-# the same for every bot of every recorded project, with one listing.
+# The marker sweep (bin/lib/state.sh): a bot's plugin-sessions/ and turns/ (and the project's checkin/ when every bot of
+# the project is one this daemon lists) of sessions `claude agents --json --all` no longer lists; done and stopped rows
+# are listed, so kept. A bot the listing names neither by name nor by its pinned job belongs to the other side of a
+# shared home: nothing of it goes. `compat` (every update) and the monitor's pass (below, with the monitor) run it over
+# every recorded project with one listing; a start never does (SessionStart fires on startup, resume, clear and
+# compact, and a bot start waits on nothing of it).
 DB="$PD/.claude/discord-agents/dead" DCK="$PD/.claude/discord-agents/checkin"
 plant_markers() {
   rm -rf "$DB/plugin-sessions" "$DB/turns" "$DCK"; mkdir -p "$DB/plugin-sessions" "$DB/turns" "$DCK"
@@ -2178,19 +2179,21 @@ ALL_MARKERS="dead/plugin-sessions/child4 dead/plugin-sessions/done2 dead/plugin-
 : > "$HOME/agents.rc"
 printf '[{"name":"dead","id":"aaaa0001","sessionId":"live1","state":"working"},{"name":"dead","id":"dddd0002","sessionId":"done2","state":"done"}]\n' > "$HOME/agents.json"
 plant_markers; start_dead
-grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: a sweeping start must still reach the exec: $out"; exit 1; }
-[ "$(markers)" = "dead/plugin-sessions/done2 dead/plugin-sessions/live1 dead/turns/live1 dead/turns/live1.primed checkin/live1 " ] ||
-  { echo "FAIL: a start sweeps its bot's markers of sessions claude agents no longer lists, and keeps done ones: $(markers)"; exit 1; }
+grep -q "^LAUNCHER .*--channels" <<<"$out" || { echo "FAIL: a start must still reach the exec: $out"; exit 1; }
+[ "$(markers)" = "$ALL_MARKERS" ] || { echo "FAIL: a start sweeps nothing (the monitor's pass and update do): $(markers)"; exit 1; }
+# Which bots a listing lets the sweep touch, on the function compat and the monitor share (one recorded project here).
+printf '%s\n' "$PDP" > "$HOME/sweep.projects"
+sweep_here() { bash -c '. "$1/bin/lib/state.sh" && sweep_recorded "$2"' x "$D" "$HOME/sweep.projects"; }
 printf '[{"name":"other","id":"eeee0001","sessionId":"live1","state":"working"}]\n' > "$HOME/agents.json"
-plant_markers; start_dead
+sweep_here
 [ "$(markers)" = "$ALL_MARKERS" ] || { echo "FAIL: a sweep never touches a bot this daemon cannot see: $(markers)"; exit 1; }
-echo eeee0001 > "$DB/pinned-job"; start_dead; rm -f "$DB/pinned-job"
+echo eeee0001 > "$DB/pinned-job"; sweep_here; rm -f "$DB/pinned-job"
 [ "$(markers)" = "dead/plugin-sessions/live1 dead/turns/live1 dead/turns/live1.primed checkin/live1 " ] ||
   { echo "FAIL: a bot whose pinned job is listed is seen (another name in the agent view): $(markers)"; exit 1; }
 printf '[{"name":"dead","id":"aaaa0001","sessionId":"live1","state":"working"}]\n' > "$HOME/agents.json"; echo 1 > "$HOME/agents.rc"
-plant_markers; start_dead
-[ "$(markers)" = "$ALL_MARKERS" ] && ! grep -q '^claude-discord: ' <<<"$out" || { echo "FAIL: a listing that failed sweeps nothing and fails no start: $(markers) / $out"; exit 1; }
-: > "$HOME/agents.rc"; printf '{}\n' > "$HOME/agents.json"; start_dead
+plant_markers; out=$(sweep_here 2>&1)
+[ "$(markers)" = "$ALL_MARKERS" ] && [ -z "$out" ] || { echo "FAIL: a listing that failed sweeps nothing, silently: $(markers) / $out"; exit 1; }
+: > "$HOME/agents.rc"; printf '{}\n' > "$HOME/agents.json"; sweep_here
 [ "$(markers)" = "$ALL_MARKERS" ] || { echo "FAIL: a listing that is no array sweeps nothing: $(markers)"; exit 1; }
 # compat: two recorded projects, one bot each; only the visible one is swept, checkin/ too, and the other left whole.
 PU2="$HOME/project_unseen"; mkdir -p "$PU2/.claude/discord-agents/unseen/plugin-sessions" "$PU2/.claude/discord-agents/checkin"
@@ -2204,7 +2207,7 @@ bash "$S" compat >/dev/null 2>&1 || { echo "FAIL: compat must exit 0 here"; exit
   [ "$(<"$HOME/agents.calls")" = "agents --json --all" ] ||
   { echo "FAIL: update's compat step sweeps every visible bot of every recorded project, once: $(markers) / $(ls -R "$PU2/.claude/discord-agents") / $(<"$HOME/agents.calls")"; exit 1; }
 mv "$SWPF.sweep" "$SWPF"; cp "$HOME/agents.full.json" "$HOME/agents.json"
-echo "ok: a start sweeps its bot's plugin-sessions/ and turns/ markers (and checkin/) of sessions claude agents no longer lists, keeps done ones, never a bot the listing does not show (by name or pinned job), nothing on a failed or non-array listing; compat sweeps every recorded project once"
+echo "ok: the marker sweep takes a bot's plugin-sessions/ and turns/ markers (and checkin/) of sessions claude agents no longer lists, keeps done ones, never a bot the listing does not show (by name or pinned job), nothing on a failed or non-array listing; compat sweeps every recorded project once; a start sweeps nothing"
 
 # tools/local-bots: not a hook, run by hand, reusing the "dead"
 # project's still-active claude stub ("agents" cats agents.json, or
@@ -5010,9 +5013,18 @@ mkdir -p "$HOME/ro"; chmod 555 "$HOME/ro"
 mkdir -p "$MB"; echo '{"version":1,"manager":"mg' > "$MB/state.json"; head -c 262200 /dev/zero | tr '\0' x > "$MB/monitor.log"
 # Two --ensure calls back to back: the first takes the lock before it returns, so the second loses its first try and
 # leaves a waiter (0.1 s here) that must give up, never start a second monitor.
+# The marker sweep runs in a pass (its ledger has a local line), at most every CLAUDE_DISCORD_MONITOR_SWEEP seconds (an
+# hour; 0 here: every pass), over the recorded projects (one here, put back after) with the claude on its PATH: a dead
+# session's markers go, a done one's stay.
+SMR="$HOME/sweepmon/.claude/discord-agents"; mkdir -p "$SMR/swm/plugin-sessions" "$SMR/swm/turns" "$SMR/checkin" "$HOME/swbin"; : > "$SMR/swm/.env"
+for f in swm/plugin-sessions/live1 swm/plugin-sessions/done2 swm/plugin-sessions/gone3 swm/turns/live1 swm/turns/gone3 swm/turns/gone3.replied checkin/live1 checkin/gone3; do : > "$SMR/$f"; done
+printf '#!/bin/sh\n[ "$*" = "agents --json --all" ] && echo %s\n' "'[{\"name\":\"swm\",\"id\":\"aaaa0001\",\"sessionId\":\"live1\",\"state\":\"working\"},{\"name\":\"swm\",\"id\":\"dddd0002\",\"sessionId\":\"done2\",\"state\":\"done\"}]'" > "$HOME/swbin/claude"; chmod +x "$HOME/swbin/claude"
+SWPF="$HOME/.claude-discord/records/projects"; mv "$SWPF" "$SWPF.mon"; printf '%s\n' "$HOME/sweepmon" > "$SWPF"
 holder
-(cd "$MP" && TMPDIR=$HOME/ro bash "$S" monitor --ensure mgr --holder tui "$HPID" && TMPDIR=$HOME/ro bash "$S" monitor --ensure mgr)
+(cd "$MP" && PATH="$HOME/swbin:$PATH" CLAUDE_DISCORD_MONITOR_SWEEP=0 TMPDIR=$HOME/ro bash "$S" monitor --ensure mgr --holder tui "$HPID" && TMPDIR=$HOME/ro bash "$S" monitor --ensure mgr)
 wait_log 1 ' pass (hosts=|failed)'
+[ "$(cd "$SMR" && echo swm/plugin-sessions/* swm/turns/* checkin/*)" = "swm/plugin-sessions/done2 swm/plugin-sessions/live1 swm/turns/live1 checkin/live1" ] ||
+  { echo "FAIL: a monitor pass sweeps a dead session's markers and keeps a done one's: $(cd "$SMR" && echo swm/*/* checkin/*)"; exit 1; }
 [ "$(cut -d' ' -f1 "$MB/holders/tui-$HPID" 2>/dev/null)" = "$HPID" ] || { echo "FAIL: --holder must write <pid> <start time> <kind>"; exit 1; }
 grep -q '^health --all --json --patch|http://127.0.0.1:8118$' "$HOME/local.calls" || { echo "FAIL: local runs the shim's health --all --json --patch with the local line's env: $(cat "$HOME/local.calls")"; exit 1; }
 grep -q '^-o BatchMode=yes -o ConnectTimeout=8 h1 env ~/.local/bin/claude-discord health --all --json --patch$' "$HOME/ssh.log" || { echo "FAIL: a remote host runs the shim over ssh: $(<"$HOME/ssh.log")"; exit 1; }
@@ -5059,6 +5071,7 @@ grep -q 'exit reason=signal$' "$MB/monitor.log" || { echo "FAIL: the exit must b
 grep -q 'state unreadable, starting empty$' "$MB/monitor.log" || { echo "FAIL: a state.json that is not valid must be said and replaced: $(<"$MB/monitor.log")"; exit 1; }
 [ -z "$(ls -A "$HOME/ro")" ] || { echo "FAIL: nothing may be written to TMPDIR"; exit 1; }
 chmod 755 "$HOME/ro"
+mv "$SWPF.mon" "$SWPF"; rm -rf "$HOME/sweepmon" "$HOME/swbin"
 # Off Linux a start time comes from `ps -o lstart=`, printed in the caller's zone and locale; the record is written by a
 # hook and compared by the monitor, which may differ in both. Reached here through a pid with no /proc entry, with a ps
 # (its own dir, this call only) that prints one fixed time as macOS ps does: the same string under two zones and locales.
@@ -5068,7 +5081,7 @@ l1=$(PATH="$HOME/psbin:$PATH" TZ=XYZ-9 LC_ALL=en_US.utf8 bash -c '. "$1"; lstart
 l2=$(PATH="$HOME/psbin:$PATH" TZ=ABC+5 LC_ALL=C bash -c '. "$1"; lstart 999999999' x "$HOME/lstart.sh")
 [ -n "$l1" ] && [ "$l1" = "$l2" ] || { echo "FAIL: a ps start time must read the same in any zone and locale: '$l1' / '$l2'"; exit 1; }
 rm -rf "$HOME/psbin" "$HOME/lstart.sh"
-echo "ok: monitor: one instance for two --ensure calls, holder records with start times, local through the shim with the ledger's env, ssh for the rest (a CRLF ledger read as plain lines; a non-zero remote exit is blind even with a document, a wrong-shaped one blinds its host alone; a ledger name= word is the display name, without its control characters, and no env word; env key names, hostname, the monitor's language and owner and health's 1.11.0 fields are in the state, null from an older host), nothing posted when all is well; it exits within a tick of its last holder (a reused pid counts as dead), leaving only lock, state.json (stopped), monitor.log (rotated at 256 KiB, one generation, the monitor's own output reopened onto the new file) and an empty holders/, nothing in TMPDIR; a broken state.json starts empty"
+echo "ok: monitor: one instance for two --ensure calls, holder records with start times, local through the shim with the ledger's env, ssh for the rest (a CRLF ledger read as plain lines; a non-zero remote exit is blind even with a document, a wrong-shaped one blinds its host alone; a ledger name= word is the display name, without its control characters, and no env word; env key names, hostname, the monitor's language and owner and health's 1.11.0 fields are in the state, null from an older host), nothing posted when all is well; it exits within a tick of its last holder (a reused pid counts as dead), leaving only lock, state.json (stopped), monitor.log (rotated at 256 KiB, one generation, the monitor's own output reopened onto the new file) and an empty holders/, nothing in TMPDIR; a broken state.json starts empty; a pass sweeps the markers of sessions claude agents no longer lists"
 
 # A crash leaves no lock behind: the pass's ssh is started without the lock's fd, so a new --ensure takes over while an
 # orphaned ssh still runs (that start's cap is 5 s, so its own cap never kills the ssh first). The exit race: an
