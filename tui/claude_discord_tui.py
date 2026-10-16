@@ -342,6 +342,16 @@ def fix_of(state: dict, b: dict) -> str:
     return txt(b.get("fix")) if rank(b.get("verdict")) == 0 and not cut_off(state, b) else ""
 
 
+def recoverable(state: dict, b: dict) -> str:
+    """What `f` runs for this row (1.16.0): "recover" for a down bot, "recover --fresh" for a stale one, "" for every
+    other verdict (a duplicate's fix is a choice, an unreachable one's the token; a warning's is a re-check), a bot of a
+    host the last pass could not reach (the command would go through it, and the verdict is not a current one), and a
+    row that is no bot the CLI can reach (bot_row's own test)."""
+    if cut_off(state, b) or not (txt(b.get("bot")) and txt(b.get("project")) and ALIAS.fullmatch(txt(b.get("host")))):
+        return ""
+    return {"down": "recover", "stale": "recover --fresh"}.get(txt(b.get("verdict")), "")
+
+
 def status_head(state: dict, b: dict, now: float) -> tuple[str, str]:
     """A row's status as its closed row shows it, and its colour: symbol + word, a problem's with how long it has stood."""
     cut = cut_off(state, b)
@@ -402,11 +412,14 @@ def bots_items(state: dict, names: dict, width: int, opened: set, now: float) ->
                 "project": [("~" if project and project == b.get("home") else project.rstrip("/").rsplit("/", 1)[-1] or DASH, DIM)]}
         items.append((key, row_lines([(cell[n], w) for n, w in cols], "▾ " if o else "▸ ")))
         if fix_of(state, b):   # one full-width line, never wrapped into a column, so it selects and copies whole
-            items.append((None, [Text.assemble(("     fix  ", DIM), (fix_of(state, b), BRAND), ("   c copies it", DIM))]))
+            # 1.16.0: the keys that run it, on a row f takes (down, stale); the ssh form of the line is 74 cells, so a
+            # short form below WIDE.
+            hint = ("   f runs it · F runs every recovery · c copies it" if width >= WIDE else "   f runs · F all · c copies") if recoverable(state, b) else "   c copies it"
+            items.append((None, [Text.assemble(("     fix  ", DIM), (fix_of(state, b), BRAND), (hint, DIM))]))
         if discord_name(b):   # 1.14.0: a bot's name is its Discord username; the two differ here
             items.append((None, [Text.assemble(("     name ", DIM), (f"≠ Discord: {discord_name(b)}", WARN), ("   = takes Discord's name here", DIM))]))
         if o:   # what can be done to the bot, under an opened row (the foot has no room for all of it)
-            items.append((None, [Text("     keys  e access · n name · t token · enter all fields", DIM)]))
+            items.append((None, [Text("     keys  e access · n name · t token · f recover · enter all fields", DIM)]))
     return items
 
 
@@ -1480,7 +1493,10 @@ QUESTION = re.compile(r"Apply (this change|these [1-9][0-9]* changes|this wideni
 BOT_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{1,31}")
 TOKEN_Q = "Token (hidden): "
 RENAMED = re.compile(r"^renamed: (.+) -> ([A-Za-z0-9_][A-Za-z0-9_-]{1,31})$", re.M)   # `bot rename`'s last line once the directory moved
-BOT_Q = re.compile(r"(Replace the token|Rename it to [A-Za-z0-9_][A-Za-z0-9_-]{1,31}|Add this bot)\? \[y/N\] |" + re.escape(TOKEN_Q))
+# 1.16.0: `bot <bot> recover`'s question names the bot as the CLI prints it (a directory named before 1.14.0's rule may
+# hold anything printable): any name, since the marker line before it is what makes the line a question.
+BOT_Q = re.compile(r"(Replace the token|Rename it to [A-Za-z0-9_][A-Za-z0-9_-]{1,31}|Add this bot|Recover .{1,64})\? \[y/N\] |" + re.escape(TOKEN_Q))
+RECOVER_Q = re.compile(r"Recover .{1,64}\? \[y/N\] $")   # the form a batch (RecoverAll) answers itself
 
 
 def ask_text(raw: str) -> Text:
@@ -1660,6 +1676,7 @@ class Asking:
     printed = ""               # what it printed after the answer, whole, once it ended (ended() gets the last of it)
     FRAME = ("#access", "#a-tail")   # the popup's box and the scroll of its message line in it (BotPopup sets its own)
     asked = stopped = False    # it asked its question; esc (or Cancel) stopped it
+    batch_yes = False          # 1.16.0: a batch (RecoverAll) asked once itself and answers the CLI's `Recover <bot>?` y, with no popup
     yes: bool | None = None    # the answer written to it; None: none yet
     says = None                # the HostSays popup while it is open
     secret: bytearray | None = None   # the token to write when it asks for one: never a str, zeroed once written
@@ -1701,6 +1718,9 @@ class Asking:
         if what == "ask" and text.replace("\r", "").endswith("\n" + TOKEN_Q):   # the token, asked for with its echo off
             secret, self.secret = self.secret or bytearray(), None
             return self.step(secret)
+        if what == "ask" and self.batch_yes and RECOVER_Q.search(text.replace("\r", "")):   # 1.16.0: the batch's one question stood for it
+            self.asked = True
+            return self.step(True)
         if what == "ask":   # its question: a popup with all it printed, its answer the next step
             self.asked = True
             return self.app.push_screen(AccessAsk(ask_text(text)), self.step)
@@ -2162,7 +2182,7 @@ class HostSays(Scrolled):
 # into a Secret field, taken out of it as a bytearray when the popup runs (the field emptied), and written to the pty
 # only when the CLI asks for it with its echo off; PtyRun zeroes it then.
 B_RAN = {1: "it could not:", 2: "refused (exit 2):", 3: "no terminal for its question (exit 3): nothing was changed",
-         4: "answered no: nothing was changed", 5: "the host did not answer, or its claude-discord is older than 1.14.0 (exit 5): nothing was changed"}
+         4: "answered no: nothing was changed", 5: "the host did not answer, or its claude-discord is too old for this (exit 5): nothing was changed"}
 
 
 class Secret(Input):
@@ -2432,6 +2452,147 @@ class BotAdd(BotPopup):   # not a BotToken: Textual runs each class's on_mount
         self.start(self.app.bot_argv({"host": host, "project": project}, "add", "--mode", self.query_one("#b-mode", Choice).value, *start))
 
 
+# ---- recover: the recovery keys f and F (1.16.0) ------------------------------
+# `claude-discord bot <bot> recover [--fresh]` on the bot's host, through the pty as the other bot popups: the host
+# decides what runs (claude respawn of the bot's last session while claude agents lists it, else --bg --name; --fresh
+# stops every listed session first), prints it and asks. The row is not changed here: the monitor is asked for one pass.
+R_HOW = {"recover": "the host decides: claude respawn of its last session while claude agents still lists it, else --bg --name",
+         "recover --fresh": "every listed session of it stopped, then --bg --name (its conversation is lost unless it left a handoff.md)"}
+
+
+def verdict_since(b: dict, now: float) -> str:
+    v = txt(b.get("verdict"))
+    return f"{WORD.get(v, v or '?')} {ago(b.get('since'), now)}".rstrip()
+
+
+class BotRecover(BotPopup):
+    """`f` on a down or stale row: `bot <bot> recover [--fresh]`, run at once (as `=` does); the CLI's plan and its one
+    question are the popup (AccessAsk, No first), its `ran` line what the dismiss says."""
+    GO = "Recover"
+    DONE = "ran"
+
+    def __init__(self, entry: dict, how: str) -> None:
+        super().__init__(entry)
+        self.how = how   # recoverable()'s word: "recover" or "recover --fresh"
+
+    def body(self) -> ComposeResult:
+        e = self.entry
+        yield Static(Text.assemble((fit("runs", 12), DIM), (f"claude-discord bot {txt(e.get('bot'))} {self.how}", f"bold {BRAND}"),
+                                   (f"    on {host_label(self.app.state, e.get('host'))}, in {txt(e.get('project'))}", DIM)), id="r-cmd")
+        yield Static(Text.assemble((fit("fix line", 12), DIM), (txt(e.get("fix")), DIM)))
+        yield Static(Text.assemble((" " * 12, ""), (R_HOW[self.how], DIM)))
+
+    def on_mount(self) -> None:
+        e = self.entry
+        self.query_one("#b-title", Static).update(Text.assemble(("Recover", f"bold {BRAND}"), (" · ", DIM), (txt(e.get("bot")), f"bold {BRAND}"),
+                                                                (f"    {host_label(self.app.state, e.get('host'))} · ", DIM), (verdict_since(e, time.time()), WARN),
+                                                                ("  ·  the CLI asks before it runs anything", DIM)))
+        self.query_one("#b-no", Button).focus()
+        self.say("the CLI's question opens as a popup: y or Yes runs it, n or esc runs nothing · esc here stops it until then")
+        self.go()
+
+    def go(self) -> None:
+        self.start(self.app.bot_argv(self.entry, txt(self.entry.get("bot")), *self.how.split()))
+
+
+class RecoverAll(BotPopup):
+    """`F`: every row `f` would take, listed in the table's order with what will be asked of its host (the problem rows
+    `f` refuses listed as skipped); one question of this popup's; then each row's `bot <bot> recover [--fresh]` in turn
+    on the pty, the next only after the previous ended, the CLI's own question answered y here (batch_yes); at the end
+    what ran and what failed (the CLI's last lines), and the monitor asked for one pass, its answer shown with the
+    results (the dismiss asks none again: ASK_GAP). esc before a run's y stops it and skips the rest; after a y it is
+    waited for. Its state: ready (nothing ran yet), running (the row at `at`), done (`outcome`: done or stopped)."""
+    BINDINGS = BotPopup.BINDINGS + [Binding("y", "yes", show=False)]
+
+    def __init__(self, rows: list, skipped: list) -> None:
+        super().__init__({})
+        self.rows, self.skipped = rows, skipped   # [(entry, how)] and [entry]
+        self.GO = f"Run {len(rows)}"
+        self.phase, self.outcome, self.at, self.results = "ready", "", 0, []
+        self.summary = Text()
+
+    def body(self) -> ComposeResult:
+        now, st = time.time(), self.app.state
+        for i, (b, how) in enumerate(self.rows):
+            yield Static(Text.assemble((f"{i + 1:>2}. ", DIM), (txt(b.get("bot")), "bold"), (f"  {host_label(st, b.get('host'))} · ", DIM), (verdict_since(b, now), WARN),
+                                       ("  →  ", DIM), (f"claude-discord bot {txt(b.get('bot'))} {how}", BRAND)), id=f"r-{i}")
+            yield Static(Text.assemble(("     ", ""), (R_HOW[how], DIM)))
+            yield Static(Text.assemble(("     fix line: ", DIM), (txt(b.get("fix")), DIM)))
+        for i, b in enumerate(self.skipped):
+            why = ("its host could not be reached at the last pass" if cut_off(st, b) else
+                   "no command recovers a duplicate: which copy to stop is yours" if txt(b.get("verdict")) == "duplicate" else "nothing to run") + " (f refuses it too)"
+            yield Static(Text.assemble((" –  ", DIM), (txt(b.get("bot")), f"bold {DIM}"), (f"  {host_label(st, b.get('host'))} · {verdict_since(b, now)}  →  skipped: {why}", DIM)), id=f"r-skip-{i}")
+            yield Static(Text.assemble(("     fix line: ", DIM), (txt(b.get("fix")), DIM)))
+        yield Static(Text.assemble((self.question(), "bold"), ("    each CLI question is answered y here; what failed is listed at the end", DIM)), id="r-q")
+
+    def question(self) -> str:
+        n = len(self.rows)
+        return f"Recover {n} bot{'s' if n != 1 else ''}? [y/N]"
+
+    def on_mount(self) -> None:
+        self.query_one("#b-title", Static).update(Text.assemble(("Recover every down or stale bot", f"bold {BRAND}"),
+                                                                (f"    {len(self.rows)} of {len(self.rows) + len(self.skipped)} problem rows · the host decides what each runs", DIM)))
+        self.query_one("#b-no", Button).focus()
+        self.say(f"← → between the buttons · y or Run {len(self.rows)} runs them in the table's order · esc closes, or stops a run before its y")
+
+    def action_yes(self) -> None:
+        self.go()
+
+    def go(self) -> None:
+        if self.phase != "ready":
+            return
+        self.phase, self.batch_yes = "running", True
+        self.query_one("#r-q", Static).update(Text(self.question() + " y", "bold"))
+        self.next_run()
+
+    def next_run(self) -> None:
+        b, how = self.rows[self.at]
+        self.start(self.app.bot_argv(b, txt(b.get("bot")), *how.split()))
+        if self.run is None:   # no pty: start() showed the command for a shell; the batch ends here
+            self.results.append(f"– {txt(b.get('bot'))}: not run (no pseudo-terminal: {self.by_hand})")
+            self.results += [f"– {txt(x.get('bot'))}: not run" for x, _ in self.rows[self.at + 1:]]
+            return self.finish("stopped")
+        self.say(f"{self.at + 1}/{len(self.rows)}: {txt(b.get('bot'))} runs; esc stops it until its question is answered y")
+
+    def ended(self, rc: int, said: str) -> None:
+        bot = txt(self.rows[self.at][0].get("bot"))
+        lines = [l for l in said.split("\n") if l.strip()]
+        if self.stopped:   # only ever before its y
+            self.results.append(f"– {bot}: stopped before its y: nothing was run")
+            self.results += [f"– {txt(b.get('bot'))}: not run" for b, _ in self.rows[self.at + 1:]]
+            return self.finish("stopped")
+        if rc == 0:
+            self.results.append(f"✓ {bot}: {lines[-1] if lines else self.DONE}")
+        else:
+            self.results.append(f"✕ {bot} (exit {rc}): " + ("\n      ".join(lines[-3:]) if lines else B_RAN.get(rc, f"claude-discord bot exited {rc}")))
+        self.at += 1
+        if self.at < len(self.rows):
+            return self.next_run()
+        self.finish("done")
+
+    def finish(self, outcome: str) -> None:
+        self.phase, self.outcome, self.batch_yes = "done", outcome, False
+        ok, bad = sum(r.startswith("✓") for r in self.results), sum(r.startswith("✕") for r in self.results)
+        left = len(self.results) - ok - bad
+        self.summary = Text(f"{outcome}: {ok} succeeded, {bad} failed" + (f", {left} not run" if left else ""), ALERT if bad or outcome == "stopped" else OK)
+        for r in self.results:   # one line per bot, in the colour of its outcome
+            self.summary.append("\n" + r, OK if r.startswith("✓") else ALERT if r.startswith("✕") else DIM)
+        self.query_one("#b-msg", Static).update(self.summary)
+        self.call_after_refresh(self.fit_tail)
+        if outcome == "done":   # the pass, asked here so that its answer is read with the results
+            self.app.run_worker(lambda: self.app.call_from_thread(self.passed, self.app.ask_pass()), thread=True)
+
+    def passed(self, text: str) -> None:
+        self.query_one("#b-msg", Static).update(Text.assemble(self.summary, ("\n\nasked the monitor for a pass: the rows change when it has run (esc closes)\n", DIM), (text, DIM)))
+        self.call_after_refresh(self.fit_tail)
+
+    def action_close(self) -> None:
+        if self.run is not None:
+            self.stop()
+        else:
+            self.dismiss("\n".join(self.results) if self.outcome == "done" else None)
+
+
 class Pane(VerticalScroll, can_focus=False):
     """The tab's body. Never focused: the arrow keys move the row cursor (the app's bindings), not the scroll position."""
 
@@ -2447,7 +2608,8 @@ class MonitorTUI(App):
     BINDINGS = [Binding("q", "quit", "quit"), Binding("Q", "quit_stop", "quit + stop backend"),
                 Binding("up", "move(-1)"), Binding("down", "move(1)"), Binding("left", "tab(-1)"), Binding("right", "tab(1)"),
                 Binding("space", "toggle"), Binding("enter", "open"), Binding("c", "copy"), Binding("a", "add"), Binding("x", "remove"),
-                Binding("l", "laptop"), Binding("e", "edit"), Binding("n", "name"), Binding("t", "token"), Binding("equals_sign", "align")]
+                Binding("l", "laptop"), Binding("e", "edit"), Binding("n", "name"), Binding("t", "token"), Binding("equals_sign", "align"),
+                Binding("f", "recover"), Binding("F", "recover_all")]
 
     def __init__(self, state_dir: Path, bot: str, wrapper: str | None, version: str = "") -> None:
         super().__init__()
@@ -2581,7 +2743,8 @@ class MonitorTUI(App):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         # The row keys belong to the main view: under a Detail or a dialog they do nothing.
-        return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy", "add", "remove", "laptop", "edit", "name", "token", "align")
+        return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy", "add", "remove", "laptop", "edit", "name", "token", "align",
+                                                             "recover", "recover_all")
 
     def action_tab(self, d: int) -> None:
         self.tab = TABS[(TABS.index(self.tab) + d) % len(TABS)]
@@ -2716,6 +2879,30 @@ class MonitorTUI(App):
         b = self.bot_row()
         if b and discord_name(b):
             self.push_screen(BotName(b, discord_name(b)), self.wrote)
+
+    def action_recover(self) -> None:
+        """`f` on a problem row (1.16.0): `bot <bot> recover [--fresh]` on the bot's host, after the CLI's one question.
+        A row it may not run on is said, with the row's fix text: `f` takes a down or stale bot of a host that answers."""
+        b = self.bot_row()
+        if not b:
+            return
+        how = recoverable(self.state, b)
+        if not how:
+            v = txt(b.get("verdict"))
+            return self.notify(f"{txt(b.get('bot'))}: {WORD.get(v, v or '?')}{': ' + txt(b.get('fix')) if txt(b.get('fix')) else ''}"
+                               + (" (its host could not be reached at the last pass)" if cut_off(self.state, b) else "") + "\nf recovers a down or stale bot only",
+                               title="not recovered", severity="warning", markup=False, timeout=10)
+        self.push_screen(BotRecover(b, how), self.wrote)
+
+    def action_recover_all(self) -> None:
+        """`F` on the Bots tab (1.16.0): every row `f` would take, in the table's order, after one question."""
+        if self.tab != "bots":
+            return
+        rows = [(b, recoverable(self.state, b)) for _, b in sorted_bots(self.state)]
+        take = [(b, how) for b, how in rows if how]
+        if not take:
+            return self.notify("nothing to recover: no down or stale bot on a host that answers", title="not recovered", severity="warning", timeout=10)
+        self.push_screen(RecoverAll(take, [b for b, how in rows if not how and rank(b.get("verdict")) == 0]), self.wrote)
 
     def bot_argv(self, b: dict, *rest: str) -> list[str]:
         """`claude-discord bot --host <the bot's host> --manager <this manager> --project <its project> -- ...`, as
