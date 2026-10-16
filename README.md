@@ -1453,8 +1453,13 @@ row `f` would take, in the table's order (the problem rows it refuses are
 listed as skipped), asks once, runs them one after the other, answering each
 command's own question itself, runs to the end, lists `✓ <bot>` and `✕ <bot>
 (exit N)` with the command's last lines, and asks the monitor for one pass;
-`esc` before a run's `y` stops it and skips the rest, after a `y` the run is
-waited for. Neither changes the row: the next pass says whether the bot
+`esc` before a run's `y` stops it and skips the rest; after a `y` the run is
+waited for and the rest of the batch is not started. A `STUCK` row whose
+`servers` is 0 (health's "no plugin server: the bot is down") gets `recover`,
+not `--fresh`: the respawn keeps its conversation. Both keys act on the
+verdict of the last pass, up to one pass old (the row's `since`); a bot that
+came back since is respawned or restarted all the same, which the next pass
+shows. Neither changes the row: the next pass says whether the bot
 answers (a respawned worker may sit idle until the next message). `f` refuses
 every other row with a notification: `DUPLICATE` (which copy to stop is
 yours), `UNREACHABLE` (the token), a warning, a bot with no token, and a bot
