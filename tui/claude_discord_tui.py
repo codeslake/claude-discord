@@ -18,8 +18,9 @@ row edits who may drive that bot (its channels, senders, DM policy and mode),
 read through `claude-discord access ... --json` and written by
 `claude-discord access ... set`, run on a pty the TUI holds (1.13.1): its
 question is shown in a popup and the answer written back. Since 1.14.0 `n`
-renames a bot (on Discord and here; `=` renames it here to Discord's name, restarting it if it runs), `t` replaces
-its token and `a` on the Bots tab adds a bot, each through `claude-discord bot`
+renames a bot (on Discord and here; `=` renames it here to Discord's name, restarting
+it if it runs; `enter` shows Discord's name when the two differ), `t` replaces its
+token and `a` on the Bots tab adds a bot, each through `claude-discord bot`
 on such a pty; a token typed here is written to that pty when the CLI asks for
 it (its echo off), never to an argument, a file or the screen. Nothing else:
 no restart of its own, no post, no patch, and it never reads a .env or an
@@ -368,6 +369,17 @@ def discord_name(b: dict) -> str:
     return d if d and d != txt(b.get("bot")) else ""
 
 
+def discord_line(b: dict, width: int) -> Text | None:
+    """The all-fields view's line for a bot whose Discord username is not its name here (health 1.14.0's discord_name),
+    else None: Discord's name, `=` as a key, and what it does (a running session is stopped and started again by the
+    rename). Not in the list: a bot kept under another name on purpose would pay a row for it for ever. Below WIDE the
+    restart note goes, never the name."""
+    if not discord_name(b):
+        return None
+    return Text.assemble(("Discord name: ", DIM), (discord_name(b), WARN), ("   ", DIM), ("=", f"bold {BRAND}"),
+                         (" rename here to Discord's" + (" (restarts it if running)" if width >= WIDE else ""), DIM))
+
+
 def with_mode(entry: dict) -> dict:
     """A bot's entry for the all-fields screen: `mode` is always there, a dash when the host sent none (before 1.11.1)."""
     return dict(obj(entry), mode=txt(obj(entry).get("mode")) or DASH)
@@ -419,11 +431,6 @@ def bots_items(state: dict, names: dict, width: int, opened: set, now: float) ->
             # short form below WIDE.
             hint = ("   f runs it · F runs every recovery · c copies it" if width >= WIDE else "   f runs · F all · c copies") if recoverable(state, b) else "   c copies it"
             items.append((None, [Text.assemble(("     fix  ", DIM), (fix_of(state, b), BRAND), (hint, DIM))]))
-        if discord_name(b):   # 1.14.0: a bot's name is its Discord username; the two differ here
-            # Both names, `=` as a key, and what it does: a running session is stopped and started again by the rename.
-            # Below WIDE the restart note goes, never a name.
-            items.append((None, [Text.assemble(("     name ", DIM), (f"differs: here {txt(b.get('bot'))} · Discord {discord_name(b)}", WARN), ("   ", DIM), ("=", f"bold {BRAND}"),
-                                               (" rename here to Discord's" + (" (restarts it if running)" if width >= WIDE else ""), DIM))]))
         if o:   # what can be done to the bot, under an opened row (the foot has no room for all of it)
             items.append((None, [Text("     keys  e access · n name · t token · f recover · enter all fields", DIM)]))
     return items
@@ -593,12 +600,14 @@ class Detail(Screen):
     """Enter on a row: its text in full, and the recovery command in a widget of its own so it selects and copies whole."""
     BINDINGS = [Binding("escape", "app.pop_screen", "back")]
 
-    def __init__(self, body: str, fix: str | None = None) -> None:
+    def __init__(self, body: str, fix: str | None = None, name: Text | None = None) -> None:
         super().__init__()
-        self.body, self.fix = body, fix
+        self.body, self.fix, self.dname = body, fix, name   # dname: discord_line's, for a bot whose two names differ
 
     def compose(self) -> ComposeResult:
         with VerticalScroll():
+            if self.dname is not None:
+                yield Static(self.dname, id="discord")
             yield Static(self.body, id="body-detail", markup=False)   # state-derived text: [..] in it is text, not markup
             if self.fix is not None:
                 yield Static("\nrecovery command:", markup=False)
@@ -2800,7 +2809,7 @@ class MonitorTUI(App):
         entry = obj(entry)
         # A host's posts are keyed host|- in `alerts`; a bot's and a project row's by their own key.
         self.push_screen(Detail(entry_text(key, key + "|-" if scope == "hosts" else key, with_mode(entry) if scope == "bots" else entry, alerts),
-                                txt(entry.get("fix"))))
+                                txt(entry.get("fix")), discord_line(entry, self.width) if scope == "bots" else None))
 
     def action_copy(self) -> None:
         fix = fix_of(self.state, obj(obj(self.state.get("bots")).get(self.cursor["bots"] or ""))) if self.tab == "bots" else ""
@@ -2938,7 +2947,7 @@ class MonitorTUI(App):
 
     def renamed(self, host: str, project: str, old: str, new: str) -> None:
         """`bot rename` moved a bot's directory (the CLI's last line): its row is the new name's now, without waiting
-        for the pass the popup asked for. Both names are the new one, so the `name differs` line goes. The next
+        for the pass the popup asked for. Both names are the new one, so `enter` shows no Discord name line. The next
         state.json replaces all of this. The key is the monitor's reducer's, `host|project|bot` (a remote bot's project
         is the path on that host, as the entry holds it)."""
         bots = obj(self.state.get("bots"))
