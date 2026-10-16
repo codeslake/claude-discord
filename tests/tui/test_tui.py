@@ -39,6 +39,7 @@ HANGUL = "한글봇이름이아주길어요"   # 11 characters, 22 cells
 ACCESS = {"dm": "allowlist", "dm_allow": ["111"],
           "groups": [{"id": "900", "mention": True, "allow": ["111", "222", "333", "444", "555"]}, {"id": "901", "mention": False, "allow": []}]}
 NAMES = {"111": "dongyong22", "222": "gpuvillain", "333": "junyong-dev-bot"}
+ZBOT = "local|/home/u/rcps|zbot"
 PHOTO, MGRBOT, HBOT, OLDBOT, NOTOK = ("local|/home/u/rcps|photobot", "local|/home/u/cd|mgr", "local|/home/u/cd|" + HANGUL,
                                       "old|/home/u/p|oldbot", "local|/home/u|notok")
 FIX = "cd ~/rcps && claude-discord --bg --name photobot"
@@ -333,7 +334,13 @@ def pure():
     assert tui.recoverable(fz, fz["bots"][OLDBOT]) == "" and tui.recoverable(fz, dict(fz["bots"][OLDBOT], verdict="duplicate")) == "" and tui.recoverable(fz, dict(fz["bots"][PHOTO], host="")) == ""
     dup = dict(s, bots={OLDBOT: dict(s["bots"][OLDBOT], verdict="duplicate", fix="claude agents, then claude stop <id>")})
     assert [l.plain for k, ls in tui.bots_items(dup, NAMES, 137, set(), T) if k is None for l in ls if l.plain.lstrip().startswith("fix  ")] == ["     fix  claude agents, then claude stop <id>   c copies it"]
-    assert tui.BOT_Q.fullmatch("Recover photobot? [y/N] ") and tui.RECOVER_Q.search("Recover photobot? [y/N] ") and not tui.RECOVER_Q.search("Rename it to x? [y/N] ")
+    assert tui.BOT_Q.fullmatch("Recover photobot? [y/N] ") and tui.RECOVER_Q.search("Recover xy? [y/N] ")
+    # M7 of the review: a batch answers the Recover question only, never the token's or the rename's
+    assert not tui.RECOVER_Q.search("Rename it to x? [y/N] ") and not tui.RECOVER_Q.search("Replace the token? [y/N] ") and not tui.RECOVER_Q.search("Add this bot? [y/N] ")
+    # I1 of the review: a stale bot with no plugin server is down (health: "no plugin server: the bot is down"): the respawn path keeps its conversation
+    st0, st1 = dict(fz["bots"][HBOT], verdict="stale", servers="0"), dict(fz["bots"][HBOT], verdict="stale", servers="1")
+    assert tui.recoverable(fz, st0) == "recover" and tui.recoverable(fz, st1) == "recover --fresh" and tui.recoverable(fz, dict(st0, servers="")) == "recover --fresh", "stale: servers 0 respawns"
+    assert "no plugin server" in tui.recover_why(st0, "recover") and "respawn" in tui.recover_why(st0, "recover") and tui.recover_why(fz["bots"][PHOTO], "recover") == tui.R_HOW["recover"]
     print("ok: f takes a down or stale row of a host that answers (recover, recover --fresh), and no other; the CLI's Recover question is one of bot's")
 
     # ---- the shell: the pane's renderer, title, tabs, footer, bar ----
@@ -793,11 +800,14 @@ def variant(name):
             s["bots"][f"local|/home/u/m|m{i:02}"] = dict(s["bots"][OLDBOT], host="local", project="/home/u/m", bot=f"m{i:02}")
     elif name == "renamed":   # 1.14.0: Discord has another name for photobot
         s["bots"][PHOTO]["discord_name"] = "photo_x"
-    elif name == "down_stale":   # 1.16.0: what f and F take (photobot down, the Hangul bot stale) beside what they refuse (duplicate, working, no token)
+    elif name in ("down_stale", "down_stale3"):   # 1.16.0: what f and F take (photobot down, the Hangul bot stale) beside what they refuse (duplicate, working, no token)
         s["bots"][HBOT].update(verdict="stale", detail="no turn ended for 58m; 3 messages unanswered", fix=f"cd ~/cd && claude-discord refresh {HANGUL} --force",
                                since=iso(time.time() - 3620), posted="stale", posted_at=iso(time.time() - 3400))
         s["bots"][OLDBOT].update(verdict="duplicate", detail="2 plugin servers for this bot: two sessions answer every message", servers="2", since=iso(time.time() - 1100),
                                  fix="claude agents, then claude stop <id> for the copy that is not the bot's", posted="duplicate", posted_at=iso(time.time() - 980))
+        if name == "down_stale3":   # a third row f takes: stale with no plugin server (I1 of the review), between photobot and the Hangul bot by name
+            s["bots"][ZBOT] = dict(s["bots"][PHOTO], bot="zbot", verdict="stale", servers="0", detail="no plugin server: the bot is down", fix="cd ~/rcps && claude-discord refresh zbot --force",
+                                   since=iso(time.time() - 7300), posted="stale", posted_at=iso(time.time() - 7000), channel="903", channel_name="z")
     elif name == "stopped":
         s["monitor"].update(pid=None, stopped_at="2026-10-11T12:00:00Z", holders=[])
     elif name == "stopped_by_user":
@@ -2480,20 +2490,21 @@ async def recover_all(app, pilot):
 async def recover_all_stopped(app, pilot):
     """esc before a run's y stops it (killed) and skips the rest, listed as not run, and no pass is asked for; esc after
     a y does not stop it (it may be writing): said, and the popup taken down waits for it."""
-    fake_pty(app, [None], [(H_PLAN, "ask"), (H_END, 0)])
+    fake_pty(app, [(R_PLAN, "ask"), (R_END, 0)], [None])
     await pilot.press("F")
     await settle(app, pilot)
     pop = app.screen
     await pilot.press("y")
-    await until(pilot, lambda: app.runs and pop.run is app.runs[0], "the first run started")
+    await until(pilot, lambda: len(app.runs) == 2 and pop.run is app.runs[1], "the second run started")
     await pilot.press("escape")
     await settle(app, pilot)
-    assert app.runs[0].killed.is_set() and len(app.runs) == 1 and pop.run is None and app.screen is pop
+    assert app.runs[1].killed.is_set() and len(app.runs) == 2 and pop.run is None and app.screen is pop
     msg = text(pop, "#b-msg").split("\n")
-    assert msg[0].startswith("stopped: 0 succeeded, 0 failed, 2 not run") and msg[1] == "– photobot: stopped before its y: nothing was run" and msg[2] == f"– {HANGUL}: not run", msg
+    assert msg[0].startswith("stopped: 1 succeeded, 0 failed, 1 not run") and msg[1].startswith("✓ photobot: ") and msg[2] == f"– {HANGUL}: stopped before its y: nothing was run", msg
+    assert checks(app) == 1 and CHECKS in text(pop, "#b-msg"), "a pass is asked when a row succeeded, whatever the outcome (M1 of the review)"
     await pilot.press("escape")
     await settle(app, pilot)
-    assert len(app.screen_stack) == 1 and checks(app) == 0
+    assert len(app.screen_stack) == 1 and checks(app) == 1 and "✓ photobot" in notes(app), notes(app)
     fake_pty(app, [(R_PLAN, "ask"), None])
     await pilot.press("F")
     await settle(app, pilot)
@@ -2508,6 +2519,35 @@ async def recover_all_stopped(app, pilot):
     app.pop_screen()
     await settle(app, pilot)
     assert run.waited and run.ended.is_set() and not run.killed.is_set() and len(app.screen_stack) == 1 and len(app.runs) == 1
+
+
+async def recover_all_held(app, pilot):
+    """I2 of the review: esc after a run's y inside a batch does not stop that run (it may be writing: waited for, said)
+    but ends the batch after it: the rows after it are not started, listed as not run; one pass is asked, the run's
+    result shown. The list names each row's command: a stale bot with no plugin server gets `recover` (I1), the other
+    stale one `recover --fresh`."""
+    fake_pty(app, [(R_PLAN, "ask"), None], [None], [None])
+    await pilot.press("F")
+    await settle(app, pilot)
+    pop = app.screen
+    rows = [text(pop, f"#r-{i}") for i in range(3)]
+    assert rows[0].rstrip().endswith("claude-discord bot photobot recover") and rows[1].rstrip().endswith("claude-discord bot zbot recover") and "STUCK 2h" in rows[1], rows
+    assert rows[2].rstrip().endswith(f"claude-discord bot {HANGUL} recover --fresh") and "no plugin server" in text(pop, "#r-why-1") and "respawn" in text(pop, "#r-why-1"), (rows, text(pop, "#r-why-1"))
+    await pilot.press("y")
+    await until(pilot, lambda: app.runs and app.runs[0].written == ["y\n"], "the first run answered")
+    await pilot.press("escape")
+    await pilot.pause()
+    run = app.runs[0]
+    assert not run.killed.is_set() and pop.run is run and text(pop, "#b-msg").startswith("still running: it was answered y") and "the rest of the batch is not started" in text(pop, "#b-msg"), text(pop, "#b-msg")
+    run.finish((R_END, 0))
+    await settle(app, pilot)
+    assert len(app.runs) == 1 and pop.run is None and app.screen is pop, (len(app.runs), app.screen)
+    msg = text(pop, "#b-msg").split("\n")
+    assert msg[0].startswith("stopped: 1 succeeded, 0 failed, 2 not run") and msg[1].startswith("✓ photobot: claude-discord: bot: ran claude respawn") and msg[2:4] == ["– zbot: not run", f"– {HANGUL}: not run"], msg
+    assert checks(app) == 1 and CHECKS in text(pop, "#b-msg"), (checks(app), text(pop, "#b-msg"))
+    await pilot.press("escape")
+    await settle(app, pilot)
+    assert len(app.screen_stack) == 1 and checks(app) == 1 and len(app.runs) == 1
 
 
 async def stopped(app, pilot):
@@ -2603,6 +2643,7 @@ async def main():
     await case("recover_refused", recover_refused, state="down_stale", wrapper=recover_cli)
     await case("recover_all", recover_all, state="down_stale", wrapper=recover_cli)
     await case("recover_all_stopped", recover_all_stopped, state="down_stale", wrapper=recover_cli)
+    await case("recover_all_held", recover_all_held, state="down_stale3", wrapper=recover_cli)
     await case("access_long_host_answered", access_long_host_answered, state="all_ok", wrapper=access_cli)
     await case("stopped", stopped)
     await case("stopped_by_user", stopped_by_user)

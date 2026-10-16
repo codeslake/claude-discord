@@ -349,7 +349,10 @@ def recoverable(state: dict, b: dict) -> str:
     row that is no bot the CLI can reach (bot_row's own test)."""
     if cut_off(state, b) or not (txt(b.get("bot")) and txt(b.get("project")) and ALIAS.fullmatch(txt(b.get("host")))):
         return ""
-    return {"down": "recover", "stale": "recover --fresh"}.get(txt(b.get("verdict")), "")
+    v = txt(b.get("verdict"))
+    # A stale bot with no plugin server is down (health: "no plugin server: the bot is down"): the respawn keeps its
+    # conversation, where --fresh would stop and lose it (I1 of the 1.16.0 review).
+    return "recover" if v == "down" or (v == "stale" and txt(b.get("servers")) == "0") else "recover --fresh" if v == "stale" else ""
 
 
 def status_head(state: dict, b: dict, now: float) -> tuple[str, str]:
@@ -1683,6 +1686,7 @@ class Asking:
     YES_SAID = "answered y: it runs, and is waited for (esc does not stop it now)"
     NO_SAID = "answered n; it ends"
     HELD_SAID = "still running: it was answered y and may be writing; it is waited for"
+    cancel_rest = False        # 1.16.0: esc after a y, in a batch (RecoverAll): this run is waited for and no other is started
 
     def step(self, answer: bool | bytearray | None) -> None:
         """The run's next part, in a worker thread: the answer written (y or n, or the token; None: none), then what it
@@ -1775,6 +1779,7 @@ class Asking:
         """esc while it runs: its process group killed and its end said. Not after a y: it may be writing, and is
         waited for."""
         if self.yes:
+            self.cancel_rest = True
             return self.say(self.HELD_SAID, WARN)
         self.stopped = True
         self.run.kill()
@@ -2460,6 +2465,14 @@ R_HOW = {"recover": "the host decides: claude respawn of its last session while 
          "recover --fresh": "every listed session of it stopped, then --bg --name (its conversation is lost unless it left a handoff.md)"}
 
 
+def recover_why(b: dict, how: str) -> str:
+    """What will be asked of the host for this row: R_HOW's line, or, for a stale bot with no plugin server, why it
+    gets the respawn path rather than --fresh."""
+    if how == "recover" and txt(b.get("verdict")) == "stale":
+        return "stale with no plugin server: the bot is down, so the host respawns its last session (its conversation kept) rather than stopping it; else --bg --name"
+    return R_HOW[how]
+
+
 def verdict_since(b: dict, now: float) -> str:
     v = txt(b.get("verdict"))
     return f"{WORD.get(v, v or '?')} {ago(b.get('since'), now)}".rstrip()
@@ -2480,7 +2493,7 @@ class BotRecover(BotPopup):
         yield Static(Text.assemble((fit("runs", 12), DIM), (f"claude-discord bot {txt(e.get('bot'))} {self.how}", f"bold {BRAND}"),
                                    (f"    on {host_label(self.app.state, e.get('host'))}, in {txt(e.get('project'))}", DIM)), id="r-cmd")
         yield Static(Text.assemble((fit("fix line", 12), DIM), (txt(e.get("fix")), DIM)))
-        yield Static(Text.assemble((" " * 12, ""), (R_HOW[self.how], DIM)))
+        yield Static(Text.assemble((" " * 12, ""), (recover_why(e, self.how), DIM)))
 
     def on_mount(self) -> None:
         e = self.entry
@@ -2503,12 +2516,13 @@ class RecoverAll(BotPopup):
     results (the dismiss asks none again: ASK_GAP). esc before a run's y stops it and skips the rest; after a y it is
     waited for. Its state: ready (nothing ran yet), running (the row at `at`), done (`outcome`: done or stopped)."""
     BINDINGS = BotPopup.BINDINGS + [Binding("y", "yes", show=False)]
+    HELD_SAID = "still running: it was answered y and may be writing; it is waited for, and the rest of the batch is not started"
 
     def __init__(self, rows: list, skipped: list) -> None:
         super().__init__({})
         self.rows, self.skipped = rows, skipped   # [(entry, how)] and [entry]
         self.GO = f"Run {len(rows)}"
-        self.phase, self.outcome, self.at, self.results = "ready", "", 0, []
+        self.phase, self.outcome, self.at, self.results, self.succeeded = "ready", "", 0, [], 0
         self.summary = Text()
 
     def body(self) -> ComposeResult:
@@ -2516,7 +2530,7 @@ class RecoverAll(BotPopup):
         for i, (b, how) in enumerate(self.rows):
             yield Static(Text.assemble((f"{i + 1:>2}. ", DIM), (txt(b.get("bot")), "bold"), (f"  {host_label(st, b.get('host'))} · ", DIM), (verdict_since(b, now), WARN),
                                        ("  →  ", DIM), (f"claude-discord bot {txt(b.get('bot'))} {how}", BRAND)), id=f"r-{i}")
-            yield Static(Text.assemble(("     ", ""), (R_HOW[how], DIM)))
+            yield Static(Text.assemble(("     ", ""), (recover_why(b, how), DIM)), id=f"r-why-{i}")
             yield Static(Text.assemble(("     fix line: ", DIM), (txt(b.get("fix")), DIM)))
         for i, b in enumerate(self.skipped):
             why = ("its host could not be reached at the last pass" if cut_off(st, b) else
@@ -2563,9 +2577,13 @@ class RecoverAll(BotPopup):
             return self.finish("stopped")
         if rc == 0:
             self.results.append(f"✓ {bot}: {lines[-1] if lines else self.DONE}")
+            self.succeeded += 1
         else:
             self.results.append(f"✕ {bot} (exit {rc}): " + ("\n      ".join(lines[-3:]) if lines else B_RAN.get(rc, f"claude-discord bot exited {rc}")))
         self.at += 1
+        if self.cancel_rest:   # esc after this run's y: it was waited for, the rest is not started (I2 of the review)
+            self.results += [f"– {txt(b.get('bot'))}: not run" for b, _ in self.rows[self.at:]]
+            return self.finish("stopped")
         if self.at < len(self.rows):
             return self.next_run()
         self.finish("done")
@@ -2579,7 +2597,7 @@ class RecoverAll(BotPopup):
             self.summary.append("\n" + r, OK if r.startswith("✓") else ALERT if r.startswith("✕") else DIM)
         self.query_one("#b-msg", Static).update(self.summary)
         self.call_after_refresh(self.fit_tail)
-        if outcome == "done":   # the pass, asked here so that its answer is read with the results
+        if self.succeeded:   # the pass (a row changed something), asked here so that its answer is read with the results
             self.app.run_worker(lambda: self.app.call_from_thread(self.passed, self.app.ask_pass()), thread=True)
 
     def passed(self, text: str) -> None:
@@ -2590,7 +2608,7 @@ class RecoverAll(BotPopup):
         if self.run is not None:
             self.stop()
         else:
-            self.dismiss("\n".join(self.results) if self.outcome == "done" else None)
+            self.dismiss("\n".join(self.results) if self.succeeded else None)
 
 
 class Pane(VerticalScroll, can_focus=False):
