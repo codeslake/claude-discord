@@ -56,6 +56,56 @@ grep -qF "(await import(\"$HOME/.claude-discord/runtime/discord-chunk.ts\")).chu
 out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch after the rewrite must change nothing: $out"; exit 1; }
 echo "ok: patch rewrites a chunk import and a proxy preload left at the old paths to runtime/, and a second run is silent"
 
+# A server.ts 1.9.3 patched (its guard line in, its login giving up on a refused token): only the login is replaced, once.
+# So is the login of one patched by 1.9.4 to 1.13.x (0.0.2), which waited out a refused token only at the login.
+OLD193='new Promise<string>(ok => { if (TOKEN) return ok(TOKEN); const t = setInterval(() => { let m; try { m = readFileSync(ENV_FILE, "utf8").match(/^DISCORD_BOT_TOKEN=(.+)$/m) } catch {} if (m?.[1].trim()) { clearInterval(t); ok(m[1].trim()) } }, 10000) }).then(t => client.login(t)).catch('
+mkdir -p "$PCACHE/0.0.3"
+CD_OLD=$OLD193 perl -0777 -pe 's/^  process\.exit\(1\)\n\}\n/  process.stderr.write("discord channel: no token yet; waiting for it (re-read every 10 s)\\n")\n}\n/m; s/^client\.login\(TOKEN\)\.catch\(/$ENV{CD_OLD}/m' "$HOME/server.ts.pristine" > "$PCACHE/0.0.3/server.ts"
+grep -qF "$OLD193" "$PCACHE/0.0.3/server.ts" && [ "$(grep -c 'process.exit(1)' "$PCACHE/0.0.3/server.ts")" = 1 ] || { echo "FAIL: the 1.9.3-patched fixture was not planted: $(<"$PCACHE/0.0.3/server.ts")"; exit 1; }
+OLD194=';(async () => { let bad = ""; const read = () => { let m; try { m = readFileSync(ENV_FILE, "utf8").match(/^DISCORD_BOT_TOKEN=(.+)$/m) } catch {} return m?.[1].trim() || "" }; const pick = () => { const v = bad ? read() : (TOKEN || read()); return v && v !== bad ? v : "" }; for (;;) { const t = await new Promise<string>(ok => { const v = pick(); if (v) return ok(v); const i = setInterval(() => { const w = pick(); if (w) { clearInterval(i); ok(w) } }, 10000) }); try { return await client.login(t) } catch (e) { if ((e as any)?.code !== "TokenInvalid") throw e; bad = t; process.stderr.write("discord channel: the token was refused; waiting for a new one in .env (re-read every 10 s)\n") } } })().catch('
+mkdir -p "$PCACHE/0.0.2"
+CD_OLD=$OLD194 perl -0777 -pe 's/^  process\.exit\(1\)\n\}\n/  process.stderr.write("discord channel: no token yet; waiting for it (re-read every 10 s)\\n")\n}\n/m; s/^client\.login\(TOKEN\)\.catch\(/$ENV{CD_OLD}/m' "$HOME/server.ts.pristine" > "$PCACHE/0.0.2/server.ts"
+out=$(bash "$S" patch 2>&1) && grep -qF "$PCACHE/0.0.3/server.ts" <<<"$out" && ! grep -qF '.then(t => client.login(t))' "$PCACHE/0.0.3/server.ts" &&
+  [ "$(grep -c 'code !== "TokenInvalid"' "$PCACHE/0.0.3/server.ts")" = 1 ] && grep -qF '})().catch(err => {' "$PCACHE/0.0.3/server.ts" &&
+  [ "$(grep -c 'no token yet; waiting for it' "$PCACHE/0.0.3/server.ts")" = 1 ] && [ "$(grep -c 'process.exit(1)' "$PCACHE/0.0.3/server.ts")" = 1 ] || { echo "FAIL: patch must upgrade a 1.9.3 login to the refused-token loop: $out $(<"$PCACHE/0.0.3/server.ts")"; exit 1; }
+grep -qF "$PCACHE/0.0.2/server.ts" <<<"$out" && ! grep -qF 'return await client.login(t)' "$PCACHE/0.0.2/server.ts" && [ "$(grep -c 'client.on("shardDisconnect", f)' "$PCACHE/0.0.2/server.ts")" = 1 ] &&
+  [ "$(grep -c 'code !== "TokenInvalid"' "$PCACHE/0.0.2/server.ts")" = 1 ] && grep -qF '})().catch(err => {' "$PCACHE/0.0.2/server.ts" || { echo "FAIL: patch must upgrade a 1.9.4 login to the one that waits out a 4004 too: $out $(<"$PCACHE/0.0.2/server.ts")"; exit 1; }
+out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch after the 1.9.3 and 1.9.4 upgrades must change nothing: $out"; exit 1; }
+rm -rf "$PCACHE/0.0.3" "$PCACHE/0.0.2"
+echo "ok: patch upgrades a server.ts 1.9.3 patched to wait out a refused token, and one 1.9.4 to 1.13.x patched to wait out a 4004 after the login too; a second run is silent"
+# A moved pattern: exit 1 naming file and patch, the other patches still applied.
+mkdir -p "$PCACHE/0.0.7"
+printf 'client.on(x, msg => {\n  if (msg.author.isBot()) return\n})\nif (!TOKEN) {\n  process.exit(1)\n}\nclient.connect(TOKEN).catch(err => {})\n' > "$PCACHE/0.0.7/server.ts"
+printf '{"mcpServers":{"discord":{"command":"bun"}}}\n' > "$PCACHE/0.0.7/.mcp.json"
+out=$(bash "$S" patch 2>&1) && { echo "FAIL: a pattern that no longer matches must exit 1"; exit 1; }
+grep -q 'patch: .*0.0.7/server.ts: bot-authors no longer matches' <<<"$out" || { echo "FAIL: wrong no-match report: $out"; exit 1; }
+# One late-token anchor without the other (the login moved): reported, and the exit left in place.
+grep -q 'patch: .*0.0.7/server.ts: late-token no longer matches' <<<"$out" && grep -q '^  process.exit(1)$' "$PCACHE/0.0.7/server.ts" || { echo "FAIL: a moved login must leave the no-token exit alone and be reported: $out"; exit 1; }
+! grep -q '0.0.[456]/server.ts: ' <<<"$out" || { echo "FAIL: only the moved dir may be reported: $out"; exit 1; }
+grep -qF "$HOME/.claude-discord/runtime/discord-proxy.ts" "$PCACHE/0.0.7/bunfig.toml" &&
+  [ "$(jq -r '.mcpServers.discord.env.CLAUDE_DISCORD_BOT' "$PCACHE/0.0.7/.mcp.json")" = '${DISCORD_STATE_DIR:-}' ] || { echo "FAIL: the patches that still match must be applied beside the moved one"; exit 1; }
+# failure-cache: a .mcp.json without the discord server's command, and one that
+# is not JSON, are left byte-identical, named, exit 1; the file lists once.
+rm -rf "$PCACHE/0.0.7"
+for v in 0.0.8 0.0.9; do mkdir -p "$PCACHE/$v"; cp "$HOME/server.ts.pristine" "$PCACHE/$v/server.ts"; done
+printf '{"mcpServers":{"other":{"command":"x"}}}\n' > "$PCACHE/0.0.8/.mcp.json"
+printf '{"mcpServers": oops\n' > "$PCACHE/0.0.9/.mcp.json"
+cp "$PCACHE/0.0.8/.mcp.json" "$HOME/mcp8.orig"; cp "$PCACHE/0.0.9/.mcp.json" "$HOME/mcp9.orig"
+out=$(bash "$S" patch 2>&1) && { echo "FAIL: a .mcp.json the failure-cache patch cannot edit must exit 1: $out"; exit 1; }
+for v in 0.0.8 0.0.9; do
+  grep -q "patch: .*$v/.mcp.json: failure-cache no longer matches" <<<"$out" || { echo "FAIL: no failure-cache report for $v: $out"; exit 1; }
+  cmp -s "$HOME/mcp${v#0.0.}.orig" "$PCACHE/$v/.mcp.json" || { echo "FAIL: $v/.mcp.json must be left byte-identical"; exit 1; }
+  grep -q 'ignoreEveryone: true' "$PCACHE/$v/server.ts" || { echo "FAIL: the other patches must still be applied to $v"; exit 1; }
+done
+! grep '^claude-discord: patched' <<<"$out" | grep -q '\.mcp\.json' || { echo "FAIL: an unpatched .mcp.json must not be listed as patched: $out"; exit 1; }
+[ "$(grep '^claude-discord: patched' <<<"$out" | grep -o "$PCACHE/0.0.8/server.ts" | wc -l)" = 1 ] || { echo "FAIL: a patched file must be listed once: $out"; exit 1; }
+rm -f "$HOME/mcp8.orig" "$HOME/mcp9.orig"
+rm -rf "$PCACHE/0.0.8" "$PCACHE/0.0.9"
+rm -rf "$PCACHE/0.0.5" "$PCACHE/0.0.6"
+echo "ok: patch applies the five patches to every cached version, is idempotent and silent, and reports a moved pattern with exit 1"
+# The old single file moved the plugin cache aside after these cases; the install cases below ran with it aside.
+mv "$HOME/.claude/plugins" "$HOME/.claude/plugins.off"
+
 # A machine with the old install: setup replaces what install.sh put under
 # ~/.claude-discord with links into a compat copy of the real plugin (a project set up by the
 # previous release and not yet by this one still reaches its hooks through
