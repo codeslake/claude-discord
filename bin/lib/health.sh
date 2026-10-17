@@ -227,14 +227,16 @@ if [ "${1:-}" = health ]; then
       for a in "${args[@]}"; do case $a in */discord/*) hit=yes; break;; esac; done
       [ "$hit" = yes ] || continue
       pid=${c#"$proc"/}; pid=${pid%/cmdline}
-      # -x: without it this is a SUBSTRING test, so a bot named "hbot"
-      # counts "hbot2"'s server too (measured) -- the shorter-named bot then
-      # reads as a duplicate and the longer-named one, when down, does not
-      # read as down at all. -z makes each NUL-separated entry a line, and
-      # -x anchors the whole entry.
-      if grep -qzxF "DISCORD_STATE_DIR=$1" "$proc/$pid/environ" 2>/dev/null; then n=$((n + 1)); continue; fi
-      v=""; { while IFS= read -rd '' l; do case $l in "DISCORD_STATE_DIR="*"/.claude/discord-agents/$2") v=${l#DISCORD_STATE_DIR=}; break;; esac; done < "$proc/$pid/environ"; } 2>/dev/null
-      [ -n "$v" ] && [ "$v" -ef "$1" ] && n=$((n + 1))
+      # ONE fork per candidate, no bash loop over its environment (a loop cost a few ms per live server per bot per
+      # run: +1.9 s on the suite's health cases with 18 servers on the machine, 2026-10-18). The whole entry, as -z
+      # -x anchored it before: GNU grep (the /proc branch) stops at the NUL that ends it, since NUL is a control
+      # character, and the one value comes back with no NUL in it. Compared whole, so a bot named "hbot" never counts
+      # "hbot2"'s server: the exact dir, else the old path's last part and a builtin -ef through the link.
+      v=$(grep -aoE '(^|[^A-Za-z0-9_])DISCORD_STATE_DIR=[^[:cntrl:]]*' "$proc/$pid/environ" 2>/dev/null) || continue
+      v=${v#*DISCORD_STATE_DIR=}; v=${v%%$'\n'*}
+      if [ "$v" = "$1" ]; then n=$((n + 1))
+      else case $v in */.claude/discord-agents/"$2") [ "$v" -ef "$1" ] && n=$((n + 1));; esac
+      fi
     done
     printf '%s' "$n"
   }
