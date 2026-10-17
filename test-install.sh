@@ -271,13 +271,13 @@ echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or wr
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.
 P5="$HOME/project5"; mkdir -p "$P5"; cd "$P5"
-R5=$(broot "$P5")
+R5=$HOME/.claude-discord/projects/$(skey "$P5")/bots   # by hand, not broot: the first case asserts that nothing made the key dir
 SL5="$P5/.claude/settings.local.json"
 
 out=$(printf '' | bash "$S" setup nosetup --mode 2>&1) && { echo "FAIL: --mode on a bot that is not set up should refuse"; exit 1; }
 rc=$?
 [ "$rc" -eq 2 ] && grep -qF "run 'claude-discord setup nosetup' first" <<<"$out" || { echo "FAIL: --mode on an unset bot must exit 2 with a hint, got rc=$rc: $out"; exit 1; }
-[ ! -e "$R5/nosetup" ] && [ ! -e "$(pstate "$P5")/config.env" ] && [ ! -e "$P5/.claude/discord-agents" ] || { echo "FAIL: --mode on an unset bot must create nothing (no bot dir or config.env): $(find "$R5" "$P5/.claude")"; exit 1; }
+[ ! -e "$HOME/.claude-discord/projects/$(skey "$P5")" ] && [ ! -e "$P5/.claude/discord-agents" ] || { echo "FAIL: --mode on an unset bot must create nothing (no key dir, bot dir or config.env): $(find "$HOME/.claude-discord/projects/$(skey "$P5")" "$P5/.claude" 2>&1)"; exit 1; }
 echo "ok: --mode on a bot that is not set up exits 2 with a hint and creates nothing"
 
 printf '\n1\n222\n\ntokF\nn\n' | bash "$S" setup five --scope project >/dev/null   # mode kept at its default, none
@@ -512,6 +512,13 @@ rc=0; out=$(cd "$CA" && printf '\n1\n2\n\nt\nn\n' | bash "$S" setup cbot --scope
 [ "$rc" = 1 ] && grep -qF "$CA" <<<"$out" && grep -qF "$CB2" <<<"$out" && grep -q 'share one' <<<"$out" && [ "$(ls -A "$CK")" = project ] && [ ! -e "$CA/.claude/discord-agents" ] ||
   { echo "FAIL: two paths with one key: setup refuses the second (rc=$rc): $out / $(ls -A "$CK")"; exit 1; }
 echo "ok: two projects whose paths share one key: setup refuses the second, naming both, and writes no bot file"
+# (M-3) The collision must not keep a bot of the second project down: a start there says it and launches on the old path.
+mkdir -p "$CA/.claude/discord-agents/cbot"; printf 'DISCORD_BOT_TOKEN=tc\n' > "$CA/.claude/discord-agents/cbot/.env"; echo none > "$CA/.claude/discord-agents/cbot/mode"; echo '{}' > "$CA/.claude/discord-agents/cbot/access.json"
+printf "DISCORD_CHANNEL_ID='7'\nDISCORD_USER_ID='8'\nDISCORD_ALLOW_IDS=''\n" > "$CA/.claude/discord-agents/config.env"
+out=$(cd "$CA" && bash "$S" --name cbot 2>&1) || :
+grep -q 'share one' <<<"$out" && grep -qF -- "\"DISCORD_STATE_DIR\": \"$CA/.claude/discord-agents/cbot\"" <<<"$out" && [ -d "$CA/.claude/discord-agents/cbot" ] && [ ! -L "$CA/.claude/discord-agents/cbot" ] ||
+  { echo "FAIL: a key collision must not stop a bot of the second project: the start says it and launches on the old path: $out"; exit 1; }
+echo "ok: a start in a project whose key another project holds says so and launches on the old path (setup alone refuses)"
 # (d) a project of the old shape (<project>/.claude/discord-agents/) with two bots, moved by compat: every bot dir by
 # rename (same inode), config.env, peers.json and checkin/ with it, a link per bot whose old path a job record names, the
 # hooks link gone, the .gitignore kept, a manager's records/monitor and scratch left where they are (Task 4 moves them
@@ -527,6 +534,7 @@ JOBS="$HOME/.claude/jobs"; mkdir -p "$JOBS/mv000001" "$JOBS/mv000002"
 jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$OR/ob1\"}}" '{sessionId: "0b100000-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JOBS/mv000001/state.json"
 jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$OR/ob2\"}}" '{sessionId: "0b200000-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JOBS/mv000002/state.json"
 OPF=$HOME/.claude-discord/records/projects; OPFK=$(cat "$OPF" 2>/dev/null || :); printf '%s\n' "$OLDP" > "$OPF"
+cp "$HOME/bin/claude" "$HOME/claude.before-move"; printf '#!/bin/bash\ncase $1 in agents) echo "[]";; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"   # no session of any bot runs
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
 OS="$HOME/.claude-discord/projects/$(skey "$OLDP")"
 [ "$(cat "$OS/project" 2>/dev/null)" = "$OLDP" ] && diff -r "$HOME/old-shape.ref/ob1" "$OS/bots/ob1" >/dev/null 2>&1 && diff -r "$HOME/old-shape.ref/ob2" "$OS/bots/ob2" >/dev/null 2>&1 &&
@@ -542,6 +550,12 @@ out2=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: a second compat fai
 echo "ok: compat moves a 1.16 project's bots, config.env, peers.json and checkin/ into ~/.claude-discord/projects/<key>/ by rename, leaves a link per bot a job record names, drops the hooks link, keeps the .gitignore, touches no records/monitor or scratch, and a second run changes nothing"
 # (g) the link goes only when no jobs/<id>/state.json names its old path; after the last, discord-agents/ and its .gitignore.
 rm -rf "$JOBS/mv000002"
+# (M-4) No job record, but a foreground session of ob2 on the old path (`claude agents` lists it with a pid, no id): kept, said.
+printf '#!/bin/bash\ncase $1 in agents) echo %s;; *) echo "PLAIN $*";; esac\n' "'[{\"name\":\"ob2\",\"pid\":4242,\"cwd\":\"$(cd "$OLDP" && pwd -P)\"}]'" > "$HOME/bin/claude"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+[ "$(readlink "$OR/ob2")" = "$OS/bots/ob2" ] && grep -qF "$OR/ob2" <<<"$out" && grep -q 'session of ob2' <<<"$out" ||
+  { echo "FAIL: a foreground session on the old path (no job record) keeps its link at compat, said: $out / $(ls -la "$OR" 2>&1)"; exit 1; }
+printf '#!/bin/bash\ncase $1 in agents) echo "[]";; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
 [ ! -L "$OR/ob2" ] && [ ! -e "$OR/ob2" ] && [ "$(readlink "$OR/ob1")" = "$OS/bots/ob1" ] && [ -d "$OS/bots/ob2" ] && grep -q mv000001 <<<"$out" && grep -qF "$OR/ob1" <<<"$out" ||
   { echo "FAIL: the old path goes only when no job record names it: $out / $(ls -la "$OR" 2>&1)"; exit 1; }
@@ -549,6 +563,29 @@ rm -rf "$JOBS/mv000001"
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
 [ ! -e "$OR" ] && [ ! -L "$OR" ] && [ -d "$OLDP/.claude" ] && [ -d "$OS/bots/ob1" ] || { echo "FAIL: the old path goes only when no job record names it: with none left, discord-agents/ and its .gitignore go: $(ls -la "$OLDP/.claude" 2>&1)"; exit 1; }
 echo "ok: a bot's old-path link stays while a jobs/<id>/state.json names it (compat says which job), goes when none does, and the empty discord-agents/ with its .gitignore after the last"
+# (M-2) A move cut between the rename and the link (bots/ob2 there, no link) is repaired by the next compat when a job record
+# names the old path; (I-1) the record holds the start's LOGICAL $PWD, here the project through a link: the path's last
+# part decides, not its spelling.
+mkdir -p "$OR" "$HOME/lnk"; printf '*\n' > "$OR/.gitignore"; ln -s "$OLDP" "$HOME/lnk/old"
+mkdir -p "$JOBS/mv000003"; jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$HOME/lnk/old/.claude/discord-agents/ob2\"}}" '{sessionId: "0b400000-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JOBS/mv000003/state.json"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+[ "$(readlink "$OR/ob2")" = "$OS/bots/ob2" ] && grep -qF "$OR/ob2" <<<"$out" && [ ! -e "$OR/ob1" ] ||
+  { echo "FAIL: a move cut before its link is repaired by compat when a job record (in any spelling of the project path) names the old path, said: $out / $(ls -la "$OR" 2>&1)"; exit 1; }
+rm -rf "$JOBS/mv000003"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+[ ! -e "$OR" ] && [ ! -L "$OR" ] || { echo "FAIL: the repaired link goes as any other once its record is gone: $(ls -la "$OR" 2>&1)"; exit 1; }
+echo "ok: compat makes the per-bot link again when a move was cut before it and a job record names the old path in any spelling of the project path; it goes with the record"
+# (M-1) The lock is taken before anything is written: a held lock leaves the old shape whole, the start says so and runs on it.
+OLDL="$HOME/old lock"; LR="$OLDL/.claude/discord-agents"; mkdir -p "$LR/lb"; printf 'DISCORD_BOT_TOKEN=tl\n' > "$LR/lb/.env"; echo none > "$LR/lb/mode"; echo '{}' > "$LR/lb/access.json"
+printf "DISCORD_CHANNEL_ID='7'\nDISCORD_USER_ID='8'\nDISCORD_ALLOW_IDS=''\n" > "$LR/config.env"
+LS="$HOME/.claude-discord/projects/$(skey "$OLDL")"; mkdir -p "$LS.lock"
+out=$(cd "$OLDL" && bash "$S" --name lb 2>&1) || :
+grep -q 'lock is held' <<<"$out" && grep -qF -- "\"DISCORD_STATE_DIR\": \"$LR/lb\"" <<<"$out" && [ ! -e "$LS/project" ] && [ -d "$LR/lb" ] && [ ! -L "$LR/lb" ] && [ -f "$LR/config.env" ] ||
+  { echo "FAIL: a held <key>.lock must leave the old shape whole (no project file written) and the start say it and run on the old path: $out / $(find "$LS" "$LR" 2>&1)"; exit 1; }
+rmdir "$LS.lock"
+out=$(cd "$OLDL" && bash "$S" --name lb 2>&1)
+grep -qF -- "\"DISCORD_STATE_DIR\": \"$LS/bots/lb\"" <<<"$out" && [ -f "$LS/bots/lb/.env" ] || { echo "FAIL: with the lock gone the next start moves the project: $out"; exit 1; }
+echo "ok: a held <key>.lock leaves a 1.16 project whole (nothing written under the key), the start says it and runs on the old path; the next start moves it"
 # (h) another filesystem (rename(2) refused; a perl stub refuses the move's rename): a bot with a live session is left in
 # place and said; with none, copied, compared, the source removed and the link made.
 OLDX="$HOME/old xdev"; XR="$OLDX/.claude/discord-agents"; mkdir -p "$XR/xb"; printf 'DISCORD_BOT_TOKEN=tx\n' > "$XR/xb/.env"; echo none > "$XR/xb/mode"; printf 'a\nb\n' > "$XR/xb/handoff.md"
@@ -566,7 +603,7 @@ mkdir -p "$JOBS/xb000001"; jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$X
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
 [ "$(readlink "$XR/xb")" = "$XS/bots/xb" ] && [ "$(<"$XS/bots/xb/handoff.md")" = $'a\nb' ] && [ "$(<"$XS/bots/xb/.env")" = DISCORD_BOT_TOKEN=tx ] && [ -z "$(ls -A "$XS/bots" | command grep '^\.')" ] ||
   { echo "FAIL: with no live session a bot on another filesystem is copied, compared and replaced by a link: $out / $(find "$XR" "$XS" 2>&1)"; exit 1; }
-rm -f "$HOME/bin/perl"; cp "$HOME/claude.before-xdev" "$HOME/bin/claude"; rm -f "$HOME/claude.before-xdev"; rm -rf "$JOBS/xb000001"
+rm -f "$HOME/bin/perl"; cp "$HOME/claude.before-move" "$HOME/bin/claude"; rm -f "$HOME/claude.before-xdev" "$HOME/claude.before-move"; rm -rf "$JOBS/xb000001"
 echo "ok: a bot whose directory cannot be renamed (another filesystem) is left in place and said while a session of it runs, and copied, compared and linked once none does"
 # A start in a project of the old shape moves it first (no job record names the bot: no link is left) and launches on the new path.
 OLDS="$HOME/old start"; SR2="$OLDS/.claude/discord-agents"; mkdir -p "$SR2/sb"; printf 'DISCORD_BOT_TOKEN=ts\n' > "$SR2/sb/.env"; echo none > "$SR2/sb/mode"; echo '{}' > "$SR2/sb/access.json"
