@@ -83,11 +83,10 @@ if [ "${1:-}" = bot ]; then
     cd "$a_proj" 2>/dev/null || { echo "claude-discord: bot: no such project directory (--project)" >&2; exit 1; }
   else
     # The project above the cwd that has the bot; for add, the one above it with bots.
-    bp=$PWD bw=$bot; [ "$act" != add ] || bw=""
-    while [ ! -d "$bp/.claude/discord-agents/$bw" ] && [ -n "$bp" ]; do bp=${bp%/*}; done
-    [ -z "$bp" ] || cd "$bp"
+    bw=$bot; [ "$act" != add ] || bw=""
+    ! find_proj "$bw" || cd "$pd_project"
   fi
-  root=$PWD/.claude/discord-agents; d=$root/$bot M=$helpers/records/monitor
+  proj_cwd; root=$pd_root proj_state=$pd_state; d=$root/$bot M=$helpers/records/monitor
   bn=${bot//[[:cntrl:]]/}   # the name as it is printed
   b_host_name=$(uname -n); b_host_name=${b_host_name%%.*}
   [ "$act" = add ] || [ -f "$d/.env" ] || { echo "claude-discord: bot: no bot '$bn' set up in $root (claude-discord setup <bot>)" >&2; exit 1; }
@@ -141,7 +140,8 @@ if [ "${1:-}" = bot ]; then
     [ ! -e "$M/$1" ] || [ "$M/$1" -ef "$M/${2:-}" ] || { echo "claude-discord: bot: $M/$1 is there: a manager named $1 has a backend on this machine; nothing was changed" >&2; exit 1; }
     while IFS= read -r p || [ -n "$p" ]; do
       p=${p%$'\r'}
-      [ -n "$p" ] && [ -f "$p/.claude/discord-agents/$1/hosts" ] || continue
+      [ -n "$p" ] || continue
+      proj_dirs "$p"; [ -f "$pd_root/$1/hosts" ] || continue
       echo "claude-discord: bot: '$1' is a dev-manager with a hosts ledger in $p: one backend serves one manager name per machine; nothing was changed" >&2; exit 1
     done < <(cat "$helpers/records/projects" 2>/dev/null)
   }
@@ -153,8 +153,10 @@ if [ "${1:-}" = bot ]; then
     b_where="" b_how=id
     while IFS= read -r p || [ -n "$p" ]; do
       p=${p%$'\r'}
-      for f in "$p"/.claude/discord-agents/*/.env; do
-        [ -n "$p" ] && [ -f "$f" ] && ! { [ -n "${1:-}" ] && [ "${f%/.env}" -ef "$1" ]; } || continue
+      [ -n "$p" ] || continue
+      proj_dirs "$p"
+      for f in "$pd_root"/*/.env; do
+        [ -f "$f" ] && ! { [ -n "${1:-}" ] && [ "${f%/.env}" -ef "$1" ]; } || continue
         id=""; { read -r id < "${f%/.env}/bot-id"; } 2>/dev/null || :
         [ "$id" != "$b_id" ] || b_where=${f%/.env}
         { while IFS= read -r l || [ -n "$l" ]; do
@@ -174,9 +176,11 @@ if [ "${1:-}" = bot ]; then
     shopt -s nocasematch
     while IFS= read -r p || [ -n "$p" ]; do
       p=${p%$'\r'}
-      for f in "$p"/.claude/discord-agents/*/.env "$M"/*/; do
+      [ -n "$p" ] || continue
+      proj_dirs "$p"
+      for f in "$pd_root"/*/.env "$M"/*/; do
         f=${f%/}; f=${f%/.env}; n=${f##*/}
-        [ -n "$p" ] && [ -d "$f" ] && [[ $n == "$1" ]] && [ "$n" != "$1" ] || continue
+        [ -d "$f" ] && [[ $n == "$1" ]] && [ "$n" != "$1" ] || continue
         if [ "$f" = "$M/$n" ]; then [ -n "$mgr" ] && [ "$n" = "$bot" ] && continue; else [ -n "${2:-}" ] && [ "$f" -ef "$2" ] && continue; fi
         shopt -u nocasematch
         echo "claude-discord: bot: '$1' is the name of $f but for its case: on a case-insensitive file system they are one directory, and the hooks compare names without case; nothing was changed" >&2; exit 1
@@ -201,9 +205,9 @@ if [ "${1:-}" = bot ]; then
   if [ "$act" = add ]; then
     # The project's channel and owner are set: add asks none of what setup asks of a project's first bot.
     DISCORD_CHANNEL_ID="" DISCORD_USER_ID="" DISCORD_ALLOW_IDS=""
-    [ ! -f "$root/config.env" ] || . "$root/config.env"
+    [ ! -f "$proj_state/config.env" ] || . "$proj_state/config.env"
     c_match "$DISCORD_CHANNEL_ID" '^[0-9]{1,20}$' && c_match "$DISCORD_USER_ID" '^[0-9]{1,20}$' ||
-      { echo "claude-discord: bot: add needs a project whose channel and owner are set ($root/config.env): set up its first bot with claude-discord setup <bot> at a terminal there; nothing was changed" >&2; exit 1; }
+      { echo "claude-discord: bot: add needs a project whose channel and owner are set ($proj_state/config.env): set up its first bot with claude-discord setup <bot> at a terminal there; nothing was changed" >&2; exit 1; }
     [ -t 0 ] && [ -t 1 ] || b_noterm
     b_read
     b_me "copy it again (Developer Portal, the bot's Bot tab, Reset Token)"
@@ -428,8 +432,8 @@ if [ "${1:-}" = bot ]; then
     { echo "claude-discord: bot: $d/.env holds the token of the bot $b_shown ($b_id), not $bn's ($me): claude-discord bot $bn token puts its own back; nothing was changed" >&2; exit 1; }
   [ "$b_user" != "$new" ] || [ "$new" != "$bot" ] || { echo "claude-discord: bot: $bn is its name here and on Discord already; nothing to change"; exit 0; }
   # A peer of that name in peers.json: the bot would skip it as itself.
-  b_clash=$(jq -r --arg n "$new" --arg id "$b_id" 'first(.peers[]? | objects | select((.name // "" | tostring | ascii_downcase) == ($n | ascii_downcase) and (.bot_id // "" | tostring) != $id) | .bot_id | tostring) // empty' "$root/peers.json" 2>/dev/null) || b_clash=""
-  [ -z "$b_clash" ] || { echo "claude-discord: bot: the peer $new (${b_clash//[!0-9]/}) in $root/peers.json has that name, and a bot skips its own name there; nothing was changed" >&2; exit 1; }
+  b_clash=$(jq -r --arg n "$new" --arg id "$b_id" 'first(.peers[]? | objects | select((.name // "" | tostring | ascii_downcase) == ($n | ascii_downcase) and (.bot_id // "" | tostring) != $id) | .bot_id | tostring) // empty' "$proj_state/peers.json" 2>/dev/null) || b_clash=""
+  [ -z "$b_clash" ] || { echo "claude-discord: bot: the peer $new (${b_clash//[!0-9]/}) in $proj_state/peers.json has that name, and a bot skips its own name there; nothing was changed" >&2; exit 1; }
   live=""
   if [ "$new" != "$bot" ]; then
     live=$(live_sessions "$bot" "$d") || { echo "claude-discord: bot: 'claude agents --json' failed, so what runs is unknown; nothing was changed" >&2; exit 1; }
@@ -494,8 +498,9 @@ if [ "${1:-}" = bot ]; then
   # This bot's line in each project's peers.json, by its id.
   while IFS= read -r p || [ -n "$p" ]; do
     p=${p%$'\r'}
-    [ -n "$p" ] && [ -f "$p/.claude/discord-agents/peers.json" ] || continue
-    jq_edit "$p/.claude/discord-agents/peers.json" --arg id "$b_id" --arg n "$new" \
+    [ -n "$p" ] || continue
+    proj_dirs "$p"; [ -f "$pd_state/peers.json" ] || continue
+    jq_edit "$pd_state/peers.json" --arg id "$b_id" --arg n "$new" \
       'if (.peers | type) == "array" then .peers |= map(if type == "object" and ((.bot_id // "") | tostring) == $id then .name = $n else . end) else . end'
   done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null)
   if [ -d "$helpers/scratch/$bot" ] && { [ ! -e "$helpers/scratch/$new" ] || [ "$helpers/scratch/$new" -ef "$helpers/scratch/$bot" ]; }; then

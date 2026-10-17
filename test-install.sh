@@ -277,7 +277,7 @@ SL5="$P5/.claude/settings.local.json"
 out=$(printf '' | bash "$S" setup nosetup --mode 2>&1) && { echo "FAIL: --mode on a bot that is not set up should refuse"; exit 1; }
 rc=$?
 [ "$rc" -eq 2 ] && grep -qF "run 'claude-discord setup nosetup' first" <<<"$out" || { echo "FAIL: --mode on an unset bot must exit 2 with a hint, got rc=$rc: $out"; exit 1; }
-[ ! -e "$R5" ] || { echo "FAIL: --mode on an unset bot must create nothing (no bot dir, .gitignore or config.env): $(find "$R5")"; exit 1; }
+[ ! -e "$R5/nosetup" ] && [ ! -e "$(pstate "$P5")/config.env" ] && [ ! -e "$P5/.claude/discord-agents" ] || { echo "FAIL: --mode on an unset bot must create nothing (no bot dir or config.env): $(find "$R5" "$P5/.claude")"; exit 1; }
 echo "ok: --mode on a bot that is not set up exits 2 with a hint and creates nothing"
 
 printf '\n1\n222\n\ntokF\nn\n' | bash "$S" setup five --scope project >/dev/null   # mode kept at its default, none
@@ -295,7 +295,7 @@ echo "ok: --mode fed only the mode answer switches a set-up bot's mode, writes n
 
 printf 'dev-manager\npeerx:700:800:host\n' | bash "$S" setup five --mode >/dev/null
 [ "$(<"$R5/five/mode")" = dev-manager ] || { echo "FAIL: --mode to dev-manager did not switch the mode"; exit 1; }
-[ "$(jq -c '.peers' "$R5/peers.json" 2>/dev/null)" = '[{"name":"peerx","bot_id":"700","owner_id":"800","machine":"host"}]' ] || { echo "FAIL: --mode to dev-manager must record the peer: $(cat "$R5/peers.json" 2>&1)"; exit 1; }
+[ "$(jq -c '.peers' "$(pstate "$P5")/peers.json" 2>/dev/null)" = '[{"name":"peerx","bot_id":"700","owner_id":"800","machine":"host"}]' ] || { echo "FAIL: --mode to dev-manager must record the peer: $(cat "$(pstate "$P5")/peers.json" 2>&1)"; exit 1; }
 [ "$(jq -c '.groups["1"].allowFrom' "$R5/five/access.json")" = '["222","700"]' ] || { echo "FAIL: the peer must reach access.json's allowFrom: $(jq -c . "$R5/five/access.json")"; exit 1; }
 echo "ok: --mode to dev-manager also asks the peers question and records a peer in peers.json and access.json's allowFrom"
 

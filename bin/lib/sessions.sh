@@ -3,8 +3,11 @@
 # name or by its job record (refresh, below, says why both). Exit 1 when `claude agents --json` fails or gives no list:
 # what runs is then unknown, which is not "nothing runs".
 live_sessions() {
-  local jobs agents
-  jobs=$(grep -lF -- "DISCORD_STATE_DIR\\\": \\\"$2\\\"" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/jobs/*/state.json 2>/dev/null) || jobs=""
+  local jobs agents old
+  # A job respawned on the path before the move (1.18.0) names <project>/.claude/discord-agents/<bot>, as it was written
+  # then (the logical cwd; the physical one too, for a project reached through a link).
+  old="$PWD/.claude/discord-agents/$1"
+  jobs=$(grep -lF -e "DISCORD_STATE_DIR\\\": \\\"$2\\\"" -e "DISCORD_STATE_DIR\\\": \\\"$old\\\"" -e "DISCORD_STATE_DIR\\\": \\\"$(pwd -P)/.claude/discord-agents/$1\\\"" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/jobs/*/state.json 2>/dev/null) || jobs=""
   jobs=$(printf '%s\n' "$jobs" | sed -n 's#.*/\([^/]*\)/state\.json$#\1#p')
   agents=$(claude agents --json 2>/dev/null) && printf '%s' "${agents:-null}" | jq -r --arg n "$1" --arg jobs "$jobs" --arg cwd "$(pwd -P)" '
       ($jobs | split("\n")) as $j |

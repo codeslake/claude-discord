@@ -564,11 +564,14 @@ out=$(cd "$HOME" && bash "$SH" 2>&1) && { echo "FAIL: with no clone the shim mus
 grep -q 'not set up' <<<"$out" && grep -q 'git clone' <<<"$out" || { echo "FAIL: the shim must say how to set up: $out"; exit 1; }
 rm -rf "$HOME/shim test" "$HOME/.claude/skills"
 echo "ok: the shim runs the project's clone (path with a space, from a subdirectory), else the global one, else the source clone, else explains"
-# Where a project's state is, for every fixture: pstate <project> its state dir (config.env, peers.json, checkin/), broot <project>
-# the directory holding its bot dirs, bdir <project> <bot> one bot's dir. Today the old shape: <project>/.claude/discord-agents for all three.
-pstate() { printf '%s/.claude/discord-agents\n' "$1"; }
-broot() { printf '%s/.claude/discord-agents\n' "$1"; }
-bdir() { printf '%s/.claude/discord-agents/%s\n' "$1" "$2"; }
+# Where a project's state is, for every fixture (1.18.0): pstate <project> its state dir ~/.claude-discord/projects/<key>
+# (config.env, peers.json, checkin/), broot <project> the directory holding its bot dirs (bots/), bdir <project> <bot> one
+# bot's dir. Each makes the project and its key dir with its `project` file when missing (a fixture built by hand is then
+# the new shape to the wrapper and the hooks). The old shape, <project>/.claude/discord-agents/, is written literally where
+# a case is about a project not moved yet.
+pstate() { local d; mkdir -p "$1"; d=$HOME/.claude-discord/projects/$(skey "$1"); mkdir -p "$d"; [ -f "$d/project" ] || (cd "$1" && pwd -P) > "$d/project"; printf '%s\n' "$d"; }
+broot() { local d; d=$(pstate "$1"); mkdir -p "$d/bots"; printf '%s/bots\n' "$d"; }
+bdir() { printf '%s/%s\n' "$(broot "$1")" "$2"; }
 # skey <project>: the state key of a project (physical path), the suite's own copy of the rule bin/lib/state.sh's proj_key follows (its table case pins the two equal).
 skey() { local p; p=$(cd "$1" 2>/dev/null && pwd -P) || p=$1; local LC_ALL=C; printf '%s\n' "${p//[^A-Za-z0-9]/-}"; }
 
@@ -609,6 +612,5 @@ echo "ok: setup writes config.env, .env, access.json (with ackReaction) and mode
 PC=$(cd -P "$HOME/.claude-discord/source" && pwd -P); S=$PC/bin/claude-discord
 TT=$PC/tools/thread   # the hooks name the thread tool by its absolute path in the plugin
 ! grep -qs '/.claude/discord-agents/hooks/' "$P/.claude/settings.local.json" "$P/.claude/settings.json" || { echo "FAIL: setup must register no settings hook, the plugin's hooks.json does"; exit 1; }
-[ -L "$R/hooks" ] || { echo "FAIL: setup must create the hooks symlink"; exit 1; }
-[ "$(readlink "$R/hooks")" = "$PC/hooks" ] || { echo "FAIL: hooks symlink must point at the installed plugin's hooks: $(readlink "$R/hooks")"; exit 1; }
-echo "ok: setup registers no settings hook and links the project's hooks to the installed plugin (after access.json is written)"
+[ ! -e "$P/.claude/discord-agents" ] || { echo "FAIL: setup must leave no hooks link or state under the project's .claude (1.18.0): $(ls -la "$P/.claude/discord-agents")"; exit 1; }
+echo "ok: setup registers no settings hook and leaves nothing under the project's .claude but the install"

@@ -80,7 +80,7 @@ BARE_Q='.tool_input.text // "" | tostring | [splits("```")] | to_entries | map(s
 # Then, for a dev-manager (0b): whether the peer answer check applies (not an edit, no reply_to), the deny line for a
 # named but unmentioned peer, and one "<bot_id> <deny line>" per peer (only these need the turn's sender, read below).
 # peers.json is read raw and parsed inside (try): a broken one costs only these, never the checks above.
-pf="$DISCORD_STATE_DIR/../peers.json" pa=(--arg pr "") af="$DISCORD_STATE_DIR/access.json" aa=(--arg acc "")
+pf="$proj_state/peers.json" pa=(--arg pr "") af="$DISCORD_STATE_DIR/access.json" aa=(--arg acc "")
 [ "$bot_mode" = dev-manager ] && [ -f "$pf" ] && pa=(--rawfile pr "$pf")
 [ -f "$af" ] && [ -r "$af" ] && aa=(--rawfile acc "$af")
 peerlines=() ch=""

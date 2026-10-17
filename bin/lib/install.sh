@@ -206,7 +206,8 @@ strip_settings() {
       scanned=1
       for p in "${ps[@]}"; do
         p=${p%$'\r'}; [ -n "$p" ] || continue
-        for b in "$p"/.claude/discord-agents/*/; do
+        proj_dirs "$p"
+        for b in "$pd_root"/*/; do
           [ -f "$b.env" ] || continue
           set -- "$b"plugin-sessions/*
           [ -e "$1" ] || miss="$miss ${b%/}"
@@ -226,7 +227,17 @@ strip_settings() {
 if [ "${1:-}" = compat ]; then
   crc=0; remove_old_install || crc=1
   strip_settings
-  { . "$self_root/bin/lib/state.sh" && sweep_recorded "$helpers/records/projects"; } || :
+  # 1.18.0: every recorded project still in the 1.16 shape is moved; a bot's link stays while a job record names its old
+  # path (state.sh: move_project, unlink_old). The very first update to 1.18.0 moves every project of this machine.
+  if [ -f "$helpers/records/projects" ]; then
+    while IFS= read -r p || [ -n "$p" ]; do
+      p=${p%$'\r'}; [ -n "$p" ] && [ -d "$p" ] || continue
+      p=$(cd "$p" 2>/dev/null && pwd -P) || continue
+      move_project "$p" || :
+      unlink_old "$p" say
+    done < "$helpers/records/projects"
+  fi
+  sweep_recorded "$helpers/records/projects" || :
   exit "$crc"
 fi
 
@@ -387,6 +398,13 @@ if [ "${1:-}" = setup ]; then
     install_all || exit $?
   fi
   umask 077
+  # The project's state dir (~/.claude-discord/projects/<key>, state.sh): made for a new project (a key another project
+  # holds is refused, both named), or the 1.16 shape moved into it first; then the links a job record no longer needs go.
+  if [ -z "$pd_new" ]; then
+    if [ -d "$root" ]; then move_project "$project_dir" || exit 1; elif [ "${3:-}" != --mode ]; then proj_init "$project_dir" || exit 1; fi   # --mode creates nothing
+    proj_cwd; root=$pd_root proj_state=$pd_state
+  fi
+  unlink_old "$project_dir" say
   if [ "${3:-}" = --mode ]; then
     # --mode changes only an already set-up bot's mode, so re-picking a mode
     # never re-asks the token or the mention question. It creates nothing:
@@ -398,12 +416,11 @@ if [ "${1:-}" = setup ]; then
   else
     # --reset forgets this bot's token and access policy AND the shared IDs, so
     # every prompt is asked again; other bots keep their own files.
-    [ "${3:-}" = --reset ] && rm -rf "$root/$name" "$root/config.env"
+    [ "${3:-}" = --reset ] && rm -rf "$root/$name" "$proj_state/config.env"
     mkdir -p "$root/$name"
-    printf '*\n' > "$root/.gitignore"
     # A project set up before its Discord channel existed (Enter at these
     # prompts) is asked again, so a later setup run fills the IDs in.
-    if [ ! -f "$root/config.env" ] || grep -qxE "DISCORD_(CHANNEL|USER)_ID=('')?" "$root/config.env"; then
+    if [ ! -f "$proj_state/config.env" ] || grep -qxE "DISCORD_(CHANNEL|USER)_ID=('')?" "$proj_state/config.env"; then
       ask channel "Discord channel ID: "
       ask user "Your Discord user ID: "
       # Shown only at a terminal, like read -p's own prompt.
@@ -426,10 +443,10 @@ EOT
         *,all|all,*|*,all,*)
           echo "claude-discord: answer either 'all' or a list of IDs, not both" >&2; exit 2;;
       esac
-      printf "DISCORD_CHANNEL_ID='%s'\nDISCORD_USER_ID='%s'\nDISCORD_ALLOW_IDS='%s'\n" "$channel" "$user" "$others" > "$root/config.env"
+      printf "DISCORD_CHANNEL_ID='%s'\nDISCORD_USER_ID='%s'\nDISCORD_ALLOW_IDS='%s'\n" "$channel" "$user" "$others" > "$proj_state/config.env"
     fi
   fi
-  [ -f "$root/config.env" ] && . "$root/config.env"   # sourced whenever present: later code (write_access) reads its variables
+  [ -f "$proj_state/config.env" ] && . "$proj_state/config.env"   # sourced whenever present: later code (write_access) reads its variables
   if [ "${3:-}" != --mode ]; then
     keep=""
     [ -f "$root/$name/.env" ] && keep=" (empty keeps the current one)"
@@ -487,7 +504,9 @@ EOT
     here=$(pwd -P)
     while IFS= read -r p || [ -n "$p" ]; do
       p=${p%$'\r'}
-      [ -n "$p" ] && [ "$p" != "$here" ] && [ -f "$p/.claude/discord-agents/$name/hosts" ] && [ "$(cat "$p/.claude/discord-agents/$name/mode" 2>/dev/null)" = dev-manager ] || continue
+      [ -n "$p" ] && [ "$p" != "$here" ] || continue
+      proj_dirs "$p"
+      [ -f "$pd_root/$name/hosts" ] && [ "$(cat "$pd_root/$name/mode" 2>/dev/null)" = dev-manager ] || continue
       echo "claude-discord: '$name' is already a dev-manager with a hosts ledger in $p; one backend serves one manager name per machine, so pick another bot name here" >&2
       exit 2
     done < "$helpers/records/projects"
@@ -499,7 +518,7 @@ EOT
     entry='^[^:]+:[0-9]+:[0-9]+:[^:]+$'
     bad=$(jq -rn --arg in "$peers" --arg re "$entry" '$in | split(",")[] | select(. != "" and (test($re) | not))')
     [ -z "$bad" ] || echo "claude-discord: skipping peers not shaped name:bot_id:owner_id:machine: ${bad//$'\n'/ }" >&2
-    jq_edit "$root/peers.json" --arg in "$peers" --arg re "$entry" '
+    jq_edit "$proj_state/peers.json" --arg in "$peers" --arg re "$entry" '
       reduce ($in | split(",")[] | select(test($re)) | split(":") | {name: .[0], bot_id: .[1], owner_id: .[2], machine: .[3]}) as $p
         (.; if any(.peers[]?; .bot_id == $p.bot_id) then .peers |= map(if .bot_id == $p.bot_id then $p else . end)
             else .peers = (.peers // []) + [$p] end)'
@@ -507,7 +526,7 @@ EOT
     # every existing group's allowFrom, wherever the bot's channel actually
     # is, not only the one keyed by config.env's channel; this bot itself is
     # skipped by name, and $a + ($ids - $a) keeps it additive, as before.
-    ids=$(jq -c --arg self "$name" '[.peers[]? | select((.name // "" | tostring | ascii_downcase) != ($self | ascii_downcase)) | .bot_id | tostring]' "$root/peers.json" 2>/dev/null) || ids='[]'
+    ids=$(jq -c --arg self "$name" '[.peers[]? | select((.name // "" | tostring | ascii_downcase) != ($self | ascii_downcase)) | .bot_id | tostring]' "$proj_state/peers.json" 2>/dev/null) || ids='[]'
     # An EMPTY allowFrom already lets every author through, peers included, and
     # adding ids to it would narrow the group to just those ids -- turning
     # "everyone" into "peers only" without saying so. Such a group is left as
@@ -525,7 +544,6 @@ EOT
     # Only a manager posts to #bot-health-check: any other mode has no ledger, so no monitor.
     rm -f "$root/$name/hosts"
   fi
-  ensure_hooks_symlink
   record_project
   # A manager's backend runs with no session and no TUI: started here, detached, unless one runs or its owner stopped
   # it (the front says which, in one line).

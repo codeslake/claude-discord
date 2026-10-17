@@ -27,7 +27,7 @@ d=$(dirname "$r")
 while [ ! -d "$d" ]; do d=$(dirname "$d"); done
 git -C "$d" check-ignore -q "$r" 2>/dev/null && exit 0
 p=$(peers) && [ -n "$p" ] || exit 0
-ci="$DISCORD_STATE_DIR/../checkin/$session_id"
+ci="$proj_state/checkin/$session_id"
 if [ -n "$(find "$ci" -mmin -60 2>/dev/null)" ]; then
   touch "$ci" 2>/dev/null
   exit 0

@@ -25,8 +25,9 @@ if [ "${1:-}" = refresh ]; then
   # outside any session gives the directory the usual way, by standing in it.
   if [ -n "${DISCORD_STATE_DIR:-}" ]; then
     [ -n "$name" ] || name=$(basename "$DISCORD_STATE_DIR")
-    cd "$(dirname "$(dirname "$(dirname "$DISCORD_STATE_DIR")")")"
-    root=$PWD/.claude/discord-agents
+    proj_of_state_dir "$DISCORD_STATE_DIR"   # either shape, a link the move left too
+    [ -n "$pd_project" ] && cd "$pd_project" 2>/dev/null || { echo "claude-discord: cannot tell the project of $DISCORD_STATE_DIR" >&2; exit 1; }
+    proj_cwd; root=$pd_root
   fi
   [ -n "$name" ] || { echo "usage: claude-discord refresh <name> [--force] [claude args]" >&2; exit 2; }
   case $name in ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;; esac

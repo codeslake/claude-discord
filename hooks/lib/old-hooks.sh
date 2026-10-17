@@ -45,12 +45,12 @@ strip_old_hooks() {
 # repo a hook auto-pushes) and never the user-global settings.json, which is
 # what a bot in $HOME would call its project settings.
 migrate_project() {
-  local p=${bot_project:-${CLAUDE_PROJECT_DIR:-}} f d b   # the bot's project, also from a session in its worktree
+  local p=${project_dir:-${CLAUDE_PROJECT_DIR:-}} f d b   # the bot's project, also from a session in its worktree
   [ -n "$p" ] || return 0
   # The entries are the project's, the plugin is loaded per session: remove
   # them only once every bot set up here has run the plugin (a marker in its
   # plugin-sessions/); a bot still on the old path would lose its hooks.
-  for b in "$p"/.claude/discord-agents/*/; do
+  for b in "${bots_root:-$p/.claude/discord-agents}"/*/; do
     [ -f "$b.env" ] || continue
     set -- "$b"plugin-sessions/*
     [ -e "$1" ] || return 0

@@ -6,14 +6,15 @@
 # projects' manager bots (records/projects), and the cwd becomes the chosen project's root.
 if [ "${1:-}" = tui ]; then
   bot=${2:-}
-  # From anywhere inside the project, like the shim: up to the directory that holds .claude/discord-agents.
+  # From anywhere inside the project, like the shim: up to the project that has bots (either shape, state.sh).
   here=$PWD
-  while [ ! -d "$PWD/.claude/discord-agents" ] && [ "$PWD" != / ]; do cd ..; done
+  ! find_proj || cd "$pd_project"
+  root=$pd_root
   # A project above with no manager bot (or not the one named), e.g. a plain bot's project, counts as none; a bot named
   # that lives here stays here, so its own refusal (no ledger) is the one said.
   mgr_here=""
-  [ -z "$bot" ] || [ ! -d "$PWD/.claude/discord-agents/$bot" ] || mgr_here=1
-  for d in "$PWD"/.claude/discord-agents/*/; do
+  [ -z "$bot" ] || [ ! -d "$root/$bot" ] || mgr_here=1
+  for d in "$root"/*/; do
     d=${d%/}
     [ -f "$d/hosts" ] && [ "$(cat "$d/mode" 2>/dev/null)" = dev-manager ] && { [ -z "$bot" ] || [ "$bot" = "${d##*/}" ]; } && { mgr_here=1; break; }
   done
@@ -23,7 +24,8 @@ if [ "${1:-}" = tui ]; then
     if [ -f "$pf" ]; then
       while IFS= read -r p || [ -n "$p" ]; do
         p=${p%$'\r'}; [ -n "$p" ] || continue
-        for d in "$p"/.claude/discord-agents/*/; do
+        proj_dirs "$p"
+        for d in "$pd_root"/*/; do
           d=${d%/}; b=${d##*/}
           [ -f "$d/hosts" ] && [ "$(cat "$d/mode" 2>/dev/null)" = dev-manager ] || continue
           [ -z "$bot" ] || [ "$bot" = "$b" ] || continue
@@ -46,8 +48,8 @@ if [ "${1:-}" = tui ]; then
       [ -n "$pick" ] || { echo "claude-discord: tui: no entry $i" >&2; exit 2; }
     fi
     bot=${pick%%$'\t'*}; cd "${pick#*$'\t'}"
+    proj_cwd; root=$pd_root
   fi
-  root=$PWD/.claude/discord-agents
   if [ -z "$bot" ]; then
     n=0
     for d in "$root"/*/; do

@@ -116,12 +116,6 @@
 # Needs: bun, jq, and `claude plugin install discord@claude-plugins-official`.
 set -euo pipefail
 
-# State lives in the PROJECT, next to its other .claude/ files, so a bot belongs
-# to the directory you start it from and `setup` is run there. The token is a
-# plaintext secret inside a git tree, so setup drops a `*` .gitignore into the
-# directory: nothing under it is ever staged, and the project's own .gitignore
-# is left alone.
-root=$PWD/.claude/discord-agents
 helpers=$HOME/.claude-discord
 plugin=discord@claude-plugins-official
 # This script lives at <plugin root>/bin/claude-discord; the plugin's tools
@@ -135,11 +129,13 @@ cd_here=$PWD self_root=""
 ! { cd -- "${self_path%/*}/.." && cd -P .; } 2>/dev/null || self_root=$PWD   # ${..%/*}, not dirname: one fork less
 cd -- "$cd_here" 2>/dev/null || { echo "claude-discord: could not return to $cd_here" >&2; exit 1; }
 
-# proj_key <absolute path>: Claude Code's folder for the project under ~/.claude/projects, where its transcripts are:
-# every non-alphanumeric byte a dash (1.17.1; the C locale keeps the ranges ASCII, as c_match's). Known to differ from
-# Claude Code's for a non-ASCII path (one byte a dash here, one UTF-16 unit there) and past 200 characters (truncated
-# and hashed there): the transcript is then not found, which reads as "not moving".
-proj_key() { local LC_ALL=C; printf '%s\n' "${1//[^A-Za-z0-9]/-}"; }
+# A bot belongs to the project it is started from (`setup` is run there): its state is ~/.claude-discord/projects/<key>/
+# (bin/lib/state.sh: the layout, proj_key, the move from the 1.16 shape <project>/.claude/discord-agents/, still read
+# until moved). root is where this project's bot dirs are, proj_state its config.env, peers.json and checkin/,
+# project_dir the project (physical); the verbs that walk up from a subdirectory recompute them (find_proj).
+[ -r "$self_root/bin/lib/state.sh" ] || { echo "claude-discord: $self_root/bin/lib/state.sh is missing: bin/claude-discord runs beside bin/lib/ (a copy of the one file is no install)" >&2; exit 1; }
+. "$self_root/bin/lib/state.sh"
+proj_cwd; root=$pd_root proj_state=$pd_state project_dir=$pd_project
 # transcript_moved <bot dir> <minutes>: 0 when a transcript (<key of this project>/<sid>.jsonl) of a session this
 # bot's hooks marked (plugin-sessions/<sid>: the id the session has NOW, after a /clear or a takeover too) changed
 # within <minutes>. The session is then working, whatever Discord sees of it (1.17.1: `recover --fresh` and a stale
@@ -163,14 +159,13 @@ if [ "${1:-}" = monitor ]; then
     case $a in --holder) sk=2;; -*) ;; *) mb=$a; break;; esac
   done
   case $mb in ''|.|..|*/*) ;; *)
-    mp=$PWD
-    while [ ! -d "$mp/.claude/discord-agents/$mb" ] && [ "$mp" != / ]; do mp=$(dirname "$mp"); done
-    if [ -d "$mp/.claude/discord-agents/$mb" ]; then cd "$mp"
+    if find_proj "$mb"; then cd "$pd_project"
     elif [ -f "$helpers/records/projects" ]; then
       mc="" mn=0
       while IFS= read -r p || [ -n "$p" ]; do
         p=${p%$'\r'}
-        [ -n "$p" ] && [ -f "$p/.claude/discord-agents/$mb/hosts" ] || continue
+        [ -n "$p" ] || continue
+        proj_dirs "$p"; [ -f "$pd_root/$mb/hosts" ] || continue
         mc=$p; mn=$((mn + 1))
       done < "$helpers/records/projects"
       [ "$mn" != 1 ] || cd "$mc"
@@ -253,20 +248,6 @@ ensure_ack_reaction() {  # $1 = bot dir
   jq_edit "$1/access.json" 'if has("ackReaction") then . else . + {ackReaction: "👀"} end'
 }
 
-# Makes <project>/.claude/discord-agents/hooks a symlink to the plugin's hooks,
-# so a settings entry an old peer committed still reaches them. Kept this
-# release, removed in the next. Only when the path is absent or already a
-# symlink (broken or not); a real directory there is left alone with a warning.
-ensure_hooks_symlink() {
-  local link="$root/hooks"
-  if [ -e "$link" ] && [ ! -L "$link" ]; then
-    echo "claude-discord: $link exists and is not a symlink, leaving it alone" >&2
-    return 0
-  fi
-  [ -L "$link" ] && [ "$link" -ef "$self_root/hooks" ] && return 0   # already right: no forks on every start
-  mkdir -p "$root" 2>/dev/null || return 0
-  ln -sfn "$self_root/hooks" "$link" 2>/dev/null || echo "claude-discord: could not symlink $link" >&2
-}
 has_path() { [ -e "$1" ] || [ -L "$1" ]; }   # a dangling link counts
 # Read in the shell, not with jq: every start asks (sync_runtime), and one jq start is 10 ms with jq 1.6. The manifest is
 # ours and flat (no other "version" key in it): the first one's string; "?" when there is none.
@@ -495,6 +476,14 @@ done
 [ -r "$lib/patch.sh" ] || { echo "claude-discord: $lib/patch.sh is missing: bin/claude-discord runs beside bin/lib/ (a copy of the one file is no install)" >&2; exit 1; }
 . "$lib/patch.sh"   # patch_official, run at every start
 
+# A project still in the 1.16 shape (pulled by hand, no update yet) is moved before the bot is looked up; a link a job
+# record still needs stays (unlink_old).
+if [ -z "$pd_new" ] && [ -d "$root" ]; then
+  move_project "$project_dir" || exit 1
+  proj_cwd; root=$pd_root proj_state=$pd_state
+fi
+unlink_old "$project_dir"
+
 args=() name="" skip=0 want_name=0 named=0 positional=0 has_name=0 bare=0
 # With a --name anywhere, a bare word is an argument for claude, not the bot
 # (`-p hello --name beta` keeps `hello`).
@@ -545,7 +534,8 @@ if [ -z "$name" ] && [ -n "$rid" ]; then
     # is a JSON string, so its quotes appear escaped as \".
     for d in "$root"/*/; do
       d=${d%/}
-      grep -qF -- "DISCORD_STATE_DIR\\\": \\\"$d\\\"" "$f" || continue
+      # Either path: a fresh start's record names the state dir; one respawned on the path before the move names <project>/.claude/discord-agents/<bot>.
+      grep -qF -- "DISCORD_STATE_DIR\\\": \\\"$d\\\"" "$f" || grep -qF -- "DISCORD_STATE_DIR\\\": \\\"$project_dir/.claude/discord-agents/${d##*/}\\\"" "$f" || continue
       case " $cands " in *" ${d##*/} "*) ;; *) cands="$cands ${d##*/}";; esac
     done
   done
@@ -570,11 +560,11 @@ case $name in
   hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
 esac
 dir=$root/$name
-if [ ! -f "$dir/.env" ] || [ ! -f "$root/config.env" ]; then
+if [ ! -f "$dir/.env" ] || [ ! -f "$proj_state/config.env" ]; then
   echo "claude-discord: no bot '$name' under $root; run 'claude-discord setup $name' in this directory first" >&2
   exit 1
 fi
-. "$root/config.env"
+. "$proj_state/config.env"
 
 # Everything that can refuse the start comes before anything is written (the
 # handoff below is consumed, so a refusal after it would lose it).
@@ -790,7 +780,6 @@ prune_dead_sessions() {
   [ "$failed" = 0 ] || echo "claude-discord: could not remove $failed dead session(s) of $name from the agent view" >&2
 }
 
-ensure_hooks_symlink
 prune_dead_sessions || :   # even its last line (a warning on a closed stderr) may not fail the start
 # worktree.bgIsolation "none" turns off Claude Code's background-isolation
 # guard for this session: measured on two machines, a session started with

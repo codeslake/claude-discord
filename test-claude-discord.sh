@@ -45,7 +45,7 @@ RA=$(broot "$PA")
 printf '\n\n999\n111\nall\ntokC\nn\n' | bash "$S" setup gamma >/dev/null
 [ "$(jq -c '.groups["999"].allowFrom' "$RA/gamma/access.json")" = '[]' ] || { echo "FAIL: 'all' must leave the group allowFrom empty: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
 [ "$(jq -c '.allowFrom' "$RA/gamma/access.json")" = '["111"]' ] || { echo "FAIL: 'all' opens the channel, never DMs: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
-grep -q "^DISCORD_ALLOW_IDS=''$" "$RA/config.env" || { echo "FAIL: 'all' must not be stored in the shared config.env: $(grep ALLOW "$RA/config.env")"; exit 1; }
+grep -q "^DISCORD_ALLOW_IDS=''$" "$(pstate "$PA")/config.env" || { echo "FAIL: 'all' must not be stored in the shared config.env: $(grep ALLOW "$(pstate "$PA")/config.env")"; exit 1; }
 echo "ok: 'all' empties the group allowFrom (everyone in the channel), keeps DMs owner-only, and is not persisted"
 
 # A later bot in that project inherits config.env's ids, which never carry
@@ -83,10 +83,10 @@ echo "ok: 'all' is case-insensitive and refuses to be mixed with IDs"
 PR2="$HOME/project-runpath"; mkdir -p "$PR2"; cd "$PR2"
 RR=$(broot "$PR2")
 # A bot dir predating access.json, as setup wrote config.env (asserted above) and .env, and no access.json.
-mkdir -p "$RR/runner"; printf "DISCORD_CHANNEL_ID='999'\nDISCORD_USER_ID='111'\nDISCORD_ALLOW_IDS='222,333,'\n" > "$RR/config.env"; printf 'DISCORD_BOT_TOKEN=tokR\n' > "$RR/runner/.env"
+mkdir -p "$RR/runner"; printf "DISCORD_CHANNEL_ID='999'\nDISCORD_USER_ID='111'\nDISCORD_ALLOW_IDS='222,333,'\n" > "$(pstate "$PR2")/config.env"; printf 'DISCORD_BOT_TOKEN=tokR\n' > "$RR/runner/.env"
 bash "$S" runner >/dev/null 2>&1 || :   # the run path rewrites it before anything else
 [ "$(jq -c '.groups["999"].allowFrom' "$RR/runner/access.json" 2>/dev/null)" = '["111","222","333"]' ] || { echo "FAIL: the run path must rebuild access.json from the stored IDs: $(jq -c . "$RR/runner/access.json" 2>/dev/null)"; exit 1; }
-sed -i "s/^DISCORD_ALLOW_IDS=.*/DISCORD_ALLOW_IDS='all'/" "$RR/config.env"
+sed -i "s/^DISCORD_ALLOW_IDS=.*/DISCORD_ALLOW_IDS='all'/" "$(pstate "$PR2")/config.env"
 rm -f "$RR/runner/access.json"
 bash "$S" runner >/dev/null 2>&1 || :
 [ "$(jq -c '.groups["999"].allowFrom' "$RR/runner/access.json" 2>/dev/null)" = '["111","all"]' ] || { echo "FAIL: config.env's 'all' must be read as a literal ID, never as open-channel: $(jq -c . "$RR/runner/access.json" 2>/dev/null)"; exit 1; }
@@ -147,13 +147,13 @@ printf '\n\n\n\n\nn\n' | bash "$S" setup later --scope project >/dev/null
 [ "$(jq -c '[(.groups | keys), .allowFrom]' "$RL/later/access.json")" = '[[""],[""]]' ] || { echo "FAIL: the empty-answer fixture is not what setup writes: $(jq -c . "$RL/later/access.json")"; exit 1; }
 jq '.ackReaction = ""' "$RL/later/access.json" > "$RL/later/a.tmp" && cat "$RL/later/a.tmp" > "$RL/later/access.json" && rm -f "$RL/later/a.tmp"
 printf '55\n11\n22\ntokL\n\n\n' | bash "$S" setup later --scope project >/dev/null
-grep -q "^DISCORD_CHANNEL_ID='55'$" "$RL/config.env" && grep -q '^DISCORD_BOT_TOKEN=tokL$' "$RL/later/.env" &&
+grep -q "^DISCORD_CHANNEL_ID='55'$" "$(pstate "$PL")/config.env" && grep -q '^DISCORD_BOT_TOKEN=tokL$' "$RL/later/.env" &&
   [ "$(jq -c '[(.groups | keys), .groups["55"].allowFrom, .groups["55"].requireMention, .allowFrom, .ackReaction]' "$RL/later/access.json")" = '[["55"],["11","22"],true,["11"],""]' ] ||
-  { echo "FAIL: a re-run with the real IDs must fill the empty group key and ids and keep the rest: $(jq -c . "$RL/later/access.json") $(<"$RL/config.env")"; exit 1; }
+  { echo "FAIL: a re-run with the real IDs must fill the empty group key and ids and keep the rest: $(jq -c . "$RL/later/access.json") $(<"$(pstate "$PL")/config.env")"; exit 1; }
 echo "ok: a bot set up with empty IDs gets the real channel and ids from a later setup run, other access.json fields kept"
 # Channel known at the first run, user ID answered later: the "55" group's allowFrom [""] must be filled too.
 printf '\n\n\n\n\nn\n' | bash "$S" setup later2 --scope project >/dev/null 2>&1 || :
-printf "DISCORD_CHANNEL_ID='77'\nDISCORD_USER_ID=''\nDISCORD_ALLOW_IDS=''\n" > "$RL/config.env"
+printf "DISCORD_CHANNEL_ID='77'\nDISCORD_USER_ID=''\nDISCORD_ALLOW_IDS=''\n" > "$(pstate "$PL")/config.env"
 jq -c '.groups = {"77": {"requireMention": true, "allowFrom": [""]}} | .allowFrom = [""]' "$RL/later2/access.json" > "$RL/later2/a.tmp" && cat "$RL/later2/a.tmp" > "$RL/later2/access.json" && rm -f "$RL/later2/a.tmp"
 printf '77\n11\n\ntokL2\n\n\n' | bash "$S" setup later2 --scope project >/dev/null
 [ "$(jq -c '[(.groups | keys), .groups["77"].allowFrom, .allowFrom]' "$RL/later2/access.json")" = '[["77"],["11"],["11"]]' ] ||
@@ -171,7 +171,7 @@ echo "ok: --reset re-asks everything and rewrites access.json from config.env, o
 # Direct hook-behaviour tests, through the project's own symlinked copy
 # (alpha's state is now stable: channel 999, token tokA2).
 DSD="$R/alpha"
-H="$R/hooks/turn"
+H="$PC/hooks/turn"
 
 # Real prompts are multi-line, with a closing tag:
 # <channel source="..." chat_id="…" message_id="…" ...>\n<@id> text\n</channel>
@@ -212,11 +212,11 @@ out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1o","prom
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
 grep -q ' in channel 999\. ' <<<"$ctx" && grep -q '^People in this channel (mention one as <@id> to reach them): .*Own 5 er <@111>, <@501>$' <<<"$ctx" || { echo "FAIL: a top-level allowFrom that is no array must cost only its own ids, not the channel or the group's: $ctx"; exit 1; }
 jq '.groups = {"998": true}' "$DSD/access.json.keep" > "$DSD/access.json"   # 998: not config.env's channel, which a fallback would answer
-(DISCORD_STATE_DIR=$DSD; . "$R/hooks/lib/discord.sh"; resolve_channel; [ "$bot_channel" = 998 ]) || { echo "FAIL: a group that is no object must still name the channel"; exit 1; }
+(DISCORD_STATE_DIR=$DSD; . "$PC/hooks/lib/discord.sh"; resolve_channel; [ "$bot_channel" = 998 ]) || { echo "FAIL: a group that is no object must still name the channel"; exit 1; }
 cfg_ch=$(sed -n "s/^DISCORD_CHANNEL_ID='\{0,1\}\([0-9]*\)'\{0,1\}$/\1/p" "$RS/config.env")
 for body in '' '  '; do
   printf '%s' "$body" > "$DSD/access.json"
-  (DISCORD_STATE_DIR=$DSD; . "$R/hooks/lib/discord.sh"; resolve_channel; [ -n "$cfg_ch" ] && [ "$bot_channel" = "$cfg_ch" ] && [ -z "$bot_access_ids" ]) || { echo "FAIL: an empty access.json ('$body') must leave config.env's channel ($cfg_ch)"; exit 1; }
+  (DISCORD_STATE_DIR=$DSD; . "$PC/hooks/lib/discord.sh"; resolve_channel; [ -n "$cfg_ch" ] && [ "$bot_channel" = "$cfg_ch" ] && [ -z "$bot_access_ids" ]) || { echo "FAIL: an empty access.json ('$body') must leave config.env's channel ($cfg_ch)"; exit 1; }
 done
 jq '.groups["999"].allowFrom = [] | .allowFrom = []' "$DSD/access.json.keep" > "$DSD/access.json"
 # 21 writers: the file keeps the newest 20, the one who wrote last is last. Twenty of them are written straight into the file, so one real prompt takes it past the cap.
@@ -526,7 +526,7 @@ echo "ok: on-prompt exits 0 with no output on invalid JSON and on empty stdin"
 
 mv "$PC/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh.bak"
 for hookname in turn/on-prompt turn/on-reply turn/on-stop turn/on-session-start peers/thread-guard peers/edit-gate autoresearchclaw/on-start; do
-  out=$(DISCORD_STATE_DIR="$DSD" bash "$R/hooks/$hookname" <<<'{"session_id":"sX","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\">\nhi\n</channel>"}'); rc=$?
+  out=$(DISCORD_STATE_DIR="$DSD" bash "$PC/hooks/$hookname" <<<'{"session_id":"sX","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\">\nhi\n</channel>"}'); rc=$?
   [ "$rc" -eq 0 ] && [ -z "$out" ] || { echo "FAIL: $hookname with a missing lib must exit 0 with no output"; exit 1; }
 done
 mv "$PC/hooks/lib/discord.sh.bak" "$PC/hooks/lib/discord.sh"
@@ -783,10 +783,9 @@ bash "$S" setup .. --reset </dev/null >/dev/null 2>&1 && { echo "FAIL: .. accept
 [ -f "$P/.claude/marker" ]
 echo "ok: setup .. --reset refused, project .claude intact"
 
-[ "$(<"$R/.gitignore")" = "*" ]
-[ -z "$(git -C "$P" status --porcelain --ignored=no -- .claude/discord-agents)" ]
-git -C "$P" check-ignore -q .claude/discord-agents/alpha/.env
-echo "ok: state is under the project .claude and git ignores every file in it"
+# 1.18.0: the state is outside the project (nothing under .claude/discord-agents, so nothing for git to see); the token file is 600.
+[ ! -e "$P/.claude/discord-agents" ] && [ "$(stat -c %a "$R/alpha/.env")" = 600 ] || { echo "FAIL: no state under the project's .claude, and the token file 600: $(ls -la "$P/.claude" "$R/alpha")"; exit 1; }
+echo "ok: the state is under ~/.claude-discord/projects/<key>, nothing of it under the project .claude, the token file 600"
 
 # --resume takes a full id, a short id, or a session NAME resolved from this
 # project's transcripts; an unknown value is passed through for claude to judge.
@@ -991,7 +990,6 @@ bash "$S" --name gamma >/dev/null 2>&1
 # keeping its mode.
 [ "$(stat -c %i "$(bdir "$P2" "gamma")/access.json")" != "$gi" ] && [ "$(stat -c %a "$(bdir "$P2" "gamma")/access.json")" = 640 ] ||
   { echo "FAIL: jq_edit must replace access.json by a rename (a new inode), never write it in place, and keep its mode: $(stat -c '%i %a' "$(bdir "$P2" "gamma")/access.json") was $gi 640"; exit 1; }
-[ -L "$(pstate "$P2")/hooks" ] || { echo "FAIL: start must create the hooks symlink"; exit 1; }
 [ "$(tail -c1 "$(bdir "$P2" "gamma")/access.json" | wc -l)" -eq 1 ] || { echo "FAIL: access.json must end with a trailing newline"; exit 1; }
 echo "ok: start registers no settings hook, adds ackReaction and the hooks symlink when they were missing, access.json ends with a trailing newline"
 
@@ -1091,10 +1089,10 @@ mkdir -p "$(bdir "$HOME" "hb")"; plugin_hook "$HOME" hb s2   # a bot whose proje
 rm -rf "$(pstate "$HOME")"
 [ -L "$P2/.claude/settings.json" ] && cmp -s "$HOME/dotrepo/settings.json" "$P2/dot.before" && cmp -s "$HOME/.claude/settings.json" "$P2/global.before" || { echo "FAIL: a symlinked settings.json and the user-global one must be left byte-identical"; exit 1; }
 # A project whose .claude is itself a link (into the dotfiles tree): nothing in it is the project's own.
-PL="$HOME/linked proj"; mkdir -p "$PL" "$HOME/dotrepo/cl/discord-agents/lb" "$HOME/dotrepo/cl/rules"; ln -s "$HOME/dotrepo/cl" "$PL/.claude"
+PL="$HOME/linked proj"; mkdir -p "$PL" "$(bdir "$PL" lb)" "$HOME/dotrepo/cl/rules"; ln -s "$HOME/dotrepo/cl" "$PL/.claude"
 echo '{}' > "$HOME/dotrepo/cl/settings.local.json"; plant_old "$HOME/dotrepo/cl/settings.local.json"; cp "$HOME/dotrepo/cl/settings.local.json" "$P2/cl.before"; : > "$HOME/dotrepo/cl/rules/claude-discord-dev-manager.md"
 plugin_hook "$PL" lb l1
-[ -e "$HOME/dotrepo/cl/discord-agents/lb/plugin-sessions/l1" ] && cmp -s "$HOME/dotrepo/cl/settings.local.json" "$P2/cl.before" && [ -e "$HOME/dotrepo/cl/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: a first run must not edit through a symlinked .claude"; exit 1; }
+[ -e "$(bdir "$PL" lb)/plugin-sessions/l1" ] && cmp -s "$HOME/dotrepo/cl/settings.local.json" "$P2/cl.before" && [ -e "$HOME/dotrepo/cl/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: a first run must not edit through a symlinked .claude"; exit 1; }
 rm -rf "$PL" "$HOME/dotrepo/cl" "$P2/cl.before"
 ! grep -q '/.claude/discord-agents/hooks/' "$P2/.claude/settings.local.json" || { echo "FAIL: the regular settings.local.json beside them must still be migrated"; exit 1; }
 # setup and compat (which every update runs on the pulled code) take them out of those files too: the plugin's
@@ -1137,13 +1135,15 @@ echo "ok: a first run never edits a symlinked settings.json, the user-global one
 # no CLAUDE_PLUGIN_ROOT) runs in a session with no marker and exits 0 doing nothing in a marked one; the
 # plugin's hook runs either way. Markers a month old go when a new one is written.
 GD="$(bdir "$P2" "gamma")"; rm -rf "$GD/turns" "$GD/plugin-sessions"
+# The old path an old settings entry runs the hook by: <project>/.claude/discord-agents/hooks, a link (1.8-1.16 made it).
+mkdir -p "$P2/.claude/discord-agents"; ln -sfn "$PC/hooks" "$P2/.claude/discord-agents/hooks"
 tagged() { printf '{"session_id":"%s","prompt":"<channel source=\\"plugin:discord:discord\\" chat_id=\\"111\\" message_id=\\"%s\\" user=\\"u\\" user_id=\\"9\\" ts=\\"t\\">\\nhello\\n</channel>"}' "$1" "$2"; }
-tagged g0 500 | DISCORD_STATE_DIR="$GD" bash "$(pstate "$P2")/hooks/turn/on-prompt" >/dev/null
+tagged g0 500 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
 [ -s "$GD/turns/g0" ] && [ ! -e "$GD/plugin-sessions" ] || { echo "FAIL: with no marker directory an old-path hook must run as before"; exit 1; }
 mkdir -p "$GD/plugin-sessions"; : > "$GD/plugin-sessions/g2"; : > "$GD/plugin-sessions/old"; touch -d '40 days ago' "$GD/plugin-sessions/old" "$GD/plugin-sessions/g2"
-tagged g1 501 | DISCORD_STATE_DIR="$GD" bash "$(pstate "$P2")/hooks/turn/on-prompt" >/dev/null
+tagged g1 501 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
 [ -s "$GD/turns/g1" ] || { echo "FAIL: an old-path hook must run in a session with no marker"; exit 1; }
-out=$(tagged g2 502 | DISCORD_STATE_DIR="$GD" bash "$(pstate "$P2")/hooks/turn/on-prompt")
+out=$(tagged g2 502 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt")
 out2=$(tagged g2 503 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" bash "$HOME/.claude-discord/hooks/turn/on-prompt")
 out3=$(tagged g2 504 | DISCORD_STATE_DIR="$GD" bash "$PC/hooks/turn/on-prompt")
 [ -z "$out$out2$out3" ] && [ ! -e "$GD/turns/g2" ] || { echo "FAIL: an old-path hook in a marked session must exit 0 doing nothing ($out|$out2|$out3)"; exit 1; }
@@ -1151,7 +1151,7 @@ out=$(tagged g2 505 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PR
 [ "$(cut -d' ' -f2 "$GD/turns/g2")" = 505 ] && [ -n "$out" ] || { echo "FAIL: the plugin's hook must run in a marked session: $out"; exit 1; }
 # With the plugin install gone again (a rollback), a marked session's old path is all it has: it runs.
 mv "$P2/.claude/skills" "$P2/.claude/skills.off"; rm -f "$GD/turns/g2"   # a fresh turn: an open one queues the message instead
-tagged g2 508 | DISCORD_STATE_DIR="$GD" bash "$(pstate "$P2")/hooks/turn/on-prompt" >/dev/null
+tagged g2 508 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
 mv "$P2/.claude/skills.off" "$P2/.claude/skills"
 [ "$(cut -d' ' -f2 "$GD/turns/g2" 2>/dev/null)" = 508 ] || { echo "FAIL: a marked session with no plugin install left must run its old-path hooks"; exit 1; }
 plugin_hook "$P2" gamma g3
@@ -1246,9 +1246,9 @@ tg() { printf '{"tool_name":"mcp__plugin_discord_discord__reply","tool_input":{"
 [ -n "$(tg "$CPID")" ] && [ -z "$(tg "$CPID2")" ] || { echo "FAIL: an input with no session id passes the gate for the bot's process, not for a child's"; exit 1; }
 # X04: an old-path hook (a settings entry) of a child goes through the process check too.
 rm -rf "$GD/plugin-sessions"
-out=$(tagged c10 614 | CLAUDE_JOB_DIR="$J1" CLAUDE_PID="$CPID2" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$(pstate "$P2")/hooks/turn/on-prompt")
+out=$(tagged c10 614 | CLAUDE_JOB_DIR="$J1" CLAUDE_PID="$CPID2" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt")
 [ -z "$out" ] && [ ! -e "$GD/turns/c10" ] || { echo "FAIL: an old-path hook of a claude -p child is not the bot either: $out"; exit 1; }
-kill "$CPID" "$CPID2" 2>/dev/null || :; rm -rf "$SESS" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"
+kill "$CPID" "$CPID2" 2>/dev/null || :; rm -rf "$SESS" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id" "$P2/.claude/discord-agents"
 echo "ok: the gate by process: a claude -p child (sdk-cli, no jobId) is not the bot whatever CLAUDE_JOB_DIR it inherited, nor a worker of another job, nor when it resumes the bot's session; a background bot of its own job and a foreground bot (CLAUDE_JOB_DIR inherited or not) are; no record of this process leaves one event open, uncached; the marker holds the pid it was written for; the bot after /clear caches again; an input with no session id and an old-path hook are decided the same way"
 
 # h7. one migration per session however many of its hooks start at once (noclobber on the marker). A migration's jq
@@ -1285,17 +1285,15 @@ bash "$S" --name delta >/dev/null 2>&1
 [ "$(jq -r '.ackReaction' "$(bdir "$P2" "delta")/access.json")" = "" ] || { echo "FAIL: an explicit empty ackReaction must be left alone"; exit 1; }
 echo "ok: an explicit empty ackReaction (disabled by the owner) is left alone"
 
-# j. an existing real directory at .claude/discord-agents/hooks is left
-# alone, not clobbered into a symlink.
+# j. a start makes no hooks link and nothing else under the project's .claude (1.18.0: the 1.8-1.17 link is gone with the
+# per-project state); a real directory someone left at .claude/discord-agents/hooks is not touched either.
 P3="$HOME/project3"; mkdir -p "$(bdir "$P3" "eps")"; cd "$P3"
 printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$(pstate "$P3")/config.env"
 printf 'DISCORD_BOT_TOKEN=tokE\n' > "$(bdir "$P3" "eps")/.env"
-mkdir -p "$(pstate "$P3")/hooks"; echo marker > "$(pstate "$P3")/hooks/MARKER"
+mkdir -p "$P3/.claude/discord-agents/hooks"; echo marker > "$P3/.claude/discord-agents/hooks/MARKER"
 out=$(bash "$S" --name eps 2>&1)
-[ -f "$(pstate "$P3")/hooks/MARKER" ] || { echo "FAIL: a real hooks directory must not be touched"; exit 1; }
-[ ! -L "$(pstate "$P3")/hooks" ] || { echo "FAIL: a real hooks directory must not become a symlink"; exit 1; }
-grep -q "is not a symlink, leaving it alone" <<<"$out" || { echo "FAIL: a real hooks directory must warn on stderr"; exit 1; }
-echo "ok: an existing real hooks directory is left alone with a warning, not clobbered"
+[ -f "$P3/.claude/discord-agents/hooks/MARKER" ] && [ ! -L "$P3/.claude/discord-agents/hooks" ] && [ "$(ls -A "$P3/.claude/discord-agents")" = hooks ] || { echo "FAIL: a start must make no link under the project's .claude and leave a real hooks directory alone: $(ls -la "$P3/.claude/discord-agents")"; exit 1; }
+echo "ok: a start leaves the project's .claude alone: no hooks link (1.18.0), a real hooks directory someone left untouched"
 
 # --- dead sessions in the agent view ---------------------------------------
 # Its own project and its own claude stub: `agents` logs its arguments, prints
@@ -1581,7 +1579,7 @@ SL_EXPECT='{"permissions":{"allow":["Bash(git status)"]},"hooks":{"PreToolUse":[
 cp "$D/rules/dev-manager.md" "$RULE"
 out=$(printf '\n42\n111\n\ntokM\nn\ndev-manager\ndong:900:800:wmac, junyong:901:801:lmd42,mgr:902:803:here,bad:x:1:2\n' | bash "$S" setup mgr --scope project 2>"$P4/err")
 [ "$(<"$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: mode by name was not stored"; exit 1; }
-[ "$(jq -c '.peers' "$R4/peers.json")" = '[{"name":"dong","bot_id":"900","owner_id":"800","machine":"wmac"},{"name":"junyong","bot_id":"901","owner_id":"801","machine":"lmd42"},{"name":"mgr","bot_id":"902","owner_id":"803","machine":"here"}]' ] || { echo "FAIL: peers.json wrong: $(<"$R4/peers.json")"; exit 1; }
+[ "$(jq -c '.peers' "$(pstate "$P4")/peers.json")" = '[{"name":"dong","bot_id":"900","owner_id":"800","machine":"wmac"},{"name":"junyong","bot_id":"901","owner_id":"801","machine":"lmd42"},{"name":"mgr","bot_id":"902","owner_id":"803","machine":"here"}]' ] || { echo "FAIL: peers.json wrong: $(<"$(pstate "$P4")/peers.json")"; exit 1; }
 grep -qF 'bad:x:1:2' "$P4/err" || { echo "FAIL: a malformed peer entry must be warned about"; exit 1; }
 [ "$(jq -c '.groups["42"].allowFrom' "$R4/mgr/access.json")" = '["111","900","901"]' ] || { echo "FAIL: peers (not self) must join the group allowFrom: $(jq -c . "$R4/mgr/access.json")"; exit 1; }
 [ "$(jq -c '.allowFrom' "$R4/mgr/access.json")" = '["111"]' ] || { echo "FAIL: the DM allowFrom must not get the peers"; exit 1; }
@@ -1595,26 +1593,26 @@ plugin_hook "$P4" mgr m1 turn/on-session-start >/dev/null
 [ "$(jq -c '.permissions' "$SL")" = '{"allow":["Bash(git status)"]}' ] || { echo "FAIL: settings.local.json's permission grants must survive"; exit 1; }
 echo "ok: setup with mode dev-manager (by name) writes mode, peers.json (malformed entry warned) and the group allowFrom, writing no hook; the plugin's first run takes the old rule file and every settings hook of ours away (a user's hook sharing a group, the permission grants stay)"
 
-cp "$R4/peers.json" "$P4/peers.before"; cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
+cp "$(pstate "$P4")/peers.json" "$P4/peers.before"; cp "$SJ" "$P4/settings.before"; cp "$SL" "$P4/local.before"
 printf '\nn\n2\n\n' | bash "$S" setup mgr --scope project >/dev/null
 grep -q '^DISCORD_BOT_TOKEN=tokM$' "$R4/mgr/.env" || { echo "FAIL: an empty token on a re-run must keep the current token"; exit 1; }
 [ "$(<"$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: mode by number was not stored"; exit 1; }
-cmp -s "$R4/peers.json" "$P4/peers.before" || { echo "FAIL: an empty peers answer must keep peers.json as it was"; exit 1; }
+cmp -s "$(pstate "$P4")/peers.json" "$P4/peers.before" || { echo "FAIL: an empty peers answer must keep peers.json as it was"; exit 1; }
 cmp -s "$SJ" "$P4/settings.before" && cmp -s "$SL" "$P4/local.before" || { echo "FAIL: a re-run with nothing new must leave both settings files byte-identical"; exit 1; }
 [ "$(jq -c '.groups["42"].allowFrom' "$R4/mgr/access.json")" = '["111","900","901"]' ] || { echo "FAIL: a re-run rewrites access.json, and the kept peers must be re-added"; exit 1; }
 printf '\nn\n2\ndong2:900:810:pmac\n' | bash "$S" setup mgr --scope project >/dev/null
-[ "$(jq -c '[.peers[] | select(.bot_id == "900")]' "$R4/peers.json")" = '[{"name":"dong2","bot_id":"900","owner_id":"810","machine":"pmac"}]' ] && [ "$(jq '.peers | length' "$R4/peers.json")" = 3 ] || { echo "FAIL: peers must merge by bot_id: $(<"$R4/peers.json")"; exit 1; }
+[ "$(jq -c '[.peers[] | select(.bot_id == "900")]' "$(pstate "$P4")/peers.json")" = '[{"name":"dong2","bot_id":"900","owner_id":"810","machine":"pmac"}]' ] && [ "$(jq '.peers | length' "$(pstate "$P4")/peers.json")" = 3 ] || { echo "FAIL: peers must merge by bot_id: $(<"$(pstate "$P4")/peers.json")"; exit 1; }
 printf '\nn\n\ndong:900:800:wmac\n' | bash "$S" setup mgr --scope project >/dev/null
 [ "$(<"$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: an empty mode answer must keep the current mode"; exit 1; }
-[ "$(jq -r '.peers[] | select(.bot_id == "900") | .name' "$R4/peers.json")" = dong ] || { echo "FAIL: merge back"; exit 1; }
+[ "$(jq -r '.peers[] | select(.bot_id == "900") | .name' "$(pstate "$P4")/peers.json")" = dong ] || { echo "FAIL: merge back"; exit 1; }
 err=$(printf '\nn\nbogus\n\n' | bash "$S" setup mgr --scope project 2>&1 >/dev/null)
 [ "$(<"$R4/mgr/mode")" = dev-manager ] || { echo "FAIL: an unknown mode answer must keep the default (the current mode)"; exit 1; }
 grep -q bogus <<<"$err" || { echo "FAIL: an unknown mode answer must be warned about"; exit 1; }
-cp "$R4/peers.json" "$P4/peers.before"
-jq '.peers += [{"bot_id":"905"}]' "$P4/peers.before" > "$R4/peers.json"
+cp "$(pstate "$P4")/peers.json" "$P4/peers.before"
+jq '.peers += [{"bot_id":"905"}]' "$P4/peers.before" > "$(pstate "$P4")/peers.json"
 printf '\nn\n2\n\n' | bash "$S" setup mgr --scope project >/dev/null
 [ "$(jq -c '.groups["42"].allowFrom' "$R4/mgr/access.json")" = '["111","900","901","905"]' ] || { echo "FAIL: a peer without a name must not empty the allowFrom update: $(jq -c . "$R4/mgr/access.json")"; exit 1; }
-cp "$P4/peers.before" "$R4/peers.json"
+cp "$P4/peers.before" "$(pstate "$P4")/peers.json"
 echo "ok: re-run: empty token keeps it, mode by number, empty/unknown mode keeps the current one (unknown warned), empty peers keeps the list, peers merge by bot_id, a nameless peer still reaches allowFrom"
 
 printf 'tokP\nn\nnone\n' | bash "$S" setup plain --scope project >/dev/null
@@ -1641,7 +1639,7 @@ rm -rf "$R4/mgr/plugin-sessions" "$R4/plain/plugin-sessions"
 echo "ok: a first run takes every hook an earlier version registered out of both settings files (the user's own hook and key stay)"
 
 # Peers hooks, through the project's symlinked copy.
-G="$R4/hooks/peers"
+G="$PC/hooks/peers"
 guard() { DISCORD_STATE_DIR="$R4/${2:-mgr}" CLAUDE_PROJECT_DIR="$P4" bash "$G/thread-guard" <<<"$1"; }   # mention-guard's checks, merged into it
 # jesc <string>: sets _je to the JSON string body of it (no jq: the tests below build ~40 inputs).
 jesc() { _je=$1; _je=${_je//\\/\\\\}; _je=${_je//\"/\\\"}; _je=${_je//$'\n'/\\n}; _je=${_je//$'\t'/\\t}; _je=${_je//$'\r'/\\r}; }
@@ -1676,12 +1674,12 @@ out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"MGR here, a
 [ -z "$out" ] || { echo "FAIL: the bot naming itself must pass (self skipped by name): $out"; exit 1; }
 out=$(guard '{"session_id":"g1","tool_input":{"chat_id":"42","text":"Dong, please review"}}' plain)
 [ -z "$out" ] || { echo "FAIL: thread-guard's peer checks must be a no-op for a bot that is not a dev-manager: $out"; exit 1; }
-out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g2","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"555\" user=\"junyong\" user_id=\"901\" ts=\"t\">\nlooks good\n</channel>"}')
+out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$PC/hooks/turn/on-prompt" <<<'{"session_id":"g2","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"555\" user=\"junyong\" user_id=\"901\" ts=\"t\">\nlooks good\n</channel>"}')
 [ "$(<"$R4/mgr/turns/g2")" = "42 555 901" ] || { echo "FAIL: on-prompt must record the triggering user_id"; exit 1; }
 ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")
 grep -qxF 'Peers (mention to reach them): dong <@900>, junyong <@901>' <<<"$ctx" || { echo "FAIL: a dev-manager's context must list its peers, self excluded: $ctx"; exit 1; }
 grep -qxF "Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; Discord carries only what a peer must act on or the human asks you to send; echo nothing either way." <<<"$ctx" || { echo "FAIL: the dev-manager line is missing: $ctx"; exit 1; }
-out=$(DISCORD_STATE_DIR="$R4/plain" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g3","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"556\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
+out=$(DISCORD_STATE_DIR="$R4/plain" bash "$PC/hooks/turn/on-prompt" <<<'{"session_id":"g3","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"556\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'Peers\|Dev manager' <<<"$out" && { echo "FAIL: a plain bot must not get the dev-manager context"; exit 1; }
 REASON_B='You are answering junyong; mention it as <@901> or it never sees this.'
 out=$(guard '{"session_id":"g2","tool_input":{"chat_id":"42","text":"thanks, merged"}}')
@@ -1695,8 +1693,8 @@ out=$(guard '{"session_id":"g2","tool_input":{"chat_id":"42","reply_to":"555","t
 # One turn, two messages (the second arrives mid-turn, as a prompt of its
 # own): the peer's, then the human's. Rule B looks at the turn's LAST message
 # only, and not at all for a reply_to, which reaches its author unmentioned.
-DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g4","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"557\" user=\"junyong\" user_id=\"901\" ts=\"t\">\nlooks good\n</channel>"}' >/dev/null
-DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"g4","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"558\" user=\"u\" user_id=\"111\" ts=\"t\">\nship it?\n</channel>"}' >/dev/null
+DISCORD_STATE_DIR="$R4/mgr" bash "$PC/hooks/turn/on-prompt" <<<'{"session_id":"g4","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"557\" user=\"junyong\" user_id=\"901\" ts=\"t\">\nlooks good\n</channel>"}' >/dev/null
+DISCORD_STATE_DIR="$R4/mgr" bash "$PC/hooks/turn/on-prompt" <<<'{"session_id":"g4","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"558\" user=\"u\" user_id=\"111\" ts=\"t\">\nship it?\n</channel>"}' >/dev/null
 [ "$(<"$R4/mgr/turns/g4")" = "$(printf '42 557 901\n42 558 111')" ] || { echo "FAIL: both messages of one turn must be recorded"; exit 1; }
 out=$(guard '{"session_id":"g4","tool_input":{"chat_id":"42","text":"yes, shipping"}}')
 [ -z "$out" ] || { echo "FAIL: a reply to the human (the last message) must not be held to the peer's mention: $out"; exit 1; }
@@ -1711,15 +1709,15 @@ out=$(guard '{"session_id":"g1","tool_name":"mcp__plugin_discord_discord__edit_m
 [ -z "$out" ] || { echo "FAIL: an edit naming a peer is not held to its mention (as mention-guard's reply-only matcher): $out"; exit 1; }
 echo "ok: thread-guard (mention-guard merged) denies a named peer (word boundaries, Korean suffix ok) without its <@id> or <@!id>, and an answer mentioning nobody to the peer that wrote the turn's last message; passes for self, a non-dev-manager, dongyong22, a reply to a human, a reply_to, and invalid JSON; on-prompt adds the peers context for a dev-manager only"
 
-checkin() { DISCORD_STATE_DIR="$R4/mgr" CLAUDE_PROJECT_DIR="$P4" bash "$R4/hooks/turn/on-reply" <<<"$1"; }   # checkin, merged into on-reply
+checkin() { DISCORD_STATE_DIR="$R4/mgr" CLAUDE_PROJECT_DIR="$P4" bash "$PC/hooks/turn/on-reply" <<<"$1"; }   # checkin, merged into on-reply
 out=$(checkin '{"session_id":"c1","tool_input":{"text":"no mention here"}}')
-[ -z "$out" ] && [ ! -e "$R4/checkin/c1" ] || { echo "FAIL: a reply without a peer mention is no check-in"; exit 1; }
+[ -z "$out" ] && [ ! -e "$(pstate "$P4")/checkin/c1" ] || { echo "FAIL: a reply without a peer mention is no check-in"; exit 1; }
 checkin '{"session_id":"c2","tool_input":{"text":"<@902> note to self"}}' >/dev/null
-[ ! -e "$R4/checkin/c2" ] || { echo "FAIL: mentioning yourself is no check-in"; exit 1; }
+[ ! -e "$(pstate "$P4")/checkin/c2" ] || { echo "FAIL: mentioning yourself is no check-in"; exit 1; }
 out=$(checkin '{"session_id":"c1","tool_input":{"text":"<@901> I will change on-prompt"}}')
-[ -z "$out" ] && [ -f "$R4/checkin/c1" ] || { echo "FAIL: a reply mentioning a peer must touch checkin/<session_id>, silently"; exit 1; }
+[ -z "$out" ] && [ -f "$(pstate "$P4")/checkin/c1" ] || { echo "FAIL: a reply mentioning a peer must touch checkin/<session_id>, silently"; exit 1; }
 checkin '{"session_id":"c3","tool_input":{"text":"<@!900> I will change on-stop"}}' >/dev/null
-[ -f "$R4/checkin/c3" ] || { echo "FAIL: a <@!id> mention of a peer is a check-in too"; exit 1; }
+[ -f "$(pstate "$P4")/checkin/c3" ] || { echo "FAIL: a <@!id> mention of a peer is a check-in too"; exit 1; }
 echo "ok: on-reply (checkin merged) touches checkin/<session_id> only for a reply that mentions a peer (<@id> or <@!id>), and prints nothing"
 
 # edit-gate, against a claude-discord checkout that is a git repo with the
@@ -1738,15 +1736,15 @@ for f in "$CD/x.sh" "$HOME/src/link/x.sh" "$CD/new-file.sh" "$CD/.claude/discord
 done
 for f in "$CD/.claude/discord-agents/mgr/handoff.md" "$HOME/src/other/x.sh"; do
   out=$(gate e1 "$f")
-  [ -z "$out" ] && [ ! -e "$R4/checkin/e1" ] || { echo "FAIL: $f (gitignored, or outside claude-discord) must pass silently and touch nothing: $out"; exit 1; }
+  [ -z "$out" ] && [ ! -e "$(pstate "$P4")/checkin/e1" ] || { echo "FAIL: $f (gitignored, or outside claude-discord) must pass silently and touch nothing: $out"; exit 1; }
 done
 out=$(gate e1 "$CD/x.sh" plain)
 [ -z "$out" ] || { echo "FAIL: edit-gate must be a no-op for a bot that is not a dev-manager"; exit 1; }
-: > "$R4/checkin/e1"; age 1800 "$R4/checkin/e1"; before=$(mtime "$R4/checkin/e1")
+: > "$(pstate "$P4")/checkin/e1"; age 1800 "$(pstate "$P4")/checkin/e1"; before=$(mtime "$(pstate "$P4")/checkin/e1")
 out=$(gate e1 "$CD/x.sh")
 [ -z "$out" ] || { echo "FAIL: an edit with a fresh check-in must pass: $out"; exit 1; }
-[ "$(mtime "$R4/checkin/e1")" -gt "$before" ] || { echo "FAIL: an allowed edit must re-touch the check-in (sliding window)"; exit 1; }
-age 3700 "$R4/checkin/e1"
+[ "$(mtime "$(pstate "$P4")/checkin/e1")" -gt "$before" ] || { echo "FAIL: an allowed edit must re-touch the check-in (sliding window)"; exit 1; }
+age 3700 "$(pstate "$P4")/checkin/e1"
 out=$(gate e1 "$CD/x.sh")
 [ "$(reason <<<"$out")" = "$GATE_REASON" ] || { echo "FAIL: a check-in older than 60 minutes must be denied: $out"; exit 1; }
 echo "ok: edit-gate denies claude-discord edits (tracked or untracked, via a symlink, a new file) without a check-in or with a stale one; passes with a fresh one and re-touches it, for gitignored bot state (a handoff.md in a dir not created yet), outside claude-discord and for a non-dev-manager"
@@ -1799,7 +1797,7 @@ out=$(tguard "$(body 42 "$A501")" '' "$HOME/arcbot/bot")
 mkdir -p "$HOME/nomode/bot/turns"; touch "$HOME/nomode/bot/turns/t1"; cp "$R4/plain/access.json" "$HOME/nomode/bot/"   # channel 42, no mode file at all
 out=$(tguard "$(body 42 "$A501")" '' "$HOME/nomode/bot")
 [ "$(reason <<<"$out")" = "$TG_REASON" ] || { echo "FAIL: a bot with no mode file must be denied like mode none: $out"; exit 1; }
-out=$(DISCORD_STATE_DIR="$HOME/nomode/bot" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"nm1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"557\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
+out=$(DISCORD_STATE_DIR="$HOME/nomode/bot" bash "$PC/hooks/turn/on-prompt" <<<'{"session_id":"nm1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"557\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -qF 'One request, one thread' <<<"$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")" && [ -s "$HOME/nomode/bot/turns/nm1.primed" ] || { echo "FAIL: a bot with no mode file must be primed normally: $out"; exit 1; }
 mkdir -p "$HOME/nochan/bot"; echo dev-manager > "$HOME/nochan/bot/mode"   # no access.json, no config.env: no channel
 out=$(tguard "$(body 42 "$A501")" '' "$HOME/nochan/bot")
@@ -2032,20 +2030,20 @@ echo "ok: switching mgr between none, dev-manager and autoresearchclaw writes on
 # turn primes again, with the same text.
 AP='{"session_id":"a1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"700\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}'
 echo none > "$R4/mgr/mode"
-plain_out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")
+plain_out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$PC/hooks/turn/on-prompt" <<<"$AP")
 primed_mode() { local k; k=$(cat "$1" 2>/dev/null); printf '%s' "${k%% *}"; }   # the key is "<mode> <the context text>"
 [ -n "$plain_out" ] && [ "$(primed_mode "$R4/mgr/turns/a1.primed")" = none ] || { echo "FAIL: priming under mode none must record it: $plain_out"; exit 1; }
 echo autoresearchclaw > "$R4/mgr/mode"
-out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")
+out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$PC/hooks/turn/on-prompt" <<<"$AP")
 [ "$out" = "$plain_out" ] && [ "$(primed_mode "$R4/mgr/turns/a1.primed")" = autoresearchclaw ] || { echo "FAIL: an autoresearchclaw bot must get a plain bot's identity context, re-primed after the mode change: $out"; exit 1; }
 ! grep -qE 'AutoResearchClaw|\[arc\]' <<<"$out" || { echo "FAIL: no AutoResearchClaw text in on-prompt's context: $out"; exit 1; }
-out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<"$AP")
+out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$PC/hooks/turn/on-prompt" <<<"$AP")
 [ -z "$out" ] || { echo "FAIL: primed under the same mode: nothing more: $out"; exit 1; }
 echo "ok: on-prompt gives an autoresearchclaw bot the same identity context as a plain bot, no AutoResearchClaw text, re-primed after a mode change"
 
 # on-start: the bot's session gets the installed rule file, byte for byte,
 # as SessionStart context; nothing for any other session.
-ARC="$R4/hooks/autoresearchclaw"
+ARC="$PC/hooks/autoresearchclaw"
 ARC_RULE="$PC/rules/autoresearchclaw.md"
 arc_rule() { sed "s#@ARC_EVENTS@#$PC/tools/arc-events#g" "$ARC_RULE"; }   # what on-start must emit
 onstart() { DISCORD_STATE_DIR="$R4/$1" bash "$ARC/on-start" <<<'{"session_id":"o1","source":"compact"}'; }
@@ -2065,7 +2063,7 @@ mv "$ARC_RULE" "$ARC_RULE.bak"; rc=0; out=$(onstart mgr) || rc=$?; mv "$ARC_RULE
 # Run as Claude Code runs it (sh -c under the session's process, here a
 # fake worker leading its own process group): the same output, and once the
 # worker is gone nothing is left in its group.
-(DISCORD_STATE_DIR="$R4/mgr" WORKER_OUT="$HOME/worker.out" CLAUDE_PROJECT_DIR="$P4" exec fake-worker "$CMD_ARC" </dev/null) &
+(DISCORD_STATE_DIR="$R4/mgr" WORKER_OUT="$HOME/worker.out" CLAUDE_PROJECT_DIR="$P4" exec fake-worker "\"$PC/hooks/autoresearchclaw/on-start\"" </dev/null) &   # the plugin's command shape (hooks.json)
 W=$!; KILL_AT_EXIT="$KILL_AT_EXIT $W"
 n=0; while [ ! -e "$HOME/worker.out.done" ] && [ "$n" -lt 250 ]; do nap 0.02; n=$((n+1)); done
 [ -e "$HOME/worker.out.done" ] || { echo "FAIL: on-start did not return (a child holding its output?)"; exit 1; }
@@ -2140,12 +2138,12 @@ echo "ok: events records history silently on its first call (and starts arc-seen
 # config.env.
 cp "$R4/mgr/access.json" "$P4/access.before"
 jq '.groups = {"4343": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
-out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"ch1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"800\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
+out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$PC/hooks/turn/on-prompt" <<<'{"session_id":"ch1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"800\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'in channel 4343\.' <<<"$out" || { echo "FAIL: on-prompt must name the access.json channel: $out"; exit 1; }
 out=$(bash "$S" --name mgr 2>&1)
 grep -q 'sharing the Discord channel 4343,' <<<"$out" || { echo "FAIL: the start prompt must name the access.json channel: $out"; exit 1; }
 jq '.groups = {"4343": .groups["42"], "4444": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
-out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$R4/hooks/turn/on-prompt" <<<'{"session_id":"ch2","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"801\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
+out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$PC/hooks/turn/on-prompt" <<<'{"session_id":"ch2","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"801\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
 grep -q 'in channel 42\.' <<<"$out" || { echo "FAIL: with several groups the identity falls back to config.env's channel: $out"; exit 1; }
 out=$(bash "$S" --name mgr 2>&1)
 grep -q 'sharing the Discord channel 42,' <<<"$out" || { echo "FAIL: with several groups the start prompt falls back to config.env's channel: $out"; exit 1; }
@@ -2697,7 +2695,7 @@ printf '\n900\n111\n222\ntokS\nn\n' | bash "$S" setup sbot --scope project >/dev
 # The working-hold and notify cases below each want a project of their own with one fresh bot: copies of this one as
 # it stands after setup (before any state), the bot renamed, instead of two more setups.
 for pair in working-project:wbot notify-project:nbot; do
-  cp -a "$SP" "$HOME/${pair%%:*}"; mv "$(bdir "$HOME/${pair%%:*}" sbot)" "$(bdir "$HOME/${pair%%:*}" "${pair##*:}")"
+  cp -a "$SP" "$HOME/${pair%%:*}"; cp -a "$(bdir "$SP" sbot)" "$(bdir "$HOME/${pair%%:*}" "${pair##*:}")"; cp "$(pstate "$SP")/config.env" "$(pstate "$HOME/${pair%%:*}")/"
 done
 SD="$(bdir "$SP" "sbot")"
 echo "$ID_SEEN" > "$SD/last-message-id"; seed_id "$SD"; seed_guild "$SD"
@@ -3115,7 +3113,7 @@ PF="$HOME/.claude-discord/records/projects"
 grep -qxF "$(cd "$PU" && pwd -P)" "$PF" || { echo "FAIL: setup must record its project in records/projects: $(cat "$PF" 2>&1)"; exit 1; }
 mv "$PF" "$PF.suite"
 # The project --all walks is a copy of single-project whose path has a space, a quote and a $; the gone one a space.
-SPS="$HOME/single pro'ject \$x"; cp -a "$SP" "$SPS"; SDS="$(bdir "$SPS" "sbot")"
+SPS="$HOME/single pro'ject \$x"; cp -a "$SP" "$SPS"; SDS="$(bdir "$SPS" "sbot")"; cp -a "$(bdir "$SP" sbot)" "$SDS"; cp "$(pstate "$SP")/config.env" "$(pstate "$SPS")/"
 printf '%s\n' "$HOME/gone project" > "$PF"
 printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "$HOME/logger.calls"\n' > "$HOME/bin/logger"; chmod +x "$HOME/bin/logger"
 rm -f "$HOME/logger.calls" "$SDS/health.log"
@@ -3565,7 +3563,7 @@ cd "$MP"; AD="$MR/acc"; mkdir -p "$AD"; echo none > "$AD/mode"; printf 'DISCORD_
 ACC='{"dmPolicy":"allowlist","allowFrom":["111"],"ackReaction":"👀","groups":{"900":{"requireMention":true,"allowFrom":["111","222"]},"901":{"requireMention":false,"allowFrom":[]}},"pending":{"abc123":{"senderId":"999","chatId":"5","createdAt":1,"expiresAt":99999999999999}},"custom":{"keep":[1,2]}}'
 jq . <<<"$ACC" > "$AD/access.json"; printf '777\n' > "$AD/bot-id"; printf '900 5 dev-bots %s\n' "$(date +%s)" > "$AD/channel-guild"
 printf '900 dev-bots\n901 bot-health\n' > "$AD/channel-names"; printf '111 dongyong22\n222 gpu villain\n' > "$AD/user-names"
-printf '{"peers":[{"name":"peerbot","bot_id":"555","owner_id":"1","machine":"m"},{"name":"ACC","bot_id":"777","owner_id":"1","machine":"m"},{"name":"odd","bot_id":"x9","owner_id":"1","machine":"m"}]}\n' > "$MR/peers.json"
+printf '{"peers":[{"name":"peerbot","bot_id":"555","owner_id":"1","machine":"m"},{"name":"ACC","bot_id":"777","owner_id":"1","machine":"m"},{"name":"odd","bot_id":"x9","owner_id":"1","machine":"m"}]}\n' > "$(pstate "$MP")/peers.json"
 # access --json asks Discord four things with the bot's token: the server's channels, the server (its roles), the bot's
 # membership (its roles) and the members. Whether the bot can read a channel is VIEW_CHANNEL (1024) and
 # READ_MESSAGE_HISTORY (65536) after the roles and the channel's overwrites: 900 plain; 901 denied to @everyone and
@@ -3616,9 +3614,9 @@ rc=0; out=$(printf '\n' | bash "$S" setup bot 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -q "bot name 'bot' is reserved" <<<"$out" && grep -q '^reserved_name() { case \$1 in .*|hosts|access|bot|add|hooks|checkin) return 0;; esac; return 1; }$' "$S" ||
   { echo "FAIL: access, bot and add are words claude-discord uses (a subcommand, bot add), so no bot may take the name: rc=$rc $out / $(grep -n '^reserved_name()' "$S")"; exit 1; }
 # A DISCORD_CHANNEL_ID that is no id (the bot's main channel when access.json does not say) is said, before Discord is asked.
-cp "$MR/config.env" "$HOME/acc.env.was"; printf "DISCORD_CHANNEL_ID='9 9'\nDISCORD_USER_ID='111'\n" > "$MR/config.env"; : > "$CURL_LOG"
-ac acc --json; cp "$HOME/acc.env.was" "$MR/config.env"; rm -f "$HOME/acc.env.was"
-[ "$ARC" = 1 ] && [ -z "$AO" ] && grep -q "^claude-discord: access: DISCORD_CHANNEL_ID in $MR/config.env is not a channel id" <<<"$AE" && [ ! -s "$CURL_LOG" ] ||
+cp "$(pstate "$MP")/config.env" "$HOME/acc.env.was"; printf "DISCORD_CHANNEL_ID='9 9'\nDISCORD_USER_ID='111'\n" > "$(pstate "$MP")/config.env"; : > "$CURL_LOG"
+ac acc --json; cp "$HOME/acc.env.was" "$(pstate "$MP")/config.env"; rm -f "$HOME/acc.env.was"
+[ "$ARC" = 1 ] && [ -z "$AO" ] && grep -q "^claude-discord: access: DISCORD_CHANNEL_ID in $(pstate "$MP")/config.env is not a channel id" <<<"$AE" && [ ! -s "$CURL_LOG" ] ||
   { echo "FAIL: a DISCORD_CHANNEL_ID that is no id is exit 1 with a reason, not an empty answer: rc=$ARC $AO / $AE"; exit 1; }
 echo "ok: access --json: one line with the policy, the server's channels and whether the bot can read each (roles, then the channel's overwrites for @everyone, the bot's roles, allow over deny within one level, and the bot; the server's owner and an administrator read all; not known is null, never a guess), names without controls, bidi or zero-width characters and cut at 40, the people (the member list when Discord gives it, the names kept here when it does not) and the peers; four calls, the token on curl's stdin only; a DISCORD_CHANNEL_ID that is no id is exit 1; 'access' is a reserved bot name"
 # access set, with no terminal: the changes are printed and nothing is written (exit 3), so what a set of words would do
@@ -3656,8 +3654,8 @@ warning: dongyong22 (111) is the owner of this bot (DISCORD_USER_ID) and can no 
 warning: peerbot (555) is a peer dev bot (peers.json) and can no longer reach this bot in #dev-bots" ] ||
   { echo "FAIL: the words are applied in order (a channel left and taken again is the same channel with the senders given; =any undone by a later +), and the owner's and a peer's removal are warned of: rc=$ARC $AO / $AE"; exit 1; }
 echo none > "$AD/mode"; printf '%s\n' "$A_FILE" > "$AD/access.json"
-printf "DISCORD_CHANNEL_ID='901'\nDISCORD_USER_ID='111'\n" > "$HOME/acc.env"; cp "$MR/config.env" "$HOME/acc.env.was"; cp "$HOME/acc.env" "$MR/config.env"
-ac acc set channel-901 dm=off; cp "$HOME/acc.env.was" "$MR/config.env"; rm -f "$HOME/acc.env" "$HOME/acc.env.was"
+printf "DISCORD_CHANNEL_ID='901'\nDISCORD_USER_ID='111'\n" > "$HOME/acc.env"; cp "$(pstate "$MP")/config.env" "$HOME/acc.env.was"; cp "$HOME/acc.env" "$(pstate "$MP")/config.env"
+ac acc set channel-901 dm=off; cp "$HOME/acc.env.was" "$(pstate "$MP")/config.env"; rm -f "$HOME/acc.env" "$HOME/acc.env.was"
 [ "$ARC" = 3 ] && grep -qx 'warning: the main channel of the bot becomes #dev-bots (was #bot-health): its session prompt, its hooks and health use that one' <<<"$AO" &&
   grep -qx '    DMs: allowlist -> off' <<<"$AO" && grep -qx '    DMs: - dongyong22 (111) may no longer DM it' <<<"$AO" ||
   { echo "FAIL: leaving the channel config.env names moves the bot's main channel to the one group left, and is warned of; dm=off is an allowlist with nobody on it (not the plugin's disabled): rc=$ARC $AO"; exit 1; }
@@ -3995,12 +3993,12 @@ echo none > "$AD/mode"; rm -rf "$AD/hosts" "$MB2/accM"
   { echo "FAIL: bot rename refuses a name that is none, one taken, a reserved one and its own session's bot before asking Discord: $A$BRC $BO"; exit 1; }
 # No terminal: what it would do is printed, nothing is done (exit 3). Discord refusing the name (it allows about two
 # changes an hour) changes nothing here.
-printf '{"peers":[{"name":"peerbot","bot_id":"555","owner_id":"1","machine":"m"},{"name":"acc","bot_id":"777","owner_id":"1","machine":"m"}]}\n' > "$MR/peers.json"
+printf '{"peers":[{"name":"peerbot","bot_id":"555","owner_id":"1","machine":"m"},{"name":"acc","bot_id":"777","owner_id":"1","machine":"m"}]}\n' > "$(pstate "$MP")/peers.json"
 # Refused after Discord says who the token in .env is: one of another bot (not the bot-id's), and a name a peer of
 # peers.json has (the bot would skip that peer as itself).
 : > "$CURL_REPLIES"; queue_line '200 {"id":"888","bot":true,"username":"other"}'; queue_line "200 $TOK_ME"; A=""
 for w in acc2 peerbot; do BRC=0; BO=$(bash "$S" bot acc rename $w </dev/null 2>&1) || BRC=$?; A="$A$BRC $BO / "; done
-[[ $A == "1 claude-discord: bot: $AD/.env holds the token of the bot other (888), not acc's (777)"*" / 1 claude-discord: bot: the peer peerbot (555) in $MR/peers.json has that name"* ]] &&
+[[ $A == "1 claude-discord: bot: $AD/.env holds the token of the bot other (888), not acc's (777)"*" / 1 claude-discord: bot: the peer peerbot (555) in $(pstate "$MP")/peers.json has that name"* ]] &&
   [ -d "$AD" ] || { echo "FAIL: bot rename refuses a .env token of another bot and a peer's name: $A"; exit 1; }
 : > "$CURL_REPLIES"; queue_line "200 $TOK_ME"; queue_line "200 $TOK_ME"
 queue_line '400 {"message":"Invalid Form Body","code":50035,"errors":{"username":{"_errors":[{"code":"USERNAME_RATE_LIMIT","message":"You are changing your username too fast."}]}}}'
@@ -4043,12 +4041,12 @@ bt - y acc rename acc2
 [ "$BRC" = 0 ] && grep -qx '    it runs (1 session): stopped, renamed, started again as acc2 from its handoff.md' <<<"$BO" &&
   grep -qx "claude-discord: bot: renamed: $MR/acc2 (and on Discord)" <<<"$BO" && grep -qx '    its session runs again as acc2' <<<"$BO" && [ "${BO##*$'\n'}" = "renamed: acc -> acc2" ] &&
   [ ! -e "$AD" ] && [ -f "$MR/acc2/.env" ] && [ -d "$HOME/.claude-discord/scratch/acc2" ] && ! kill -0 "$OLD" 2>/dev/null &&
-  [ "$(jq -c '[.peers[] | [.name, .bot_id]]' "$MR/peers.json")" = '[["peerbot","555"],["acc2","777"]]' ] &&
+  [ "$(jq -c '[.peers[] | [.name, .bot_id]]' "$(pstate "$MP")/peers.json")" = '[["peerbot","555"],["acc2","777"]]' ] &&
   [ "$(sed -n '2s/ .*//p' "$CURL_LOG")" = "-s" ] && grep -q -- "-X PATCH -H @- -H Content-Type: application/json --data-binary {\"username\":\"acc2\"} https://discord.com/api/v10/users/@me$" "$CURL_LOG" &&
   [ "$(sort -u "$CURL_STDIN_LOG")" = "Authorization: Bot tokAccUnique" ] && [ "$(<"$HOME/claude.calls")" = "STOP acc11111" ] &&
   [[ $BO == *"stopping acc (acc11111, pid $OLD)"$'\n'"LAUNCHER "*" -n acc2 --append-system-prompt "*HANDOFF_ACC*" --bg Catch up on the channel and continue from your handoff."$'\n'* ]] &&
   [ "$(tail -n 2 "$MR/acc2/access.log" | cut -d' ' -f4-)" = "rename: on Discord acc -> acc2
-rename: acc -> acc2" ] || { echo "FAIL: bot rename of a running bot, y: Discord first, then the session stopped, the directory, its peers.json line by id and its scratch directory renamed, the session started again as the new name from its handoff: rc=$BRC $BO / $(cat "$HOME/claude.calls" "$CURL_LOG" "$MR/peers.json" 2>&1)"; exit 1; }
+rename: acc -> acc2" ] || { echo "FAIL: bot rename of a running bot, y: Discord first, then the session stopped, the directory, its peers.json line by id and its scratch directory renamed, the session started again as the new name from its handoff: rc=$BRC $BO / $(cat "$HOME/claude.calls" "$CURL_LOG" "$(pstate "$MP")/peers.json" 2>&1)"; exit 1; }
 # A step after the directory moved fails (here the start under the new name): exit 1, what failed said, and the last line
 # still names the move, which a program follows (the TUI, after a manager's rename). Its handoff.md went with the start
 # above, so the plan says what a start with none means (M1). A scratch directory of the new name is there already: the
@@ -4214,9 +4212,9 @@ bt "$TOK_NEW" - add; A=$BRC$BO; bt "$TOK_NEW" - add; A2=$BRC$BO; bt "$TOK_NEW" -
   [[ $A2 == 1*"that token's bot (777) is set up in $AD already"* ]] && [[ $A3 == 1*"that token is no bot's (Discord says it is a user's)"* ]] &&
   [ "$BRC" = 1 ] && grep -q "$MB2/accM is there: a manager named accM has a backend on this machine" <<<"$BO" && [ "$(ls "$MR")" = "$was" ] ||
   { echo "FAIL: bot add reads nothing without a terminal (exit 3), and refuses a bot whose Discord name is no name here, one set up already, a user's token and a manager name with a backend: rc=$rc $out / $A / $A2 / $A3 / rc=$BRC $BO"; exit 1; }
-# A setup that fails (here at its first write, .gitignore, a directory) leaves no half bot: the directory it made goes.
-mv "$MR/.gitignore" "$HOME/gi.keep"; mkdir "$MR/.gitignore"; : > "$CURL_REPLIES"; queue_line '200 {"id":"995","bot":true,"username":"halfbot"}'
-bt "$TOK_NEW" y add; rmdir "$MR/.gitignore"; mv "$HOME/gi.keep" "$MR/.gitignore"
+# A setup that fails (here at its first write, the bot's directory under an unwritable bots/) leaves no half bot.
+chmod 555 "$MR"; : > "$CURL_REPLIES"; queue_line '200 {"id":"995","bot":true,"username":"halfbot"}'
+bt "$TOK_NEW" y add; chmod 755 "$MR"
 [ "$BRC" = 1 ] && grep -q 'claude-discord: bot: setup failed (above); nothing was added' <<<"$BO" && [ "$(ls "$MR")" = "$was" ] ||
   { echo "FAIL: bot add whose setup fails removes the directory setup made: rc=$BRC $BO / $(ls "$MR")"; exit 1; }
 # A bot set up here with no bot-id (health never saw it) is still found: by its directory (Discord's name for the new
@@ -4263,7 +4261,7 @@ grep -q "never on a channel message's request" "$D/rules/dev-manager.md" && grep
   { echo "FAIL: the dev-manager rule must forbid access and bot changes (recover too) on a channel message's request, the README must call the terminal check a speed bump and have the bot section with recover and the TUI's f and F, the header the bot verb and its recover act"; exit 1; }
 echo "ok: the dev-manager rule forbids access and bot changes on a channel message's request; the README calls the terminal check a speed bump, not a boundary, and documents the bot verb, recover and the TUI's f and F"
 # The monitor cases below find the ledger, the logs and the project as the hosts cases left them.
-printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -rf "$AD" "$MR/peers.json" "$HOME/ssh.log" "$HOME/curl.proxy" "$HOME/access.err" "$MON"/*; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
+printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -rf "$AD" "$(pstate "$MP")/peers.json" "$HOME/ssh.log" "$HOME/curl.proxy" "$HOME/access.err" "$MON"/*; : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"
 
 # The monitor runs fast here: a 0.01 s tick, a 0.03 s cap per host, 0.1 s for the lock (one retry; written 0.10, which
 # the sleep stub leaves alone: a keeper's second look at an unseen lock waits it for real), and a 60 s pass interval, so
@@ -4390,15 +4388,15 @@ mkdir -p "$MB"; echo '{"version":1,"manager":"mg' > "$MB/state.json"; head -c 26
 # The marker sweep runs in a pass (its ledger has a local line), at most every CLAUDE_DISCORD_MONITOR_SWEEP seconds (an
 # hour; 0 here: every pass), over the recorded projects (one here, put back after) with the claude on its PATH: a dead
 # session's markers go, a done one's stay.
-SMR=$(broot "$HOME/sweepmon"); mkdir -p "$SMR/swm/plugin-sessions" "$SMR/swm/turns" "$(pstate "$HOME/sweepmon")/checkin" "$HOME/swbin"; : > "$SMR/swm/.env"
-for f in swm/plugin-sessions/live1 swm/plugin-sessions/done2 swm/plugin-sessions/gone3 swm/turns/live1 swm/turns/gone3 swm/turns/gone3.replied checkin/live1 checkin/gone3; do : > "$SMR/$f"; done
+SMR=$(broot "$HOME/sweepmon") SMS=$(pstate "$HOME/sweepmon"); mkdir -p "$SMR/swm/plugin-sessions" "$SMR/swm/turns" "$SMS/checkin" "$HOME/swbin"; : > "$SMR/swm/.env"
+for f in swm/plugin-sessions/live1 swm/plugin-sessions/done2 swm/plugin-sessions/gone3 swm/turns/live1 swm/turns/gone3 swm/turns/gone3.replied; do : > "$SMR/$f"; done; : > "$SMS/checkin/live1"; : > "$SMS/checkin/gone3"
 printf '#!/bin/sh\n[ "$*" = "agents --json --all" ] && echo %s\n' "'[{\"name\":\"swm\",\"id\":\"aaaa0001\",\"sessionId\":\"live1\",\"state\":\"working\"},{\"name\":\"swm\",\"id\":\"dddd0002\",\"sessionId\":\"done2\",\"state\":\"done\"}]'" > "$HOME/swbin/claude"; chmod +x "$HOME/swbin/claude"
 SWPF="$HOME/.claude-discord/records/projects"; mv "$SWPF" "$SWPF.mon"; printf '%s\n' "$HOME/sweepmon" > "$SWPF"
 holder
 (cd "$MP" && PATH="$HOME/swbin:$PATH" CLAUDE_DISCORD_MONITOR_SWEEP=0 TMPDIR=$HOME/ro bash "$S" monitor --ensure mgr --holder tui "$HPID" && TMPDIR=$HOME/ro bash "$S" monitor --ensure mgr)
 wait_log 1 ' pass (hosts=|failed)'
-[ "$(cd "$SMR" && echo swm/plugin-sessions/* swm/turns/* checkin/*)" = "swm/plugin-sessions/done2 swm/plugin-sessions/live1 swm/turns/live1 checkin/live1" ] ||
-  { echo "FAIL: a monitor pass sweeps a dead session's markers and keeps a done one's: $(cd "$SMR" && echo swm/*/* checkin/*)"; exit 1; }
+[ "$(cd "$SMR" && echo swm/plugin-sessions/* swm/turns/*) $(cd "$SMS" && echo checkin/*)" = "swm/plugin-sessions/done2 swm/plugin-sessions/live1 swm/turns/live1 checkin/live1" ] ||
+  { echo "FAIL: a monitor pass sweeps a dead session's markers and keeps a done one's: $(cd "$SMR" && echo swm/*/*) $(cd "$SMS" && echo checkin/*)"; exit 1; }
 [ "$(cut -d' ' -f1 "$MB/holders/tui-$HPID" 2>/dev/null)" = "$HPID" ] || { echo "FAIL: --holder must write <pid> <start time> <kind>"; exit 1; }
 grep -q '^health --all --json --patch|http://127.0.0.1:8118$' "$HOME/local.calls" || { echo "FAIL: local runs the shim's health --all --json --patch with the local line's env: $(cat "$HOME/local.calls")"; exit 1; }
 grep -q '^-o BatchMode=yes -o ConnectTimeout=8 h1 env ~/.local/bin/claude-discord health --all --json --patch$' "$HOME/ssh.log" || { echo "FAIL: a remote host runs the shim over ssh: $(<"$HOME/ssh.log")"; exit 1; }
@@ -4636,7 +4634,7 @@ mstate --argjson n "$(date +%s)" '.hosts.h5.left_s = $n - 86401 | .hosts.h6.left
 export CLAUDE_DISCORD_MONITOR_PASS=0.02
 printf '%s\n' '429 {"retry_after": 0.01}' '429 {"retry_after": 60}' > "$CURL_REPLIES"; : > "$CURL_LOG"
 mdoc h1 1 nf:stale tm:stale > "$MON/h1.out"
-printf "ALERT_LANG='EN'\n" >> "$MR/config.env"   # labels in English from here on; any case of en, anything else is ko
+printf "ALERT_LANG='EN'\n" >> "$(pstate "$MP")/config.env"   # labels in English from here on; any case of en, anything else is ko
 cp "$MR/mgr/.env" "$MR/mgr/.env.keep"; : > "$MR/mgr/.env"
 mstart
 grep -q 'post h1|/home/u/ws/p|nf stale failed 000 (no DISCORD_BOT_TOKEN in .*/mgr/\.env)$' "$MB/monitor.log" && [ -z "$(posts)" ] || { echo "FAIL: a POST with no token in the manager's .env must fail before curl, logged with the reason: $(grep ' post ' "$MB/monitor.log")"; exit 1; }

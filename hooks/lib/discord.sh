@@ -46,7 +46,7 @@ resolve_channel() {
 # without one) and empties bot_access_ids: resolve_channel's fallback, read
 # with builtins. thread-guard applies the access.json half inside its own jq.
 config_channel() {
-  local config="$DISCORD_STATE_DIR/../config.env" line
+  local config="$proj_state/config.env" line
   bot_channel="" bot_access_ids=""
   if [ -f "$config" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
@@ -57,13 +57,30 @@ config_channel() {
   fi
 }
 
+# proj_state: the project's state dir (config.env, peers.json, checkin/); bots_root: its bot dirs' parent; project_dir:
+# the project. Computed once, no fork, from the state dir's shape (1.18.0, bin/lib/state.sh has the layout):
+#   ~/.claude-discord/projects/<key>/bots/<bot>          proj_state is up to /bots/, project_dir its `project` file
+#   <project>/.claude/discord-agents/<bot>, a symlink    a job whose respawnFlags froze the old path: the link's target, as above
+#   <project>/.claude/discord-agents/<bot>, a directory  not moved yet: proj_state is its parent, as before 1.18.0
 # A bot is the session its state dir belongs to: a `claude -p` started from a
 # bot's shell inherits DISCORD_STATE_DIR, and in another project it is not that
 # bot (Claude Code gives every hook CLAUDE_PROJECT_DIR, measured on 2.1.296).
 # The bot's own project, or a git worktree of it: a bot started with --worktree
 # runs with CLAUDE_PROJECT_DIR set to that worktree. Any other directory, under
 # the project or not, is another session.
-bot_project=${DISCORD_STATE_DIR:-}; bot_project=${bot_project%/}; bot_project=${bot_project%/.claude/discord-agents/*}
+sd=${DISCORD_STATE_DIR:-}; sd=${sd%/}; project_dir="" proj_state="" bots_root=""
+case $sd in
+  */.claude/discord-agents/*)
+    project_dir=${sd%/.claude/discord-agents/*} proj_state=${sd%/*}; bots_root=$proj_state
+    if [ -L "$sd" ]; then
+      pd_here=$PWD; { cd -P -- "$sd" 2>/dev/null && sd=$PWD; } || :; cd -- "$pd_here" 2>/dev/null || :
+      case $sd in */bots/*) proj_state=${sd%/bots/*}; bots_root=$proj_state/bots;; esac
+    fi;;
+  */bots/*)
+    proj_state=${sd%/bots/*}; bots_root=$proj_state/bots
+    { IFS= read -r project_dir < "$proj_state/project"; } 2>/dev/null || :;;
+  ?*) proj_state=${sd%/*}; bots_root=$proj_state;;
+esac
 # in_bot_worktree: CLAUDE_PROJECT_DIR is the bot project's directory in a
 # linked worktree: <worktree><prefix>, prefix being the project's path under the
 # first entry, the main worktree (empty when the project is the repo root; git
@@ -75,16 +92,16 @@ in_bot_worktree() {
   while IFS= read -r l; do
     case $l in "worktree "?*)
       if [ -n "$main" ]; then
-        p=$bot_project; main=""
+        p=$project_dir; main=""
         while [ -n "$p" ] && ! [ "$p" -ef "${l#worktree }" ]; do case $p in */*) pre=/${p##*/}$pre; p=${p%/*};; *) p="";; esac; done
         [ -n "$p" ] || return 1   # the bot project is not under this repo's main worktree
       elif [ "${l#worktree }$pre" -ef "$CLAUDE_PROJECT_DIR" ]; then return 0; fi;;
     esac
-  done <<<"$(git -C "$bot_project" worktree list --porcelain 2>/dev/null)"
+  done <<<"$(git -C "$project_dir" worktree list --porcelain 2>/dev/null)"
   return 1
 }
 if [ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ] &&
-   { [ -z "${CLAUDE_PROJECT_DIR:-}" ] || [ "$DISCORD_STATE_DIR/.." -ef "$CLAUDE_PROJECT_DIR/.claude/discord-agents" ] || in_bot_worktree; }; then
+   { [ -z "${CLAUDE_PROJECT_DIR:-}" ] || [ "$project_dir" -ef "$CLAUDE_PROJECT_DIR" ] || in_bot_worktree; }; then
   bot_name=${DISCORD_STATE_DIR%/}; bot_name=${bot_name##*/}
   IFS= read -r bot_mode 2>/dev/null < "$DISCORD_STATE_DIR/mode" || :
 fi
@@ -127,7 +144,7 @@ react() {
 is_bot_user() {
   local id=$1 i kind out status k=$DISCORD_STATE_DIR/user-kinds
   case $id in ''|*[!0-9]*) return 1;; esac
-  jq -e --arg id "$id" 'any(.peers[]?; (.bot_id // "" | tostring) == $id)' "$DISCORD_STATE_DIR/../peers.json" >/dev/null 2>&1 && return 0
+  jq -e --arg id "$id" 'any(.peers[]?; (.bot_id // "" | tostring) == $id)' "$proj_state/peers.json" >/dev/null 2>&1 && return 0
   if [ -f "$k" ]; then
     while read -r i kind; do [ "$i" != "$id" ] || { [ "$kind" = bot ]; return; }; done < "$k"
   fi
@@ -150,7 +167,7 @@ peers() {
   [ "$bot_mode" = dev-manager ] || return 0
   jq -c --arg self "$bot_name" '[.peers[]? | {name: (.name // "" | tostring), bot_id: (.bot_id // "" | tostring)}
     | select(.name != "" and (.bot_id | test("^[0-9]+$")) and (.name | ascii_downcase) != ($self | ascii_downcase))]
-    | select(length > 0)' "$DISCORD_STATE_DIR/../peers.json" 2>/dev/null
+    | select(length > 0)' "$proj_state/peers.json" 2>/dev/null
 }
 
 # plugin_gate: every hook calls it right after sourcing this file (a tool never
@@ -184,7 +201,7 @@ plugin_gate() {
     [ -e "$m/$sid" ] || { bot_process; [ $? != 1 ]; return; }
     # A marked session whose plugin install is gone again (rolled back) has no
     # plugin hooks left: the old path is all it has, so it runs.
-    [ -e "$bot_project/.claude/skills/claude-discord/hooks/hooks.json" ] ||
+    [ -e "$project_dir/.claude/skills/claude-discord/hooks/hooks.json" ] ||
       [ -e "$HOME/.claude/skills/claude-discord/hooks/hooks.json" ]
     [ $? != 0 ]
     return
@@ -279,11 +296,14 @@ hook_session() {
 # first bot that wakes. No records, no manager, every keeper alive: builtins only (no fork on Linux), and silent.
 # CLAUDE_DISCORD_NO_AUTOSTART turns it off on a machine (the other side of a shared home; the suite).
 revive_backends() {
-  local pf="$HOME/.claude-discord/records/projects" p d m bot_name bot_project seen=" "
+  local pf="$HOME/.claude-discord/records/projects" p d m k q bots bot_name bot_project seen=" " LC_ALL=C
   [ -z "${CLAUDE_DISCORD_NO_AUTOSTART:-}" ] && [ -f "$pf" ] || return 0
   while IFS= read -r p || [ -n "$p" ]; do
     p=${p%$'\r'}; [ -n "$p" ] || continue
-    for d in "$p"/.claude/discord-agents/*/; do
+    # Either shape (state.sh's proj_dirs, inlined: no fork): the key's `project` names the project, or the 1.16 dir.
+    k=${p//[^A-Za-z0-9]/-} q=""; { IFS= read -r q < "$HOME/.claude-discord/projects/$k/project"; } 2>/dev/null || :
+    if [ "$q" = "$p" ]; then bots=$HOME/.claude-discord/projects/$k/bots; else bots=$p/.claude/discord-agents; fi
+    for d in "$bots"/*/; do
       d=${d%/}
       [ -f "$d/hosts" ] && [ -f "$d/.env" ] || continue   # the front refuses a bot with no .env, on every prompt
       m=""; { read -r m < "$d/mode"; } 2>/dev/null

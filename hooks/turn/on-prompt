@@ -170,7 +170,7 @@ if [ -n "$session_id" ]; then
   # turns re-sent the whole text at every message (41 of 107 injections on
   # lmd79, 2026-10-16). Sorted inside the awk: no sort process per prompt, and
   # the awk reads config.env and user-names itself (no sed, no cut).
-  people=$(ids=$bot_access_ids awk -v f="$DISCORD_STATE_DIR/user-names" -v c="$DISCORD_STATE_DIR/../config.env" -v q="'" '
+  people=$(ids=$bot_access_ids awk -v f="$DISCORD_STATE_DIR/user-names" -v c="$proj_state/config.env" -v q="'" '
     function add(x) { if (x ~ /^[0-9]+$/ && !seen[x]++) id[++k] = x "" }
     BEGIN {
       m = split(ENVIRON["ids"], a, "\n"); for (i = 1; i <= m; i++) add(a[i])
@@ -191,7 +191,7 @@ People in this channel (mention one as <@id> to reach them): $people"
   # A dev-manager with peers also learns who they are and how to work with them.
   if [ "$bot_mode" = dev-manager ] && p=$(jq -r --arg self "$bot_name" '[.peers[]? | {name: (.name // "" | tostring), bot_id: (.bot_id // "" | tostring)}
     | select(.name != "" and (.bot_id | test("^[0-9]+$")) and (.name | ascii_downcase) != ($self | ascii_downcase))]
-    | select(length > 0) | map("\(.name) <@\(.bot_id)>") | join(", ")' "$DISCORD_STATE_DIR/../peers.json" 2>/dev/null) && [ -n "$p" ]; then
+    | select(length > 0) | map("\(.name) <@\(.bot_id)>") | join(", ")' "$proj_state/peers.json" 2>/dev/null) && [ -n "$p" ]; then
     identity="$identity
 Peers (mention to reach them): $p
 Dev manager: work alone end to end; ping a peer only for a review, a test on its machine, an R&R split or a heads-up before changing shared files; Discord carries only what a peer must act on or the human asks you to send; echo nothing either way."

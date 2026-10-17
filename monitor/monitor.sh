@@ -71,7 +71,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 case $bot in ''|.|..|*/*) echo "$usage" >&2; exit 2;; esac
-dir=$PWD/.claude/discord-agents/$bot
+. "${BASH_SOURCE[0]%/*}/../bin/lib/state.sh"; proj_cwd; dir=$pd_root/$bot pstate=$pd_state   # either shape (1.18.0: ~/.claude-discord/projects/<key>/bots/<bot>; config.env beside bots/)
 M=$HOME/.claude-discord/records/monitor/$bot
 # The ledger is the on/off switch: no hosts file, no monitor. --stop needs none: it stops what runs.
 [ -n "$stop" ] || { [ -f "$dir/hosts" ] && [ -f "$dir/.env" ]; } || { echo "claude-discord: monitor: $dir has no hosts ledger (claude-discord setup $bot --mode writes one)" >&2; exit 1; }
@@ -350,7 +350,7 @@ read_cfg() {
       ALERT_LANG=*) case $v in [eE][nN]) lang=en;; *) lang=ko;; esac;;
       DISCORD_USER_ID=*) mowner=$v;;
     esac
-  done 2>/dev/null < "$dir/../config.env"   # 2> first: a missing file's error must not reach monitor.log
+  done 2>/dev/null < "$pstate/config.env"   # 2> first: a missing file's error must not reach monitor.log
 }
 
 # is_holder <path>: a record's name is tui-, keeper- or (written before 1.10.3) session-<digits>. Anything else there (a
@@ -851,7 +851,7 @@ run_pass() {
   # markers are its own monitor's; on a shared home, the bots this side's `claude agents` does not list are left.
   if [ -n "$has_local" ] && [ $((SECONDS - swept)) -ge "${sweep%%.*}" ]; then
     swept=$SECONDS
-    { . "${BASH_SOURCE[0]%/*}/../bin/lib/state.sh" && sweep_recorded "$HOME/.claude-discord/records/projects"; } 2>/dev/null 9>&- || :
+    sweep_recorded "$HOME/.claude-discord/records/projects" 2>/dev/null 9>&- || :
   fi
   log "pass hosts=$hosts bots=$nb findings=$findings posted=$posted $(( SECONDS - t0 ))s"
 }

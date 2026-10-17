@@ -5,8 +5,10 @@
 # nothing when nothing is new:
 #   iteration-end artifacts/rc-<run>/stage-15/decision.md    an iteration ended
 #   run-end artifacts/rc-<run>/pipeline_summary.json         a run ended
-# The project is $DISCORD_STATE_DIR/../../.. (the state dir is
-# <project>/.claude/discord-agents/<bot>). Dedup key: the file's path
+# The project is the state dir's (the three lines below, as hooks/lib/discord.sh
+# reads it: ~/.claude-discord/projects/<key>/bots/<bot> and its `project` file,
+# or the 1.16 shape <project>/.claude/discord-agents/<bot>, a link to the new
+# place or not). Dedup key: the file's path
 # relative to the project plus the cksum of its content, one
 # "<path> <cksum>" line per seen pair in $DISCORD_STATE_DIR/arc-seen. So a
 # relaunch that rewrites decision.md with other content is a new event, and
@@ -24,7 +26,10 @@
 set -u
 [ -n "${DISCORD_STATE_DIR:-}" ] || { echo "events: DISCORD_STATE_DIR is unset; run this inside a claude-discord bot session" >&2; exit 2; }
 seen=$DISCORD_STATE_DIR/arc-seen
-cd "$DISCORD_STATE_DIR/../../.." 2>/dev/null || exit 0
+sd=${DISCORD_STATE_DIR%/} project_dir=""
+case $sd in */.claude/discord-agents/*) project_dir=${sd%/.claude/discord-agents/*};; esac
+case $sd in */bots/*) [ -n "$project_dir" ] || { IFS= read -r project_dir < "${sd%/bots/*}/project"; } 2>/dev/null || :;; esac
+[ -n "$project_dir" ] && cd "$project_dir" 2>/dev/null || exit 0
 [ -e "$seen" ] && first=0 || first=1
 files=()
 for f in artifacts/rc-*/stage-15/decision.md artifacts/rc-*/pipeline_summary.json; do [ -s "$f" ] && files+=("$f"); done

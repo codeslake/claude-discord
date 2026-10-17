@@ -47,7 +47,9 @@ printf '%s\n' "$rows" | while IFS=$'\t' read -r name cwd; do
   # pass by riding a DIFFERENT bot's real state dir while printing its own,
   # forged name. Reject anything that is not one plain path component.
   case $name in */*|.|..) continue ;; esac
-  dir="$cwd/.claude/discord-agents/$name"
+  # Either shape: ~/.claude-discord/projects/<key of the cwd>/bots/<name> (1.18.0), else <cwd>/.claude/discord-agents/<name>.
+  dir=$(cd -P "$cwd" 2>/dev/null && LC_ALL=C && printf '%s/.claude-discord/projects/%s/bots/%s' "$HOME" "${PWD//[^A-Za-z0-9]/-}" "$name") || continue
+  [ -d "$dir" ] || dir="$cwd/.claude/discord-agents/$name"
   [ -d "$dir" ] || continue
   state_dir=$(cd "$dir" 2>/dev/null && pwd -P) || continue
   [ -n "$self" ] && [ "$state_dir" = "$self" ] && continue

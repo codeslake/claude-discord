@@ -16,7 +16,8 @@ h_manager() {
   h_cands="" h_n=0
   h_scan() {  # $1 = a project root: its manager bots with a ledger go into h_cands (one bot dir a line), each once
     local d m
-    for d in "$1"/.claude/discord-agents/*/; do
+    proj_dirs "$1"
+    for d in "$pd_root"/*/; do
       d=${d%/}; m=""
       [ -f "$d/hosts" ] || continue
       { read -r m < "$d/mode"; } 2>/dev/null || :
@@ -26,9 +27,7 @@ h_manager() {
       h_cands=$h_cands$d$'\n'; h_n=$((h_n + 1))
     done
   }
-  hp=$(pwd -P)   # physical, as records/projects holds its paths
-  while [ ! -d "$hp/.claude/discord-agents" ] && [ -n "$hp" ]; do hp=${hp%/*}; done
-  h_scan "$hp"
+  ! find_proj || h_scan "$pd_project"   # the project above the cwd (physical, as records/projects holds its paths)
   if [ "$h_n" = 0 ] && [ -f "$helpers/records/projects" ]; then
     while IFS= read -r p || [ -n "$p" ]; do
       p=${p%$'\r'}

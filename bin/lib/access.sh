@@ -60,19 +60,17 @@ if [ "${1:-}" = access ]; then
   if [ -n "$a_proj" ]; then
     cd "$a_proj" 2>/dev/null || { echo "claude-discord: access: no such project directory (--project)" >&2; exit 1; }
   else
-    ap=$PWD
-    while [ ! -d "$ap/.claude/discord-agents/$bot" ] && [ -n "$ap" ]; do ap=${ap%/*}; done
-    [ -z "$ap" ] || cd "$ap"
+    ! find_proj "$bot" || cd "$pd_project"
   fi
-  root=$PWD/.claude/discord-agents; d=$root/$bot; f=$d/access.json
+  proj_cwd; root=$pd_root proj_state=$pd_state; d=$root/$bot; f=$d/access.json
   bn=${bot//[[:cntrl:]]/}   # the name as it is printed
   [ -f "$f" ] || { echo "claude-discord: access: no bot '$bn' set up in $root (claude-discord setup <bot>)" >&2; exit 1; }
   command -v jq >/dev/null 2>&1 || { echo "claude-discord: access needs jq" >&2; exit 1; }
   DISCORD_CHANNEL_ID="" DISCORD_USER_ID=""
-  [ ! -f "$root/config.env" ] || . "$root/config.env"
+  [ ! -f "$proj_state/config.env" ] || . "$proj_state/config.env"
   # The bot's main channel when access.json does not say which (and a part of a URL below): an id or nothing.
   [ -z "$DISCORD_CHANNEL_ID" ] || c_match "$DISCORD_CHANNEL_ID" '^[0-9]{1,20}$' ||
-    { echo "claude-discord: access: DISCORD_CHANNEL_ID in $root/config.env is not a channel id (digits only); correct it there" >&2; exit 1; }
+    { echo "claude-discord: access: DISCORD_CHANNEL_ID in $proj_state/config.env is not a channel id (digits only); correct it there" >&2; exit 1; }
   # What names this machine keeps: the channels' (health writes channel-names), the people's (on-prompt writes
   # user-names) and the peer bots' (peers.json). They are for reading: every argument and every stored value is an id.
   # member-names: the names Discord's member list gave at the last --json, for set to show next to an id it has no
@@ -81,7 +79,7 @@ if [ "${1:-}" = access ]; then
   { a_cn=$(<"$d/channel-names"); } 2>/dev/null || :
   { a_un=$(<"$d/user-names"); } 2>/dev/null || :
   { a_mn=$(<"$d/member-names"); } 2>/dev/null || :
-  { a_peers=$(<"$root/peers.json"); } 2>/dev/null || :
+  { a_peers=$(<"$proj_state/peers.json"); } 2>/dev/null || :
   { read -r mode < "$d/mode"; } 2>/dev/null || :
   mode=${mode//[[:cntrl:]]/}; mode=${mode:-none}
   a_host_name=$(uname -n); a_host_name=${a_host_name%%.*}

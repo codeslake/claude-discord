@@ -49,8 +49,9 @@ if [ "${1:-}" = health ]; then
         keep="$keep$p"$'\n'
         # Missing now is not gone for good (a volume not mounted yet, the other side of a shared home): reported, never
         # pruned, so the monitor reads it as blind and its bots stay known. Only the owner removes a line.
-        if [ ! -d "$p/.claude/discord-agents" ]; then
-          miss="project folder missing: $p/.claude/discord-agents (gone for good: delete its line from $pf)"
+        proj_dirs "$p"
+        if [ ! -d "$pd_root" ]; then
+          miss="project folder missing: $pd_root (gone for good: delete its line from $pf)"
           if [ "$as_json" = yes ]; then one=$(jq -nc --arg p "$p" --arg e "$miss" '{project: $p, bots: [], error: $e}'); docs=$docs$one$'\n'; else echo "== $p"; echo "$miss"; any=1; fi
           continue
         fi
@@ -98,8 +99,9 @@ if [ "${1:-}" = health ]; then
   # wrong project. A session whose shell has wandered off its own project
   # still gets the fallback.
   if [ ! -d "$root" ] && [ -n "${DISCORD_STATE_DIR:-}" ]; then
-    cd "$(dirname "$(dirname "$(dirname "$DISCORD_STATE_DIR")")")"
-    root=$PWD/.claude/discord-agents
+    proj_of_state_dir "$DISCORD_STATE_DIR"   # either shape, a link the move left too
+    [ -z "$pd_project" ] || cd "$pd_project" 2>/dev/null || :
+    proj_cwd; root=$pd_root proj_state=$pd_state project_dir=$pd_project
   fi
 
   # Removing a timer an older version installed. Installing one is gone: the
@@ -126,7 +128,7 @@ if [ "${1:-}" = health ]; then
   record_project
   command -v jq >/dev/null 2>&1 || { echo "claude-discord: health needs jq" >&2; exit 1; }
   command -v curl >/dev/null 2>&1 || { echo "claude-discord: health needs curl" >&2; exit 1; }
-  [ ! -f "$root/config.env" ] || . "$root/config.env"
+  [ ! -f "$proj_state/config.env" ] || . "$proj_state/config.env"
 
   now_s=$(date +%s)
   # A Discord id is a snowflake: its top 42 bits are milliseconds since
@@ -190,7 +192,7 @@ if [ "${1:-}" = health ]; then
     fi
   fi
 
-  count_servers() {  # $1 = bot state dir
+  count_servers() {  # $1 = bot state dir, $2 = its path before the move (a job respawned on it, 1.18.0): both count
     local n=0 c pid args a hit l
     if [ ! -d "$proc" ]; then
       [ "$mac_ok" = yes ] || { printf 'unknown'; return 0; }   # ps itself failed: cannot tell, never zero
@@ -199,7 +201,7 @@ if [ "${1:-}" = health ]; then
       # shortcut: ps joins env words with spaces, so a dir "/a/My" also matches a line carrying "/a/My Project/x"; quote-aware parsing if a Mac project ever has such siblings.
       local IFS=$'\n'; set -f   # one ps line at a time (a subshell: neither leaks), with no here-string (bash 3.2 writes those to TMPDIR)
       for l in $mac_env; do
-        case "$l " in *" DISCORD_STATE_DIR=$1 "*) n=$((n + 1));; esac
+        case "$l " in *" DISCORD_STATE_DIR=$1 "*|*" DISCORD_STATE_DIR=$2 "*) n=$((n + 1));; esac
       done
       printf '%s' "$n"; return 0
     fi
@@ -223,7 +225,7 @@ if [ "${1:-}" = health ]; then
       # reads as a duplicate and the longer-named one, when down, does not
       # read as down at all. -z makes each NUL-separated entry a line, and
       # -x anchors the whole entry.
-      grep -qzxF "DISCORD_STATE_DIR=$1" "$proc/$pid/environ" 2>/dev/null && n=$((n + 1))
+      { grep -qzxF "DISCORD_STATE_DIR=$1" "$proc/$pid/environ" || grep -qzxF "DISCORD_STATE_DIR=$2" "$proc/$pid/environ"; } 2>/dev/null && n=$((n + 1))
     done
     printf '%s' "$n"
   }
@@ -419,7 +421,7 @@ if [ "${1:-}" = health ]; then
     bot=${d##*/}
     tok=$(grep '^DISCORD_BOT_TOKEN=' "$d/.env" 2>/dev/null | head -1) || tok=""
     tok=${tok#DISCORD_BOT_TOKEN=}
-    servers=$(count_servers "$d")
+    servers=$(count_servers "$d" "$project_dir/.claude/discord-agents/$bot")
     turn=$(turn_age_min "$d")
     last_seen=$(cat "$d/last-message-id" 2>/dev/null) || last_seen=0
     is_id "$last_seen" || last_seen=0
