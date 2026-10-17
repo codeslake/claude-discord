@@ -44,7 +44,7 @@ enables it per session with `--settings`.
   hook states `CLAUDE_DISCORD_TOOLS=<path>` in a bot session's context, and the
   commands in this README are run with that path. From a terminal use
   `<clone>/tools`, e.g. `~/.claude-discord/source/tools`.
-- **ledger**: `<project>/.claude/discord-agents/<manager bot>/hosts`, the ssh
+- **ledger**: `~/.claude-discord/projects/<key>/bots/<manager bot>/hosts`, the ssh
   hosts a manager bot's monitor checks. Its existence is the monitor's on/off
   switch.
 - **backend**: a manager bot's keeper and the monitor it keeps up. It runs
@@ -58,8 +58,10 @@ enables it per session with `--settings`.
 - **finding**: a verdict that needs a human (`down`, `stale`, `duplicate`,
   `unreachable`, `nostate`, `throttled`, `apierror`, `patchfail`, `hostdown`,
   `blind`). `ok` and `busy` are not findings; `noreach` is logged, never posted.
-- **project**: the directory you run `claude-discord` from. All state lives in
-  `./.claude/discord-agents/` there, so a bot belongs to a project. With exactly
+- **project**: the directory you run `claude-discord` from. Its state lives in
+  `~/.claude-discord/projects/<key>/` (key: the project's path, every
+  non-alphanumeric character a dash, as Claude Code names its transcript
+  folder), so a bot belongs to a project. With exactly
   one bot set up, naming it is optional; with several, the name is required.
 
 ## Discord side, once
@@ -136,7 +138,7 @@ separate them.
 
 ```
 claude-discord install         # the plugin, shim, runtime and compat copy for this project; no bot questions; safe to re-run
-claude-discord update          # git pull --ff-only the clone this runs from (a link resolves to the source clone), re-patch, refresh the compat copy and the shim
+claude-discord update          # git pull --ff-only the clone this runs from (a link resolves to the source clone), re-patch, refresh the compat copy and the shim, move any project still in the 1.16 state shape (compat, below)
 claude-discord update --all    # every recorded install, each real clone once however many links point at it; a removed project is pruned
 claude-discord --version       # claude-discord <version> (<short sha>) of that clone
 claude-discord patch           # patch every cached copy of the official discord plugin (also done at each start and by update)
@@ -300,10 +302,43 @@ session's start prompt still names no channel until its next start; replies go
 where each message came from, so nothing depends on it. A tool called before
 the login fails with discord.js's error instead of reaching Discord.
 
-Everything lives under `./.claude/discord-agents/` in the project, mode 0700.
-Setup writes a `*` `.gitignore` inside that directory, so the token can never
-be staged even with `git add -A`; your project's own `.gitignore` is untouched.
-A second project gets its own setup and its own bots.
+**Where the state is (1.18.0).** A project's state lives outside the project,
+under `~/.claude-discord/projects/<key>/`, mode 0700 throughout:
+
+```
+~/.claude-discord/projects/<key>/
+  project            the project's absolute physical path, one line
+  config.env         setup's answers (channel, owner, the other ids)
+  peers.json         a dev-manager's peers (one file per project)
+  checkin/<sid>      the check-ins edit-gate reads
+  bots/<bot>/        .env (the token, 600), access.json, mode, hosts, turns/, plugin-sessions/, handoff*.md, logs, caches
+```
+
+`<key>` is the project's path with every non-alphanumeric character a dash,
+the name Claude Code gives its transcript folder under `~/.claude/projects`
+(`/home/u/my_proj` is `-home-u-my-proj`); `project` is the authority, so two
+paths that share a key (`a_b` and `a.b`) are refused at the second `setup`,
+naming both. Nothing of the state is in the project's `.claude/` any more (no
+token in a git tree, so no `.gitignore` to keep). A relocated project is set
+up again in its new place (its old key reads as `project folder missing` in
+`health --all`). A second project gets its own setup and its own bots.
+
+Before 1.18.0 all of this was `<project>/.claude/discord-agents/`. The first
+`update` to 1.18.0 (its `compat` step), a `setup`, or a start in a project
+still in that shape moves it: each bot directory is renamed (one `rename(2)`,
+same inode, nothing copied), and a symlink
+`<project>/.claude/discord-agents/<bot>` is left pointing at the new place,
+because a background session's job record froze the old path in its
+`respawnFlags`: a respawn, a daemon restart or a fleet claim comes back on
+that path and keeps working through the link (the hooks, the plugin's
+server, `health` and `refresh` accept either path). The link goes once no
+`~/.claude/jobs/*/state.json` names the old path (a stopped job keeps its
+record until `claude rm <id>` or the bot's next start prunes it; `compat`
+says which job holds which link), and the empty `discord-agents/` with its
+`.gitignore` after the last. A bot directory on another filesystem is
+copied, compared and removed instead, but only while no session of it runs;
+otherwise it is left for the next start or update, said. `records/monitor`
+and `scratch/` do not move in 1.18.0.
 
 ## Modes
 
@@ -319,7 +354,7 @@ empty for the default (the current mode on a re-run).
 
 A dev-manager's setup also asks for its peers as
 `name:bot_id:owner_id:machine`, comma-separated. They are merged by `bot_id`
-into `.claude/discord-agents/peers.json` (one file per project, so the same
+into `~/.claude-discord/projects/<key>/peers.json` (one file per project, so the same
 list can be pasted on every machine: each bot skips itself by name), and
 every peer's `bot_id` is added to every group's `allowFrom` in this bot's
 `access.json` (not the DM one). A group whose `allowFrom` is empty is left
@@ -361,7 +396,7 @@ bot session on this machine, one line per session as `<name><TAB><project
 dir>`, sorted by name. Discovery is `claude agents --json` (active sessions
 only: `--all` would add completed ones, retired bots among them; no filter on
 the state, since a live bot can show `done`) filtered to
-a session whose project has a `.claude/discord-agents/<name>` directory,
+a session whose project has a bot directory `<name>` (its state dir, or the 1.16 shape),
 this bot's own session excluded by state dir; it prints nothing, never
 fails, and is never registered as a hook.
 
@@ -628,7 +663,7 @@ in the channel steers a run, and gates are answered in the run's terminal.
   writes `pipeline_summary.json`, aborted and failed runs included.
 - **`tools/arc-events`** prints one line per new event,
   `iteration-end <path>` or `run-end <path>` (relative to the project), and
-  nothing otherwise. What it has seen is `.claude/discord-agents/<bot>/arc-seen`,
+  nothing otherwise. What it has seen is `<bot dir>/arc-seen`,
   one `<path> <cksum>` line per file and content: a relaunch that rewrites
   `decision.md` with other content is a new event, an identical rewrite is
   not. Its first call ever (no `arc-seen` yet) records what is there and
@@ -871,9 +906,9 @@ Which plugin runs them:
   `settings.local.json`, and the `claude-discord-*.md` rule files); `setup` and
   a start remove none of these (`setup` and `update` take the entries only out
   of the user-global and symlinked settings files, see Migrating). Every other key and hook in either
-  file stays, and a `hooks` key left empty is dropped. `.claude/discord-agents/hooks` in the project stays a symlink to the
-  plugin's `hooks/` for this release (a peer's committed settings may still
-  name it; the next release removes it). To switch the hooks off, uninstall the
+  file stays, and a `hooks` key left empty is dropped. The `.claude/discord-agents/hooks`
+  symlink of 1.8-1.17 is removed with the state move (1.18.0): an old entry a
+  peer committed is then a guarded no-op. To switch the hooks off, uninstall the
   plugin (delete its install path) or disable it in `/plugin`, where it is
   listed as `discord-agents`. In a session that already ran the plugin,
   disabling it (or revoking the project's trust) leaves that session with no
@@ -977,7 +1012,7 @@ its predicted sweep and the pinned one survived. So `on-session-start` pins
 every background bot at startup and resume: it adds the session's job id (the
 basename of `$CLAUDE_JOB_DIR`) to `~/.claude/jobs/pins.json`, the file the
 agent view's `ctrl+t` writes, and removes the id this bot pinned last time
-(kept in `.claude/discord-agents/<bot>/pinned-job`). No other entry is
+(kept in `<bot dir>/pinned-job`). No other entry is
 touched, a file that is not a JSON array of strings is left alone, and the
 write takes the CLI's own lock (the directory `pins.json.lock`), skipping the
 start when another process holds it. A foreground bot has no job and pins
@@ -1747,9 +1782,9 @@ rest of Claude Code.
 | Gateway connection fails behind a proxy | `discord-proxy.ts` missing from `~/.claude-discord/runtime/` (`claude-discord update` or `patch` refills it), or `HTTPS_PROXY` unset in the shell that ran `claude-discord` |
 | Bot answers in the foreground, silent after `/bg` | wrapper older than 2026-09-18 (state dir not in `--settings`); run `claude-discord update` |
 | Every bot in the channel answers one message | someone wrote `@everyone`/`@here` with a wrapper older than 2026-09-18, or the mention policy is off on all of them |
-| `no bot '<name>' under ./.claude/discord-agents` | no setup in THIS directory; `cd` to the project you set it up in, or run setup here |
+| `no bot '<name>' under ~/.claude-discord/projects/<key>/bots` | no setup in THIS directory; `cd` to the project you set it up in, or run setup here |
 | `bot name must be a plain directory name` | the name contained `/`, or was `.`/`..` |
-| `bot name 'hooks'` (or `'checkin'`) `is reserved` | those names are claude-discord's own directories under `.claude/discord-agents/`; pick another. A subcommand's name (`setup`, `install`, `update`, `patch`, `compat`, `refresh`, `health`, `monitor`, `tui`, `access`) is reserved too |
+| `bot name 'hooks'` (or `'checkin'`) `is reserved` | those names are claude-discord's own directories beside the bots (`checkin/` in the project's state dir; `hooks`, the 1.8-1.17 link); pick another. A subcommand's name (`setup`, `install`, `update`, `patch`, `compat`, `refresh`, `health`, `monitor`, `tui`, `access`) is reserved too |
 | Two bots answer each other forever | the mention policy is off on both; turn it back on for at least one |
 | `Over 500 characters in the channel: start a thread ...` | the bot tried to put a long answer in the channel; `thread start "[<area>] <short title>"`, then post it inside the thread |
 | `A mirror line says which way it went ...` | a line opens with `->` or `<-`; write `[sent to name] ...` or `[received from name] ...` |

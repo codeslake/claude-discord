@@ -15,6 +15,8 @@
 # (truncated and hashed there): the key only has to be stable, and `project` is the authority; transcript_moved then
 # does not find the transcript, which reads as "not moving".
 proj_key() { local LC_ALL=C; printf '%s\n' "${1//[^A-Za-z0-9]/-}"; }
+# proj_list: every project with a state dir (projects/*/project), one a line. Unused until Task 4 retires records/projects.
+proj_list() { local f p; for f in "$helpers"/projects/*/project; do p=""; { IFS= read -r p < "$f"; } 2>/dev/null || :; [ -z "$p" ] || printf '%s\n' "$p"; done; }
 # proj_dirs <project, physical path>: pd_key; pd_state (config.env, peers.json, checkin/); pd_root (the bot dirs' parent);
 # pd_new (1 for the 1.18.0 shape: that key's `project` names the path; empty for the old shape, both dirs the old one).
 # Builtins only: the wrapper's every call and the hooks' revive come through here.

@@ -569,9 +569,11 @@ echo "ok: the shim runs the project's clone (path with a space, from a subdirect
 # bot's dir. Each makes the project and its key dir with its `project` file when missing (a fixture built by hand is then
 # the new shape to the wrapper and the hooks). The old shape, <project>/.claude/discord-agents/, is written literally where
 # a case is about a project not moved yet.
-pstate() { local d; mkdir -p "$1"; d=$HOME/.claude-discord/projects/$(skey "$1"); mkdir -p "$d"; [ -f "$d/project" ] || (cd "$1" && pwd -P) > "$d/project"; printf '%s\n' "$d"; }
-broot() { local d; d=$(pstate "$1"); mkdir -p "$d/bots"; printf '%s/bots\n' "$d"; }
-bdir() { printf '%s/%s\n' "$(broot "$1")" "$2"; }
+# A subshell body: the cd stays inside; forks only when something is missing (~100 calls a run).
+pstate() ( [ -d "$1" ] || mkdir -p "$1"; cd -P -- "$1" || exit 1; local LC_ALL=C; d=$HOME/.claude-discord/projects/${PWD//[^A-Za-z0-9]/-}
+  [ -d "$d/bots" ] || mkdir -p "$d/bots"; [ -f "$d/project" ] || printf '%s\n' "$PWD" > "$d/project"; printf '%s\n' "$d" )
+broot() { local d; d=$(pstate "$1") || return 1; printf '%s/bots\n' "$d"; }
+bdir() { local d; d=$(pstate "$1") || return 1; printf '%s/bots/%s\n' "$d" "$2"; }
 # skey <project>: the state key of a project (physical path), the suite's own copy of the rule bin/lib/state.sh's proj_key follows (its table case pins the two equal).
 skey() { local p; p=$(cd "$1" 2>/dev/null && pwd -P) || p=$1; local LC_ALL=C; printf '%s\n' "${p//[^A-Za-z0-9]/-}"; }
 
