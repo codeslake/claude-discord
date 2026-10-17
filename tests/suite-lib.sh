@@ -564,6 +564,12 @@ out=$(cd "$HOME" && bash "$SH" 2>&1) && { echo "FAIL: with no clone the shim mus
 grep -q 'not set up' <<<"$out" && grep -q 'git clone' <<<"$out" || { echo "FAIL: the shim must say how to set up: $out"; exit 1; }
 rm -rf "$HOME/shim test" "$HOME/.claude/skills"
 echo "ok: the shim runs the project's clone (path with a space, from a subdirectory), else the global one, else the source clone, else explains"
+# Where a project's state is, for every fixture: pstate <project> its state dir (config.env, peers.json, checkin/), broot <project>
+# the directory holding its bot dirs, bdir <project> <bot> one bot's dir. Today the old shape: <project>/.claude/discord-agents for all three.
+pstate() { printf '%s/.claude/discord-agents\n' "$1"; }
+broot() { printf '%s/.claude/discord-agents\n' "$1"; }
+bdir() { printf '%s/.claude/discord-agents/%s\n' "$1" "$2"; }
+
 P="$HOME/project"; mkdir -p "$P"; cd "$P"; git init -q .
 # A local stand-in for GitHub, built from the WORKING TREE (a clone of $D would
 # carry only committed HEAD, so a red-green cycle could not see an edit). Every
@@ -582,7 +588,7 @@ export CLAUDE_DISCORD_REPO=$SRC
 export CLAUDE_DISCORD_COMPAT_STEP_S=0.01 CLAUDE_DISCORD_COMPAT_WAIT_S=5
 PHOME=$(cd "$HOME" && pwd -P)   # setup keys trust by the physical path
 jq -n --arg h "$PHOME" '[$h + "/project", $h + "/project-moved", $h + "/project4", $h + "/project-all", $h + "/project-upper", $h + "/project-runpath", $h + "/project-later", $h + "/project2"] | map({key: ., value: {hasTrustDialogAccepted: true}}) | {projects: from_entries}' > "$HOME/.claude.json"
-R="$P/.claude/discord-agents"
+R=$(broot "$P") RS=$(pstate "$P")   # the bot dirs of the main project, and its state dir (config.env, peers.json, checkin/)
 
 printf '\n1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alpha --scope project >/dev/null
 # No --method: the default is link, and the first setup on a machine clones the source.
@@ -591,7 +597,7 @@ printf '\n1550575144320110662\n111\n222, 333 ,\ntokA\ny\n' | bash "$S" setup alp
 [ "$(jq -c '.groups["1550575144320110662"].allowFrom' "$R/alpha/access.json")" = '["111","222","333"]' ]
 [ "$(jq -c '.allowFrom' "$R/alpha/access.json")" = '["111"]' ]
 [ "$(jq -r '.ackReaction' "$R/alpha/access.json")" = "👀" ]
-grep -q "^DISCORD_ALLOW_IDS='222,333,'$" "$R/config.env"
+grep -q "^DISCORD_ALLOW_IDS='222,333,'$" "$RS/config.env"
 grep -q "^DISCORD_BOT_TOKEN=tokA$" "$R/alpha/.env"
 [ "$(<"$R/alpha/mode")" = none ] || { echo "FAIL: no mode answer (EOF) must store the default, none"; exit 1; }
 echo "ok: setup writes config.env, .env, access.json (with ackReaction) and mode (default none); others normalised; no-mention honoured"

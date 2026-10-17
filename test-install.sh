@@ -169,7 +169,7 @@ echo "ok: setup on an old install replaces the old hook, tool and runtime copies
 # plugin's HEAD sha (a git pull by hand in the source clone) or that holds a file newer than the stamp (an old
 # install.sh writing through a link); a compaction does not; a plugin that is not the source clone never does; bots
 # starting together leave one complete copy and no temp dir.
-CB="$HOME/cbproj/.claude/discord-agents/cb"; mkdir -p "$CB"
+CB=$(bdir "$HOME/cbproj" cb); mkdir -p "$CB"
 cbs() { printf '{"session_id":"%s","source":"%s"}' "$1" "$2" | CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$HOME/cbproj" DISCORD_STATE_DIR="$CB" bash "$PC/hooks/turn/on-session-start" >/dev/null; }
 [ "$(cat "$OH/compat/VERSION")" = "$(git -C "$PC" rev-parse HEAD)" ] || { echo "FAIL: setup must stamp compat/VERSION with the source's HEAD sha: $(cat "$OH/compat/VERSION")"; exit 1; }
 git -C "$SRC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m pulled-by-hand && git -C "$PC" pull -q --ff-only
@@ -271,7 +271,7 @@ echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or wr
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.
 P5="$HOME/project5"; mkdir -p "$P5"; cd "$P5"
-R5="$P5/.claude/discord-agents"
+R5=$(broot "$P5")
 SL5="$P5/.claude/settings.local.json"
 
 out=$(printf '' | bash "$S" setup nosetup --mode 2>&1) && { echo "FAIL: --mode on a bot that is not set up should refuse"; exit 1; }
@@ -300,7 +300,7 @@ printf 'dev-manager\npeerx:700:800:host\n' | bash "$S" setup five --mode >/dev/n
 echo "ok: --mode to dev-manager also asks the peers question and records a peer in peers.json and access.json's allowFrom"
 
 # setup installs the plugin. Fixtures: XP (git, path with a space, trusted), refusals leave the bot untouched.
-XP="$HOME/scope proj"; XR="$XP/.claude/discord-agents"; XL="$XP/.claude/skills/claude-discord"; GL="$HOME/.claude/skills/claude-discord"
+XP="$HOME/scope proj"; XR=$(broot "$XP"); XL="$XP/.claude/skills/claude-discord"; GL="$HOME/.claude/skills/claude-discord"
 mkdir -p "$XP"; (cd "$XP" && git init -q .)
 jq -n --arg p "$PHOME/scope proj" '{projects: {($p): {hasTrustDialogAccepted: true}}, other: 1}' > "$HOME/.claude.json"
 # link: the project path is a symlink to the one source; second project shares it; the install stays out of git status, is recorded, and the shim is installed.
@@ -416,7 +416,7 @@ echo "ok: install installs and refreshes (twice), patches the official plugin ca
 # the one source coexist (one code, loaded once); a clone on either side beside another install is refused.
 mkdir -p "$HOME/.claude"
 rc=0; out=$(cd "$HOME" && printf '900\n111\n\ntokH\nn\n' | bash "$S" setup hbot --method link 2>&1) || rc=$?
-[ "$rc" = 0 ] && grep -q 'this project is \$HOME' <<<"$out" && [ "$(readlink "$GL")" = "$HOME/.claude-discord/source" ] && [ -f "$HOME/.claude/discord-agents/hbot/.env" ] || { echo "FAIL: a bot in \$HOME must install globally, saying so (rc=$rc): $out"; exit 1; }
+[ "$rc" = 0 ] && grep -q 'this project is \$HOME' <<<"$out" && [ "$(readlink "$GL")" = "$HOME/.claude-discord/source" ] && [ -f "$(bdir "$HOME" "hbot")/.env" ] || { echo "FAIL: a bot in \$HOME must install globally, saying so (rc=$rc): $out"; exit 1; }
 CO="$HOME/co proj"; mkdir -p "$CO"
 jq --arg p "$PHOME/co proj" '.projects[$p].hasTrustDialogAccepted = true' "$HOME/.claude.json" > "$HOME/cj.tmp" && mv "$HOME/cj.tmp" "$HOME/.claude.json"
 rc=0; out=$(cd "$CO" && printf '900\n111\n\ntokC\nn\n' | bash "$S" setup cobot --scope project 2>&1) || rc=$?
@@ -424,7 +424,7 @@ rc=0; out=$(cd "$CO" && printf '900\n111\n\ntokC\nn\n' | bash "$S" setup cobot -
 rm -f "$CO/.claude/skills/claude-discord"
 rc=0; out=$(cd "$CO" && printf '\nn\n' | bash "$S" setup cobot --scope project --method clone 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -q 'already installed globally' <<<"$out" && [ ! -e "$CO/.claude/skills/claude-discord" ] || { echo "FAIL: a project clone beside the global link must be refused (rc=$rc): $out"; exit 1; }
-rm -f "$GL"; rm -rf "$CO" "$HOME/.claude/discord-agents"
+rm -f "$GL"; rm -rf "$CO" "$(pstate "$HOME")"
 echo "ok: a bot in \$HOME installs globally and says so; a project link and the global link coexist; a clone beside another install is refused"
 
 # --version and update. UP is a project linked to the source (so are the earlier projects the records still hold), UC a clone-method install.

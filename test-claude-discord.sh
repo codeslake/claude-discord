@@ -41,7 +41,7 @@ echo "ok: second bot asks only token+mention and reuses shared IDs"
 # deliberately not written to the shared config.env, and the suite checks that
 # a later bot there does not inherit it.
 PA="$HOME/project-all"; mkdir -p "$PA"; cd "$PA"
-RA="$PA/.claude/discord-agents"
+RA=$(broot "$PA")
 printf '\n\n999\n111\nall\ntokC\nn\n' | bash "$S" setup gamma >/dev/null
 [ "$(jq -c '.groups["999"].allowFrom' "$RA/gamma/access.json")" = '[]' ] || { echo "FAIL: 'all' must leave the group allowFrom empty: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
 [ "$(jq -c '.allowFrom' "$RA/gamma/access.json")" = '["111"]' ] || { echo "FAIL: 'all' opens the channel, never DMs: $(jq -c . "$RA/gamma/access.json")"; exit 1; }
@@ -67,12 +67,12 @@ echo "ok: dev-manager peers leave an 'all' group alone and are still added to a 
 # stores a literal "all" as an ID).
 PU="$HOME/project-upper"; mkdir -p "$PU"; cd "$PU"
 printf '\n\n999\n111\nALL\ntokU\nn\n' | bash "$S" setup upper >/dev/null
-[ "$(jq -c '.groups["999"].allowFrom' "$PU/.claude/discord-agents/upper/access.json")" = '[]' ] || { echo "FAIL: 'ALL' must be read as 'all'"; exit 1; }
+[ "$(jq -c '.groups["999"].allowFrom' "$(bdir "$PU" "upper")/access.json")" = '[]' ] || { echo "FAIL: 'ALL' must be read as 'all'"; exit 1; }
 PX="$HOME/project-mixed"; mkdir -p "$PX"; cd "$PX"
 if printf '\n\n\n999\n111\nall,123\ntokX\nn\n' | bash "$S" setup mixed >/dev/null 2>&1; then
   echo "FAIL: 'all' mixed with IDs must be refused"; exit 1
 fi
-[ ! -f "$PX/.claude/discord-agents/mixed/access.json" ] || { echo "FAIL: a refused answer must not write access.json"; exit 1; }
+[ ! -f "$(bdir "$PX" "mixed")/access.json" ] || { echo "FAIL: a refused answer must not write access.json"; exit 1; }
 echo "ok: 'all' is case-insensitive and refuses to be mixed with IDs"
 
 # The run path writes a missing access.json with TWO arguments (no "all"
@@ -81,7 +81,7 @@ echo "ok: 'all' is case-insensitive and refuses to be mixed with IDs"
 # DISCORD_ALLOW_IDS=all in the shared config.env must NOT open that bot: "all"
 # is honoured only from the live third argument, never from config.env.
 PR2="$HOME/project-runpath"; mkdir -p "$PR2"; cd "$PR2"
-RR="$PR2/.claude/discord-agents"
+RR=$(broot "$PR2")
 # A bot dir predating access.json, as setup wrote config.env (asserted above) and .env, and no access.json.
 mkdir -p "$RR/runner"; printf "DISCORD_CHANNEL_ID='999'\nDISCORD_USER_ID='111'\nDISCORD_ALLOW_IDS='222,333,'\n" > "$RR/config.env"; printf 'DISCORD_BOT_TOKEN=tokR\n' > "$RR/runner/.env"
 bash "$S" runner >/dev/null 2>&1 || :   # the run path rewrites it before anything else
@@ -97,7 +97,7 @@ cd "$P"
 # Its own throwaway project, so the bot-count assumptions the rest of this
 # suite makes about $P (project) are untouched.
 PM="$HOME/project-moved"; mkdir -p "$PM"; cd "$PM"
-RM="$PM/.claude/discord-agents"
+RM=$(broot "$PM")
 
 # A fresh setup still writes config.env's channel group (unchanged behaviour).
 printf '\n55\n11\n\ntokZ\nn\n' | bash "$S" setup moved --scope project >/dev/null
@@ -142,7 +142,7 @@ echo "ok: dev-manager re-run adds a peer to the moved group's allowFrom, not to 
 
 # Started before its Discord bot and channel existed: Enter at every ID and the token. A later re-run asks the IDs
 # again and fills the "" group key and "" ids in access.json, keeping a hand-edited field.
-PL="$HOME/project-later"; mkdir -p "$PL"; cd "$PL"; RL="$PL/.claude/discord-agents"
+PL="$HOME/project-later"; mkdir -p "$PL"; cd "$PL"; RL=$(broot "$PL")
 printf '\n\n\n\n\nn\n' | bash "$S" setup later --scope project >/dev/null
 [ "$(jq -c '[(.groups | keys), .allowFrom]' "$RL/later/access.json")" = '[[""],[""]]' ] || { echo "FAIL: the empty-answer fixture is not what setup writes: $(jq -c . "$RL/later/access.json")"; exit 1; }
 jq '.ackReaction = ""' "$RL/later/access.json" > "$RL/later/a.tmp" && cat "$RL/later/a.tmp" > "$RL/later/access.json" && rm -f "$RL/later/a.tmp"
@@ -162,7 +162,7 @@ echo "ok: a known channel's group gets the later user ID"
 
 cd "$P"
 printf '999\n111\n\ntokA2\nn\n' | bash "$S" setup alpha --scope project --reset >/dev/null
-grep -q "^DISCORD_CHANNEL_ID='999'$" "$R/config.env"
+grep -q "^DISCORD_CHANNEL_ID='999'$" "$RS/config.env"
 grep -q "^DISCORD_BOT_TOKEN=tokA2$" "$R/alpha/.env"
 [ "$(jq -c '.groups | keys' "$R/alpha/access.json")" = '["999"]' ] || { echo "FAIL: --reset must rewrite access.json from config.env's new channel: $(jq -c . "$R/alpha/access.json")"; exit 1; }
 [ -f "$R/beta/.env" ] && [ -f "$R/beta/access.json" ]
@@ -213,7 +213,7 @@ ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
 grep -q ' in channel 999\. ' <<<"$ctx" && grep -q '^People in this channel (mention one as <@id> to reach them): .*Own 5 er <@111>, <@501>$' <<<"$ctx" || { echo "FAIL: a top-level allowFrom that is no array must cost only its own ids, not the channel or the group's: $ctx"; exit 1; }
 jq '.groups = {"998": true}' "$DSD/access.json.keep" > "$DSD/access.json"   # 998: not config.env's channel, which a fallback would answer
 (DISCORD_STATE_DIR=$DSD; . "$R/hooks/lib/discord.sh"; resolve_channel; [ "$bot_channel" = 998 ]) || { echo "FAIL: a group that is no object must still name the channel"; exit 1; }
-cfg_ch=$(sed -n "s/^DISCORD_CHANNEL_ID='\{0,1\}\([0-9]*\)'\{0,1\}$/\1/p" "$R/config.env")
+cfg_ch=$(sed -n "s/^DISCORD_CHANNEL_ID='\{0,1\}\([0-9]*\)'\{0,1\}$/\1/p" "$RS/config.env")
 for body in '' '  '; do
   printf '%s' "$body" > "$DSD/access.json"
   (DISCORD_STATE_DIR=$DSD; . "$R/hooks/lib/discord.sh"; resolve_channel; [ -n "$cfg_ch" ] && [ "$bot_channel" = "$cfg_ch" ] && [ -z "$bot_access_ids" ]) || { echo "FAIL: an empty access.json ('$body') must leave config.env's channel ($cfg_ch)"; exit 1; }
@@ -967,24 +967,24 @@ echo "ok: CLAUDE_DISCORD_LAUNCHER set, no claude on PATH -> exit 127, error on s
 # config.env present, no settings.json, no ackReaction, no hooks symlink), so
 # the assertions below are about the start path only, not entangled with
 # setup's own registration above.
-P2="$HOME/project2"; mkdir -p "$P2/.claude/discord-agents/gamma"; cd "$P2"
-printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$P2/.claude/discord-agents/config.env"
-printf 'DISCORD_BOT_TOKEN=tokG\n' > "$P2/.claude/discord-agents/gamma/.env"
-jq -n '{dmPolicy:"allowlist", allowFrom:["2"], groups:{"1":{requireMention:true, allowFrom:["2"]}}}' > "$P2/.claude/discord-agents/gamma/access.json"
-chmod 640 "$P2/.claude/discord-agents/gamma/access.json"; gi=$(stat -c %i "$P2/.claude/discord-agents/gamma/access.json")
+P2="$HOME/project2"; mkdir -p "$(bdir "$P2" "gamma")"; cd "$P2"
+printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$(pstate "$P2")/config.env"
+printf 'DISCORD_BOT_TOKEN=tokG\n' > "$(bdir "$P2" "gamma")/.env"
+jq -n '{dmPolicy:"allowlist", allowFrom:["2"], groups:{"1":{requireMention:true, allowFrom:["2"]}}}' > "$(bdir "$P2" "gamma")/access.json"
+chmod 640 "$(bdir "$P2" "gamma")/access.json"; gi=$(stat -c %i "$(bdir "$P2" "gamma")/access.json")
 
 # b. no plugin install in this project: a start registers nothing (the
 # plugin's hooks.json does) and adds the missing ackReaction and hooks symlink.
 [ ! -e "$P2/.claude/settings.local.json" ]
 bash "$S" --name gamma >/dev/null 2>&1
 [ ! -e "$P2/.claude/settings.local.json" ] && [ ! -e "$P2/.claude/settings.json" ] || { echo "FAIL: a start must write no settings file"; exit 1; }
-[ "$(jq -r '.ackReaction' "$P2/.claude/discord-agents/gamma/access.json")" = "👀" ]
+[ "$(jq -r '.ackReaction' "$(bdir "$P2" "gamma")/access.json")" = "👀" ]
 # jq_edit replaces a file by rename (the plugin reads access.json at every message and moves a half-written one aside),
 # keeping its mode.
-[ "$(stat -c %i "$P2/.claude/discord-agents/gamma/access.json")" != "$gi" ] && [ "$(stat -c %a "$P2/.claude/discord-agents/gamma/access.json")" = 640 ] ||
-  { echo "FAIL: jq_edit must replace access.json by a rename (a new inode), never write it in place, and keep its mode: $(stat -c '%i %a' "$P2/.claude/discord-agents/gamma/access.json") was $gi 640"; exit 1; }
-[ -L "$P2/.claude/discord-agents/hooks" ] || { echo "FAIL: start must create the hooks symlink"; exit 1; }
-[ "$(tail -c1 "$P2/.claude/discord-agents/gamma/access.json" | wc -l)" -eq 1 ] || { echo "FAIL: access.json must end with a trailing newline"; exit 1; }
+[ "$(stat -c %i "$(bdir "$P2" "gamma")/access.json")" != "$gi" ] && [ "$(stat -c %a "$(bdir "$P2" "gamma")/access.json")" = 640 ] ||
+  { echo "FAIL: jq_edit must replace access.json by a rename (a new inode), never write it in place, and keep its mode: $(stat -c '%i %a' "$(bdir "$P2" "gamma")/access.json") was $gi 640"; exit 1; }
+[ -L "$(pstate "$P2")/hooks" ] || { echo "FAIL: start must create the hooks symlink"; exit 1; }
+[ "$(tail -c1 "$(bdir "$P2" "gamma")/access.json" | wc -l)" -eq 1 ] || { echo "FAIL: access.json must end with a trailing newline"; exit 1; }
 echo "ok: start registers no settings hook, adds ackReaction and the hooks symlink when they were missing, access.json ends with a trailing newline"
 
 # c. a project set up by the previous release has its hooks in the settings files and its rule file. setup
@@ -993,7 +993,7 @@ echo "ok: start registers no settings hook, adds ackReaction and the hooks symli
 # project's own key, hook and rule file stay).
 # plugin_hook <project> <bot> <session id> [hook]: a hook run the way the plugin's hooks.json runs it
 # (CLAUDE_PLUGIN_ROOT set, the script under it); on-stop with no turn in flight does nothing else.
-plugin_hook() { printf '{"session_id":"%s","stop_hook_active":false}' "$3" | CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$1" DISCORD_STATE_DIR="$1/.claude/discord-agents/$2" bash "$PC/hooks/${4:-turn/on-stop}"; }
+plugin_hook() { printf '{"session_id":"%s","stop_hook_active":false}' "$3" | CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$1" DISCORD_STATE_DIR="$(bdir "$1" "$2")" bash "$PC/hooks/${4:-turn/on-stop}"; }
 mkdir -p "$P2/.claude/rules"; echo mine > "$P2/.claude/rules/other.md"; echo old > "$P2/.claude/rules/claude-discord-dev-manager.md"
 echo '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' > "$P2/.claude/settings.json"
 cp "$P2/.claude/settings.json" "$P2/.claude/settings.local.json"
@@ -1005,7 +1005,7 @@ printf '\n\nn\nnone\n' | bash "$S" setup gamma --scope project >/dev/null
 [ -e "$P2/.claude/skills/claude-discord" ] || { echo "FAIL: fixture: setup must install the plugin in $P2"; exit 1; }
 cmp -s "$P2/.claude/settings.json" "$P2/sj.before" && cmp -s "$P2/.claude/settings.local.json" "$P2/sl.before" && [ -f "$P2/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: a start, setup --mode and a full setup must all leave the old hooks and rule file"; exit 1; }
 out=$(plugin_hook "$P2" gamma c1 2>&1)
-[ -z "$out" ] && [ -e "$P2/.claude/discord-agents/gamma/plugin-sessions/c1" ] || { echo "FAIL: a plugin hook's first run must record its session silently: $out"; exit 1; }
+[ -z "$out" ] && [ -e "$(bdir "$P2" "gamma")/plugin-sessions/c1" ] || { echo "FAIL: a plugin hook's first run must record its session silently: $out"; exit 1; }
 ! grep -q '/.claude/discord-agents/hooks/' "$P2/.claude/settings.json" "$P2/.claude/settings.local.json" && [ ! -e "$P2/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: a plugin hook's first run must remove the old hooks and rule file"; exit 1; }
 for f in settings.json settings.local.json; do
   [ "$(jq -c . "$P2/.claude/$f")" = '{"enabledPlugins":{"x":true},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}' ] || { echo "FAIL: $f must keep the project's own key and hook and none of ours: $(<"$P2/.claude/$f")"; exit 1; }
@@ -1013,12 +1013,12 @@ done
 [ "$(<"$P2/.claude/rules/other.md")" = mine ] || { echo "FAIL: a foreign rule file must survive"; exit 1; }
 # Two bots in one project: the first to load the plugin leaves the project's entries for the other.
 plant_old "$P2/.claude/settings.local.json"; cp "$P2/.claude/settings.local.json" "$P2/sl.two"
-mkdir -p "$P2/.claude/discord-agents/delta"; : > "$P2/.claude/discord-agents/delta/.env"
+mkdir -p "$(bdir "$P2" "delta")"; : > "$(bdir "$P2" "delta")/.env"
 plugin_hook "$P2" gamma c8
 cmp -s "$P2/.claude/settings.local.json" "$P2/sl.two" || { echo "FAIL: while another bot in the project has no plugin marker, its old entries must stay"; exit 1; }
 plugin_hook "$P2" delta d1
 ! grep -q '/.claude/discord-agents/hooks/' "$P2/.claude/settings.local.json" || { echo "FAIL: once every bot in the project ran the plugin, the old entries go"; exit 1; }
-rm -rf "$P2/.claude/discord-agents/delta" "$P2/sl.two"
+rm -rf "$(bdir "$P2" "delta")" "$P2/sl.two"
 # Once per session: the same session's next run removes nothing, even what came back.
 plant_old "$P2/.claude/settings.local.json"; cp "$P2/.claude/settings.local.json" "$P2/sl.before"
 plugin_hook "$P2" gamma c1
@@ -1078,9 +1078,9 @@ rm -f "$P2/.claude/settings.json"; ln -s "$HOME/dotrepo/settings.json" "$P2/.cla
 echo '{}' > "$P2/.claude/settings.local.json"; plant_old "$P2/.claude/settings.local.json"
 echo '{}' > "$HOME/.claude/settings.json"; plant_old "$HOME/.claude/settings.json"; cp "$HOME/.claude/settings.json" "$P2/global.before"
 plugin_hook "$P2" gamma s1
-mkdir -p "$HOME/.claude/discord-agents/hb"; plugin_hook "$HOME" hb s2   # a bot whose project is $HOME
-[ -e "$HOME/.claude/discord-agents/hb/plugin-sessions/s2" ] || { echo "FAIL: fixture: the \$HOME bot's first run did not happen"; exit 1; }
-rm -rf "$HOME/.claude/discord-agents"
+mkdir -p "$(bdir "$HOME" "hb")"; plugin_hook "$HOME" hb s2   # a bot whose project is $HOME
+[ -e "$(bdir "$HOME" "hb")/plugin-sessions/s2" ] || { echo "FAIL: fixture: the \$HOME bot's first run did not happen"; exit 1; }
+rm -rf "$(pstate "$HOME")"
 [ -L "$P2/.claude/settings.json" ] && cmp -s "$HOME/dotrepo/settings.json" "$P2/dot.before" && cmp -s "$HOME/.claude/settings.json" "$P2/global.before" || { echo "FAIL: a symlinked settings.json and the user-global one must be left byte-identical"; exit 1; }
 # A project whose .claude is itself a link (into the dotfiles tree): nothing in it is the project's own.
 PL="$HOME/linked proj"; mkdir -p "$PL" "$HOME/dotrepo/cl/discord-agents/lb" "$HOME/dotrepo/cl/rules"; ln -s "$HOME/dotrepo/cl" "$PL/.claude"
@@ -1100,12 +1100,12 @@ i0=$(ls -i "$HOME/dotrepo/settings.json" | awk '{print $1}')
 FOREIGN='{"model":"x","hooks":{"Stop":[{"hooks":[{"type":"command","command":"mine"}]}]}}'
 printf '%s\n' "$FOREIGN" > "$HOME/.claude/settings.json"; plant_old "$HOME/.claude/settings.json"; cp "$HOME/.claude/settings.json" "$P2/global.before"
 STPF="$HOME/.claude-discord/records/projects"; mv "$STPF" "$STPF.strip"; printf '%s\n' "$(cd "$P2" && pwd -P)" "$HOME/gone project" > "$STPF"   # these only, put back after
-mkdir -p "$P2/.claude/discord-agents/unrun"; : > "$P2/.claude/discord-agents/unrun/.env"   # set up, never ran the plugin
+mkdir -p "$(bdir "$P2" "unrun")"; : > "$(bdir "$P2" "unrun")/.env"   # set up, never ran the plugin
 err=$(printf '\nn\n\n' | bash "$S" setup gamma 2>&1 >/dev/null)
 cmp -s "$HOME/.claude/settings.json" "$P2/global.before" && cmp -s "$HOME/dotrepo/settings.json" "$P2/dot.before" &&
   [ "$(grep -c 'old claude-discord hook entries left in' <<<"$err")" = 1 ] && grep -qF "/unrun" <<<"$err" ||
   { echo "FAIL: setup leaves the user-global and symlinked entries while a recorded bot has not loaded the plugin, and says so once: $err"; exit 1; }
-rm -rf "$P2/.claude/discord-agents/unrun"
+rm -rf "$(bdir "$P2" "unrun")"
 err=$(printf '\nn\n\n' | bash "$S" setup gamma 2>&1 >/dev/null)
 ! grep -q '/.claude/discord-agents/hooks/' "$HOME/dotrepo/settings.json" "$HOME/.claude/settings.json" && [ -L "$P2/.claude/settings.json" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] &&
   [ "$(jq -c . "$HOME/.claude/settings.json")" = "$(jq -c . <<<"$FOREIGN")" ] && ! grep -qF 'old claude-discord hook entries' <<<"$err" ||
@@ -1128,14 +1128,14 @@ echo "ok: a first run never edits a symlinked settings.json, the user-global one
 # h6. the gate. An old-path hook (run through .claude/discord-agents/hooks or ~/.claude-discord/hooks, or with
 # no CLAUDE_PLUGIN_ROOT) runs in a session with no marker and exits 0 doing nothing in a marked one; the
 # plugin's hook runs either way. Markers a month old go when a new one is written.
-GD="$P2/.claude/discord-agents/gamma"; rm -rf "$GD/turns" "$GD/plugin-sessions"
+GD="$(bdir "$P2" "gamma")"; rm -rf "$GD/turns" "$GD/plugin-sessions"
 tagged() { printf '{"session_id":"%s","prompt":"<channel source=\\"plugin:discord:discord\\" chat_id=\\"111\\" message_id=\\"%s\\" user=\\"u\\" user_id=\\"9\\" ts=\\"t\\">\\nhello\\n</channel>"}' "$1" "$2"; }
-tagged g0 500 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
+tagged g0 500 | DISCORD_STATE_DIR="$GD" bash "$(pstate "$P2")/hooks/turn/on-prompt" >/dev/null
 [ -s "$GD/turns/g0" ] && [ ! -e "$GD/plugin-sessions" ] || { echo "FAIL: with no marker directory an old-path hook must run as before"; exit 1; }
 mkdir -p "$GD/plugin-sessions"; : > "$GD/plugin-sessions/g2"; : > "$GD/plugin-sessions/old"; touch -d '40 days ago' "$GD/plugin-sessions/old" "$GD/plugin-sessions/g2"
-tagged g1 501 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
+tagged g1 501 | DISCORD_STATE_DIR="$GD" bash "$(pstate "$P2")/hooks/turn/on-prompt" >/dev/null
 [ -s "$GD/turns/g1" ] || { echo "FAIL: an old-path hook must run in a session with no marker"; exit 1; }
-out=$(tagged g2 502 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt")
+out=$(tagged g2 502 | DISCORD_STATE_DIR="$GD" bash "$(pstate "$P2")/hooks/turn/on-prompt")
 out2=$(tagged g2 503 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" bash "$HOME/.claude-discord/hooks/turn/on-prompt")
 out3=$(tagged g2 504 | DISCORD_STATE_DIR="$GD" bash "$PC/hooks/turn/on-prompt")
 [ -z "$out$out2$out3" ] && [ ! -e "$GD/turns/g2" ] || { echo "FAIL: an old-path hook in a marked session must exit 0 doing nothing ($out|$out2|$out3)"; exit 1; }
@@ -1143,7 +1143,7 @@ out=$(tagged g2 505 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PR
 [ "$(cut -d' ' -f2 "$GD/turns/g2")" = 505 ] && [ -n "$out" ] || { echo "FAIL: the plugin's hook must run in a marked session: $out"; exit 1; }
 # With the plugin install gone again (a rollback), a marked session's old path is all it has: it runs.
 mv "$P2/.claude/skills" "$P2/.claude/skills.off"; rm -f "$GD/turns/g2"   # a fresh turn: an open one queues the message instead
-tagged g2 508 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
+tagged g2 508 | DISCORD_STATE_DIR="$GD" bash "$(pstate "$P2")/hooks/turn/on-prompt" >/dev/null
 mv "$P2/.claude/skills.off" "$P2/.claude/skills"
 [ "$(cut -d' ' -f2 "$GD/turns/g2" 2>/dev/null)" = 508 ] || { echo "FAIL: a marked session with no plugin install left must run its old-path hooks"; exit 1; }
 plugin_hook "$P2" gamma g3
@@ -1165,11 +1165,11 @@ out=$(gp g5 507 "$P2/.claude/worktrees/wt1")
 [ -n "$out" ] && [ -e "$GD/turns/g5" ] && [ "$(wc -l < "$GL" | tr -d ' ')" = 1 ] || { echo "FAIL: a bot session in a git worktree of its project is still the bot, for one git call: $out $(cat "$GL")"; exit 1; }
 out=$(gp g7 510 "$P2/.claude/plain")
 [ -z "$out" ] && [ ! -e "$GD/turns/g7" ] || { echo "FAIL: a plain directory under the bot's project is not the bot: $out"; exit 1; }
-mkdir -p "$HOME/.claude/discord-agents/hw" "$HOME/hproj"
-out=$(gp g8 511 "$HOME/hproj" "$HOME/.claude/discord-agents/hw")
-[ -z "$out" ] && [ ! -e "$HOME/.claude/discord-agents/hw/turns/g8" ] || { echo "FAIL: a \$HOME bot (no repo) is not the session of another project under \$HOME: $out"; exit 1; }
+mkdir -p "$(bdir "$HOME" "hw")" "$HOME/hproj"
+out=$(gp g8 511 "$HOME/hproj" "$(bdir "$HOME" "hw")")
+[ -z "$out" ] && [ ! -e "$(bdir "$HOME" "hw")/turns/g8" ] || { echo "FAIL: a \$HOME bot (no repo) is not the session of another project under \$HOME: $out"; exit 1; }
 # A bot project in a subdirectory of a repo: git lists the repo's worktrees, so a linked worktree's root is not the bot, the project's directory in it is.
-SR="$HOME/sdr"; SD="$SR/sub/.claude/discord-agents/sdb"; mkdir -p "${SD%/*}" && cp -R "$GD" "$SD" && : > "$SR/sub/f"
+SR="$HOME/sdr"; SD=$(bdir "$SR/sub" sdb); mkdir -p "${SD%/*}" && cp -R "$GD" "$SD" && : > "$SR/sub/f"
 (cd "$SR" && git init -q . && git add sub/f && git -c user.email=t@t -c user.name=t commit -qm e && git worktree add -q --detach "$HOME/sdr-wt") || { echo "FAIL: could not build the subdirectory-bot repo"; exit 1; }
 out=$(gp g9 512 "$HOME/sdr-wt" "$SD")
 [ -z "$out" ] && [ ! -e "$SD/turns/g9" ] || { echo "FAIL: the root of a worktree of the repo around a subdirectory bot is not the bot: $out"; exit 1; }
@@ -1177,7 +1177,7 @@ out=$(gp g10 513 "$HOME/sdr-wt/sub" "$SD")
 [ -n "$out" ] && [ -e "$SD/turns/g10" ] || { echo "FAIL: a subdirectory bot's directory in a worktree of its repo is the bot: $out"; exit 1; }
 rm -rf "$SR" "$HOME/sdr-wt"
 git -C "$P2" worktree remove --force "$P2/.claude/worktrees/wt1"
-rm -rf "$P2/.git" "$P2/.claude/plain" "$P2/.claude/worktrees" "$HOME/.claude/discord-agents/hw" "$HOME/hproj" "$HOME/gitshim" "$GL" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"; rmdir "$HOME/.claude/discord-agents" 2>/dev/null || :
+rm -rf "$P2/.git" "$P2/.claude/plain" "$P2/.claude/worktrees" "$(bdir "$HOME" "hw")" "$HOME/hproj" "$HOME/gitshim" "$GL" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"; rm -rf "$(pstate "$HOME")" 2>/dev/null || :
 echo "ok: an old-path hook runs with no marker (no marker directory, or another session's) and exits 0 doing nothing in a marked session, whatever CLAUDE_PLUGIN_ROOT says; the plugin's hook still runs there and keeps its marker fresh; a new marker prunes month-old ones; a session in another project, or in a plain directory under the bot's, is no bot, one in a git worktree of its project is (git runs only then), and for a bot in a subdirectory of a repo, the worktree's subdirectory, not its root"
 
 # h6b. the gate by process (Task 0, measured on lmd42, CC 2.1.301): a `claude -p` started from a bot's Bash inherits
@@ -1238,7 +1238,7 @@ tg() { printf '{"tool_name":"mcp__plugin_discord_discord__reply","tool_input":{"
 [ -n "$(tg "$CPID")" ] && [ -z "$(tg "$CPID2")" ] || { echo "FAIL: an input with no session id passes the gate for the bot's process, not for a child's"; exit 1; }
 # X04: an old-path hook (a settings entry) of a child goes through the process check too.
 rm -rf "$GD/plugin-sessions"
-out=$(tagged c10 614 | CLAUDE_JOB_DIR="$J1" CLAUDE_PID="$CPID2" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt")
+out=$(tagged c10 614 | CLAUDE_JOB_DIR="$J1" CLAUDE_PID="$CPID2" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$(pstate "$P2")/hooks/turn/on-prompt")
 [ -z "$out" ] && [ ! -e "$GD/turns/c10" ] || { echo "FAIL: an old-path hook of a claude -p child is not the bot either: $out"; exit 1; }
 kill "$CPID" "$CPID2" 2>/dev/null || :; rm -rf "$SESS" "$GD/turns" "$GD/plugin-sessions" "$GD/last-message-id"
 echo "ok: the gate by process: a claude -p child (sdk-cli, no jobId) is not the bot whatever CLAUDE_JOB_DIR it inherited, nor a worker of another job, nor when it resumes the bot's session; a background bot of its own job and a foreground bot (CLAUDE_JOB_DIR inherited or not) are; no record of this process leaves one event open, uncached; the marker holds the pid it was written for; the bot after /clear caches again; an input with no session id and an old-path hook are decided the same way"
@@ -1270,22 +1270,22 @@ mv "$HOME/.claude/plugins" "$HOME/.claude/plugins.off"
 
 # i. an explicit empty ackReaction means the owner disabled it; start must
 # leave it alone, never overwrite it back to the default.
-mkdir -p "$P2/.claude/discord-agents/delta"
-printf 'DISCORD_BOT_TOKEN=tokD\n' > "$P2/.claude/discord-agents/delta/.env"
-jq -n '{dmPolicy:"allowlist", allowFrom:["2"], ackReaction:"", groups:{"1":{requireMention:true, allowFrom:["2"]}}}' > "$P2/.claude/discord-agents/delta/access.json"
+mkdir -p "$(bdir "$P2" "delta")"
+printf 'DISCORD_BOT_TOKEN=tokD\n' > "$(bdir "$P2" "delta")/.env"
+jq -n '{dmPolicy:"allowlist", allowFrom:["2"], ackReaction:"", groups:{"1":{requireMention:true, allowFrom:["2"]}}}' > "$(bdir "$P2" "delta")/access.json"
 bash "$S" --name delta >/dev/null 2>&1
-[ "$(jq -r '.ackReaction' "$P2/.claude/discord-agents/delta/access.json")" = "" ] || { echo "FAIL: an explicit empty ackReaction must be left alone"; exit 1; }
+[ "$(jq -r '.ackReaction' "$(bdir "$P2" "delta")/access.json")" = "" ] || { echo "FAIL: an explicit empty ackReaction must be left alone"; exit 1; }
 echo "ok: an explicit empty ackReaction (disabled by the owner) is left alone"
 
 # j. an existing real directory at .claude/discord-agents/hooks is left
 # alone, not clobbered into a symlink.
-P3="$HOME/project3"; mkdir -p "$P3/.claude/discord-agents/eps"; cd "$P3"
-printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$P3/.claude/discord-agents/config.env"
-printf 'DISCORD_BOT_TOKEN=tokE\n' > "$P3/.claude/discord-agents/eps/.env"
-mkdir -p "$P3/.claude/discord-agents/hooks"; echo marker > "$P3/.claude/discord-agents/hooks/MARKER"
+P3="$HOME/project3"; mkdir -p "$(bdir "$P3" "eps")"; cd "$P3"
+printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$(pstate "$P3")/config.env"
+printf 'DISCORD_BOT_TOKEN=tokE\n' > "$(bdir "$P3" "eps")/.env"
+mkdir -p "$(pstate "$P3")/hooks"; echo marker > "$(pstate "$P3")/hooks/MARKER"
 out=$(bash "$S" --name eps 2>&1)
-[ -f "$P3/.claude/discord-agents/hooks/MARKER" ] || { echo "FAIL: a real hooks directory must not be touched"; exit 1; }
-[ ! -L "$P3/.claude/discord-agents/hooks" ] || { echo "FAIL: a real hooks directory must not become a symlink"; exit 1; }
+[ -f "$(pstate "$P3")/hooks/MARKER" ] || { echo "FAIL: a real hooks directory must not be touched"; exit 1; }
+[ ! -L "$(pstate "$P3")/hooks" ] || { echo "FAIL: a real hooks directory must not become a symlink"; exit 1; }
 grep -q "is not a symlink, leaving it alone" <<<"$out" || { echo "FAIL: a real hooks directory must warn on stderr"; exit 1; }
 echo "ok: an existing real hooks directory is left alone with a warning, not clobbered"
 
@@ -1302,10 +1302,10 @@ echo "ok: an existing real hooks directory is left alone with a warning, not clo
 # resolver that maps only '.' and '/' never finds the session (measured
 # 2026-10-07: `--resume cswap` in cswap_cswap_pin_ccf_manager went to claude
 # unresolved, and `--bg` waited silently on a name picker it cannot show).
-PD="$HOME/project_dead"; mkdir -p "$PD/.claude/discord-agents/dead"; cd "$PD"
+PD="$HOME/project_dead"; mkdir -p "$(bdir "$PD" "dead")"; cd "$PD"
 PDP=$(pwd -P)
-printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$PD/.claude/discord-agents/config.env"
-printf 'DISCORD_BOT_TOKEN=tokDead\n' > "$PD/.claude/discord-agents/dead/.env"
+printf "DISCORD_CHANNEL_ID='1'\nDISCORD_USER_ID='2'\nDISCORD_ALLOW_IDS=''\n" > "$(pstate "$PD")/config.env"
+printf 'DISCORD_BOT_TOKEN=tokDead\n' > "$(bdir "$PD" "dead")/.env"
 cat > "$HOME/bin/claude" <<'STUB'
 #!/bin/bash
 case "$1" in
@@ -1470,14 +1470,14 @@ echo "ok: a listing that is not JSON, one that is empty and one that fails each 
 # shared home: nothing of it goes. `compat` (every update) and the monitor's pass (below, with the monitor) run it over
 # every recorded project with one listing; a start never does (SessionStart fires on startup, resume, clear and
 # compact, and a bot start waits on nothing of it).
-DB="$PD/.claude/discord-agents/dead" DCK="$PD/.claude/discord-agents/checkin"
+DB="$(bdir "$PD" "dead")" DCK="$(pstate "$PD")/checkin"
 plant_markers() {
   rm -rf "$DB/plugin-sessions" "$DB/turns" "$DCK"; mkdir -p "$DB/plugin-sessions" "$DB/turns" "$DCK"
   : > "$DB/plugin-sessions/live1"; : > "$DB/plugin-sessions/done2"; : > "$DB/plugin-sessions/gone3"; : > "$DB/plugin-sessions/child4"
   : > "$DB/turns/live1"; : > "$DB/turns/live1.primed"; : > "$DB/turns/gone3"; : > "$DB/turns/gone3.replied"; : > "$DB/turns/gone3.primed"
   : > "$DCK/live1"; : > "$DCK/gone3"
 }
-markers() { (cd "$PD/.claude/discord-agents" && for f in dead/plugin-sessions/* dead/turns/* checkin/*; do [ ! -e "$f" ] || printf '%s ' "$f"; done); }
+markers() { (cd "$(broot "$PD")" && for f in dead/plugin-sessions/* dead/turns/*; do [ ! -e "$f" ] || printf '%s ' "$f"; done; cd "$(pstate "$PD")" && for f in checkin/*; do [ ! -e "$f" ] || printf '%s ' "$f"; done); }
 ALL_MARKERS="dead/plugin-sessions/child4 dead/plugin-sessions/done2 dead/plugin-sessions/gone3 dead/plugin-sessions/live1 dead/turns/gone3 dead/turns/gone3.primed dead/turns/gone3.replied dead/turns/live1 dead/turns/live1.primed checkin/gone3 checkin/live1 "
 : > "$HOME/agents.rc"
 printf '[{"name":"dead","id":"aaaa0001","sessionId":"live1","state":"working"},{"name":"dead","id":"dddd0002","sessionId":"done2","state":"done"}]\n' > "$HOME/agents.json"
@@ -1499,16 +1499,16 @@ plant_markers; out=$(sweep_here 2>&1)
 : > "$HOME/agents.rc"; printf '{}\n' > "$HOME/agents.json"; sweep_here
 [ "$(markers)" = "$ALL_MARKERS" ] || { echo "FAIL: a listing that is no array sweeps nothing: $(markers)"; exit 1; }
 # compat: two recorded projects, one bot each; only the visible one is swept, checkin/ too, and the other left whole.
-PU2="$HOME/project_unseen"; mkdir -p "$PU2/.claude/discord-agents/unseen/plugin-sessions" "$PU2/.claude/discord-agents/checkin"
-: > "$PU2/.claude/discord-agents/unseen/.env"; : > "$PU2/.claude/discord-agents/unseen/plugin-sessions/gone9"; : > "$PU2/.claude/discord-agents/checkin/gone9"
+PU2="$HOME/project_unseen"; mkdir -p "$(bdir "$PU2" "unseen")/plugin-sessions" "$(pstate "$PU2")/checkin"
+: > "$(bdir "$PU2" "unseen")/.env"; : > "$(bdir "$PU2" "unseen")/plugin-sessions/gone9"; : > "$(pstate "$PU2")/checkin/gone9"
 SWPF="$HOME/.claude-discord/records/projects"; mv "$SWPF" "$SWPF.sweep"; printf '%s\n%s\n' "$PDP" "$PU2" > "$SWPF"   # these two only, put back after
 printf '[{"name":"dead","id":"aaaa0001","sessionId":"live1","state":"working"},{"name":"dead","id":"dddd0002","sessionId":"done2","state":"done"}]\n' > "$HOME/agents.json"
 plant_markers; : > "$HOME/agents.calls"
 bash "$S" compat >/dev/null 2>&1 || { echo "FAIL: compat must exit 0 here"; exit 1; }
 [ "$(markers)" = "dead/plugin-sessions/done2 dead/plugin-sessions/live1 dead/turns/live1 dead/turns/live1.primed checkin/live1 " ] &&
-  [ -e "$PU2/.claude/discord-agents/unseen/plugin-sessions/gone9" ] && [ -e "$PU2/.claude/discord-agents/checkin/gone9" ] &&
+  [ -e "$(bdir "$PU2" "unseen")/plugin-sessions/gone9" ] && [ -e "$(pstate "$PU2")/checkin/gone9" ] &&
   [ "$(<"$HOME/agents.calls")" = "agents --json --all" ] ||
-  { echo "FAIL: update's compat step sweeps every visible bot of every recorded project, once: $(markers) / $(ls -R "$PU2/.claude/discord-agents") / $(<"$HOME/agents.calls")"; exit 1; }
+  { echo "FAIL: update's compat step sweeps every visible bot of every recorded project, once: $(markers) / $(ls -R "$(pstate "$PU2")") / $(<"$HOME/agents.calls")"; exit 1; }
 mv "$SWPF.sweep" "$SWPF"; cp "$HOME/agents.full.json" "$HOME/agents.json"
 echo "ok: the marker sweep takes a bot's plugin-sessions/ and turns/ markers (and checkin/) of sessions claude agents no longer lists, keeps done ones, never a bot the listing does not show (by name or pinned job), nothing on a failed or non-array listing; compat sweeps every recorded project once; a start sweeps nothing"
 
@@ -1518,7 +1518,7 @@ echo "ok: the marker sweep takes a bot's plugin-sessions/ and turns/ markers (an
 # "dead" -- the check only needs a directory to exist, nothing else about a
 # bot. "gone" is a completed session: only the --all answer carries it.
 # "donepid" is live (a pid) with state "done", which a live bot can show.
-mkdir -p "$PD/.claude/discord-agents/beta" "$PD/.claude/discord-agents/b sp" "$PD/.claude/discord-agents/gone" "$PD/.claude/discord-agents/donepid"
+mkdir -p "$(bdir "$PD" "beta")" "$(bdir "$PD" "b sp")" "$(bdir "$PD" "gone")" "$(bdir "$PD" "donepid")"
 jq -n --arg cwd "$PDP" '[
   {name:"dead", cwd:$cwd},
   {name:"beta", cwd:$cwd},
@@ -1529,7 +1529,7 @@ jq -n --arg cwd "$PDP" '[
   {name:"other", cwd:"/elsewhere"}]' > "$HOME/agents.json"
 jq --arg cwd "$PDP" '. + [{name:"gone", cwd:$cwd, state:"done"}]' "$HOME/agents.json" > "$HOME/agents.all.json"
 : > "$HOME/agents.rc"; : > "$HOME/agents.calls"
-out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/tools/local-bots")
+out=$(DISCORD_STATE_DIR="$(bdir "$PD" "dead")" bash "$D/tools/local-bots")
 [ "$(<"$HOME/agents.calls")" = "agents --json" ] || { echo "FAIL: local-bots must list active sessions only, without --all: $(<"$HOME/agents.calls")"; exit 1; }
 [ "$out" = "$(printf 'b sp\t%s\nbeta\t%s\ndonepid\t%s' "$PDP" "$PDP" "$PDP")" ] || { echo "FAIL: local-bots must print exactly the OTHER live bots (a real .claude/discord-agents/<name> dir), name-TAB-project, sorted by name; self ('dead', by state dir) excluded, a live 'done' row kept, a completed session ('gone') absent, a name holding a slash never riding another bot's directory, and a name whose directory is missing ('nodir') or whose project does not exist ('other') left out: $out"; exit 1; }
 rm -f "$HOME/agents.all.json"
@@ -1538,13 +1538,13 @@ echo "ok: local-bots lists this machine's other live bot sessions only (no --all
 # Never fails: no output and exit 0 on bad JSON, an empty array, or a
 # listing call that itself fails.
 printf 'not json\n' > "$HOME/agents.json"
-out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/tools/local-bots"; echo "rc=$?")
+out=$(DISCORD_STATE_DIR="$(bdir "$PD" "dead")" bash "$D/tools/local-bots"; echo "rc=$?")
 [ "$out" = "rc=0" ] || { echo "FAIL: invalid JSON must print nothing and exit 0: $out"; exit 1; }
 printf '[]\n' > "$HOME/agents.json"
-out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/tools/local-bots"; echo "rc=$?")
+out=$(DISCORD_STATE_DIR="$(bdir "$PD" "dead")" bash "$D/tools/local-bots"; echo "rc=$?")
 [ "$out" = "rc=0" ] || { echo "FAIL: an empty array must print nothing and exit 0: $out"; exit 1; }
 cp "$HOME/agents.full.json" "$HOME/agents.json"; echo 1 > "$HOME/agents.rc"
-out=$(DISCORD_STATE_DIR="$PD/.claude/discord-agents/dead" bash "$D/tools/local-bots"; echo "rc=$?")
+out=$(DISCORD_STATE_DIR="$(bdir "$PD" "dead")" bash "$D/tools/local-bots"; echo "rc=$?")
 [ "$out" = "rc=0" ] || { echo "FAIL: a failing listing must print nothing and exit 0: $out"; exit 1; }
 : > "$HOME/agents.rc"
 echo "ok: local-bots prints nothing and exits 0 on invalid JSON, an empty array, and a failing listing"
@@ -1558,7 +1558,7 @@ printf '#!/bin/bash\ncase $1 in agents) exit 1;; *) echo "PLAIN $*";; esac\n' > 
 # The plugin's hooks.json registers every hook now; setup writes none and
 # removes none, and the plugin's first hook run takes ours out of both files.
 P4="$HOME/project4"; mkdir -p "$P4/.claude/rules"; cd "$P4"
-R4="$P4/.claude/discord-agents"
+R4=$(broot "$P4")
 RULE="$P4/.claude/rules/claude-discord-dev-manager.md"
 SJ="$P4/.claude/settings.json"
 SL="$P4/.claude/settings.local.json"
@@ -2409,7 +2409,7 @@ echo "ok: a failed refresh with no handoff of its own leaves an older handoff.pr
 # ~260 ms -- most of the section's wall time, against a 30 s budget for the
 # whole suite on the slowest host.
 HP="$HOME/health-project"; mkdir -p "$HP"; cd "$HP"
-HR="$HP/.claude/discord-agents"
+HR=$(broot "$HP")
 # A Discord id is a snowflake -- milliseconds since 2015-01-01 shifted left
 # 22 -- so an age is chosen and the id computed from the CLOCK. Hard-coded
 # ids would silently drift: one written as "30 minutes old" becomes days old
@@ -2672,9 +2672,9 @@ printf '\n900\n111\n222\ntokS\nn\n' | bash "$S" setup sbot --scope project >/dev
 # The working-hold and notify cases below each want a project of their own with one fresh bot: copies of this one as
 # it stands after setup (before any state), the bot renamed, instead of two more setups.
 for pair in working-project:wbot notify-project:nbot; do
-  cp -a "$SP" "$HOME/${pair%%:*}"; mv "$HOME/${pair%%:*}/.claude/discord-agents/sbot" "$HOME/${pair%%:*}/.claude/discord-agents/${pair##*:}"
+  cp -a "$SP" "$HOME/${pair%%:*}"; mv "$(bdir "$HOME/${pair%%:*}" sbot)" "$(bdir "$HOME/${pair%%:*}" "${pair##*:}")"
 done
-SD="$SP/.claude/discord-agents/sbot"
+SD="$(bdir "$SP" "sbot")"
 echo "$ID_SEEN" > "$SD/last-message-id"; seed_id "$SD"; seed_guild "$SD"
 start_server "$SD"
 
@@ -2809,7 +2809,7 @@ jq -e '.[0] | .channel == "900" and .mode == "none" and .access == {dm: "allowli
 mv "$SD/access.json.keep" "$SD/access.json"; seed_guild "$SD"; rm -f "$SD/channel-names"
 # A bot with no token and no channel (a .env with nothing in it, no access.json, no config.env): the new fields are
 # empty or null, never an error. Only the unauthenticated /gateway is asked.
-NP="$HOME/none-project"; mkdir -p "$NP/.claude/discord-agents/nobot"; : > "$NP/.claude/discord-agents/nobot/.env"
+NP="$HOME/none-project"; mkdir -p "$(bdir "$NP" "nobot")"; : > "$(bdir "$NP" "nobot")/.env"
 queue
 out=$(cd "$NP" && bash "$S" health --json 2>/dev/null) || :
 jq -e '.[0] | .bot == "nobot" and .verdict == "unknown" and .channel == "" and .channel_name == "" and .mode == "none" and .last_message_at == null and .access == null' <<<"$out" >/dev/null && [ ! -s "$CURL_REPLIES" ] ||
@@ -2978,7 +2978,7 @@ cd "$HP"
 # through the eight-bot fixture meant eight bots' worth of queued replies per
 # case for one bot's worth of assertion.
 WP="$HOME/working-project"; cd "$WP"
-WD="$WP/.claude/discord-agents/wbot"
+WD="$(bdir "$WP" "wbot")"
 echo "$ID_SEEN" > "$WD/last-message-id"; seed_id "$WD"; seed_guild "$WD"
 start_server "$WD"
 mkdir -p "$WD/turns"; : > "$WD/turns/s1"; touch -d '3 hours ago' "$WD/turns/s1"
@@ -3035,7 +3035,7 @@ echo "ok: a session the daemon calls working holds the alert whatever the turn f
 # health only reports: it posts nothing to Discord, even for a bot that is a
 # finding, and the --notify that used to post alerts is refused.
 NP="$HOME/notify-project"; cd "$NP"
-ND="$NP/.claude/discord-agents/nbot"
+ND="$(bdir "$NP" "nbot")"
 echo "$ID_SEEN" > "$ND/last-message-id"; seed_id "$ND"; seed_guild "$ND"
 start_server "$ND"
 mkdir -p "$ND/turns"; : > "$ND/turns/s1"; touch -d '3 hours ago' "$ND/turns/s1"
@@ -3081,7 +3081,7 @@ PF="$HOME/.claude-discord/records/projects"
 grep -qxF "$(cd "$PU" && pwd -P)" "$PF" || { echo "FAIL: setup must record its project in records/projects: $(cat "$PF" 2>&1)"; exit 1; }
 mv "$PF" "$PF.suite"
 # The project --all walks is a copy of single-project whose path has a space, a quote and a $; the gone one a space.
-SPS="$HOME/single pro'ject \$x"; cp -a "$SP" "$SPS"; SDS="$SPS/.claude/discord-agents/sbot"
+SPS="$HOME/single pro'ject \$x"; cp -a "$SP" "$SPS"; SDS="$(bdir "$SPS" "sbot")"
 printf '%s\n' "$HOME/gone project" > "$PF"
 printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "$HOME/logger.calls"\n' > "$HOME/bin/logger"; chmod +x "$HOME/bin/logger"
 rm -f "$HOME/logger.calls" "$SDS/health.log"
@@ -3090,7 +3090,7 @@ grep -qxF "$(cd "$SPS" && pwd -P)" "$PF" || { echo "FAIL: a health run in a proj
 [ -s "$SDS/health.log" ] && [ -s "$HOME/logger.calls" ] || { echo "FAIL: control: a health run by hand keeps health.log and the journal line"; exit 1; }
 rm -f "$HOME/logger.calls" "$SDS/health.log"
 # A project whose health crashes (config.env exits 3), listed with a CRLF; its config.env also appends a line to the list, as a concurrent setup would during the walk; the walked project listed twice.
-CP="$HOME/crash proj"; mkdir -p "$CP/.claude/discord-agents/cbot"; printf 'echo "%s" >> "%s"\nexit 3\n' "$HOME/appended project" "$PF" > "$CP/.claude/discord-agents/config.env"
+CP="$HOME/crash proj"; mkdir -p "$(bdir "$CP" "cbot")"; printf 'echo "%s" >> "%s"\nexit 3\n' "$HOME/appended project" "$PF" > "$(pstate "$CP")/config.env"
 printf '%s\n%s\r\n' "$(cd "$SPS" && pwd -P)" "$(cd "$CP" && pwd -P)" >> "$PF"
 PCACHE=$HOME/.claude/plugins/cache/claude-plugins-official/discord
 mkdir -p "$PCACHE/0.0.98"; printf 'nothing to patch here\n' > "$PCACHE/0.0.98/server.ts"
@@ -3143,7 +3143,7 @@ chmod +x "$HOME/bin/ssh"; rm -f "$HOME/ssh.log"
 # Darwin host with a battery marked laptop (a host that did not answer is written plain and said so), a host that is
 # not a plain ssh name skipped, an empty answer keeps the list (and the owner's hand edits), and leaving dev-manager
 # removes the ledger.
-MP="$HOME/monproj"; mkdir -p "$MP"; cd "$MP"; MR="$MP/.claude/discord-agents"
+MP="$HOME/monproj"; mkdir -p "$MP"; cd "$MP"; MR=$(broot "$MP")
 jq --arg p "$(pwd -P)" '.projects[$p].hasTrustDialogAccepted = true' "$HOME/.claude.json" > "$HOME/.claude.json.t" && mv "$HOME/.claude.json.t" "$HOME/.claude.json"
 printf 'Linux\nclaude-discord 1.10.0 (abc1234)\n' > "$MON/h1.out"
 printf 'Darwin\nbattery\nclaude-discord 1.10.0 (abc1234)\n' > "$MON/lap.out"
@@ -3198,7 +3198,7 @@ case "$A$HO$HE" in *secretpw*|*8118*) echo "FAIL: hosts list must never print an
 # (setup recorded $MP); --bot names it; several and none named is exit 2 with their names; none is exit 1.
 mkdir -p "$MP/sub/dir"
 A=$(cd "$MP/sub/dir" && bash "$S" hosts list --json | jq -r .manager); B=$(cd "$HOME" && bash "$S" hosts --bot mgr list --json | jq -r .ledger)
-[ "$A" = mgr ] && [ "$B" = "$(cd "$MP" && pwd -P)/.claude/discord-agents/mgr/hosts" ] || { echo "FAIL: hosts finds the manager from below its project and, outside any, among the recorded projects: '$A' '$B'"; exit 1; }
+[ "$A" = mgr ] && [ "$B" = "$(bdir "$MP" mgr)/hosts" ] || { echo "FAIL: hosts finds the manager from below its project and, outside any, among the recorded projects: '$A' '$B'"; exit 1; }
 mkdir -p "$MR/mgr2" "$MR/plain"; echo dev-manager > "$MR/mgr2/mode"; echo 'local name=two' > "$MR/mgr2/hosts"; echo none > "$MR/plain/mode"; echo local > "$MR/plain/hosts"
 hc list
 [ "$HRC" = 2 ] && [ -z "$HO" ] && grep -q -- '--bot <manager>' <<<"$HE" && grep -q "/mgr2$" <<<"$HE" && ! grep -q '/plain$' <<<"$HE" || { echo "FAIL: two manager bots and none named is exit 2, naming them (a bot that is no dev-manager is none): rc=$HRC $HE"; exit 1; }
@@ -4356,7 +4356,7 @@ mkdir -p "$MB"; echo '{"version":1,"manager":"mg' > "$MB/state.json"; head -c 26
 # The marker sweep runs in a pass (its ledger has a local line), at most every CLAUDE_DISCORD_MONITOR_SWEEP seconds (an
 # hour; 0 here: every pass), over the recorded projects (one here, put back after) with the claude on its PATH: a dead
 # session's markers go, a done one's stay.
-SMR="$HOME/sweepmon/.claude/discord-agents"; mkdir -p "$SMR/swm/plugin-sessions" "$SMR/swm/turns" "$SMR/checkin" "$HOME/swbin"; : > "$SMR/swm/.env"
+SMR=$(broot "$HOME/sweepmon"); mkdir -p "$SMR/swm/plugin-sessions" "$SMR/swm/turns" "$(pstate "$HOME/sweepmon")/checkin" "$HOME/swbin"; : > "$SMR/swm/.env"
 for f in swm/plugin-sessions/live1 swm/plugin-sessions/done2 swm/plugin-sessions/gone3 swm/turns/live1 swm/turns/gone3 swm/turns/gone3.replied checkin/live1 checkin/gone3; do : > "$SMR/$f"; done
 printf '#!/bin/sh\n[ "$*" = "agents --json --all" ] && echo %s\n' "'[{\"name\":\"swm\",\"id\":\"aaaa0001\",\"sessionId\":\"live1\",\"state\":\"working\"},{\"name\":\"swm\",\"id\":\"dddd0002\",\"sessionId\":\"done2\",\"state\":\"done\"}]'" > "$HOME/swbin/claude"; chmod +x "$HOME/swbin/claude"
 SWPF="$HOME/.claude-discord/records/projects"; mv "$SWPF" "$SWPF.mon"; printf '%s\n' "$HOME/sweepmon" > "$SWPF"
@@ -4985,9 +4985,9 @@ kill "$SP" 2>/dev/null || :; wait "$SP" 2>/dev/null || :
 # share starts ONE keeper (one state dir per name); a manager with no .env is not started (the front refuses it every time).
 rm -f "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/fx2.rec" "$MB"/last-start*; rm -f "$MB"/holders/keeper-*
 printf '#!/bin/sh\nprintf "%%s %%s|%%s|%%s|%%s|%%s\\n" "$PWD" "$*" "${DISCORD_STATE_DIR-unset}" "${CLAUDE_PROJECT_DIR-unset}" "${CLAUDE_PLUGIN_ROOT-unset}" "${CLAUDECODE-unset}" >> "$HOME/fx2.rec"\n' > "$FX/bin/claude-discord"
-DUP="$HOME/dupproj"; mkdir -p "$DUP/.claude/discord-agents/mgr" "$DUP/.claude/discord-agents/noenv"
-for b in mgr noenv; do echo dev-manager > "$DUP/.claude/discord-agents/$b/mode"; echo local > "$DUP/.claude/discord-agents/$b/hosts"; done
-echo DISCORD_BOT_TOKEN=x > "$DUP/.claude/discord-agents/mgr/.env"
+DUP="$HOME/dupproj"; mkdir -p "$(bdir "$DUP" "mgr")" "$(bdir "$DUP" "noenv")"
+for b in mgr noenv; do echo dev-manager > "$(bdir "$DUP" "$b")/mode"; echo local > "$(bdir "$DUP" "$b")/hosts"; done
+echo DISCORD_BOT_TOKEN=x > "$(bdir "$DUP" "mgr")/.env"
 printf '%s\n' "$MP" "$DUP" > "$HOME/.claude-discord/records/projects"
 env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDECODE=1 CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1
 n=0; while [ ! -s "$HOME/fx2.rec" ] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done; nap 0.05
@@ -5004,12 +5004,12 @@ env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR=
 n=0; while [ "$(wc -l < "$HOME/fx2.rec")" != 2 ] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 [ "$(wc -l < "$HOME/fx2.rec")" = 2 ] && [ "$(<"$LS")" != 0 ] || { echo "FAIL: a prompt over a minute after the last start must start again and record the time: $(cat "$HOME/fx2.rec") '$(<"$LS")'"; exit 1; }
 # And setup refuses a dev-manager name another recorded project already runs, naming that project (the same project may re-run).
-D3="$HOME/dupproj3"; mkdir -p "$D3/.claude/discord-agents/mgr"; echo DISCORD_BOT_TOKEN=x > "$D3/.claude/discord-agents/mgr/.env"; echo '{}' > "$D3/.claude/discord-agents/mgr/access.json"
+D3="$HOME/dupproj3"; mkdir -p "$(bdir "$D3" "mgr")"; echo DISCORD_BOT_TOKEN=x > "$(bdir "$D3" "mgr")/.env"; echo '{}' > "$(bdir "$D3" "mgr")/access.json"
 rc=0; out=$(cd "$D3" && printf 'dev-manager\n\n\n' | bash "$S" setup mgr --mode 2>&1) || rc=$?
-[ "$rc" = 2 ] && grep -qE "already a dev-manager with a hosts ledger in ($MP|$DUP);" <<<"$out" && [ ! -e "$D3/.claude/discord-agents/mgr/mode" ] ||
+[ "$rc" = 2 ] && grep -qE "already a dev-manager with a hosts ledger in ($MP|$DUP);" <<<"$out" && [ ! -e "$(bdir "$D3" "mgr")/mode" ] ||
   { echo "FAIL: setup --mode dev-manager must refuse a name another recorded project runs as a manager, writing no mode (rc=$rc): $out"; exit 1; }
 rc=0; out=$(cd "$D3" && printf 'none\n' | bash "$S" setup mgr --mode 2>&1) || rc=$?
-[ "$rc" = 0 ] && [ "$(<"$D3/.claude/discord-agents/mgr/mode")" = none ] || { echo "FAIL: only the dev-manager mode is refused (rc=$rc): $out"; exit 1; }
+[ "$rc" = 0 ] && [ "$(<"$(bdir "$D3" "mgr")/mode")" = none ] || { echo "FAIL: only the dev-manager mode is refused (rc=$rc): $out"; exit 1; }
 rm -rf "$D3"
 rm -rf "$DUP" "$HOME/fx2.rec"
 rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json" "$HOME/up.json" "$MB/holders/keeper-$SP"
@@ -5094,13 +5094,13 @@ PFB=$(cat "$HOME/.claude-discord/records/projects" 2>/dev/null || :); : > "$HOME
 rc=0; out=$(cd / && bash "$S" tui mgr 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'no project above / with a manager bot' <<<"$out" && ! grep -q '/\.claude/discord-agents/' <<<"$out" || { echo "FAIL: tui outside any project must say there is no project above, not name /.claude/discord-agents/<bot> (rc=$rc): $out"; exit 1; }
 # Two dev-manager bots with a ledger of their own (not borrowed from other blocks' fixtures): which one is not guessed.
-TP="$HOME/tuiproj"; mkdir -p "$TP/.claude/discord-agents/m1" "$TP/.claude/discord-agents/m2"
-for b in m1 m2; do echo dev-manager > "$TP/.claude/discord-agents/$b/mode"; echo local > "$TP/.claude/discord-agents/$b/hosts"; done
+TP="$HOME/tuiproj"; mkdir -p "$(bdir "$TP" "m1")" "$(bdir "$TP" "m2")"
+for b in m1 m2; do echo dev-manager > "$(bdir "$TP" "$b")/mode"; echo local > "$(bdir "$TP" "$b")/hosts"; done
 rc=0; out=$(cd "$TP" && bash "$S" tui </dev/null 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -q 'name the manager bot' <<<"$out" || { echo "FAIL: with two manager bots and no terminal, tui must ask for the name (rc=$rc): $out"; exit 1; }
 # Outside any project: the recorded projects' manager bots (records/projects); the TUI runs from the chosen project's root.
-NP="$HOME/notaproject"; mkdir -p "$NP" "$HOME/tuiproj2/.claude/discord-agents/mgr"
-echo dev-manager > "$HOME/tuiproj2/.claude/discord-agents/mgr/mode"; echo local > "$HOME/tuiproj2/.claude/discord-agents/mgr/hosts"
+NP="$HOME/notaproject"; mkdir -p "$NP" "$(bdir "$HOME/tuiproj2" mgr)"
+echo dev-manager > "$(bdir "$HOME/tuiproj2" mgr)/mode"; echo local > "$(bdir "$HOME/tuiproj2" mgr)/hosts"
 printf '%s\n' "$HOME/gone" "$MP" > "$HOME/.claude-discord/records/projects"
 rm -f "$HOME/uv.args" "$HOME/uv.cwd"
 (cd "$NP" && bash "$S" tui 2>/dev/null </dev/null) || { echo "FAIL: tui outside a project must use the one recorded manager bot (a missing folder skipped)"; exit 1; }
