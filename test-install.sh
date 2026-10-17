@@ -656,8 +656,11 @@ RBN="$HOME/.claude-discord/projects/$(skey "$RP")/bots/b"
 [ "$(readlink "$RB")" = "$RBN" ] && grep -q lk000001 <<<"$out" || { echo "FAIL: a job record naming the old path through a link of the project must keep the bot's link: $out / $(ls -la "$RP/.claude/discord-agents" 2>&1)"; exit 1; }
 start_server "$LP/.claude/discord-agents/b"
 queue "200 $NONE" '200 {"threads":[]}'
-out=$(cd "$RP" && bash "$S" health --json 2>/dev/null) || :
+out=$(cd "$RP" && bash "$S" health --json 2>"$HOME/health.err") || :
 [ "$(field_of b servers "$out")" = 1 ] || { echo "FAIL: health must count a server whose environ names the old path through a link of the project: $out"; exit 1; }
+# A real server's environ is NUL-separated: the one grep that reads it must leave nothing on stderr (1.18.0 on lmd42:
+# "warning: command substitution: ignored null byte in input", once per server per bot per run).
+[ ! -s "$HOME/health.err" ] || { echo "FAIL: health must say nothing on stderr while counting a real server's environ: $(head -c 300 "$HOME/health.err")"; exit 1; }
 stop_one_server "$LP/.claude/discord-agents/b"
 mkdir -p "${RBN%/b}/c"; printf 'DISCORD_BOT_TOKEN=tokC\n' > "${RBN%/b}/c/.env"; echo none > "${RBN%/b}/c/mode"   # a second bot: with one, a start picks it with no record at all
 out=$(cd "$RP" && bash "$S" --bg --resume 1111aaaa-2222-3333-4444-555555555555 2>&1) || :   # the launcher stub prints the exec line; the claude stub here refuses a launch

@@ -231,8 +231,11 @@ if [ "${1:-}" = health ]; then
       # run: +1.9 s on the suite's health cases with 18 servers on the machine, 2026-10-18). The whole entry, as -z
       # -x anchored it before: GNU grep (the /proc branch) stops at the NUL that ends it, since NUL is a control
       # character, and the one value comes back with no NUL in it. Compared whole, so a bot named "hbot" never counts
-      # "hbot2"'s server: the exact dir, else the old path's last part and a builtin -ef through the link.
-      v=$(grep -aoE '(^|[^A-Za-z0-9_])DISCORD_STATE_DIR=[^[:cntrl:]]*' "$proc/$pid/environ" 2>/dev/null) || continue
+      # "hbot2"'s server: the exact dir, else the old path's last part and a builtin -ef through the link. The match
+      # starts at the NUL that ends the entry before (the `[^A-Za-z0-9_]`), which bash drops from the substitution
+      # with a warning on stderr (one per server per bot per run, seen on lmd42 at 1.18.0): the assignment's stderr is
+      # closed, the value is whole either way.
+      { v=$(grep -aoE '(^|[^A-Za-z0-9_])DISCORD_STATE_DIR=[^[:cntrl:]]*' "$proc/$pid/environ"); } 2>/dev/null || continue
       v=${v#*DISCORD_STATE_DIR=}; v=${v%%$'\n'*}
       if [ "$v" = "$1" ]; then n=$((n + 1))
       else case $v in */.claude/discord-agents/"$2") [ "$v" -ef "$1" ] && n=$((n + 1));; esac
