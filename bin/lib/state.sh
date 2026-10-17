@@ -93,13 +93,15 @@ pmv() { perl -e 'rename $ARGV[0], $ARGV[1] or exit 1' "$1" "$2"; }
 move_project() {
   local p=$1 src=$1/.claude/discord-agents dst n rc=0
   [ -d "$src" ] && [ ! -L "$src" ] || return 0
-  proj_init "$p" || return 1
-  dst=$helpers/projects/$pd_key
+  # The lock before anything is written: a move cut short after `project` would read as the new shape with no bots.
+  proj_dirs "$p"; dst=$helpers/projects/$pd_key
+  (umask 077; mkdir -p "$helpers/projects") 2>/dev/null || :
   for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     mkdir "$dst.lock" 2>/dev/null && break
     [ "$n" -lt 20 ] || { echo "claude-discord: $dst.lock is held (another claude-discord is moving $p? else rmdir it); $p left for the next update" >&2; return 0; }
     sleep 0.5
   done
+  proj_init "$p" || { rmdir "$dst.lock" 2>/dev/null; return 1; }
   type live_sessions >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/sessions.sh"
   (
     trap 'rmdir "$dst.lock" 2>/dev/null' EXIT; set +e
