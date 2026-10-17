@@ -569,6 +569,8 @@ echo "ok: the shim runs the project's clone (path with a space, from a subdirect
 pstate() { printf '%s/.claude/discord-agents\n' "$1"; }
 broot() { printf '%s/.claude/discord-agents\n' "$1"; }
 bdir() { printf '%s/.claude/discord-agents/%s\n' "$1" "$2"; }
+# skey <project>: the state key of a project (physical path), the suite's own copy of the rule bin/lib/state.sh's proj_key follows (its table case pins the two equal).
+skey() { local p; p=$(cd "$1" 2>/dev/null && pwd -P) || p=$1; local LC_ALL=C; printf '%s\n' "${p//[^A-Za-z0-9]/-}"; }
 
 P="$HOME/project"; mkdir -p "$P"; cd "$P"; git init -q .
 # A local stand-in for GitHub, built from the WORKING TREE (a clone of $D would

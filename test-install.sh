@@ -482,6 +482,103 @@ rc=0; out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || rc=$?
 rm -rf "$UP" "$UC"
 echo "ok: --version prints the version and the clone's sha (a link's is the source's); update pulls the source behind a link once, runs the pulled commit's patch step, refills the runtime copy and the shim and asks for /reload-plugins; --all pulls each real clone once, prunes a removed project, skips a detached (pinned) clone without failing, and exits 1 on a diverged clone (left as it was) or an unwritable shim"
 
+# --- the state move (1.18.0): a project's state lives in ~/.claude-discord/projects/<key>/ ------------------------------
+# (a) the key is Claude Code's project folder name: every non-alphanumeric byte a dash, in the C locale (a table from lmd79).
+pk() { bash -c '. "$1/bin/lib/state.sh"; proj_key "$2"' _ "$PC" "$1" 2>/dev/null; }
+[ "$(pk /home/d.kim4)" = -home-d-kim4 ] && [ "$(pk /home/d.kim4/projects/my_dotfiles)" = -home-d-kim4-projects-my-dotfiles ] &&
+  [ "$(pk /home/d.kim4/projects/hoi_trigger_codebase/.claude/worktrees/hoi-v2-pr)" = -home-d-kim4-projects-hoi-trigger-codebase--claude-worktrees-hoi-v2-pr ] &&
+  [ "$(pk /home/d.kim4/projects/RobustAlwaysOn)" = -home-d-kim4-projects-RobustAlwaysOn ] && [ "$(pk /tmp)" = -tmp ] && [ "$(pk '/a b/c.d')" = -a-b-c-d ] &&
+  [ "$(pk /x/a_b)" = -x-a-b ] && [ "$(pk /x/a.b)" = -x-a-b ] && [ "$(skey '/a b/c.d')" = -a-b-c-d ] ||
+  { echo "FAIL: the key is Claude Code's folder encoding: every non-alphanumeric byte a dash: '$(pk /home/d.kim4)' '$(pk '/a b/c.d')' '$(pk /x/a_b)'"; exit 1; }
+echo "ok: proj_key (bin/lib/state.sh) is Claude Code's project folder name: every non-alphanumeric byte a dash, in the C locale; a_b and a.b share one"
+# (b) setup in a fresh project: the new layout, modes 700, nothing under the project's .claude but the install; the
+# launcher's --settings names the new state dir.
+NPJ="$HOME/new proj"; CA="$HOME/x/a_b"; CB2="$HOME/x/a.b"; mkdir -p "$NPJ" "$CA" "$CB2"
+jq --arg a "$NPJ" --arg b "$CA" '.projects[$a].hasTrustDialogAccepted = true | .projects[$b].hasTrustDialogAccepted = true' "$HOME/.claude.json" > "$HOME/cj.tmp" && mv "$HOME/cj.tmp" "$HOME/.claude.json"
+NS="$HOME/.claude-discord/projects/$(skey "$NPJ")"
+(cd "$NPJ" && printf '\n4242\n111\n\ntokN\nn\n' | bash "$S" setup nbot --scope project >/dev/null 2>&1) || { echo "FAIL: setup in a fresh project failed"; exit 1; }
+[ "$(cat "$NS/project" 2>/dev/null)" = "$NPJ" ] && grep -q "^DISCORD_CHANNEL_ID='4242'$" "$NS/config.env" && grep -q '^DISCORD_BOT_TOKEN=tokN$' "$NS/bots/nbot/.env" &&
+  [ "$(jq -r '.groups["4242"].requireMention' "$NS/bots/nbot/access.json")" = true ] && [ "$(<"$NS/bots/nbot/mode")" = none ] &&
+  [ "$(stat -c %a "$NS")" = 700 ] && [ "$(stat -c %a "$NS/bots")" = 700 ] && [ "$(stat -c %a "$NS/bots/nbot")" = 700 ] &&
+  [ ! -e "$NPJ/.claude/discord-agents" ] && [ "$(ls -A "$NPJ/.claude")" = skills ] ||
+  { echo "FAIL: setup and the start keep every bot file under ~/.claude-discord/projects/<key>, none under the project's .claude: $(find "$NPJ/.claude" "$NS" 2>&1)"; exit 1; }
+out=$(cd "$NPJ" && bash "$S" --name nbot 2>&1)
+grep -qF -- "\"DISCORD_STATE_DIR\": \"$NS/bots/nbot\"" <<<"$out" && [ ! -e "$NPJ/.claude/discord-agents" ] ||
+  { echo "FAIL: setup and the start keep every bot file under ~/.claude-discord/projects/<key>, none under the project's .claude: the launcher must name the new state dir: $out"; exit 1; }
+echo "ok: setup in a fresh project writes ~/.claude-discord/projects/<key>/{project,config.env,bots/<bot>} (700) and nothing under the project's .claude but the install; the start's --settings names it"
+# (c) two paths with one key (a_b and a.b): the second setup is refused, naming both, and writes no bot file.
+CK="$HOME/.claude-discord/projects/$(skey "$CB2")"; mkdir -p "$CK"; printf '%s\n' "$CB2" > "$CK/project"
+rc=0; out=$(cd "$CA" && printf '\n1\n2\n\nt\nn\n' | bash "$S" setup cbot --scope project 2>&1) || rc=$?
+[ "$rc" = 1 ] && grep -qF "$CA" <<<"$out" && grep -qF "$CB2" <<<"$out" && grep -q 'share one' <<<"$out" && [ "$(ls -A "$CK")" = project ] && [ ! -e "$CA/.claude/discord-agents" ] ||
+  { echo "FAIL: two paths with one key: setup refuses the second (rc=$rc): $out / $(ls -A "$CK")"; exit 1; }
+echo "ok: two projects whose paths share one key: setup refuses the second, naming both, and writes no bot file"
+# (d) a project of the old shape (<project>/.claude/discord-agents/) with two bots, moved by compat: every bot dir by
+# rename (same inode), config.env, peers.json and checkin/ with it, a link per bot whose old path a job record names, the
+# hooks link gone, the .gitignore kept, a manager's records/monitor and scratch left where they are (Task 4 moves them
+# with their readers), the records/projects line kept, and a second run changing nothing.
+OLDP="$HOME/old shape"; OR="$OLDP/.claude/discord-agents"; mkdir -p "$OR/ob1/turns" "$OR/ob2/plugin-sessions" "$OR/checkin"
+printf "DISCORD_CHANNEL_ID='7'\nDISCORD_USER_ID='8'\nDISCORD_ALLOW_IDS=''\n" > "$OR/config.env"; echo '{"peers":[]}' > "$OR/peers.json"; : > "$OR/checkin/s1"
+printf 'DISCORD_BOT_TOKEN=t1\n' > "$OR/ob1/.env"; echo dev-manager > "$OR/ob1/mode"; printf '# ledger\nlocal\n' > "$OR/ob1/hosts"; echo '{}' > "$OR/ob1/access.json"; : > "$OR/ob1/turns/t1"
+printf 'DISCORD_BOT_TOKEN=t2\n' > "$OR/ob2/.env"; echo none > "$OR/ob2/mode"; : > "$OR/ob2/plugin-sessions/p1"; printf '*\n' > "$OR/.gitignore"; ln -s "$PC/hooks" "$OR/hooks"
+chmod 700 "$OR" "$OR/ob1" "$OR/ob2"; chmod 600 "$OR/ob1/.env" "$OR/ob2/.env"
+MON1="$HOME/.claude-discord/records/monitor/ob1" SCR1="$HOME/.claude-discord/scratch/ob1"; mkdir -p "$MON1" "$SCR1"; : > "$SCR1/f"; : > "$MON1/stopped"
+cp -a "$OR" "$HOME/old-shape.ref"; i1=$(stat -c %i "$OR/ob1"); i2=$(stat -c %i "$OR/ob2")
+JOBS="$HOME/.claude/jobs"; mkdir -p "$JOBS/mv000001" "$JOBS/mv000002"
+jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$OR/ob1\"}}" '{sessionId: "0b100000-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JOBS/mv000001/state.json"
+jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$OR/ob2\"}}" '{sessionId: "0b200000-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JOBS/mv000002/state.json"
+OPF=$HOME/.claude-discord/records/projects; OPFK=$(cat "$OPF" 2>/dev/null || :); printf '%s\n' "$OLDP" > "$OPF"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+OS="$HOME/.claude-discord/projects/$(skey "$OLDP")"
+[ "$(cat "$OS/project" 2>/dev/null)" = "$OLDP" ] && diff -r "$HOME/old-shape.ref/ob1" "$OS/bots/ob1" >/dev/null 2>&1 && diff -r "$HOME/old-shape.ref/ob2" "$OS/bots/ob2" >/dev/null 2>&1 &&
+  [ "$(stat -c %i "$OS/bots/ob1")" = "$i1" ] && [ "$(stat -c %i "$OS/bots/ob2")" = "$i2" ] && [ "$(stat -c %a "$OS/bots/ob1/.env")" = 600 ] &&
+  cmp -s "$HOME/old-shape.ref/config.env" "$OS/config.env" && cmp -s "$HOME/old-shape.ref/peers.json" "$OS/peers.json" && [ -e "$OS/checkin/s1" ] &&
+  [ "$(readlink "$OR/ob1")" = "$OS/bots/ob1" ] && [ "$(readlink "$OR/ob2")" = "$OS/bots/ob2" ] && [ ! -e "$OR/hooks" ] && [ ! -L "$OR/hooks" ] &&
+  [ "$(<"$OR/.gitignore")" = "*" ] && [ ! -e "$OR/config.env" ] && [ ! -e "$OR/peers.json" ] && [ ! -e "$OR/checkin" ] &&
+  [ "$(stat -c %a "$OS")" = 700 ] && [ "$(stat -c %a "$OS/bots")" = 700 ] && [ -e "$MON1/stopped" ] && [ -f "$SCR1/f" ] && grep -qxF "$OLDP" "$OPF" ||
+  { echo "FAIL: compat moves a project's state by rename, leaves a link per bot, and is idempotent: $out / $(find "$OR" "$OS" 2>&1)"; exit 1; }
+snap=$(find "$OR" "$OS" -printf '%p %y %m %i\n' | sort)
+out2=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: a second compat failed: $out2"; exit 1; }
+[ "$(find "$OR" "$OS" -printf '%p %y %m %i\n' | sort)" = "$snap" ] || { echo "FAIL: compat moves a project's state by rename, leaves a link per bot, and is idempotent: the second run changed something: $out2"; exit 1; }
+echo "ok: compat moves a 1.16 project's bots, config.env, peers.json and checkin/ into ~/.claude-discord/projects/<key>/ by rename, leaves a link per bot a job record names, drops the hooks link, keeps the .gitignore, touches no records/monitor or scratch, and a second run changes nothing"
+# (g) the link goes only when no jobs/<id>/state.json names its old path; after the last, discord-agents/ and its .gitignore.
+rm -rf "$JOBS/mv000002"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+[ ! -L "$OR/ob2" ] && [ ! -e "$OR/ob2" ] && [ "$(readlink "$OR/ob1")" = "$OS/bots/ob1" ] && [ -d "$OS/bots/ob2" ] && grep -q mv000001 <<<"$out" && grep -qF "$OR/ob1" <<<"$out" ||
+  { echo "FAIL: the old path goes only when no job record names it: $out / $(ls -la "$OR" 2>&1)"; exit 1; }
+rm -rf "$JOBS/mv000001"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+[ ! -e "$OR" ] && [ ! -L "$OR" ] && [ -d "$OLDP/.claude" ] && [ -d "$OS/bots/ob1" ] || { echo "FAIL: the old path goes only when no job record names it: with none left, discord-agents/ and its .gitignore go: $(ls -la "$OLDP/.claude" 2>&1)"; exit 1; }
+echo "ok: a bot's old-path link stays while a jobs/<id>/state.json names it (compat says which job), goes when none does, and the empty discord-agents/ with its .gitignore after the last"
+# (h) another filesystem (rename(2) refused; a perl stub refuses the move's rename): a bot with a live session is left in
+# place and said; with none, copied, compared, the source removed and the link made.
+OLDX="$HOME/old xdev"; XR="$OLDX/.claude/discord-agents"; mkdir -p "$XR/xb"; printf 'DISCORD_BOT_TOKEN=tx\n' > "$XR/xb/.env"; echo none > "$XR/xb/mode"; printf 'a\nb\n' > "$XR/xb/handoff.md"
+printf "DISCORD_CHANNEL_ID='7'\nDISCORD_USER_ID='8'\n" > "$XR/config.env"
+REALPERL=$(command -v perl); printf '#!/bin/bash\ncase "$*" in *"rename \\$ARGV[0], \\$ARGV[1]"*) exit 1;; esac\nexec %q "$@"\n' "$REALPERL" > "$HOME/bin/perl"; chmod +x "$HOME/bin/perl"
+cp "$HOME/bin/claude" "$HOME/claude.before-xdev"
+printf '#!/bin/bash\ncase $1 in agents) echo %s;; *) echo "PLAIN $*";; esac\n' "'[{\"name\":\"xb\",\"id\":\"xb000001\",\"pid\":1,\"cwd\":\"$OLDX\",\"state\":\"working\"}]'" > "$HOME/bin/claude"
+printf '%s\n' "$OLDX" > "$OPF"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+XS="$HOME/.claude-discord/projects/$(skey "$OLDX")"
+[ -d "$XR/xb" ] && [ ! -L "$XR/xb" ] && [ ! -e "$XS/bots/xb" ] && [ "$(cat "$XS/project" 2>/dev/null)" = "$OLDX" ] && [ -f "$XS/config.env" ] && grep -qF "$XR/xb" <<<"$out" && grep -q 'session' <<<"$out" ||
+  { echo "FAIL: a cross-filesystem move of a running bot waits: $out / $(find "$XR" "$XS" 2>&1)"; exit 1; }
+printf '#!/bin/bash\ncase $1 in agents) echo "[]";; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"
+mkdir -p "$JOBS/xb000001"; jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$XR/xb\"}}" '{sessionId: "0b300000-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JOBS/xb000001/state.json"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+[ "$(readlink "$XR/xb")" = "$XS/bots/xb" ] && [ "$(<"$XS/bots/xb/handoff.md")" = $'a\nb' ] && [ "$(<"$XS/bots/xb/.env")" = DISCORD_BOT_TOKEN=tx ] && [ -z "$(ls -A "$XS/bots" | command grep '^\.')" ] ||
+  { echo "FAIL: with no live session a bot on another filesystem is copied, compared and replaced by a link: $out / $(find "$XR" "$XS" 2>&1)"; exit 1; }
+rm -f "$HOME/bin/perl"; cp "$HOME/claude.before-xdev" "$HOME/bin/claude"; rm -f "$HOME/claude.before-xdev"; rm -rf "$JOBS/xb000001"
+echo "ok: a bot whose directory cannot be renamed (another filesystem) is left in place and said while a session of it runs, and copied, compared and linked once none does"
+# A start in a project of the old shape moves it first (no job record names the bot: no link is left) and launches on the new path.
+OLDS="$HOME/old start"; SR2="$OLDS/.claude/discord-agents"; mkdir -p "$SR2/sb"; printf 'DISCORD_BOT_TOKEN=ts\n' > "$SR2/sb/.env"; echo none > "$SR2/sb/mode"; echo '{}' > "$SR2/sb/access.json"
+printf "DISCORD_CHANNEL_ID='7'\nDISCORD_USER_ID='8'\nDISCORD_ALLOW_IDS=''\n" > "$SR2/config.env"
+out=$(cd "$OLDS" && bash "$S" --name sb 2>&1)
+SS="$HOME/.claude-discord/projects/$(skey "$OLDS")"
+grep -qF -- "\"DISCORD_STATE_DIR\": \"$SS/bots/sb\"" <<<"$out" && [ -f "$SS/bots/sb/.env" ] && [ -f "$SS/config.env" ] && [ ! -e "$OLDS/.claude/discord-agents" ] ||
+  { echo "FAIL: a start in a project of the old shape moves it first and starts on the new path: $out / $(find "$OLDS" "$SS" 2>&1)"; exit 1; }
+printf '%s\n' "$OPFK" > "$OPF"
+echo "ok: a start in a 1.16-shaped project moves its state first and launches on the new path"
+
+
 # Nothing this suite started is still running at the end: a case that detached a keeper or a monitor and did not stop it fails
 # here, by name of the process (sandbox_pids: the sandbox in its argv or as its HOME; an orphaned
 # `/bin/sleep 30` names no path of the suite's). Then the reaping itself, which every exit path runs (the EXIT trap): a decoy

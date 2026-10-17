@@ -870,6 +870,14 @@ out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume ffffffff 2>&1) && { echo 
 grep -q -- 'with --name' <<<"$out" && ! grep -q PLAIN <<<"$out" || { echo "FAIL: the error must name --name: $out"; exit 1; }
 out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --name alpha --resume aaaaaaaa 2>&1)
 grep -q -- '-n alpha' <<<"$out" || { echo "FAIL: an explicit --name wins over the ambiguous job match: $out"; exit 1; }
+# 1.18.0: the record of a session respawned on the path before the move names <project>/.claude/discord-agents/<bot>; a fresh
+# start's names ~/.claude-discord/projects/<key>/bots/<bot>: both find the bot.
+NEWA="$HOME/.claude-discord/projects/$(skey "$P")/bots/alpha" OLDA="$P/.claude/discord-agents/alpha"; mkdir -p "$JR/j5" "$JR/j6"
+jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$OLDA\"}}" '{sessionId: "dddddddd-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JR/j5/state.json"
+jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$NEWA\"}}" '{sessionId: "eeeeeeee-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JR/j6/state.json"
+out=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume dddddddd-1111-2222-3333-444444444444 2>&1) || :; out2=$(CLAUDE_DISCORD_LAUNCHER= bash "$S" --bg --resume eeeeeeee-1111-2222-3333-444444444444 2>&1) || :
+grep -q -- '-n alpha' <<<"$out" && grep -q -- '-n alpha' <<<"$out2" || { echo "FAIL: a session respawned on the old path keeps working through the link: --resume must find the bot from a job record naming either path: $out / $out2"; exit 1; }
+rm -rf "$JR/j5" "$JR/j6"
 rm -rf "$JR/j2" "$JR/j3"
 
 # A live session is not resumed twice; no usable listing starts as before.
@@ -1742,6 +1750,23 @@ age 3700 "$R4/checkin/e1"
 out=$(gate e1 "$CD/x.sh")
 [ "$(reason <<<"$out")" = "$GATE_REASON" ] || { echo "FAIL: a check-in older than 60 minutes must be denied: $out"; exit 1; }
 echo "ok: edit-gate denies claude-discord edits (tracked or untracked, via a symlink, a new file) without a check-in or with a stale one; passes with a fresh one and re-touches it, for gitignored bot state (a handoff.md in a dir not created yet), outside claude-discord and for a non-dev-manager"
+# 1.18.0: a session respawned on the path before the move (its job's respawnFlags froze <project>/.claude/discord-agents/<bot>)
+# runs its hooks through the per-bot link the move left there: the turn lands in the bot's dir, the channel comes from its
+# access.json, the peers from the project's peers.json and the check-in goes to the project's checkin/.
+LK4="$HOME/.claude-discord/projects/$(skey "$P4")"; OLD4="$P4/.claude/discord-agents"
+mkdir -p "$LK4/bots" "$OLD4"; [ -f "$LK4/project" ] || printf '%s\n' "$P4" > "$LK4/project"
+[ -f "$LK4/peers.json" ] || cp "$(pstate "$P4")/peers.json" "$LK4/peers.json"; [ -f "$LK4/config.env" ] || cp "$(pstate "$P4")/config.env" "$LK4/config.env"
+rm -rf "$LK4/bots/mgrl"; cp -a "$R4/mgr" "$LK4/bots/mgrl"; rm -rf "$LK4/bots/mgrl/turns"; ln -sfn "$LK4/bots/mgrl" "$OLD4/mgrl"
+out=$(DISCORD_STATE_DIR="$OLD4/mgrl" CLAUDE_PROJECT_DIR="$P4" bash "$PC/hooks/turn/on-prompt" <<<'{"session_id":"lk1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"42\" message_id=\"559\" user=\"junyong\" user_id=\"901\" ts=\"t\">\nvia the link\n</channel>"}')
+ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out" 2>/dev/null) || ctx=""
+[ "$(cat "$LK4/bots/mgrl/turns/lk1" 2>/dev/null)" = "42 559 901" ] && grep -q 'in channel 42\.' <<<"$ctx" && grep -qxF 'Peers (mention to reach them): dong <@900>, junyong <@901>, mgr <@902>' <<<"$ctx" ||
+  { echo "FAIL: a session respawned on the old path keeps working through the link: $out / $(ls -R "$LK4/bots/mgrl" 2>&1)"; exit 1; }
+DISCORD_STATE_DIR="$OLD4/mgrl" CLAUDE_PROJECT_DIR="$P4" bash "$PC/hooks/turn/on-reply" <<<'{"session_id":"lk1","tool_input":{"text":"<@901> on it"}}' >/dev/null
+[ -f "$LK4/checkin/lk1" ] || { echo "FAIL: a session respawned on the old path keeps working through the link: the check-in must land in the project's checkin/: $(ls -R "$LK4" 2>&1)"; exit 1; }
+out=$(DISCORD_STATE_DIR="$OLD4/mgrl" CLAUDE_PROJECT_DIR="$P4" bash "$G/edit-gate" <<<"{\"session_id\":\"lk1\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$CD/x.sh\"}}")
+[ -z "$out" ] || { echo "FAIL: a session respawned on the old path keeps working through the link: edit-gate must see the fresh check-in: $out"; exit 1; }
+rm -rf "$LK4/bots/mgrl" "$LK4/checkin/lk1"; rm -f "$OLD4/mgrl"; rmdir "$OLD4" 2>/dev/null || :
+echo "ok: a session respawned on the old <project>/.claude/discord-agents/<bot> path runs its hooks through the per-bot link: the turn in bots/<bot>/turns, the channel from access.json, the peers from the project's peers.json, the check-in in its checkin/"
 
 # thread-guard: the channel keeps short lines, the long text goes in a
 # thread. 500 is counted in CHARACTERS, so a Korean line well over 500 bytes
@@ -2963,6 +2988,15 @@ out=$(PATH="$HOME/psbin:$PATH" CLAUDE_DISCORD_PROC="$FP" bash "$S" health --json
 [ "$(field_of sbot servers "$out")" = 1 ] || { echo "FAIL: a telegram-shaped bun server with sbot's DISCORD_STATE_DIR must not be counted (Linux): $out"; exit 1; }
 rm -rf "$HOME/psbin" "$HOME/ps.argv" "$HOME/ps.env" "$HOME/ps.calls" "$HOME/ps.fail" "$FP"
 echo "ok: without /proc the servers are counted from ps -axww argv first, then ps -Eww -p for those pids only (never -ax); another bot's server and a shell with the same state dir do not count; a telegram plugin server with the bot's state dir does not count (macOS and Linux); a failing ps is unknown"
+# 1.18.0: a server whose environ names the bot's path before the move (<project>/.claude/discord-agents/<bot>: a job
+# respawned on it) counts as one on the path after it does: a moved bot never reads as down.
+NEWSD="$HOME/.claude-discord/projects/$(skey "$SP")/bots/sbot" OLDSD="$SP/.claude/discord-agents/sbot"
+start_server "$OLDSD"; start_server "$NEWSD"
+queue "200 $NONE" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(field_of sbot servers "$out")" = 3 ] || { echo "FAIL: health counts a server under either path: $(field_of sbot servers "$out") servers: $out"; exit 1; }
+stop_one_server "$NEWSD"; stop_one_server "$OLDSD"
+echo "ok: health counts a bun server whose DISCORD_STATE_DIR is the bot's path before the move as well as one on its path after it"
 stop_servers
 cd "$HP"
 
