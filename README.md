@@ -494,7 +494,7 @@ token, its name and a new bot are written by one verb, at a terminal, as
 claude-discord bot <bot> token          # a new token for the bot; the current one is never read
 claude-discord bot <bot> rename <new>   # Discord first, then everything here keyed by the name
 claude-discord bot add [--mode none|dev-manager|autoresearchclaw] [--start]   # a new bot, named by its token
-claude-discord bot <bot> recover [--fresh]   # a down bot brought back: its last session respawned, or a fresh start
+claude-discord bot <bot> recover [--fresh]   # a down or stuck bot brought back: its last session respawned (conversation kept), or a fresh start
 ```
 
 - **token** reads the token with the terminal's echo off (`Token (hidden): `),
@@ -545,7 +545,8 @@ claude-discord bot <bot> recover [--fresh]   # a down bot brought back: its last
   whose directory is there.
   `y` runs `setup <name>` with its answers on its stdin (the mode, Enter for
   the rest), keeps the id, and `--start` starts it (`--bg --name`).
-- **recover** (1.16.0; the TUI's `f` and `F`) brings a `down` bot back, and
+- **recover** (1.16.0; the TUI's `f` and `F`) brings a `down` or a `stale`
+  bot back with its conversation, and
   decides on the bot's own machine, the only place that can look: it reads
   `<bot dir>/pinned-job` (the job id of the last background session the bot
   pinned, written at every startup and resume), else the newest marker in
@@ -557,15 +558,28 @@ claude-discord bot <bot> recover [--fresh]   # a down bot brought back: its last
   session back under the same id and sessionId with a new process, its
   conversation kept and its hooks run again (on-session-start starts the
   keeper and primes it; a respawned worker may sit idle until the next
-  message). None listed: `run: cd <project> && claude-discord --bg --name
+  message). When the session's current id (`~/.claude/sessions/<pid>.json`,
+  which follows a `/clear` and a handover-and-takeover) is not the one its
+  job record holds, a respawn would bring the old conversation back (cswap,
+  2026-10-17), so the plan is `claude stop <id>, then cd <project> &&
+  claude-discord --bg --name <bot> --resume <current id>` instead (1.17.1).
+  None listed: `run: cd <project> && claude-discord --bg --name
   <bot>` (a fresh session; `handoff.md` is folded in when there is one),
   refused before the question when the workspace is not trusted (a `claude
   --bg` start would refuse). Two or more listed: refused, both named (two on
-  one token both answer; which copy to stop is yours). `--fresh`, for a
-  `stale` bot, is `refresh --force` in the foreground: every listed session
+  one token both answer; which copy to stop is yours). `--fresh` is
+  `refresh --force` in the foreground: every listed session
   stopped (a stop that fails starts nothing and names what did stop), then
   `--bg --name` with `Catch up on the channel.` as its first turn; the
-  conversation is lost unless a `handoff.md` is there. It prints its plan
+  conversation is lost unless a `handoff.md` is there. It is the CLI's alone
+  (the TUI never sends it since 1.17.1: a `STUCK` row says "no answer on
+  Discord for 15 minutes", not "wedged", and on 2026-10-17 `f` discarded 7 h
+  of a cswap session's work that way), and it is refused, before the
+  question, while a transcript of the bot's session
+  (`~/.claude/projects/<project key>/<sid>.jsonl`, the sid from
+  `plugin-sessions/`, so the id the session has now) changed within the last
+  15 minutes: a working session is not a wedged one. To discard it anyway,
+  stop it by hand (`claude stop <id>`) and run `recover` again. It prints its plan
   with the `run:` line, asks once (`Recover <bot>? [y/N]`, after the marker),
   runs the command and passes its status on; nothing runs on `n` or without a
   terminal, and it does not wait for the plugin server: the monitor's next
@@ -1112,7 +1126,16 @@ Three things would make that signal cry wolf, and each is filtered:
   session was reported stale with a `--force` refresh as the suggested fix.
   Anything unknown there (no `claude`, a listing that fails) counts as
   working: a missed finding is recoverable, one telling someone to
-  force-refresh a busy session is not. That hold is capped at six runs in a
+  force-refresh a busy session is not. Before any of that (1.17.1): a
+  transcript of one of the bot's sessions
+  (`~/.claude/projects/<project key>/<sid>.jsonl`, the sid from the hooks'
+  `plugin-sessions/` markers, so the id the session has now) that changed
+  within the last 15 minutes makes the verdict `busy` ("it is working, not on
+  Discord"), with no 4 h cap: cswap on 2026-10-17 worked 7 h on cross-session
+  messages, read `STUCK`, and the TUI's `f` discarded it. The cost of that
+  rule: a session looping for ever keeps its transcript moving and reads
+  `busy` until it stops; the TUI's `busy` detail names the unanswered time,
+  which is where to look. That hold is capped at six runs in a
   row and 25 minutes since the first of them (both: a pass can be asked for,
   so six runs may be seconds apart), because `claude agents` failing repeatedly means the
   daemon itself is unwell — exactly when a bot breaks — and holding for ever
@@ -1527,19 +1550,20 @@ A problem row has its recovery command on a line of its own under it, and `c`
 copies it (OSC 52, so over ssh too, in a terminal that allows it; no other
 row has one to copy). On a `down` or `STUCK` row the line also names `f` and
 `F` (1.16.0): `f` recovers the selected bot through `claude-discord bot <bot>
-recover` (`recover --fresh` for a stuck one) on the bot's host, run at once on
-a pseudo-terminal the TUI holds; the host decides what runs (`claude respawn`
-of the bot's last session while `claude agents` still lists it, else `--bg
---name`; `--fresh` stops every listed session first), prints it, and its one
+recover` on the bot's host (never `recover --fresh`, since 1.17.1), run at
+once on a pseudo-terminal the TUI holds; the host decides what runs (`claude
+respawn` of the bot's last session while `claude agents` still lists it, a
+stop and `--bg --resume <current id>` when the session's id moved on after a
+`/clear`, else `--bg --name`), prints it, and its one
 question is the popup: `y` runs it, `n` or `esc` runs nothing. `F` lists every
 row `f` would take, in the table's order (the problem rows it refuses are
 listed as skipped), asks once, runs them one after the other, answering each
 command's own question itself, runs to the end, lists `✓ <bot>` and `✕ <bot>
 (exit N)` with the command's last lines, and asks the monitor for one pass;
 `esc` before a run's `y` stops it and skips the rest; after a `y` the run is
-waited for and the rest of the batch is not started. A `STUCK` row whose
-`servers` is 0 (health's "no plugin server: the bot is down") gets `recover`,
-not `--fresh`: the respawn keeps its conversation. Both keys act on the
+waited for and the rest of the batch is not started. A `STUCK` row gets the
+same `recover` as a `DOWN` one (1.17.1): the respawn keeps its conversation,
+and the popup says where the discarding form lives. Both keys act on the
 verdict of the last pass, up to one pass old (the row's `since`); a bot that
 came back since is respawned or restarted all the same, which the next pass
 shows. Neither changes the row: the next pass says whether the bot
@@ -1739,7 +1763,7 @@ rest of Claude Code.
 | `refresh` says `<dir> is not a trusted workspace` | `claude --bg` refuses to start in a workspace whose trust was never accepted, and the foreground path does not, so a bot moved to the background with `/bg` can run for weeks without meeting that gate. Run `claude` in the project once and accept the prompt, then retry; `--force` refreshes anyway. The check reads `hasTrustDialogAccepted` and fails **open**, so anything but an explicit `false` proceeds |
 | `refresh` says `start failed, so <bot>'s handoff was put back` | the fresh session did not come up (the line above it says why). The launch consumes `handoff.md` before starting claude, so it is moved back and the retry is not refused for want of one |
 | `claude-discord health: <bot> down` / `[down] <bot>` in `#bot-health-check` | no plugin server for the bot: its session is gone or its worker died. The pasted fix is `cd <project> && claude-discord --bg --name <bot>`; `claude-discord bot <bot> recover` (the TUI's `f` on the row) respawns the bot's last session instead when `claude agents` still lists it (its conversation kept), and starts a fresh one only otherwise |
-| `claude-discord health: <bot> stale — ... hooks or its turn are stuck` | the plugin server is up and the bot still is not answering: the hooks died (see the upgrade row above) or a turn is wedged. `claude-discord refresh <bot> --force`; or `claude-discord bot <bot> recover --fresh` (the TUI's `f` on the row), which is the same stop-then-start with the plan shown first |
+| `claude-discord health: <bot> stale — ... hooks or its turn are stuck` | the plugin server is up and the bot still is not answering: the hooks died (see the upgrade row above) or a turn is wedged. First `claude-discord bot <bot> recover` (the TUI's `f` on the row): a respawn, the conversation kept. `claude-discord refresh <bot> --force` and `claude-discord bot <bot> recover --fresh` discard it (the latter refuses while a transcript of the session moved in the last 15 minutes: a session busy with something other than Discord reads `busy`, not `stale`, since 1.17.1) |
 | `claude-discord health: <bot> duplicate` | two plugin servers share one token, so every reply is sent twice. `/bg` from a foreground session and a fleet spare both respawn a session without going through the wrapper. `claude agents` lists them; stop the one that is not the bot's |
 | `claude-discord health: <bot> unreachable` | Discord answered 401 or 403: the token was refused, or the bot cannot read the channel. Check `DISCORD_BOT_TOKEN` in `<bot>/.env` and the bot's channel permissions |
 | `claude-discord health: <bot> throttled` / `apierror` | Discord rate-limited (429) or did not answer (000, 5xx). The token was *not* rejected, so nothing is said about the bot this run — these are deliberately not reported as a credential problem |

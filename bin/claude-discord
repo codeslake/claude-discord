@@ -135,6 +135,22 @@ cd_here=$PWD self_root=""
 ! { cd -- "${self_path%/*}/.." && cd -P .; } 2>/dev/null || self_root=$PWD   # ${..%/*}, not dirname: one fork less
 cd -- "$cd_here" 2>/dev/null || { echo "claude-discord: could not return to $cd_here" >&2; exit 1; }
 
+# proj_key <absolute path>: Claude Code's folder for the project under ~/.claude/projects, where its transcripts are:
+# every non-alphanumeric byte a dash (1.17.1; the C locale keeps the ranges ASCII, as c_match's). Known to differ from
+# Claude Code's for a non-ASCII path (one byte a dash here, one UTF-16 unit there) and past 200 characters (truncated
+# and hashed there): the transcript is then not found, which reads as "not moving".
+proj_key() { local LC_ALL=C; printf '%s\n' "${1//[^A-Za-z0-9]/-}"; }
+# transcript_moved <bot dir> <minutes>: 0 when a transcript (<key of this project>/<sid>.jsonl) of a session this
+# bot's hooks marked (plugin-sessions/<sid>: the id the session has NOW, after a /clear or a takeover too) changed
+# within <minutes>. The session is then working, whatever Discord sees of it (1.17.1: `recover --fresh` and a stale
+# verdict must not take a working session for a wedged one; cswap lost 7 h of work that way on 2026-10-17).
+transcript_moved() {
+  local f s n=()
+  for f in "$1"/plugin-sessions/*; do s=${f##*/}; case $s in '*'|*[!0-9a-f-]*) continue;; esac; n+=(-o -name "$s.jsonl"); done
+  [ "${#n[@]}" -gt 0 ] || return 1
+  [ -n "$(find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(proj_key "$(pwd -P)")" -maxdepth 1 -mmin "-$2" \( "${n[@]:1}" \) -print -quit 2>/dev/null)" ]
+}
+
 # monitor: the backend health monitor of a manager bot (monitor/monitor.sh has
 # the whole story). --keep and --stop are for people; --ensure is the TUI's and the hooks'.
 if [ "${1:-}" = monitor ]; then

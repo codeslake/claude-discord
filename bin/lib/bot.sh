@@ -344,13 +344,27 @@ if [ "${1:-}" = bot ]; then
       else b_found="its session $b_id is listed by claude agents (by its name or its job record, pid $b_pid)"; fi
     elif [ -n "$b_pin$b_sid" ]; then b_found="its last session ${b_pin:-$b_sid} ($([ -n "$b_pin" ] && echo pinned-job || echo plugin-sessions)) is not listed by claude agents as started in $PWD, and no session of $bn started there is"
     else b_found="it has no last session on record (no pinned-job, no plugin-sessions marker), and no session of $bn started in $PWD is listed"; fi
+    # --fresh discards the conversation, so a session whose transcript moved in the last 15 minutes (working: a long turn,
+    # or on something that is not Discord) is not taken for a wedged one (1.17.1; cswap lost 7 h of work on 2026-10-17).
+    if [ -n "$b_fresh" ] && transcript_moved "$d" 15; then
+      echo "claude-discord: bot: a transcript of $bn's session changed within the last 15 minutes: it is working (a long turn, or on something other than Discord), which --fresh would discard. recover without --fresh keeps the conversation; to discard it anyway, stop the session by hand first (${b_stops:-claude stop <id>}), then recover; nothing was run" >&2; exit 1
+    fi
     if [ -n "$b_fresh" ]; then b_do=fresh b_cmd="claude-discord --bg --name $bn"
     elif [ "$b_n" -ge 2 ]; then
       echo "claude-discord: bot: $b_n sessions of $bn are listed ($b_names): two on one token both answer. Stop the copy by hand (claude stop <id>), or recover --fresh stops every one and starts one; nothing was run" >&2; exit 1
     elif [ "$b_n" = 1 ] && [ "$b_id" = - ]; then
       # A foreground session (no job record: started at a terminal, or /bg'd) is not the daemon's to respawn.
       echo "claude-discord: bot: the one listed session of $bn is a foreground one (pid $b_pid, no job id), which claude respawn cannot restart: stop it by hand, or recover --fresh stops it and starts a background one; nothing was run" >&2; exit 1
-    elif [ "$b_n" = 1 ]; then b_do=respawn b_cmd="claude respawn $b_id"
+    elif [ "$b_n" = 1 ]; then
+      # The session the process runs NOW (~/.claude/sessions/<pid>.json, kept current through /clear and a takeover)
+      # against the one its job record started with: when they differ, claude respawn would bring the old one back
+      # (cswap, 2026-10-17: 8f1ba77e respawned while the conversation lived in 3df5c3fb), so the job is stopped and
+      # the current id resumed under a new job instead. Either unreadable: the respawn, as before.
+      b_now=$(jq -r '.sessionId // empty' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$b_pid.json" 2>/dev/null) || b_now=""
+      b_was=$(jq -r '.sessionId // empty' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/jobs/$b_id/state.json" 2>/dev/null) || b_was=""
+      c_match "$b_now" '^[0-9a-f-]{8,64}$' || b_now=""
+      if [ -n "$b_now" ] && [ -n "$b_was" ] && [ "$b_now" != "$b_was" ]; then b_do=takeover b_cmd="claude-discord --bg --name $bn --resume $b_now"
+      else b_do=respawn b_cmd="claude respawn $b_id"; fi
     else b_do=start b_cmd="claude-discord --bg --name $bn"; fi
     # Trust before anything is stopped: a `claude --bg` start refuses an untrusted workspace (fail-open, as refresh).
     [ "$b_do" = respawn ] || ! untrusted || { echo "claude-discord: bot: $PWD is not a trusted workspace, so a --bg start would refuse: run 'claude' here once and accept the trust prompt; nothing was run" >&2; exit 1; }
@@ -358,6 +372,7 @@ if [ "${1:-}" = bot ]; then
     case $b_do in
       respawn) echo "    run: $b_cmd    (the session comes back under the same id with a new process; its conversation is kept, and its hooks run again)";;
       start) echo "    run: cd $PWD && $b_cmd    (a fresh session; handoff.md is folded in when there is one)";;
+      takeover) echo "    run: $b_stops, then cd $PWD && $b_cmd    (its conversation moved on to session $b_now since its job record's $b_was: a /clear or a takeover; claude respawn would bring the old one back, so the current one is resumed under a new job)";;
       *) if [ -n "$b_stops" ]; then echo "    run: $b_stops, then cd $PWD && $b_cmd    (every listed session stopped first; a fresh session, its conversation lost unless handoff.md is there)"
          else echo "    run: cd $PWD && $b_cmd    (no session of $bn is listed, so nothing is stopped; a fresh session)"; fi;;
     esac
@@ -365,7 +380,7 @@ if [ "${1:-}" = bot ]; then
     b_ask "Recover $bn?"
     # b_rlog <command> <exit>: a line in the bot's recover.log, in the shape of access.log's.
     b_rlog() { (umask 077; printf '%s %s %s recover%s: %s (exit %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$b_host_name" "${b_fresh:+ --fresh}" "$1" "$2" >> "$d/recover.log") 2>/dev/null || :; }
-    if [ "$b_do" = fresh ] && [ -n "$b_rows" ] && ! stop_sessions "$bn" "$b_rows"; then
+    if { [ "$b_do" = fresh ] || [ "$b_do" = takeover ]; } && [ -n "$b_rows" ] && ! stop_sessions "$bn" "$b_rows"; then
       # Nothing is started: a start beside a session that still runs puts two sessions on one token.
       b_rlog "$b_stops" 1
       echo "claude-discord: bot: $bn still runs after stop (pid ${alive[*]}): nothing was started${stopped_ids:+; stopped: $stopped_ids}. Stop it by hand (claude stop <id>), then claude-discord --bg --name $bn" >&2; exit 1
@@ -374,6 +389,7 @@ if [ "${1:-}" = bot ]; then
     case $b_do in
       respawn) claude respawn "$b_id" || b_rc=$?;;
       fresh) start_fresh "$self_path" "$bot" "$d" "Catch up on the channel." || b_rc=$?;;
+      takeover) start_fresh "$self_path" "$bot" "$d" --resume "$b_now" || b_rc=$?;;
       *) start_fresh "$self_path" "$bot" "$d" || b_rc=$?;;
     esac
     b_rlog "$b_cmd" "$b_rc"

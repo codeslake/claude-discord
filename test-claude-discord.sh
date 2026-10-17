@@ -3142,12 +3142,12 @@ guild_of() { local c="" g="" n="" t=""; { read -r c g n t < "$1/channel-guild"; 
 printf '\n900\n111\n222\ntokH\nn\n' | bash "$S" setup b1ok --scope project >/dev/null
 # The other bots are b1ok's twin under their own name and token (b5all with requireMention false, which is what setup writes
 # for a "y" answer): health only reads a bot's state dir, and setup is asserted above, so copies replace seven wrapper runs.
-for b in b2stale b3down b4busy b6dup b7reply b8cap; do
+for b in b2stale b3down b4busy b6dup b7reply b8cap b9txn; do
   cp -a "$HR/b1ok" "$HR/$b"; printf 'DISCORD_BOT_TOKEN=tok%s\n' "$b" > "$HR/$b/.env"
 done
 cp -a "$HR/b1ok" "$HR/b5all"; printf 'DISCORD_BOT_TOKEN=tokb5all\n' > "$HR/b5all/.env"
 jq '.groups |= map_values(.requireMention = false)' "$HR/b1ok/access.json" > "$HR/b5all/access.json"   # requireMention false
-for b in b1ok b2stale b3down b4busy b5all b6dup b7reply; do
+for b in b1ok b2stale b3down b4busy b5all b6dup b7reply b9txn; do
   echo "$ID_SEEN" > "$HR/$b/last-message-id"; seed_id "$HR/$b"; seed_guild "$HR/$b"
 done
 seed_id "$HR/b8cap"; seed_guild "$HR/b8cap"
@@ -3286,8 +3286,17 @@ mkdir -p "$HR/b2stale/turns" "$HR/b4busy/turns" "$HR/b8cap/turns"
 : > "$HR/b2stale/turns/s1"; touch -d '3 hours ago' "$HR/b2stale/turns/s1"
 : > "$HR/b4busy/turns/s1"
 : > "$HR/b8cap/turns/s1"
+# 1.17.1: a session whose transcript (~/.claude/projects/<Claude Code's folder for this project>/<sid>.jsonl, the sid from
+# the hooks' plugin-sessions marker, so the id the session has NOW, after a /clear too) changed within stale_min is
+# working, on a long turn or on something that is not Discord: b9txn's did just now (held, busy, whatever its turn file
+# says), b2stale's 20 minutes ago (no hold). The folder is Claude Code's: every non-alphanumeric byte a dash.
+TD="$HOME/.claude/projects/$(cd -P "$HP" && LC_ALL=C && printf '%s' "${PWD//[^A-Za-z0-9]/-}")"
+mkdir -p "$TD" "$HR/b9txn/plugin-sessions" "$HR/b2stale/plugin-sessions"
+: > "$HR/b9txn/plugin-sessions/9999aaaa-1111-2222-3333-444444444444"; : > "$TD/9999aaaa-1111-2222-3333-444444444444.jsonl"
+: > "$HR/b2stale/plugin-sessions/2222aaaa-1111-2222-3333-444444444444"; : > "$TD/2222aaaa-1111-2222-3333-444444444444.jsonl"
+touch -d '20 minutes ago' "$TD/2222aaaa-1111-2222-3333-444444444444.jsonl"
 
-# ONE run, eight bots, every verdict and every filter at once.
+# ONE run, nine bots, every verdict and every filter at once.
 #   b1ok    three messages that must all be ignored: the bot's own, one from
 #           an author outside allowFrom (the plugin drops those before any
 #           hook runs, so last-message-id could never catch up and an alert
@@ -3302,6 +3311,7 @@ mkdir -p "$HR/b2stale/turns" "$HR/b4busy/turns" "$HR/b8cap/turns"
 #   b6dup   answering fine, but two servers share its token
 #   b7reply no mention at all, a reply to one of the bot's own messages
 #   b8cap   past the 4 h ceiling, so even a fresh turn stops holding it
+#   b9txn   an old mention, no turn file, but its transcript moved just now: working elsewhere, held (1.17.1)
 queue
 qbot "[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"777\"},\"mentions\":[{\"id\":\"777\"}]},{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"999\"},\"mentions\":[{\"id\":\"777\"}]},{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"111\"},\"mentions\":[]}]"
 qbot "$MENTION"
@@ -3311,7 +3321,10 @@ qbot "[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"111\"},\"mentions\":[]}]"
 qbot "$NONE"
 qbot "[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"111\"},\"mentions\":[],\"referenced_message\":{\"author\":{\"id\":\"777\"}}}]"
 qbot "[{\"id\":\"$ID_ANCIENT\",\"author\":{\"id\":\"111\"},\"mentions\":[{\"id\":\"777\"}]}]"
+qbot "$MENTION"
 out=$(bash "$S" health --json 2>/dev/null) && { echo "FAIL: health must exit non-zero when any bot has a finding"; exit 1; }
+[ "$(verdict_of b9txn "$out")" = busy ] && [[ $(detail_of b9txn "$out") == *'transcript of its session changed within the last 15m'* ]] ||
+  { echo "FAIL: a session whose transcript moved within 15 minutes is working, not stuck (busy, the transcript named): $(jq -c '.[] | select(.bot=="b9txn")' <<<"$out")"; exit 1; }
 [ "$(verdict_of b1ok "$out")" = ok ] || { echo "FAIL: the bot's own messages, an author outside allowFrom and an unmentioned one must all be ignored: $(jq -c '.[0]' <<<"$out")"; exit 1; }
 [ "$(verdict_of b2stale "$out")" = stale ] || { echo "FAIL: an old unanswered mention must be stale: $out"; exit 1; }
 case $(detail_of b2stale "$out") in
@@ -4777,6 +4790,30 @@ rm -f "$HOME/claude.calls"; bt - y acc recover --fresh; A="$BRC $BO"; kill -0 "$
 [[ $A == 0*"    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc"*"stopping acc (acc11111, pid $OLD)"*"LAUNCHER "*" -n acc "*"ran claude-discord --bg --name acc (exit 0)"*" gone1" ]] &&
   [ "$(<"$HOME/claude.calls")" = "STOP acc11111" ] || { echo "FAIL: bot recover --fresh with one listed session stops it before the fresh start: $A / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
 sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; rm -f "$HOME/claude.calls"
+# 1.17.1 (the cswap loss of 2026-10-17): --fresh while a transcript of the bot's session changed in the last 15 minutes is
+# refused before the question, nothing stopped: a working session is not a wedged one. The session's marker names the id
+# it has NOW (a /clear or a takeover changed it since the listing's sessionId), so that id's transcript is the one read.
+# 20 minutes old: allowed again (the plan, exit 3 with no terminal).
+TDA="$HOME/.claude/projects/$(cd -P "$MP" && LC_ALL=C && printf '%s' "${PWD//[^A-Za-z0-9]/-}")"
+mkdir -p "$TDA" "$AD/plugin-sessions"; : > "$AD/plugin-sessions/3df5c3fb-1111-2222-3333-444444444444"; : > "$TDA/3df5c3fb-1111-2222-3333-444444444444.jsonl"
+rc=0; out=$(bash "$S" bot acc recover --fresh </dev/null 2>&1) || rc=$?
+touch -d '20 minutes ago' "$TDA/3df5c3fb-1111-2222-3333-444444444444.jsonl"
+rc2=0; out2=$(bash "$S" bot acc recover --fresh </dev/null 2>&1) || rc2=$?
+[ "$rc" = 1 ] && grep -q "a transcript of acc's session changed within the last 15 minutes" <<<"$out" && [[ $out != *"run: "* ]] && [ ! -e "$HOME/claude.calls" ] && kill -0 "$OLD" 2>/dev/null &&
+  [ "$rc2" = 3 ] && grep -q "^    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc" <<<"$out2" ||
+  { echo "FAIL: recover --fresh is refused while a transcript of the bot's session (by its current marker) changed in the last 15 minutes, and allowed once it is older: rc=$rc $out / rc=$rc2 $out2 / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
+rm -f "$AD/plugin-sessions/3df5c3fb-1111-2222-3333-444444444444"
+# The job's conversation moved on (a /clear or a handover-and-takeover: ~/.claude/sessions/<pid>.json names the session
+# the process runs NOW, the job record the one it started with): claude respawn would bring the old one back, so the plan
+# is a stop and a --bg --resume of the current id under a new job; y runs both. The same ids: a respawn, as above.
+mkdir -p "$HOME/.claude/jobs/acc11111" "$HOME/.claude/sessions"
+echo '{"sessionId":"0123abcd-1111-2222-3333-444444444444"}' > "$HOME/.claude/jobs/acc11111/state.json"
+echo "{\"sessionId\":\"3df5c3fb-1111-2222-3333-444444444444\",\"jobId\":\"acc11111\",\"pid\":$OLD}" > "$HOME/.claude/sessions/$OLD.json"
+bt - y acc recover; A="$BRC $BO"; kill -0 "$OLD" 2>/dev/null || A="$A gone1"
+[[ $A == 0*"its last session acc11111 (pinned-job) is listed by claude agents"*"    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc --resume 3df5c3fb-1111-2222-3333-444444444444    (its conversation moved on to session 3df5c3fb-1111-2222-3333-444444444444 since its job record's 0123abcd-1111-2222-3333-444444444444"*"stopping acc (acc11111, pid $OLD)"*"LAUNCHER "*" -n acc "*"--resume 3df5c3fb-1111-2222-3333-444444444444"*"ran claude-discord --bg --name acc --resume 3df5c3fb-1111-2222-3333-444444444444 (exit 0)"*" gone1" ]] &&
+  [ "$(<"$HOME/claude.calls")" = "STOP acc11111" ] && [[ $A != *RESPAWN* ]] ||
+  { echo "FAIL: a session whose current id (sessions/<pid>.json) differs from its job record's is stopped and resumed under its current id, not respawned: $A / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
+rm -rf "$HOME/.claude/jobs/acc11111" "$HOME/.claude/sessions/$OLD.json"; sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; rm -f "$HOME/claude.calls"
 # Its last session is not listed as started here (its pinned job runs in another project, and the newest plugin-sessions
 # marker names a session that is not listed): a fresh --bg start, after the question. An untrusted workspace is refused
 # before the marker, nothing asked. With no pinned-job, the marker whose session IS listed finds the session.
@@ -4789,7 +4826,7 @@ rc=0; out=$(bash "$S" bot acc recover </dev/null 2>&1) || rc=$?; cp "$HOME/cj.ke
 rm -f "$AD/pinned-job"; cp "$HOME/claude.live" "$HOME/bin/claude"; BRC=0; BO=$(bash "$S" bot acc recover </dev/null 2>&1) || BRC=$?
 [[ $A == 0*"its last session 0e1a2222 (pinned-job) is not listed by claude agents"*"    run: cd $MP && claude-discord --bg --name acc"*$'\n'"$MK"$'\n'"Recover acc? [y/N] y"*"LAUNCHER "*" -n acc "*"claude-discord: bot: ran claude-discord --bg --name acc (exit 0)"* ]] &&
   [[ $A != *RESPAWN* ]] && [ ! -e "$HOME/claude.calls" ] && [ "$(tail -n 1 "$AD/recover.log" | cut -d' ' -f4-)" = "recover: claude-discord --bg --name acc (exit 0)" ] &&
-  [ "$rc" = 1 ] && grep -q "$MP is not a trusted workspace, so a --bg start would refuse" <<<"$out" && [[ $out != *"$MK"* ]] && [[ $out != *"run: "* ]] && [ "$(wc -l < "$AD/recover.log" | tr -d ' ')" = 4 ] &&
+  [ "$rc" = 1 ] && grep -q "$MP is not a trusted workspace, so a --bg start would refuse" <<<"$out" && [[ $out != *"$MK"* ]] && [[ $out != *"run: "* ]] && [ "$(wc -l < "$AD/recover.log" | tr -d ' ')" = 5 ] &&
   [ "$BRC" = 3 ] && grep -q 'its last session acc11111 (plugin-sessions) is listed by claude agents' <<<"$BO" && grep -q '^    run: claude respawn acc11111' <<<"$BO" ||
   { echo "FAIL: bot recover starts a fresh --bg session when no last session is listed, refuses an untrusted workspace before asking, and finds the session by its plugin-sessions marker: $A / rc=$rc $out / rc=$BRC $BO / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
 # Two listed sessions: refused before the question, both named (exit 1), nothing run; --fresh stops every one, then
@@ -4828,7 +4865,7 @@ rc3=0; out3=$(bash "$S" bot acc recover --fresh </dev/null 2>&1) || rc3=$?   # -
   [ "$rc3" = 3 ] && grep -qx '    its one listed session is a foreground one (pid 4242, no job id)' <<<"$out3" && grep -q "^    run: kill 4242, then cd $MP && claude-discord --bg --name acc" <<<"$out3" ||
   { echo "FAIL: bot recover with a failing claude agents, or with only a foreground session listed, runs nothing (exit 1), and --fresh names that session as a foreground one: rc=$rc $out / rc=$rc2 $out2 / rc=$rc3 $out3"; exit 1; }
 cp "$HOME/claude.keep" "$HOME/bin/claude"; kill "$OLD" 2>/dev/null || :; rm -rf "$AD/pinned-job" "$AD/plugin-sessions" "$AD/recover.log" "$HOME/claude.calls" "$HOME/old2.pid"
-echo "ok: bot recover: a bad word and its own session refused (exit 2); no terminal prints the plan (exit 3); its last session (pinned-job, then the newest plugin-sessions marker) listed as started here is respawned after the one question, logged, its status passed on; none listed: a fresh --bg start, an untrusted workspace refused before the question; two listed refused, --fresh stops every one then starts one, a stop that fails starts nothing; a failed listing runs nothing; --host needs 1.16.0 and sends the act under ssh -t"
+echo "ok: bot recover: a bad word and its own session refused (exit 2); no terminal prints the plan (exit 3); its last session (pinned-job, then the newest plugin-sessions marker) listed as started here is respawned after the one question, logged, its status passed on, or, when its current session id (sessions/<pid>.json) differs from its job record's, stopped and resumed under the current id; none listed: a fresh --bg start, an untrusted workspace refused before the question; two listed refused, --fresh stops every one then starts one, a stop that fails starts nothing, a transcript that moved within 15 minutes refuses --fresh; a failed listing runs nothing; --host needs 1.16.0 and sends the act under ssh -t"
 # bot add: no terminal, nothing is read (exit 3). A bot whose Discord name is no name here (it is renamed on Discord
 # first), and one set up here already (its id in a bot-id: one token, one session), are refused; nothing is written.
 # So are a user's token (no bot), and a manager whose name has a backend on this machine.

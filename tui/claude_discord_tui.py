@@ -344,16 +344,15 @@ def fix_of(state: dict, b: dict) -> str:
 
 
 def recoverable(state: dict, b: dict) -> str:
-    """What `f` runs for this row (1.16.0): "recover" for a down bot, "recover --fresh" for a stale one, "" for every
-    other verdict (a duplicate's fix is a choice, an unreachable one's the token; a warning's is a re-check), a bot of a
-    host the last pass could not reach (the command would go through it, and the verdict is not a current one), and a
-    row that is no bot the CLI can reach (bot_row's own test)."""
+    """What `f` runs for this row (1.16.0): "recover" for a down or a stale bot, "" for every other verdict (a
+    duplicate's fix is a choice, an unreachable one's the token; a warning's is a re-check), a bot of a host the last
+    pass could not reach (the command would go through it, and the verdict is not a current one), and a row that is no
+    bot the CLI can reach (bot_row's own test). Never "recover --fresh" (1.17.1): it discards the conversation, and a
+    STUCK row is not proof the session is wedged (cswap, 2026-10-17: working on something else for 7 h; `f` ran --fresh
+    on it). --fresh is the CLI's alone, and the CLI refuses it while the session's transcript moves."""
     if cut_off(state, b) or not (txt(b.get("bot")) and txt(b.get("project")) and ALIAS.fullmatch(txt(b.get("host")))):
         return ""
-    v = txt(b.get("verdict"))
-    # A stale bot with no plugin server is down (health: "no plugin server: the bot is down"): the respawn keeps its
-    # conversation, where --fresh would stop and lose it (I1 of the 1.16.0 review).
-    return "recover" if v == "down" or (v == "stale" and txt(b.get("servers")) == "0") else "recover --fresh" if v == "stale" else ""
+    return "recover" if txt(b.get("verdict")) in ("down", "stale") else ""
 
 
 def status_head(state: dict, b: dict, now: float) -> tuple[str, str]:
@@ -2470,18 +2469,18 @@ class BotAdd(BotPopup):   # not a BotToken: Textual runs each class's on_mount
 
 
 # ---- recover: the recovery keys f and F (1.16.0) ------------------------------
-# `claude-discord bot <bot> recover [--fresh]` on the bot's host, through the pty as the other bot popups: the host
-# decides what runs (claude respawn of the bot's last session while claude agents lists it, else --bg --name; --fresh
-# stops every listed session first), prints it and asks. The row is not changed here: the monitor is asked for one pass.
-R_HOW = {"recover": "the host decides: claude respawn of its last session while claude agents still lists it, else --bg --name",
-         "recover --fresh": "every listed session of it stopped, then --bg --name (its conversation is lost unless it left a handoff.md)"}
+# `claude-discord bot <bot> recover` on the bot's host, through the pty as the other bot popups: the host decides what
+# runs (claude respawn of the bot's last session while claude agents lists it, or, when its current session id moved on
+# since its job record, a stop and a --bg --resume of the current id; else --bg --name), prints it and asks. The row is
+# not changed here: the monitor is asked for one pass. Never `--fresh` (1.17.1): see recoverable().
+R_HOW = {"recover": "the host decides: claude respawn of its last session while claude agents still lists it (or a stop and a --resume of its current session id, after a /clear), else --bg --name"}
 
 
 def recover_why(b: dict, how: str) -> str:
-    """What will be asked of the host for this row: R_HOW's line, or, for a stale bot with no plugin server, why it
-    gets the respawn path rather than --fresh."""
-    if how == "recover" and txt(b.get("verdict")) == "stale":
-        return "stale with no plugin server: the bot is down, so the host respawns its last session (its conversation kept) rather than stopping it; else --bg --name"
+    """What will be asked of the host for this row: R_HOW's line; a stale row is told its conversation is kept, and
+    where the discarding form lives."""
+    if txt(b.get("verdict")) == "stale":
+        return "STUCK is 'no answer on Discord', not 'wedged': the host respawns its last session, conversation kept; --fresh (a fresh session, the conversation gone) is the CLI's alone, claude-discord bot <bot> recover --fresh, refused while its transcript moved in the last 15 min"
     return R_HOW[how]
 
 
@@ -2491,21 +2490,21 @@ def verdict_since(b: dict, now: float) -> str:
 
 
 class BotRecover(BotPopup):
-    """`f` on a down or stale row: `bot <bot> recover [--fresh]`, run at once (as `=` does); the CLI's plan and its one
+    """`f` on a down or stale row: `bot <bot> recover`, run at once (as `=` does); the CLI's plan and its one
     question are the popup (AccessAsk, No first), its `ran` line what the dismiss says."""
     GO = "Recover"
     DONE = "ran"
 
     def __init__(self, entry: dict, how: str) -> None:
         super().__init__(entry)
-        self.how = how   # recoverable()'s word: "recover" or "recover --fresh"
+        self.how = how   # recoverable()'s word: "recover"
 
     def body(self) -> ComposeResult:
         e = self.entry
         yield Static(Text.assemble((fit("runs", 12), DIM), (f"claude-discord bot {txt(e.get('bot'))} {self.how}", f"bold {BRAND}"),
                                    (f"    on {host_label(self.app.state, e.get('host'))}, in {txt(e.get('project'))}", DIM)), id="r-cmd")
         yield Static(Text.assemble((fit("fix line", 12), DIM), (txt(e.get("fix")), DIM)))
-        yield Static(Text.assemble((" " * 12, ""), (recover_why(e, self.how), DIM)))
+        yield Static(Text.assemble((" " * 12, ""), (recover_why(e, self.how), DIM)), id="r-why")
 
     def on_mount(self) -> None:
         e = self.entry

@@ -647,6 +647,14 @@ if [ "${1:-}" = health ]; then
             0) detail="$detail (the session is running one now)";;
             2) detail="$detail (run $unknowns with no answer from 'claude agents', for $(( (now_s - first) / 60 ))m; a finding after $unknown_cap runs and $((unknown_min_s / 60))m)";;
           esac
+        elif transcript_moved "$d" "$stale_min"; then
+          # A transcript of one of its sessions (by the hooks' markers, so the id it has NOW, after a /clear too) that
+          # changed within stale_min: the session works, on a long turn or on something that is not Discord (1.17.1;
+          # cswap on 2026-10-17: 7 h of cross-session work read as STUCK, and the TUI's f discarded it). Held without
+          # the 4 h cap, which is for a session that only CLAIMS to work: the risk (README) is a session looping for
+          # ever, which reads busy until its transcript stops moving. Last before stale: the one find it forks runs
+          # only when nothing cheaper holds the finding.
+          verdict=busy detail="unanswered for ${age}m, but a transcript of its session changed within the last ${stale_min}m: it is working, not on Discord; holding the finding"
         else
           verdict=stale
           case $servers in
