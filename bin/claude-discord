@@ -478,8 +478,9 @@ done
 
 # A project still in the 1.16 shape (pulled by hand, no update yet) is moved before the bot is looked up; a link a job
 # record still needs stays (unlink_old).
+# A key another project holds (said by move_project): the bot still starts, on the old path.
 if [ -z "$pd_new" ] && [ -d "$root" ]; then
-  move_project "$project_dir" || exit 1
+  move_project "$project_dir" || :
   proj_cwd; root=$pd_root proj_state=$pd_state
 fi
 unlink_old "$project_dir"

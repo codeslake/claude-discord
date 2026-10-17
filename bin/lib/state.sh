@@ -142,7 +142,8 @@ move_project() {
 # daemon restart or a fleet claim comes back on the frozen path; a stopped job keeps its record, and so the link, until
 # `claude rm <id>` or the bot's next start prunes it: said, with `say`). The record holds the start's LOGICAL $PWD (a 1.17
 # `root=$PWD/...`), so only the path's last part is compared: a same-named bot of another project keeps a harmless link
-# longer. A link missing for a bot a record names (a move cut between its rename and its
+# longer. With `say` (compat, setup) a link whose bot has a session with no job record (a foreground one; `claude agents`
+# not answering counts) stays too. A link missing for a bot a record names (a move cut between its rename and its
 # link) is made again. Then the directory itself with its .gitignore, once it holds nothing else.
 unlink_old() {
   local src=$1/.claude/discord-agents b n j live rest="" jobs="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/jobs"
@@ -165,6 +166,16 @@ unlink_old() {
       rest=1
       [ "${2:-}" != say ] || { j=$(printf '%s\n' "$j" | sed -n 's#.*/\([^/]*\)/state\.json$#\1#p' | tr '\n' ' '); echo "claude-discord: $b stays a link to its moved state: job ${j% } names the old path (a respawn comes back on it; claude rm <id>, or the bot's next start, lets the link go)"; }
       continue
+    fi
+    if [ "${2:-}" = say ]; then
+      type live_sessions >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/sessions.sh"
+      live=$(cd "$1" && live_sessions "$n" "$b" </dev/null) || live=unknown
+      if [ -n "$live" ]; then
+        rest=1
+        if [ "$live" = unknown ]; then echo "claude-discord: $b stays a link to its moved state: 'claude agents --json' did not answer, so whether a session of $n runs on the old path is unknown"
+        else echo "claude-discord: $b stays a link to its moved state: a session of $n runs with no job record (${live%%$'\n'*}; a foreground one), and may still read the old path"; fi
+        continue
+      fi
     fi
     rm -f "$b"
   done
