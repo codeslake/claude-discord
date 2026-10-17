@@ -3014,6 +3014,7 @@ queue "200 $NONE" '200 {"threads":[]}'
 out=$(cd "$RP" && bash "$S" health --json 2>/dev/null) || :
 [ "$(field_of b servers "$out")" = 1 ] || { echo "FAIL: health must count a server whose environ names the old path through a link of the project: $out"; exit 1; }
 stop_one_server "$LP/.claude/discord-agents/b"
+mkdir -p "${RBN%/b}/c"; printf 'DISCORD_BOT_TOKEN=tokC\n' > "${RBN%/b}/c/.env"; echo none > "${RBN%/b}/c/mode"   # a second bot: with one, a start picks it with no record at all
 out=$(cd "$RP" && bash "$S" --bg --resume 1111aaaa-2222-3333-4444-555555555555 2>&1) || :   # the launcher stub prints the exec line; the claude stub here refuses a launch
 grep -q -- '-n b' <<<"$out" || { echo "FAIL: --resume must find the bot from a job record naming the old path through a link of the project: $out"; exit 1; }
 cp "$HOME/rpf.keep" "$RPF"; rm -rf "$HOME/rpf.keep" "$HOME/.claude/jobs/lk000001" "$HOME/link" "$HOME/real"
