@@ -1786,7 +1786,11 @@ rest of Claude Code.
 
 `./test-claude-discord.sh ./bin/claude-discord` runs the wrapper against a
 throwaway HOME with a stub plugin and stub `claude`; it touches nothing real
-and prints `ALL PASS`. It first parses `bin/claude-discord`, `bin/lib/*.sh`, the
+and prints `ALL PASS`. `./test-install.sh ./bin/claude-discord` is the second
+file: setup on an old install, the compat copy, setup's scopes and `--mode`,
+`install`, `update` and `patch`, in the same sandbox (`tests/suite-lib.sh` is the
+preamble both source). Each file keeps within 40 s run serially; run the one a
+change touches while working, both before a push. The core file first parses `bin/claude-discord`, `bin/lib/*.sh`, the
 shim, the hooks, the tools and the monitor with `bash -n` and refuses bash 4
 constructs in them (macOS runs them under bash 3.2). It runs on Linux only: it finds its stand-in plugin
 servers through `/proc`, and assumes GNU `wc`, `sed` and a `/tmp` that is not a
