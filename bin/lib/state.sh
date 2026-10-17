@@ -136,16 +136,29 @@ move_project() {
   return 0
 }
 # unlink_old <project, physical path> [say]: each link <project>/.claude/discord-agents/<bot> the move left goes once no
-# ${CLAUDE_CONFIG_DIR:-~/.claude}/jobs/*/state.json names that path (a respawn, a daemon restart or a fleet claim comes
-# back on the frozen path; a stopped job keeps its record, and so the link, until `claude rm <id>` or the bot's next start
-# prunes it: said, with `say`); then the directory itself with its .gitignore, once it holds nothing else.
+# ${CLAUDE_CONFIG_DIR:-~/.claude}/jobs/*/state.json names a path ending in /.claude/discord-agents/<bot> (a respawn, a
+# daemon restart or a fleet claim comes back on the frozen path; a stopped job keeps its record, and so the link, until
+# `claude rm <id>` or the bot's next start prunes it: said, with `say`). The record holds the start's LOGICAL $PWD (a 1.17
+# `root=$PWD/...`), so only the path's last part is compared: a same-named bot of another project keeps a harmless link
+# longer. A link missing for a bot a record names (a move cut between its rename and its
+# link) is made again. Then the directory itself with its .gitignore, once it holds nothing else.
 unlink_old() {
-  local src=$1/.claude/discord-agents b j rest=""
+  local src=$1/.claude/discord-agents b n j live rest="" jobs="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/jobs"
   [ -d "$src" ] && [ ! -L "$src" ] || return 0
+  proj_dirs "$1"
+  if [ -n "$pd_new" ]; then
+    for b in "$pd_root"/*/; do
+      b=${b%/}; n=${b##*/}
+      [ -f "$b/.env" ] && [ ! -e "$src/$n" ] && [ ! -L "$src/$n" ] || continue
+      grep -qF -- "/.claude/discord-agents/$n\\\"" "$jobs"/*/state.json 2>/dev/null || continue
+      ln -s "$b" "$src/$n" 2>/dev/null && echo "claude-discord: $src/$n linked to $b again: a job record names the old path and the move's link was missing" || :
+    done
+  fi
   for b in "$src"/*; do
     [ -L "$b" ] || { { [ -e "$b" ] || [ -L "$b" ]; } && rest=1; continue; }
     case $(readlink "$b") in "$helpers"/projects/*/bots/*) ;; *) rest=1; continue;; esac
-    j=$(grep -lF -- "DISCORD_STATE_DIR\\\": \\\"$b\\\"" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/jobs/*/state.json 2>/dev/null) || j=""
+    n=${b##*/}
+    j=$(grep -lF -- "/.claude/discord-agents/$n\\\"" "$jobs"/*/state.json 2>/dev/null) || j=""
     if [ -n "$j" ]; then
       rest=1
       [ "${2:-}" != say ] || { j=$(printf '%s\n' "$j" | sed -n 's#.*/\([^/]*\)/state\.json$#\1#p' | tr '\n' ' '); echo "claude-discord: $b stays a link to its moved state: job ${j% } names the old path (a respawn comes back on it; claude rm <id>, or the bot's next start, lets the link go)"; }

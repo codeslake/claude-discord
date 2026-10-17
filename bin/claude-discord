@@ -532,10 +532,16 @@ if [ -z "$name" ] && [ -n "$rid" ]; then
     jq -e --arg r "$ridl" '((.sessionId // "") | startswith($r)) or ((.resumeSessionId // "") | startswith($r))' "$f" >/dev/null 2>&1 || continue
     # The raw file, as refresh reads it: inside state.json the --settings value
     # is a JSON string, so its quotes appear escaped as \".
+    rec=$(<"$f")
     for d in "$root"/*/; do
       d=${d%/}
-      # Either path: a fresh start's record names the state dir; one respawned on the path before the move names <project>/.claude/discord-agents/<bot>.
-      grep -qF -- "DISCORD_STATE_DIR\\\": \\\"$d\\\"" "$f" || grep -qF -- "DISCORD_STATE_DIR\\\": \\\"$project_dir/.claude/discord-agents/${d##*/}\\\"" "$f" || continue
+      # Either path: a fresh start's record names the state dir; one respawned on the path before the move (1.18.0) names
+      # <project>/.claude/discord-agents/<bot> in whatever spelling the start's $PWD had, and is this bot's when that path
+      # is this bot dir (through the link the move left; the link gone, it is nobody's).
+      if ! grep -qF -- "DISCORD_STATE_DIR\\\": \\\"$d\\\"" "$f"; then
+        old=${rec#*DISCORD_STATE_DIR\\\": \\\"}; old=${old%%\\\"*}
+        case $old in */.claude/discord-agents/"${d##*/}") [ "$old" -ef "$d" ] || continue;; *) continue;; esac
+      fi
       case " $cands " in *" ${d##*/} "*) ;; *) cands="$cands ${d##*/}";; esac
     done
   done

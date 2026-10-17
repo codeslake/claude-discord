@@ -192,8 +192,12 @@ if [ "${1:-}" = health ]; then
     fi
   fi
 
-  count_servers() {  # $1 = bot state dir, $2 = its path before the move (a job respawned on it, 1.18.0): both count
-    local n=0 c pid args a hit l
+  # $1 = the bot state dir; $2 = the bot's name. A server whose DISCORD_STATE_DIR is the path before the move (a job
+  # respawned on it, 1.18.0: <project>/.claude/discord-agents/<bot>, in whatever spelling the start's $PWD had) counts when
+  # that path is the bot dir, through the link the move left; the link gone, such a server reads as down (accepted: it
+  # would find no .env to reopen either).
+  count_servers() {
+    local n=0 c pid args a hit l v
     if [ ! -d "$proc" ]; then
       [ "$mac_ok" = yes ] || { printf 'unknown'; return 0; }   # ps itself failed: cannot tell, never zero
       # The token after the argv text: " DISCORD_STATE_DIR=<dir>" ending the
@@ -201,7 +205,10 @@ if [ "${1:-}" = health ]; then
       # shortcut: ps joins env words with spaces, so a dir "/a/My" also matches a line carrying "/a/My Project/x"; quote-aware parsing if a Mac project ever has such siblings.
       local IFS=$'\n'; set -f   # one ps line at a time (a subshell: neither leaks), with no here-string (bash 3.2 writes those to TMPDIR)
       for l in $mac_env; do
-        case "$l " in *" DISCORD_STATE_DIR=$1 "*|*" DISCORD_STATE_DIR=$2 "*) n=$((n + 1));; esac
+        case "$l " in
+          *" DISCORD_STATE_DIR=$1 "*) n=$((n + 1));;
+          *" DISCORD_STATE_DIR="*"/.claude/discord-agents/$2 "*) v=${l##* DISCORD_STATE_DIR=}; v=${v%% *}; [ "$v" -ef "$1" ] && n=$((n + 1));;
+        esac
       done
       printf '%s' "$n"; return 0
     fi
@@ -225,7 +232,9 @@ if [ "${1:-}" = health ]; then
       # reads as a duplicate and the longer-named one, when down, does not
       # read as down at all. -z makes each NUL-separated entry a line, and
       # -x anchors the whole entry.
-      { grep -qzxF "DISCORD_STATE_DIR=$1" "$proc/$pid/environ" || grep -qzxF "DISCORD_STATE_DIR=$2" "$proc/$pid/environ"; } 2>/dev/null && n=$((n + 1))
+      if grep -qzxF "DISCORD_STATE_DIR=$1" "$proc/$pid/environ" 2>/dev/null; then n=$((n + 1)); continue; fi
+      v=""; { while IFS= read -rd '' l; do case $l in "DISCORD_STATE_DIR="*"/.claude/discord-agents/$2") v=${l#DISCORD_STATE_DIR=}; break;; esac; done < "$proc/$pid/environ"; } 2>/dev/null
+      [ -n "$v" ] && [ "$v" -ef "$1" ] && n=$((n + 1))
     done
     printf '%s' "$n"
   }
@@ -421,7 +430,7 @@ if [ "${1:-}" = health ]; then
     bot=${d##*/}
     tok=$(grep '^DISCORD_BOT_TOKEN=' "$d/.env" 2>/dev/null | head -1) || tok=""
     tok=${tok#DISCORD_BOT_TOKEN=}
-    servers=$(count_servers "$d" "$project_dir/.claude/discord-agents/$bot")
+    servers=$(count_servers "$d" "$bot")
     turn=$(turn_age_min "$d")
     last_seen=$(cat "$d/last-message-id" 2>/dev/null) || last_seen=0
     is_id "$last_seen" || last_seen=0
