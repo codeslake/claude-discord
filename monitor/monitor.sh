@@ -561,7 +561,7 @@ def fix: . as $e
   | if   .verdict == "down"        then ("cd \(cdp) && \(cd) --bg --name \(qbot)" | wrap($e))
     elif .verdict == "stale"       then ("cd \(cdp) && \(cd) refresh \(qbot) --force" | wrap($e))
     elif .verdict == "duplicate"   then (if .host == "local" then "" else "on \(.host): " end) + "claude agents, then claude stop <id> for the copy that is not the bot\u0027s"
-    elif .verdict == "unreachable" then "check DISCORD_BOT_TOKEN in \(.project)/.claude/discord-agents/\(.bot)/.env and the bot\u0027s channel permissions"
+    elif .verdict == "unreachable" then "check DISCORD_BOT_TOKEN in the bot\u0027s state dir, ~/.claude-discord/projects/\(.project | gsub("[^A-Za-z0-9]"; "-"))/bots/\(.bot)/.env, and the bot\u0027s channel permissions"
     elif .verdict == "nostate"     then (if .host == "local" then "" else "on \(.host): " end) + "claude agents by hand; the daemon is unwell"
     elif .verdict == "throttled" or .verdict == "apierror" then ("cd \(cdp) && \(cd) health" | wrap($e))
     elif .verdict == "patchfail"   then ("\(cd) update" | wrap($e)) + "; still failing means the patch needs a claude-discord fix"

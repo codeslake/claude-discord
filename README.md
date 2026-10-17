@@ -303,7 +303,9 @@ where each message came from, so nothing depends on it. A tool called before
 the login fails with discord.js's error instead of reaching Discord.
 
 **Where the state is (1.18.0).** A project's state lives outside the project,
-under `~/.claude-discord/projects/<key>/`, mode 0700 throughout:
+under `~/.claude-discord/projects/<key>/` (the key directory, `bots/` and each
+bot directory 0700, `.env` 600; `checkin/` and the files the hooks write get
+the session's umask):
 
 ```
 ~/.claude-discord/projects/<key>/
