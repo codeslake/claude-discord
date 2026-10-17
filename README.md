@@ -92,8 +92,8 @@ git clone https://github.com/codeslake/claude-discord ~/.claude-discord/source &
 
 then `claude-discord setup <bot>` there for each bot. `install` reads no stdin
 at all and is safe to re-run (a bootstrap script calls it); it installs or
-refreshes the plugin, the shim, `~/.claude-discord/runtime/`, the compat copy
-(see Migrating) and the install record, and it ends by patching the official
+refreshes the plugin, the shim, `~/.claude-discord/runtime/` and the install
+record, and it ends by patching the official
 discord plugin's cache (as `claude-discord patch` does). Without flags it takes the install
 already there, else scope project and method link, and in an untrusted
 project it prints a one-line hint instead of asking. `~/.claude-discord/source`
@@ -137,8 +137,8 @@ separate them.
 ### Update, version, patch
 
 ```
-claude-discord install         # the plugin, shim, runtime and compat copy for this project; no bot questions; safe to re-run
-claude-discord update          # git pull --ff-only the clone this runs from (a link resolves to the source clone), re-patch, refresh the compat copy and the shim, move any project still in the 1.16 state shape (compat, below)
+claude-discord install         # the plugin, shim and runtime for this project; no bot questions; safe to re-run
+claude-discord update          # git pull --ff-only the clone this runs from (a link resolves to the source clone), re-patch, refresh the shim, move any project still in the 1.16 state shape and its backend records (compat, below)
 claude-discord update --all    # every recorded install, each real clone once however many links point at it; a removed project is pruned
 claude-discord --version       # claude-discord <version> (<short sha>) of that clone
 claude-discord patch           # patch every cached copy of the official discord plugin (also done at each start and by update)
@@ -172,8 +172,9 @@ On each machine, once:
    project (the shim reaches the source clone from a project that has no install
    yet, so a project not yet migrated can still be set up, launched and
    refreshed; Enter keeps each of the bot's current answers, `requireMention`
-   included, so only the install questions are new). It installs the plugin and
-   replaces the old `~/.claude-discord/hooks`, `rules` and `discord-*.ts` copies.
+   included, so only the install questions are new). It installs the plugin,
+   removes the old `~/.claude-discord/hooks` and `rules` copies and links
+   `discord-*.ts` into `runtime/`.
    It removes nothing from the project: the old settings hook entries and the
    `.claude/rules/claude-discord-*.md` file keep the bot working until the
    plugin's hooks run.
@@ -202,32 +203,25 @@ this machine has run with the plugin (a `<bot dir>/plugin-sessions/` marker);
 until then they stay and one line names the bots that have not. A file that is not JSON or not writable is named and left; `bash
 <plugin>/hooks/lib/old-hooks.sh <file>...` removes the entries by hand.
 
-For this release `~/.claude-discord/hooks/{turn,peers,lib,autoresearchclaw}`,
-`hooks/tools/*` and the two `.ts` files stay as links, so a project not yet
-migrated keeps working through them; they go in the next release. The hooks and
-tools links lead into `~/.claude-discord/compat/`, a plain copy (no git) of the
-plugin's hooks, tools and rules that `setup`, `install` and `update` refresh, so
-the previous release's `install.sh` writing through them never reaches a git
-clone; the `.ts` links lead into the runtime copy. `~/.claude-discord/rules/` is
-removed. `compat/VERSION` holds the HEAD sha of the clone it was copied from;
-a bot's startup or resume (its `on-session-start` hook, run from the source
-clone when the machine has one) rebuilds `compat/` when that sha is not its
-own (a `git pull` by hand in `~/.claude-discord/source`) or a
-file there is newer than `VERSION` (`install.sh` wrote through a link). The new
-copy is built beside it and renamed into place, so bots starting together never
-see a half-written one.
+Since 1.18.1 nothing of the 1.8-1.16 install is left under `~/.claude-discord`:
+`setup`, `install` and `update` (its `compat` step) remove `hooks/` (1.9-1.18.0
+a directory of links into `compat/`), `compat/` with its leftovers
+(`compat.*`) and `rules/`; a `compat/` that holds a git tree (a checkout put
+there by hand) is left, said. The two `.ts` links, `discord-chunk.ts` and
+`discord-proxy.ts` into `runtime/`, stay: a bun server patched before 1.9
+imports the chunk module from that path at its next long reply, and a running
+process cannot be re-patched. `patch --compat` (what a 1.17 `on-session-start`
+runs) is accepted as plain `patch` for one release.
 
 Rollback: remove the plugin installs (or they keep loading next to the
-re-registered settings hooks) and the links above (`./install.sh` would write
-through them into the compat copy) first:
+re-registered settings hooks) first:
 
 ```
 while IFS= read -r p; do if [ -L "$p" ]; then rm -f "$p"; elif [ -d "$p/.git" ]; then rm -rf "$p"; fi; done < ~/.claude-discord/records/installs
-rm -rf ~/.claude-discord/hooks ~/.claude-discord/discord-chunk.ts ~/.claude-discord/discord-proxy.ts   # only links remain there
 cd ~/.claude-discord/source && git checkout 2d22fca && ./install.sh   # 2d22fca: the last release before the plugin
 ```
 
-(`rm -rf` on a link removes the link, not its target.) The sessions' `plugin-sessions/` markers need no cleanup: with no plugin install left, an old-path hook runs again even in a marked session.
+The sessions' `plugin-sessions/` markers need no cleanup: with no plugin install left, an old-path hook runs again even in a marked session.
 
 ## Usage
 
@@ -862,7 +856,7 @@ acts for: every bot, or only some.
 
 | Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
 |---|---|---|---|---|---|---|
-| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Why: a respawn or an auto-update of the official plugin since the last start, a turn whose Stop never ran, a daemon that would retire an idle bot, a manager's backend killed by a restart. When: every source; the patch, the clean-up and the pin at startup and resume only. | Runs `claude-discord patch --compat` (a failure goes to `health.log`); clears the per-turn files a turn whose Stop never ran left behind, keeping the primed key; pins a background session's job (`~/.claude/jobs/pins.json` and `pinned-job`, see Background sessions); starts a dev-manager's keeper when none runs and its owner did not stop it. No marker sweep and no `claude agents` here (the monitor's pass and update sweep). | 0 B | every bot; the keeper: dev-managers with a hosts ledger |
+| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Why: a respawn or an auto-update of the official plugin since the last start, a turn whose Stop never ran, a daemon that would retire an idle bot, a manager's backend killed by a restart. When: every source; the patch, the clean-up and the pin at startup and resume only. | Runs `claude-discord patch` (a failure goes to `health.log`); clears the per-turn files a turn whose Stop never ran left behind, keeping the primed key; pins a background session's job (`~/.claude/jobs/pins.json` and `pinned-job`, see Background sessions); starts a dev-manager's keeper when none runs and its owner did not stop it. No marker sweep and no `claude agents` here (the monitor's pass and update sweep). | 0 B | every bot; the keeper: dev-managers with a hosts ledger |
 | UserPromptSubmit | | `turn/on-prompt` | Why: as above, a backend killed by a restart comes back with the first bot that wakes. When: every prompt. | Starts a dev-manager's keeper when none runs (builtins only when all run: no fork on Linux). | 0 B | every bot (the keepers of this machine's managers) |
 
 Which plugin runs them:
@@ -1824,7 +1818,7 @@ rest of Claude Code.
 `./test-claude-discord.sh ./bin/claude-discord` runs the wrapper against a
 throwaway HOME with a stub plugin and stub `claude`; it touches nothing real
 and prints `ALL PASS`. `./test-install.sh ./bin/claude-discord` is the second
-file: setup on an old install, the compat copy, setup's scopes and `--mode`,
+file: the old install's removal, setup's scopes and `--mode`,
 `install`, `update` and `patch`, in the same sandbox (`tests/suite-lib.sh` is the
 preamble both source). Each file keeps within 40 s run serially; run the one a
 change touches while working, both before a push. The core file first parses `bin/claude-discord`, `bin/lib/*.sh`, the

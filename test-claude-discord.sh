@@ -1144,7 +1144,8 @@ mkdir -p "$GD/plugin-sessions"; : > "$GD/plugin-sessions/g2"; : > "$GD/plugin-se
 tagged g1 501 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt" >/dev/null
 [ -s "$GD/turns/g1" ] || { echo "FAIL: an old-path hook must run in a session with no marker"; exit 1; }
 out=$(tagged g2 502 | DISCORD_STATE_DIR="$GD" bash "$P2/.claude/discord-agents/hooks/turn/on-prompt")
-out2=$(tagged g2 503 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" bash "$HOME/.claude-discord/hooks/turn/on-prompt")
+ln -sfn "$PC/hooks" "$HOME/.claude-discord/hooks"   # the 1.8-1.16 machine-wide link (gone since 1.18.1; the gate still knows the path)
+out2=$(tagged g2 503 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" bash "$HOME/.claude-discord/hooks/turn/on-prompt"); rm -f "$HOME/.claude-discord/hooks"
 out3=$(tagged g2 504 | DISCORD_STATE_DIR="$GD" bash "$PC/hooks/turn/on-prompt")
 [ -z "$out$out2$out3" ] && [ ! -e "$GD/turns/g2" ] || { echo "FAIL: an old-path hook in a marked session must exit 0 doing nothing ($out|$out2|$out3)"; exit 1; }
 out=$(tagged g2 505 | CLAUDE_PLUGIN_ROOT="$PC" DISCORD_STATE_DIR="$GD" CLAUDE_PROJECT_DIR="$P2" bash "$PC/hooks/turn/on-prompt")

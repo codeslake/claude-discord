@@ -1,4 +1,4 @@
-# sourced by bin/claude-discord: sync_runtime same_tree sync_compat compat_if_stale patch_official; the patch verb
+# sourced by bin/claude-discord: sync_runtime patch_official; the patch verb
 
 # The runtime files the patched official plugin imports live at a stable path,
 # ~/.claude-discord/runtime/, because the plugin cache is machine-wide while
@@ -21,87 +21,6 @@ sync_runtime() {
     cmp -s "$self_root/runtime/$f" "$rt/$f" || cp "$self_root/runtime/$f" "$rt/$f" || return 1
   done
   [ "$have" = "$mine" ] || printf '%s\n' "$mine" > "$rt/VERSION"
-}
-
-# Drops recorded installs whose path is gone (a dangling link counts as gone).
-same_tree() {
-  diff -r "$1" "$2" >/dev/null 2>&1 &&
-    [ "$(cd "$1" && find . -type f -perm -100 | sort)" = "$(cd "$2" && find . -type f -perm -100 | sort)" ]
-}
-# sync_compat <plugin>: rebuilds ~/.claude-discord/compat from that plugin when
-# it differs (a write through a link included), in a new directory swapped in by
-# rename, so a hook already running from the old copy keeps its open file.
-# compat/VERSION holds the plugin's HEAD sha (head_sha), written last.
-# rename(2) cannot replace a non-empty directory, hence two renames; a settings
-# hook started between them finds no file and its entry's -x test skips it.
-# Writers (bots starting at once, on a host and in its containers, or natively
-# and in Docker Desktop on one Mac) swap one at a time under compat.lock, taken
-# by mkdir: atomic on every filesystem they share, across containers and
-# kernels, where pids collide and flock may not reach. The copy is built first,
-# in a random-named directory (no pid: unique across kernels), so the lock
-# covers only a re-check and the renames. The lock holds an owner token (the
-# random suffix of that directory), and a writer releases only a lock holding
-# its own. A lock older than 5 s is taken for a dead writer's (a bot start must
-# not wait long, and a live holder past it is harmless, see below): it is broken by
-# renaming it to a name of our own, which exactly one breaker wins, and dropped
-# only if it is still the lock judged stale (same inode and token). The lock
-# only saves work: two holders at once (a holder stalled past the stale bound, a
-# break racing a re-take) can only fail one refresh (rc 1, retried at the next
-# start), never nest or leave compat/ absent: both renames are perl's rename(2),
-# never mv (which moves a copy INTO a compat/ another writer, or an older
-# release's taking no lock, just put in place), and our old compat/ goes aside
-# into our own random directory, never to a shared name. A subshell, so its
-# traps (our old copy back if compat/ is gone, the lock released) stay out of
-# the caller. The bounds are read only here, so the suite can shrink them.
-sync_compat() (
-  c=$helpers/compat l=$helpers/compat.lock t0=$SECONDS
-  st=${CLAUDE_DISCORD_COMPAT_STALE_S:-5} gu=${CLAUDE_DISCORD_COMPAT_WAIT_S:-10} ps=${CLAUDE_DISCORD_COMPAT_STEP_S:-0.1}
-  n=$(mktemp -d "$c.new.XXXXXX") || return 1
-  b=$n/compat o=$n/old tok=${n##*.}   # unique among writers while $n exists (mktemp -d), and no pid
-  trap 'rm -rf "$n"' EXIT; trap 'exit 1' INT TERM HUP
-  mkdir "$b" "$b/hooks" || return 1
-  for t in turn peers lib autoresearchclaw; do cp -R "$1/hooks/$t" "$b/hooks/" || return 1; done
-  cp -R "$1/tools" "$1/rules" "$b/" && head_sha "$1" > "$b/VERSION" || return 1
-  until mkdir "$l" 2>/dev/null; do
-    # Judged stale: the lock's inode and token, so the break can tell it from a newer lock at the same path.
-    id=$(perl -e '@s = lstat $ARGV[0] or exit; $s[9] < time - $ARGV[1] or exit; open F, "<", "$ARGV[0]/owner"; chomp($t = <F> // ""); print "$s[1] $t"' "$l" "$st")
-    [ -n "$id" ] && perl -e 'use File::Path "rmtree"; ($l, $k, $id) = @ARGV; rename $l, $k or exit 1; @s = lstat $k; open F, "<", "$k/owner"; chomp($t = <F> // "");
-      if ("$s[1] $t" eq $id) { rmtree $k; exit 0 } rename $k, $l; exit 1' "$l" "$l.broken.$tok" "$id" && continue
-    # The give-up bound is past the stale bound, so a dead holder's lock is broken before a waiter gives up.
-    [ "$SECONDS" -lt $((t0 + gu)) ] || { echo "claude-discord: $l stays held; compat/ not refreshed" >&2; return 1; }
-    sleep "$ps"
-  done
-  # compat/ gone: our old copy (unless we landed) goes back; $n holding it stays if that fails with compat/ still gone.
-  # set -e is back on inside a trap: a failing command would skip the rest (the lock release) and set our status, hence || :.
-  trap '{ has_path "$c" || [ ! -d "$o" ] || perl -e "rename shift, shift or exit 1" "$o" "$c" || has_path "$c"; } && rm -rf "$n" || :; IFS= read -r t 2>/dev/null < "$l/owner" && [ "$t" = "$tok" ] && rm -rf "$l" || :' EXIT
-  printf '%s\n' "$tok" > "$l/owner" || { rm -rf "$l"; return 1; }   # an ownerless lock would hold every writer off until stale
-  # compat/ gone: a writer killed between its renames left the only copy in its compat.new.*/old; the newest goes back.
-  has_path "$c" || perl -e '$c = shift; ($o) = sort { (lstat "$b/..")[9] <=> (lstat "$a/..")[9] } grep { -d } @ARGV; rename $o, $c if $o' "$c" "$c".new.*/old || :
-  # An old compat.new.* (its old/ too), compat.old.* or compat.lock.broken.* is a dead writer's or an older release's
-  # (a fresh compat.new.* may be a writer still building); perl only when there is one besides ours.
-  for t in "$c".new.* "$c".old.* "$l".broken.*; do
-    [ "$t" = "$n" ] || ! has_path "$t" || { perl -MFile::Path=rmtree -e 'for (@ARGV) { @s = lstat; rmtree $_ if @s && $s[9] < time - 600 }' "$c".new.* "$c".old.* "$l".broken.*; break; }
-  done
-  [ -d "$c" ] && [ ! -L "$c" ] && same_tree "$c" "$b" && return 0   # current already (another writer's swap while we built or waited)
-  { ! has_path "$c" || perl -e 'rename shift, shift or exit 1' "$c" "$o"; } && perl -e 'rename shift, shift or exit 1' "$b" "$c" && { rm -rf "$o"; return 0; }
-  [ -d "$c" ] && same_tree "$c" "$b"   # another writer's copy landed first: fine if it is ours; else the trap restores
-)
-# compat_if_stale: run at a bot's startup and resume (on-session-start runs
-# `patch --compat`). A compat/ whose VERSION is not this plugin's HEAD sha (a
-# `git pull` by hand in the source clone, a copy older than the stamp) or
-# that holds a file newer than its VERSION (the previous release's install.sh
-# writing through the links) is rebuilt; none at all is left to setup (unless
-# a killed writer left it in a compat.new.*/old, which goes back). Only by
-# the source clone compat/ is built from (as in remove_old_install): with no
-# source clone, compat/ is built by setup and update only, else two clones of
-# different versions would flip it back and forth at each bot start.
-compat_if_stale() {
-  local c=$helpers/compat have=""
-  [ -d "$c" ] && [ ! -L "$c" ] || { ! has_path "$c" && [ -n "$(ls -d "$c".new.*/old 2>/dev/null)" ]; } || return 0
-  [ "$helpers/source" -ef "$self_root" ] || return 0
-  IFS= read -r have 2>/dev/null < "$c/VERSION" || :
-  [ "$have" != "$(head_sha "$self_root")" ] || [ -n "$(find "$c" -type f -newer "$c/VERSION" 2>/dev/null)" ] || return 0
-  sync_compat "$self_root" && { touch "$c/VERSION" 2>/dev/null || :; }   # an identical rebuild is not redone at every start
 }
 
 # Patches the official discord plugin's install(s) so bots can work together.
@@ -207,6 +126,7 @@ patch_official() {
 # otherwise; an untrusted project gets a hint, never a question. Safe to re-run.
 
 if [ "${1:-}" = patch ]; then
-  crc=0; [ "${2:-}" != --compat ] || compat_if_stale || crc=1
-  patch_official || crc=1; exit "$crc"
+  # --compat (1.9-1.18.0: the compat copy's rebuild) is accepted and ignored for one release: a 1.17 on-session-start
+  # from a stale clone still sends it.
+  patch_official || exit 1; exit 0
 fi

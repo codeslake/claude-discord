@@ -106,171 +106,36 @@ echo "ok: patch applies the five patches to every cached version, is idempotent 
 # The old single file moved the plugin cache aside after these cases; the install cases below ran with it aside.
 mv "$HOME/.claude/plugins" "$HOME/.claude/plugins.off"
 
-# A machine with the old install: setup replaces what install.sh put under
-# ~/.claude-discord with links into a compat copy of the real plugin (a project set up by the
-# previous release and not yet by this one still reaches its hooks through
-# there), removes the old rule copies, keeps the bots' scratch, records, runtime
-# and the source clone.
-OP="$HOME/old proj"; OH="$HOME/.claude-discord"; UP="$HOME/unmigrated proj"
-# Earlier setups in this suite already linked these paths; back to real copies first, so the fixture writes nowhere else.
+# A machine with the 1.8-1.16 install (5b, 1.18.1): compat (every update) removes ~/.claude-discord/hooks (a directory of
+# links into compat/, or the 1.8 copies), compat/ and its leftovers (compat.*) and the old rule copies; keeps
+# discord-chunk.ts and discord-proxy.ts as links into runtime/ (a bun server patched before 1.9 imports the chunk module
+# from there at its next long reply, and that running process cannot be re-patched), the bots' scratch, records, runtime
+# and the source clone. A symlink at hooks/ (a dev checkout) goes as a link, its target untouched; a compat/ that holds a
+# git tree (a clone put there by hand) is left, said. `patch --compat` (a 1.17 on-session-start from a stale clone still
+# sends it) is plain patch: exit 0, silent.
+OH="$HOME/.claude-discord"
 rm -rf "$OH/hooks" "$OH/rules" "$OH/discord-chunk.ts" "$OH/discord-proxy.ts"
-mkdir -p "$OP/.claude/rules" "$OP/.claude/discord-agents" "$OH/scratch/b" "$OH/rules" "$OH/runtime" "$OH/hooks/tools"
+mkdir -p "$OH/scratch/b" "$OH/rules" "$OH/hooks/tools" "$OH/compat/hooks/turn" "$OH/compat.new.1/old" "$OH/compat.lock"
 for t in turn peers lib autoresearchclaw; do mkdir -p "$OH/hooks/$t"; echo old > "$OH/hooks/$t/stale"; done
-# The previous release's rule told an ARC bot to loop on ~/.claude-discord/hooks/autoresearchclaw/events.
-printf '#!/bin/sh\necho old\n' > "$OH/hooks/autoresearchclaw/events"; chmod +x "$OH/hooks/autoresearchclaw/events"
-(cd "$OP" && git init -q .)
-: > "$OH/scratch/b/note"; : > "$OH/runtime/discord-proxy.ts"; echo old > "$OH/hooks/tools/local-bots"; echo old > "$OH/hooks/tools/old-tool"; : > "$OH/rules/dev-manager.md"; echo old > "$OH/discord-chunk.ts"; echo old > "$OH/discord-proxy.ts"
-: > "$OP/.claude/rules/claude-discord-dev-manager.md"
-# The previous release's project: its settings hook runs a script through .claude/discord-agents/hooks -> ~/.claude-discord/hooks.
-mkdir -p "$UP/.claude/discord-agents"; ln -s "$OH/hooks" "$UP/.claude/discord-agents/hooks"
-echo '{}' > "$UP/.claude/settings.local.json"; plant_old "$UP/.claude/settings.local.json"
-jq -n --arg p "$OP" --arg p5 "$PHOME/project5" '{projects: {($p): {hasTrustDialogAccepted: true}, ($p5): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
-(cd "$OP" && printf '\n900\n111\n\ntokO\nn\ndev-manager\n\n' | bash "$S" setup obot --scope project >/dev/null)
-[ ! -e "$OH/rules" ] || { echo "FAIL: the old rule copies must go"; exit 1; }
-for f in hooks/turn/on-prompt hooks/turn/on-reply hooks/turn/on-stop hooks/turn/on-session-start hooks/peers/thread-guard hooks/peers/edit-gate hooks/autoresearchclaw/on-start hooks/autoresearchclaw/events hooks/lib/discord.sh hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events discord-chunk.ts discord-proxy.ts; do
-  # The hooks and tools go through the compat copy of the plugin, the .ts links through the stable runtime copy.
-  case $f in hooks/tools/*) want=$PHOME/.claude-discord/compat/tools/${f##*/}; src=$PC/tools/${f##*/};; hooks/autoresearchclaw/events) want=$PHOME/.claude-discord/compat/tools/arc-events; src=$PC/tools/arc-events;; hooks/*) want=$PHOME/.claude-discord/compat/$f; src=$PC/$f;; *) want=$PHOME/.claude-discord/runtime/$f; src=$PC/runtime/$f;; esac
-  [ -f "$OH/$f" ] && [ "$(readlink -f "$OH/$f")" = "$want" ] && cmp -s "$OH/$f" "$src" || { echo "FAIL: ~/.claude-discord/$f must resolve to $want, a copy of the real plugin's file: $(readlink -f "$OH/$f")"; exit 1; }
-done
-[ ! -e "$OH/compat/.git" ] && [ ! -e "$OH/compat/bin" ] || { echo "FAIL: the compat copy must hold no git tree and no wrapper"; exit 1; }
-cmp -s "$PC/runtime/discord-chunk.ts" "$OH/runtime/discord-chunk.ts" && cmp -s "$PC/runtime/discord-proxy.ts" "$OH/runtime/discord-proxy.ts" || { echo "FAIL: setup must fill ~/.claude-discord/runtime from the real plugin (the fixture's stale copy included)"; exit 1; }
-for f in hooks/turn/on-prompt hooks/peers/thread-guard hooks/autoresearchclaw/on-start hooks/autoresearchclaw/events hooks/tools/thread hooks/tools/local-bots hooks/tools/arc-events; do
-  [ -x "$OH/$f" ] || { echo "FAIL: ~/.claude-discord/$f must be an executable"; exit 1; }
-done
-for t in turn peers lib autoresearchclaw; do
-  [ -L "$OH/hooks/$t" ] && [ ! -e "$OH/hooks/$t/stale" ] && [ ! -e "$PC/hooks/$t/stale" ] || { echo "FAIL: the old hooks/$t copy must be replaced by a link, not written through"; exit 1; }
-done
-[ ! -e "$OH/hooks/tools/old-tool" ] && [ ! -e "$PC/tools/old-tool" ] || { echo "FAIL: an old tool copy must go"; exit 1; }
-# The unmigrated project's kept entry still names an executable file after another project's setup.
-[ -x "$UP/.claude/discord-agents/hooks/peers/thread-guard" ] && [ -x "$UP/.claude/discord-agents/hooks/turn/on-prompt" ] && grep -q '/.claude/discord-agents/hooks/peers/thread-guard' "$UP/.claude/settings.local.json" || { echo "FAIL: another project's setup must not disable an unmigrated project's hooks"; exit 1; }
-[ -e "$OH/scratch/b/note" ] && [ -e "$OH/runtime/discord-proxy.ts" ] && [ -d "$OH/source/.git" ] || { echo "FAIL: scratch, runtime and the source clone must stay"; exit 1; }
-[ -e "$OP/.claude/rules/claude-discord-dev-manager.md" ] || { echo "FAIL: setup must leave the project's old rule file to the plugin's first run"; exit 1; }
-# The previous release's install.sh writes through the links (install -m 755 into hooks/<topic>/ and hooks/tools/):
-# the write lands in the compat copy, never in the source clone, so update can still pull; the next setup restores the copy.
-install -m 755 "$OH/hooks/turn/on-stop" "$OH/hooks/turn/on-prompt"; echo old > "$OH/hooks/lib/discord.sh"; install -m 755 "$OH/hooks/turn/on-stop" "$OH/hooks/tools/thread"
-[ -z "$(git -C "$PC" status --porcelain)" ] && cmp -s "$PC/hooks/turn/on-prompt" "$D/hooks/turn/on-prompt" || { echo "FAIL: a write through the compat links must not reach the source clone: $(git -C "$PC" status --porcelain)"; exit 1; }
-(cd "$OP" && printf '\nn\n\n' | bash "$S" setup obot --scope project >/dev/null)
-cmp -s "$OH/hooks/turn/on-prompt" "$PC/hooks/turn/on-prompt" && cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && cmp -s "$OH/hooks/tools/thread" "$PC/tools/thread" && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] || { echo "FAIL: the next setup must restore the compat copy and leave no temp dir"; exit 1; }
-chmod -x "$OH/compat/hooks/turn/on-stop"   # the same bytes, no longer executable: an old entry's -x test would skip it
-(cd "$OP" && printf '\nn\n\n' | bash "$S" setup obot --scope project >/dev/null)
-[ -x "$OH/hooks/turn/on-stop" ] || { echo "FAIL: a mode-only difference must refresh the compat copy"; exit 1; }
-rm -f "$OP/.claude/skills/claude-discord"
-[ -x "$OH/hooks/tools/thread" ] && [ -x "$OH/hooks/turn/on-prompt" ] || { echo "FAIL: the compat links must outlive the project's install link"; exit 1; }
-# A symlink at hooks/ or rules/ (a dev checkout) goes as a link; its target keeps its files and is not written through.
-mkdir -p "$HOME/old-target/hooks/turn" "$HOME/old-target/rules"; : > "$HOME/old-target/hooks/turn/on-prompt"; : > "$HOME/old-target/rules/dev-manager.md"
-rm -rf "$OH/hooks"; ln -s "$HOME/old-target/hooks" "$OH/hooks"; ln -s "$HOME/old-target/rules" "$OH/rules"
-(cd "$OP" && printf '\nn\nnone\n' | bash "$S" setup obot --scope project >/dev/null)
-[ ! -L "$OH/hooks" ] && [ ! -e "$OH/rules" ] && [ -e "$HOME/old-target/hooks/turn/on-prompt" ] && [ -e "$HOME/old-target/rules/dev-manager.md" ] || { echo "FAIL: a symlinked hooks or rules must be removed as a link, its target untouched"; exit 1; }
-[ -x "$OH/hooks/tools/thread" ] && [ -x "$OH/hooks/turn/on-prompt" ] && [ -z "$(ls "$HOME/old-target/hooks/tools" 2>/dev/null)" ] && [ "$(ls "$HOME/old-target/hooks/turn")" = on-prompt ] || { echo "FAIL: the links must be made in a real hooks directory, not written through the old link"; exit 1; }
-rm -rf "$OP" "$UP" "$HOME/old-target"
-echo "ok: setup on an old install replaces the old hook, tool and runtime copies with links into the real plugin (an unmigrated project's hooks still resolve), removes the old rule copies (the project's rule file is the plugin's to remove), keeps scratch, runtime and the source clone, removes a symlinked hooks or rules as a link without touching its target, and an old install.sh writing through the links changes the compat copy, never the source clone"
-
-# compat/VERSION: a bot's startup (on-session-start runs patch --compat) rebuilds a compat/ whose stamp is not the
-# plugin's HEAD sha (a git pull by hand in the source clone) or that holds a file newer than the stamp (an old
-# install.sh writing through a link); a compaction does not; a plugin that is not the source clone never does; bots
-# starting together leave one complete copy and no temp dir.
-CB=$(bdir "$HOME/cbproj" cb); mkdir -p "$CB"
-cbs() { printf '{"session_id":"%s","source":"%s"}' "$1" "$2" | CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$HOME/cbproj" DISCORD_STATE_DIR="$CB" bash "$PC/hooks/turn/on-session-start" >/dev/null; }
-[ "$(cat "$OH/compat/VERSION")" = "$(git -C "$PC" rev-parse HEAD)" ] || { echo "FAIL: setup must stamp compat/VERSION with the source's HEAD sha: $(cat "$OH/compat/VERSION")"; exit 1; }
-git -C "$SRC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m pulled-by-hand && git -C "$PC" pull -q --ff-only
-: > "$OH/compat/stale"; touch -d '1 hour ago' "$OH/compat/stale"
-cbs cb1 compact
-[ -e "$OH/compat/stale" ] || { echo "FAIL: a compaction must not rebuild compat/"; exit 1; }
-bash "$D/bin/claude-discord" patch --compat >/dev/null 2>&1 || :
-[ -e "$OH/compat/stale" ] || { echo "FAIL: a plugin other than the source clone must not rebuild compat/"; exit 1; }
-mv "$OH/source" "$OH/source.off"; bash "$D/bin/claude-discord" patch --compat >/dev/null 2>&1 || :; mv "$OH/source.off" "$OH/source"
-[ -e "$OH/compat/stale" ] || { echo "FAIL: with no source clone, a bot start must not rebuild compat/ (setup and update do)"; exit 1; }
-cbs cb1 startup
-[ ! -e "$OH/compat/stale" ] && [ "$(cat "$OH/compat/VERSION")" = "$(git -C "$PC" rev-parse HEAD)" ] || { echo "FAIL: a startup must rebuild a compat/ stamped by another commit: $(cat "$OH/compat/VERSION")"; exit 1; }
-touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
-cbs cb2 resume
-cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" || { echo "FAIL: a resume must rebuild a compat/ written through after its stamp"; exit 1; }
-touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
-for _ in 1 2 3 4 5 6; do bash "$S" patch --compat >/dev/null 2>&1 & done; wait
-cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* "$OH"/compat/compat.* 2>/dev/null)" ] ||
-  { echo "FAIL: six parallel refreshes must leave one complete compat/ and no temp dir: $(ls -d "$OH"/compat* "$OH"/compat/compat.* 2>&1)"; exit 1; }
-# Writers swap one at a time under compat.lock. A stale lock is broken by exactly one of two refreshes that both judged it
-# stale: the stubs order both judgements before either break, and the second break after the first re-took the lock (its swap
-# waits for that break); the second must leave that lock, wait, then find compat/ current (one swap). Both succeed.
-SB="$HOME/swapfail-stubs"; mkdir -p "$SB"; RP=$(command -v perl); cp -R "$OH/compat" "$HOME/cur"
-cat > "$SB/hook" <<'EOF'
-#!/bin/sh
-case ${0##*/} in mv) s=$1 d=$2 r=/bin/mv;; mkdir) case $TC:$1 in dual:*/compat.lock) "$TMK" -p "$1"; exit;; esac; exec "$TMK" "$@";; *) s=$3 d=$4 r=$TRP;; esac
-w() { i=0; until [ -e "$TSB/$1" ] || [ $i = 1000 ]; do sleep 0.01; i=$((i+1)); done; [ -e "$TSB/$1" ] || : > "$TSB/capped.$1"; }   # a cap that ends a wait is said, never silent
-case $TC:$s:$d in
-  two:"$TOH/compat":*old) echo >> "$TSB/swaps"; w b2done;;   # compat/ going aside: a swap
-  two:*:*/compat.lock.broken.*) mkdir "$TSB/b1" 2>/dev/null && { w b2; exec "$r" "$@"; }; : > "$TSB/b2"; i=0
-    until { [ -s "$TOH/compat.lock/owner" ] && [ "$(cat "$TOH/compat.lock/owner")" != dead ]; } || [ $i = 1000 ]; do sleep 0.01; i=$((i+1)); done
-    [ $i != 1000 ] || : > "$TSB/capped.owner"
-    o=$(cat "$TOH/compat.lock/owner" 2>/dev/null); "$r" "$@"; x=$?; [ "$(cat "$TOH/compat.lock/owner" 2>/dev/null)" = "$o" ] || : > "$TSB/overlap"; : > "$TSB/b2done"; exit $x;;
-  dual:"$TOH/compat":*old) case $d in */compat.new.*/old) ;; *) : > "$TSB/shared";; esac; mkdir "$TSB/a1" 2>/dev/null && { w at2; exec "$r" "$@"; }   # aside
-    : > "$TSB/at2"; w landed; "$r" "$@"; x=$?; : > "$TSB/aside2"; exit $x;;
-  dual:*/compat.new.*/compat:"$TOH/compat") mkdir "$TSB/l1" 2>/dev/null && { "$r" "$@"; x=$?; : > "$TSB/landed"; w aside2; exit $x; }; w done;;   # land
-esac; exec "$r" "$@"
-EOF
-chmod +x "$SB/hook"; for t in perl mv mkdir; do ln -s hook "$SB/$t"; done; export TSB="$SB" TOH="$OH" TRP="$RP" TMK="$(command -v mkdir)"
-mkdir "$OH/compat.lock"; echo dead > "$OH/compat.lock/owner"; touch -d '1 minute ago' "$OH/compat.lock" "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
-for k in 1 2; do { PATH="$SB:$PATH" TC=two bash "$S" patch --compat >/dev/null 2>"$SB/err.$k" || : > "$SB/failed"; } & done; wait
-[ -z "$(ls "$SB"/capped.* 2>/dev/null)" ] || { echo "FAIL: two breakers: the stub lost its forced order (a wait ran out: $(ls "$SB"/capped.*)); this says nothing about the code"; exit 1; }
-[ -e "$SB/b2done" ] && [ ! -e "$SB/overlap" ] && [ ! -e "$SB/failed" ] && [ "$(wc -l < "$SB/swaps")" -eq 1 ] && cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -x "$OH/hooks/turn/on-prompt" ] && [ -z "$(ls -d "$OH"/compat.* "$OH"/compat/compat* 2>/dev/null)" ] ||
-  { echo "FAIL: of two breakers of one stale lock only one may break it, the other waits; one swap, both succeed, one complete compat/: swaps=$(wc -l < "$SB/swaps") current=$(cmp "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" 2>&1 && echo yes) exec=$([ -x "$OH/hooks/turn/on-prompt" ] && echo yes; ls -ld "$OH/hooks/turn" "$OH/hooks/turn/on-prompt" 2>&1) stderr=$(cat "$SB"/err.* 2>&1) $(ls -d "$SB"/* "$OH"/compat* "$OH"/compat/compat* 2>&1)"; exit 1; }
-# Two holders at once (a lock broken under a stalled holder; the stub lets both past it), worst order: A takes compat/ aside,
-# lands, B takes that aside, A exits, B lands. Nothing nested, absent or old again; no old copy goes to a name writers share.
-touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
-for _ in 1 2; do { PATH="$SB:$PATH" TC=dual bash "$S" patch --compat >/dev/null 2>&1 || :; : > "$SB/done"; } & done; wait
-[ -e "$SB/aside2" ] && [ ! -e "$SB/shared" ] && diff -r "$OH/compat" "$HOME/cur" >/dev/null && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] ||
-  { echo "FAIL: two holders at once must leave compat/ whole and current, nothing nested or left: $(ls -d "$SB"/* "$OH"/compat* "$OH"/compat/compat* "$OH"/compat/old 2>&1)"; exit 1; }
-rm -r "$SB"/*
-# Under the lock a dead writer's leftovers go: an old compat.new.* (its old copy too), compat.old.<pid> (1.9.4), compat.lock.broken.*
-# (a breaker killed mid-break), a copy 1.9.4 nested in compat/; a compat.new.* under 10 minutes old may be a writer still building.
-mkdir "$OH/compat.old.99999" "$OH/compat.new.99999" "$OH/compat.new.99999/old" "$OH/compat.lock.broken.x" "$OH/compat.new.fresh" "$OH/compat/compat.old.99998"
-touch -d '1 hour ago' "$OH/compat.old.99999" "$OH/compat.new.99999" "$OH/compat.lock.broken.x"; touch -d '5 minutes ago' "$OH/compat.new.fresh"; touch -d '1 minute ago' "$OH/compat/VERSION"
-rc=0; bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
-[ "$rc" = 0 ] && [ "$(ls -d "$OH"/compat.* "$OH"/compat/compat* 2>/dev/null)" = "$OH/compat.new.fresh" ] ||
-  { echo "FAIL: leftovers must be removed under the lock, a fresh compat.new.* kept (rc=$rc): $(ls -d "$OH"/compat* "$OH"/compat/compat* 2>&1)"; exit 1; }
-rmdir "$OH/compat.new.fresh"
-# A failed swap: perl's rename of our copy fails after compat/ went aside (a non-race failure) -> the old copy goes
-# back, the run fails, the lock is released. Only that rename fails; the restore reaches the real perl.
-printf '#!/bin/sh\ncase $3 in */compat.new.*/compat) exit 1;; esac\nexec "%s" "$@"\n' "$RP" > "$SB/perl"; chmod +x "$SB/perl"
-touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
-rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
-[ "$rc" != 0 ] && [ -x "$OH/compat/hooks/turn/on-prompt" ] && [ -s "$OH/compat/VERSION" ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] ||
-  { echo "FAIL: a failed rename must put the old compat/ back, fail and release the lock (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-# The restore fails too: ours goes if another writer landed meanwhile, else the run fails and our compat.new.*/old stays.
-printf '#!/bin/sh\ncase $3 in */compat.new.*/compat) exit 1;; */compat.new.*/old) [ ! -e "%s/mw" ] || cp -R "%s/cur" "$4"; exit 1;; esac\nexec "%s" "$@"\n' "$SB" "$HOME" "$RP" > "$SB/perl"
-: > "$SB/mw"; touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || :
-diff -r "$OH/compat" "$HOME/cur" >/dev/null && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] || { echo "FAIL: a restore beaten by another writer's landing must drop ours: $(ls -d "$OH"/compat* "$OH"/compat.*/* 2>&1)"; exit 1; }
-rm "$SB/mw"; touch -d '1 minute ago' "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"; rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
-j=$(ls -d "$OH"/compat.* 2>/dev/null || :); [ "$rc" != 0 ] && [ ! -e "$OH/compat" ] && [ -d "$j/old" ] ||
-  { echo "FAIL: a failed restore must keep its compat.new.*/old and still release the lock (rc=$rc): $(ls -d "$OH"/compat* "$OH"/compat.*/* 2>&1)"; exit 1; }
-# A writer killed between its two renames leaves the same. A bot start puts the newest old copy back under the lock before
-# the sweep, which then removes the older one (a current copy stays: same inode); the emptied one is fresh again, and stays.
-rm -r "$j" "$SB/perl"; mkdir "$OH/compat.new.a" "$OH/compat.new.b"; cp -R "$HOME/cur" "$OH/compat.new.a/old"; cp -R "$HOME/cur" "$OH/compat.new.b/old"
-touch -d '2 hours ago' "$OH/compat.new.a"; touch -d '1 hour ago' "$OH/compat.new.b"; i=$(ls -di "$OH/compat.new.b/old"); bash "$S" patch --compat >/dev/null 2>&1 || :
-j=$(ls -di "$OH/compat" 2>/dev/null || :); [ "${j%% *}" = "${i%% *}" ] && [ "$(ls -d "$OH"/compat.* 2>/dev/null)" = "$OH/compat.new.b" ] ||
-  { echo "FAIL: a bot start must put back the newest old copy a killed writer left ($i): $(ls -di "$OH"/compat* "$OH"/compat.*/* 2>&1)"; exit 1; }
-# Our compat/ refused to go aside for a non-race reason (permissions): it stays unreplaced, so the run fails.
-rmdir "$OH/compat.new.b"; printf '#!/bin/sh\ncase $4 in */compat.new.*/old) exit 1;; esac\nexec "%s" "$@"\n' "$RP" > "$SB/perl"; chmod +x "$SB/perl"; echo other-sha > "$OH/compat/VERSION"
-rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
-[ "$rc" != 0 ] && [ "$(cat "$OH/compat/VERSION")" = other-sha ] && [ -z "$(ls -d "$OH"/compat.* 2>/dev/null)" ] || { echo "FAIL: a refused mv that leaves compat/ unreplaced must fail (rc=$rc): $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-# A lockless writer (1.9.4, or a holder stalled past the bound whose lock we broke) lands its copy right after ours went aside: our rename(2)
-# fails instead of nesting ours in it, and the run succeeds; the stub also re-takes the lock (owner next), which our release must leave.
-printf '#!/bin/sh\ncase $4 in */compat.new.*/old) "%s" "$@" && cp -R "%s/cur" "$3" && rm -r "$3.lock" && mkdir "$3.lock" && echo next > "$3.lock/owner" && : > "%s/fired"; exit;; esac\nexec "%s" "$@"\n' "$RP" "$HOME" "$SB" "$RP" > "$SB/perl"
-mkdir "$OH/compat.lock"; touch -d '1 minute ago' "$OH/compat.lock" "$OH/compat/VERSION"; echo old > "$OH/hooks/lib/discord.sh"
-rc=0; PATH="$SB:$PATH" bash "$S" patch --compat >/dev/null 2>&1 || rc=$?
-[ "$(cat "$OH/compat.lock/owner" 2>/dev/null)" = next ] || { echo "FAIL: a writer whose lock was broken while it stalled must not release the next holder's lock: $(ls -d "$OH"/compat* 2>&1)"; exit 1; }
-rm -r "$OH/compat.lock"
-[ -e "$SB/fired" ] && [ "$rc" = 0 ] && cmp -s "$OH/hooks/lib/discord.sh" "$PC/hooks/lib/discord.sh" && [ -z "$(ls -d "$OH"/compat.* "$OH"/compat/compat* 2>/dev/null)" ] ||
-  { echo "FAIL: a copy landed by a lockless writer must stay whole, ours neither inside nor beside it (rc=$rc): $(ls -d "$OH"/compat* "$OH"/compat/compat* 2>&1)"; exit 1; }
-rm -rf "$HOME/cur"
-rm -rf "$SB"
-bash "$S" patch --compat >/dev/null 2>&1   # leave a fresh compat/
-rm -rf "$HOME/cbproj"
-echo "ok: a startup or resume rebuilds a compat/ stamped by another commit or written through after its stamp, a compaction or a non-source plugin does not, parallel refreshes leave one complete copy, writers swap one at a time under a lock (a held one is waited for, a stale one broken by exactly one breaker, a dead writer's leftovers removed), two holders at once leave one whole current copy, a failed swap restores the old copy (drops it if another writer landed meanwhile), a killed writer's old copy goes back at a bot start, a refused move aside fails, a lockless writer's copy landing at our swap stays whole, a writer whose lock was broken leaves the next holder's, and with no source clone no bot start rebuilds it"
+: > "$OH/scratch/b/note"; echo old > "$OH/hooks/tools/thread"; : > "$OH/rules/dev-manager.md"; echo old > "$OH/discord-chunk.ts"; echo old > "$OH/discord-proxy.ts"; echo old > "$OH/compat/hooks/turn/on-prompt"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+[ ! -e "$OH/hooks" ] && [ ! -L "$OH/hooks" ] && [ ! -e "$OH/compat" ] && [ ! -e "$OH/compat.new.1" ] && [ ! -e "$OH/compat.lock" ] && [ ! -e "$OH/rules" ] &&
+  [ "$(readlink "$OH/discord-chunk.ts")" = "$OH/runtime/discord-chunk.ts" ] && [ "$(readlink "$OH/discord-proxy.ts")" = "$OH/runtime/discord-proxy.ts" ] &&
+  cmp -s "$OH/discord-chunk.ts" "$PC/runtime/discord-chunk.ts" && cmp -s "$OH/discord-proxy.ts" "$PC/runtime/discord-proxy.ts" &&
+  [ -e "$OH/scratch/b/note" ] && [ -d "$OH/source/.git" ] && [ -d "$OH/records" ] ||
+  { echo "FAIL: compat removes the old install copies and keeps the runtime links: $out / $(ls -la "$OH" 2>&1)"; exit 1; }
+mkdir -p "$HOME/old-target/hooks/turn" "$OH/compat/.git"; : > "$HOME/old-target/hooks/turn/on-prompt"; ln -s "$HOME/old-target/hooks" "$OH/hooks"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+[ ! -L "$OH/hooks" ] && [ ! -e "$OH/hooks" ] && [ -e "$HOME/old-target/hooks/turn/on-prompt" ] && [ -d "$OH/compat/.git" ] && grep -q 'compat holds a git tree' <<<"$out" ||
+  { echo "FAIL: a symlinked hooks goes as a link, its target untouched, and a compat/ holding a git tree is left, said: $out / $(ls -la "$OH" "$HOME/old-target/hooks/turn" 2>&1)"; exit 1; }
+rm -rf "$OH/compat" "$HOME/old-target"
+out=$(bash "$S" patch --compat 2>&1) && [ -z "$out" ] || { echo "FAIL: patch --compat (a 1.17 on-session-start from a stale clone) is plain patch: exit 0, silent: $out"; exit 1; }
+echo "ok: compat removes ~/.claude-discord/hooks, compat/ with its leftovers and the old rule copies (a symlinked hooks as a link, a compat/ holding a git tree left and said), keeps the two runtime links, scratch, records and the source clone; patch --compat is plain patch"
 
 # setup --mode: changes only a set-up bot's mode. A fresh project, so these
 # assertions are not entangled with any other bot's state.
 P5="$HOME/project5"; mkdir -p "$P5"; cd "$P5"
+jq -n --arg p5 "$PHOME/project5" '{projects: {($p5): {hasTrustDialogAccepted: true}}}' > "$HOME/.claude.json"
 R5=$HOME/.claude-discord/projects/$(skey "$P5")/bots   # by hand, not broot: the first case asserts that nothing made the key dir
 SL5="$P5/.claude/settings.local.json"
 
@@ -356,9 +221,8 @@ GP="$HOME/g proj"; GP2="$HOME/g proj2"; mkdir -p "$GP" "$GP2"
 RECS=$HOME/.claude-discord/records/installs; cp "$RECS" "$HOME/installs.parked"; : > "$RECS"
 (cd "$GP" && printf '900\n111\n\ntokG\nn\n' | bash "$S" setup gbot --scope global --method clone >/dev/null) || { echo "FAIL: setup --scope global --method clone failed"; exit 1; }
 [ -d "$GL/.git" ] && [ ! -L "$GL" ] && [ ! -e "$GP/.claude/skills" ] || { echo "FAIL: global clone must be a real clone at ~/.claude/skills and leave the project alone"; exit 1; }
-# The machine-wide compat links stay on the source clone, not on this clone-method install (it may be pinned, and may go). Run the clone's own wrapper: it is the one whose self_root is the clone.
+# Run the clone's own wrapper: it is the one whose self_root is the clone.
 (cd "$GP" && printf '\nn\n' | bash "$GL/bin/claude-discord" setup gbot >/dev/null 2>&1) || { echo "FAIL: a re-run of the global clone's own wrapper failed"; exit 1; }
-[ "$(readlink "$HOME/.claude-discord/hooks/tools/thread")" = "$HOME/.claude-discord/compat/tools/thread" ] && [ "$(readlink "$HOME/.claude-discord/hooks/turn")" = "$HOME/.claude-discord/compat/hooks/turn" ] || { echo "FAIL: a clone-method setup must keep the compat links on the compat copy: $(readlink "$HOME/.claude-discord/hooks/tools/thread")"; exit 1; }
 (cd "$GP2" && printf '900\n111\n\ntokG2\nn\n\nproject\n' | bash "$S" setup gbot2 >/dev/null 2>&1) || { echo "FAIL: a second bot on a globally installed machine must not be refused"; exit 1; }
 [ ! -e "$GP2/.claude/skills" ] || { echo "FAIL: with a global install the project must get no copy"; exit 1; }
 rm -rf "$GL"
@@ -374,7 +238,7 @@ done
 grep -qxF '/sub/.claude/skills/claude-discord' "$SG/.git/info/exclude" || { echo "FAIL: a subdirectory project needs its prefix in the exclude pattern"; exit 1; }
 echo "ok: setup installs the plugin as a link or a clone at project or global scope, asks nothing when an install exists, refuses the other scope and bad flags before writing, excludes it in subdirectories and worktrees, records it, and writes trust only on y"
 
-# install: the plugin, shim, runtime and compat copy, asking nothing (stdin is left unread) and writing no bot
+# install: the plugin, shim and runtime, asking nothing (stdin is left unread) and writing no bot
 # file; a re-run is the same. A setup whose clone fails writes no bot file: the install comes before the questions.
 IP="$HOME/inst proj"; FP="$HOME/fail proj"; mkdir -p "$IP" "$FP"
 jq --arg p "$PHOME/inst proj" '.projects[$p].hasTrustDialogAccepted = true' "$HOME/.claude.json" > "$HOME/cj.tmp" && mv "$HOME/cj.tmp" "$HOME/.claude.json"
@@ -382,7 +246,7 @@ for _ in 1 2; do
   rc=0; left=$(printf 'leftover\n' | { (cd "$IP" && bash "$S" install --scope project --method link >"$HOME/inst.out" 2>&1) || rc=$?; cat; })
   [ "$rc" = 0 ] && [ "$left" = leftover ] && [ "$(readlink "$IP/.claude/skills/claude-discord")" = "$HOME/.claude-discord/source" ] && [ ! -e "$IP/.claude/discord-agents" ] || { echo "FAIL: install must install, read nothing from stdin and write no bot file (rc=$rc, left=$left): $(<"$HOME/inst.out")"; exit 1; }
 done
-grep -qxF "$IP/.claude/skills/claude-discord" "$HOME/.claude-discord/records/installs" && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" && [ -d "$HOME/.claude-discord/compat/hooks/turn" ] || { echo "FAIL: install must record the install and refresh the shim and compat copy"; exit 1; }
+grep -qxF "$IP/.claude/skills/claude-discord" "$HOME/.claude-discord/records/installs" && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" && [ ! -e "$HOME/.claude-discord/compat" ] && [ ! -e "$HOME/.claude-discord/hooks" ] || { echo "FAIL: install must record the install, refresh the shim and leave no compat copy"; exit 1; }
 # install ends with one patch of the official plugin cache: an install then /reload-plugins with no bot start must
 # find .mcp.json and server.ts patched. A version dir whose pattern moved warns on stderr and leaves the install at rc 0.
 for v in 0.0.20 0.0.21; do mkdir -p "$PCACHE/$v"; done
@@ -441,12 +305,12 @@ grep -qE '^claude-discord [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]{7,}\)$' <<<"$v" && [
 jq '.version = "9.9.9"' "$SRC/.claude-plugin/plugin.json" > "$SRC/p.json" && mv "$SRC/p.json" "$SRC/.claude-plugin/plugin.json" &&
   sed -i 's/^if \[ "\${1:-}" = patch \]; then$/& echo PATCH-CODE-V2 >\&2/' "$SRC/bin/lib/patch.sh" && grep -q PATCH-CODE-V2 "$SRC/bin/lib/patch.sh" &&
   git -C "$SRC" -c user.email=t@t -c user.name=t commit -qam bump || { echo "FAIL: could not bump the stand-in repo"; exit 1; }
-rm -rf "$HOME/.claude-discord/runtime" "$HOME/.claude-discord/compat"; echo stale > "$HOME/.local/bin/claude-discord"
+rm -rf "$HOME/.claude-discord/runtime"; echo stale > "$HOME/.local/bin/claude-discord"
 out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || { echo "FAIL: update failed: $out"; exit 1; }
 grep -q PATCH-CODE-V2 <<<"$out" || { echo "FAIL: update must run the patch step from the code it just pulled: $out"; exit 1; }
 grep -q -- '-> 9.9.9' <<<"$out" && grep -q '/reload-plugins' <<<"$out" && [ "$(grep -c -- "$PC" <<<"$out")" = 1 ] || { echo "FAIL: update must pull the source behind the link once and ask for /reload-plugins: $out"; exit 1; }
 [ "$(jq -r .version "$PC/.claude-plugin/plugin.json")" = 9.9.9 ] && [ "$(jq -r .version "$CC/.claude-plugin/plugin.json")" != 9.9.9 ] || { echo "FAIL: update must pull the source and only the source"; exit 1; }
-[ -s "$HOME/.claude-discord/runtime/discord-chunk.ts" ] && [ -s "$HOME/.claude-discord/runtime/discord-proxy.ts" ] && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" && [ -x "$HOME/.claude-discord/compat/hooks/turn/on-prompt" ] || { echo "FAIL: update must refill the runtime copy and the compat copy and refresh the shim"; exit 1; }
+[ -s "$HOME/.claude-discord/runtime/discord-chunk.ts" ] && [ -s "$HOME/.claude-discord/runtime/discord-proxy.ts" ] && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" || { echo "FAIL: update must refill the runtime copy and refresh the shim"; exit 1; }
 # --all: every recorded link and the clone, the source pulled once, a project removed since setup pruned, live records kept.
 git -C "$SRC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m again
 printf '%s\n' "$HOME/gone proj/.claude/skills/claude-discord" >> "$HOME/.claude-discord/records/installs"

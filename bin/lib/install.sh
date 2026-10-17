@@ -126,52 +126,25 @@ install_plugin() {  # uses $scope $method $pdir $gdir
   fi
 }
 
-# What install.sh used to put under ~/.claude-discord becomes links into
-# ~/.claude-discord/compat, a plain copy (no git) of the real plugin's hooks,
-# tools and rules (the source clone when there is one, else $self_root, the
-# resolved install, not one project's link): hooks/{turn,peers,lib,autoresearchclaw},
-# every tool under hooks/tools, and the two runtime .ts files (the bunfig preload
-# an old bot's MCP server names; they link to the stable runtime/ copy, which
-# sync_runtime fills, so they never dangle). A copy, not the clone (R16): the
-# previous release's install.sh writes through these links, and a write into a
-# clone would leave `update` refusing to pull for good.
-# Links stay for one release, because a project set up by the previous release
-# and not yet by this one keeps its settings hooks, and those resolve through
-# .claude/discord-agents/hooks -> ~/.claude-discord/hooks; deleting the copies
-# would silently turn every one of them into a no-op. The next release removes
-# the links. rules/ goes (only the old rule copies read it); scratch/, records/,
-# source/ are not touched (runtime/ and compat/ are refreshed). A symlink at hooks/ itself is removed as
-# a link (R2): it leads somewhere that is not ours to empty. The other paths
-# are removed with rm -rf, which on a link removes only the link.
+# The 1.8-1.16 install under ~/.claude-discord goes (5b, 1.18.1): hooks/ (links into compat/ since 1.9, copies before),
+# compat/ with its leftovers (compat.*: a dead writer's build, its lock) and rules/ (the old rule copies). Links and
+# a plain copy, never a clone: a compat/ that holds a .git (a checkout put there by hand) is left, said. rm -rf on a
+# link removes only the link (a symlinked hooks/, a dev checkout: its target is not ours to empty). Kept: the two
+# runtime .ts links (a bun server patched before 1.9 imports the chunk module from ~/.claude-discord/discord-chunk.ts
+# at its next long reply, and that running process cannot be re-patched; they point at runtime/, which sync_runtime
+# fills), scratch/, records/ and source/.
 remove_old_install() {
-  local h=$helpers real=$self_root c=$helpers/compat t f bad=0
-  # The machine-wide source clone when there is one: a clone-method (possibly pinned) project must not pull every unmigrated project onto its version.
-  [ ! -d "$h/source/hooks" ] || real=$h/source
-  [ ! -L "$h/hooks" ] || rm -f "$h/hooks"
-  [ ! -e "$h/rules" ] && [ ! -L "$h/rules" ] || rm -rf "$h/rules"
-  [ -d "$h/hooks/tools" ] && [ ! -L "$h/hooks/tools" ] || { rm -rf "$h/hooks/tools"; mkdir -p "$h/hooks/tools" || bad=1; }
+  local h=$helpers f bad=0
   sync_runtime || bad=1
-  sync_compat "$real" || bad=1
-  for f in "$h"/hooks/tools/* "$h"/hooks/tools/.[!.]*; do   # an old copy, a link into a clone, or a link to a tool the plugin no longer ships goes
-    { [ -e "$f" ] || [ -L "$f" ]; } && ! { [ -L "$f" ] && [ "$f" -ef "$c/tools/${f##*/}" ]; } && { rm -rf "$f" || bad=1; }
-  done
-  for t in turn peers lib autoresearchclaw; do
-    [ -L "$h/hooks/$t" ] && [ "$(readlink "$h/hooks/$t")" = "$c/hooks/$t" ] && continue   # already linked (every setup after the first)
-    rm -rf "${h:?}/hooks/$t" && ln -s "$c/hooks/$t" "$h/hooks/$t" || bad=1
-  done
-  for f in "$c"/tools/*; do
-    [ -L "$h/hooks/tools/${f##*/}" ] && [ "$h/hooks/tools/${f##*/}" -ef "$f" ] && continue
-    ln -sfn "$f" "$h/hooks/tools/${f##*/}" || bad=1
-  done
+  if [ -e "$h/compat/.git" ]; then echo "claude-discord: $h/compat holds a git tree: left as it is (remove it by hand; nothing of claude-discord reads it)" >&2
+  else rm -rf "$h/compat"; fi
+  rm -rf "$h/hooks" "$h/rules" "$h"/compat.*
   for f in discord-chunk.ts discord-proxy.ts; do
     [ -L "$h/$f" ] && [ "$h/$f" -ef "$h/runtime/$f" ] && continue
     ln -sfn "$h/runtime/$f" "$h/$f" || bad=1
   done
-  [ "$bad" = 0 ] || { echo "claude-discord: could not link the old install paths under $h to $c" >&2; return 1; }
+  [ "$bad" = 0 ] || { echo "claude-discord: could not link $h/discord-chunk.ts and discord-proxy.ts to $h/runtime" >&2; return 1; }
 }
-
-# same_tree <a> <b>: same files and the same executables (diff -r ignores modes,
-# and an old settings entry skips a hook that is not -x).
 
 # strip_settings: the hook entries releases before 1.9 wrote (a command under .claude/discord-agents/hooks/) taken out
 # of the files the plugin's first hook run never edits: the user-global settings.json, and a symlinked
@@ -354,7 +327,7 @@ coexist() {
   echo "$3" >&2; exit 2
 }
 
-# The plugin, the shim, runtime/, compat/ and the install record; before any
+# The plugin, the shim, runtime/ and the install record; before any
 # bot question (R17), so a failed clone leaves no bot file behind.
 install_all() {
   if [ -z "$scope" ]; then

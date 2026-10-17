@@ -23,13 +23,13 @@
 #                                        replace the running session with a fresh
 #                                        one that starts from its handoff
 #   claude-discord install [--scope project|global] [--method link|clone]
-#                                        the plugin, the shim, runtime/ and compat/ for this
+#                                        the plugin, the shim and runtime/ for this
 #                                        project (or globally); reads no stdin at all;
 #                                        safe to re-run (the bootstrap's command)
 #   claude-discord update [--all]        git pull --ff-only the clone this runs from (--all:
 #                                        every recorded install, each real clone once; a
 #                                        clone on a detached HEAD is skipped), then the
-#                                        pulled code's patch, compat copy and shim
+#                                        pulled code's patch, compat step and shim
 #   claude-discord --version             version and short sha of the clone
 #   claude-discord health [--json]
 #                                        is every bot in this project still
@@ -260,7 +260,6 @@ plugin_version() {
   fi
   echo "?"
 }
-head_sha() { git -C "$1" rev-parse HEAD 2>/dev/null || :; }   # compat/VERSION's stamp (empty with no git)
 # The one version line: what --version prints (`hosts` and `access --host` parse it on other machines, so its shape
 # does not move) and, since 1.14.1, what the TUI is handed as --version-line for its title.
 version_line() { echo "claude-discord $(plugin_version "$self_root") ($(git -C "$self_root" rev-parse --short HEAD 2>/dev/null || echo nogit))"; }
