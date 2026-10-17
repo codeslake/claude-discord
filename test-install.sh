@@ -553,8 +553,15 @@ rm -rf "$JOBS/mv000002"
 # (M-4) No job record, but a foreground session of ob2 on the old path (`claude agents` lists it with a pid, no id): kept, said.
 printf '#!/bin/bash\ncase $1 in agents) echo %s;; *) echo "PLAIN $*";; esac\n' "'[{\"name\":\"ob2\",\"pid\":4242,\"cwd\":\"$(cd "$OLDP" && pwd -P)\"}]'" > "$HOME/bin/claude"
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
-[ "$(readlink "$OR/ob2")" = "$OS/bots/ob2" ] && grep -qF "$OR/ob2" <<<"$out" && grep -q 'session of ob2' <<<"$out" ||
+[ "$(readlink "$OR/ob2")" = "$OS/bots/ob2" ] && grep -qF "$OR/ob2" <<<"$out" && grep -q 'a foreground session of ob2' <<<"$out" ||
   { echo "FAIL: a foreground session on the old path (no job record) keeps its link at compat, said: $out / $(ls -la "$OR" 2>&1)"; exit 1; }
+# A row WITH a job id whose record names the NEW path (lmd79 after the live move: photo-bot's a890d472) is a background
+# session on the new place already, found by its name: no reason to keep the link.
+mkdir -p "$JOBS/ob200002"; jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$OS/bots/ob2\"}}" '{sessionId: "0b500000-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JOBS/ob200002/state.json"
+printf '#!/bin/bash\ncase $1 in agents) echo %s;; *) echo "PLAIN $*";; esac\n' "'[{\"name\":\"ob2\",\"id\":\"ob200002\",\"pid\":4242,\"cwd\":\"$(cd "$OLDP" && pwd -P)\"}]'" > "$HOME/bin/claude"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+[ ! -L "$OR/ob2" ] && [ ! -e "$OR/ob2" ] && ! grep -q 'foreground' <<<"$out" || { echo "FAIL: a live row with a job id whose record names the new path is no reason to keep the link: $out / $(ls -la "$OR" 2>&1)"; exit 1; }
+rm -rf "$JOBS/ob200002"
 printf '#!/bin/bash\ncase $1 in agents) echo "[]";; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
 [ ! -L "$OR/ob2" ] && [ ! -e "$OR/ob2" ] && [ "$(readlink "$OR/ob1")" = "$OS/bots/ob1" ] && [ -d "$OS/bots/ob2" ] && grep -q mv000001 <<<"$out" && grep -qF "$OR/ob1" <<<"$out" ||

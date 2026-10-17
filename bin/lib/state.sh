@@ -142,11 +142,12 @@ move_project() {
 # daemon restart or a fleet claim comes back on the frozen path; a stopped job keeps its record, and so the link, until
 # `claude rm <id>` or the bot's next start prunes it: said, with `say`). The record holds the start's LOGICAL $PWD (a 1.17
 # `root=$PWD/...`), so only the path's last part is compared: a same-named bot of another project keeps a harmless link
-# longer. With `say` (compat, setup) a link whose bot has a session with no job record (a foreground one; `claude agents`
-# not answering counts) stays too. A link missing for a bot a record names (a move cut between its rename and its
+# longer. With `say` (compat, setup) a link whose bot has a FOREGROUND session (a live row with no job id: `claude agents`
+# lists it with a pid alone; one not answering counts too) stays too: a row with a job id whose record names the new
+# path is a background session on the new place already (lmd79, 2026-10-18: photo-bot's), and keeps nothing. A link missing for a bot a record names (a move cut between its rename and its
 # link) is made again. Then the directory itself with its .gitignore, once it holds nothing else.
 unlink_old() {
-  local src=$1/.claude/discord-agents b n j live rest="" jobs="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/jobs"
+  local src=$1/.claude/discord-agents b n j live fg rest="" jobs="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/jobs"
   [ -d "$src" ] && [ ! -L "$src" ] || return 0
   proj_dirs "$1"
   if [ -n "$pd_new" ]; then
@@ -170,10 +171,12 @@ unlink_old() {
     if [ "${2:-}" = say ]; then
       type live_sessions >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/sessions.sh"
       live=$(cd "$1" && live_sessions "$n" "$b" </dev/null) || live=unknown
-      if [ -n "$live" ]; then
+      fg=""   # a foreground row is "- <pid>" (no job id)
+      case $live in unknown) fg=unknown;; "- "*|*$'\n'"- "*) fg=${live#*- }; fg=${fg%%$'\n'*};; esac
+      if [ -n "$fg" ]; then
         rest=1
-        if [ "$live" = unknown ]; then echo "claude-discord: $b stays a link to its moved state: 'claude agents --json' did not answer, so whether a session of $n runs on the old path is unknown"
-        else echo "claude-discord: $b stays a link to its moved state: a session of $n runs with no job record (${live%%$'\n'*}; a foreground one), and may still read the old path"; fi
+        if [ "$fg" = unknown ]; then echo "claude-discord: $b stays a link to its moved state: 'claude agents --json' did not answer, so whether a session of $n runs on the old path is unknown"
+        else echo "claude-discord: $b stays a link to its moved state: a foreground session of $n (pid $fg, no job record) runs here and may still read the old path"; fi
         continue
       fi
     fi
