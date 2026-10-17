@@ -623,6 +623,49 @@ printf '%s\n' "$OPFK" > "$OPF"
 echo "ok: a start in a 1.16-shaped project moves its state first and launches on the new path"
 
 
+# --- the two cases of the state move that start a plugin server (moved here from the core file, 1.18.0) ---------------
+# A project with one bot, as the core file's single-project (the install questions skipped: this file's earlier cases
+# leave the trust and install state in another place than the core's); the health run below reads it from its root.
+SP="$HOME/single-project"; mkdir -p "$SP"; cd "$SP"
+printf '900\n111\n222\ntokS\nn\n' | CLAUDE_DISCORD_SETUP_NOASK=1 bash "$S" setup sbot --scope project >/dev/null 2>&1 || { echo "FAIL: fixture: the setup of single-project failed"; exit 1; }
+SD="$(bdir "$SP" "sbot")"
+echo "$ID_SEEN" > "$SD/last-message-id"; seed_id "$SD"; seed_guild "$SD"
+start_server "$SD"   # as in the core file: the case below counts this one too
+# 1.18.0: a server whose environ names the bot's path before the move (<project>/.claude/discord-agents/<bot>: a job
+# respawned on it) counts as one on the path after it does: a moved bot never reads as down.
+NEWSD="$HOME/.claude-discord/projects/$(skey "$SP")/bots/sbot" OLDSD="$SP/.claude/discord-agents/sbot"
+mkdir -p "${OLDSD%/*}"; ln -s "$NEWSD" "$OLDSD"   # the link the move leaves while a job record names the old path; without it such a server reads as down (accepted)
+start_server "$OLDSD"; start_server "$NEWSD"
+queue "200 $NONE" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(field_of sbot servers "$out")" = 3 ] || { echo "FAIL: health counts a server under either path: $(field_of sbot servers "$out") servers: $out"; exit 1; }
+stop_one_server "$NEWSD"; stop_one_server "$OLDSD"; rm -rf "$SP/.claude/discord-agents"
+echo "ok: health counts a bun server whose DISCORD_STATE_DIR is the bot's path before the move (through the link the move left) as well as one on its path after it"
+# (I-1) A 1.17 job record and a server's environ hold the start's LOGICAL $PWD: a project reached through a link is recorded
+# (records/projects, pwd -P) as the real path, while the record and the environ name the link's. compat keeps the per-bot
+# link, health counts the server, --resume finds the bot: the path's last part and what it resolves to decide, not its spelling.
+RP="$HOME/real/p3"; LP="$HOME/link/p3"; RB="$RP/.claude/discord-agents/b"; mkdir -p "$RB" "$HOME/link"; ln -s "$RP" "$LP"
+jq --arg p "$(cd "$RP" && pwd -P)" '.projects[$p].hasTrustDialogAccepted = true' "$HOME/.claude.json" > "$HOME/cj.tmp" && mv "$HOME/cj.tmp" "$HOME/.claude.json"   # a --bg start checks the trust
+printf "DISCORD_CHANNEL_ID='900'\nDISCORD_USER_ID='111'\nDISCORD_ALLOW_IDS=''\n" > "$RP/.claude/discord-agents/config.env"
+printf 'DISCORD_BOT_TOKEN=tokP3\n' > "$RB/.env"; echo none > "$RB/mode"; jq -n '{dmPolicy:"allowlist", allowFrom:["111"], groups:{"900":{requireMention:true, allowFrom:["111"]}}}' > "$RB/access.json"
+echo "$ID_SEEN" > "$RB/last-message-id"; seed_id "$RB"; seed_guild "$RB"
+mkdir -p "$HOME/.claude/jobs/lk000001"; jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$LP/.claude/discord-agents/b\"}}" '{sessionId: "1111aaaa-2222-3333-4444-555555555555", respawnFlags: ["--settings", $s]}' > "$HOME/.claude/jobs/lk000001/state.json"
+RPF="$HOME/.claude-discord/records/projects"; cp "$RPF" "$HOME/rpf.keep"; printf '%s\n' "$(cd "$RP" && pwd -P)" >> "$RPF"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+RBN="$HOME/.claude-discord/projects/$(skey "$RP")/bots/b"
+[ "$(readlink "$RB")" = "$RBN" ] && grep -q lk000001 <<<"$out" || { echo "FAIL: a job record naming the old path through a link of the project must keep the bot's link: $out / $(ls -la "$RP/.claude/discord-agents" 2>&1)"; exit 1; }
+start_server "$LP/.claude/discord-agents/b"
+queue "200 $NONE" '200 {"threads":[]}'
+out=$(cd "$RP" && bash "$S" health --json 2>/dev/null) || :
+[ "$(field_of b servers "$out")" = 1 ] || { echo "FAIL: health must count a server whose environ names the old path through a link of the project: $out"; exit 1; }
+stop_one_server "$LP/.claude/discord-agents/b"
+mkdir -p "${RBN%/b}/c"; printf 'DISCORD_BOT_TOKEN=tokC\n' > "${RBN%/b}/c/.env"; echo none > "${RBN%/b}/c/mode"   # a second bot: with one, a start picks it with no record at all
+out=$(cd "$RP" && bash "$S" --bg --resume 1111aaaa-2222-3333-4444-555555555555 2>&1) || :   # the launcher stub prints the exec line; the claude stub here refuses a launch
+grep -q -- '-n b' <<<"$out" || { echo "FAIL: --resume must find the bot from a job record naming the old path through a link of the project: $out"; exit 1; }
+cp "$HOME/rpf.keep" "$RPF"; rm -rf "$HOME/rpf.keep" "$HOME/.claude/jobs/lk000001" "$HOME/link" "$HOME/real"
+echo "ok: a job record and a server environ naming the old path in the start's logical spelling (the project through a link) keep the link at compat, count in health and resolve --resume"
+stop_servers
+
 # Nothing this suite started is still running at the end: a case that detached a keeper or a monitor and did not stop it fails
 # here, by name of the process (sandbox_pids: the sandbox in its argv or as its HOME; an orphaned
 # `/bin/sleep 30` names no path of the suite's). Then the reaping itself, which every exit path runs (the EXIT trap): a decoy

@@ -2433,34 +2433,7 @@ echo "ok: a failed refresh with no handoff of its own leaves an older handoff.pr
 # whole suite on the slowest host.
 HP="$HOME/health-project"; mkdir -p "$HP"; cd "$HP"
 HR=$(broot "$HP")
-# A Discord id is a snowflake -- milliseconds since 2015-01-01 shifted left
-# 22 -- so an age is chosen and the id computed from the CLOCK. Hard-coded
-# ids would silently drift: one written as "30 minutes old" becomes days old
-# as the suite ages, and past the 4 h ceiling on holding an alert the cases
-# that expect a held alert would start failing.
-snowflake_for() {  # $1 = minutes ago
-  printf '%s' $(( ( ($(date +%s) - $1 * 60) * 1000 - 1420070400000 ) << 22 ))
-}
-ID_SEEN=$(snowflake_for 40)     # already answered: the hooks recorded it
-ID_STALE=$(snowflake_for 30)    # newer than that, and past the 15 min threshold
-ID_ANCIENT=$(snowflake_for 400) # past the 4 h ceiling, so no hold survives it
-me_json='{"id":"777","username":"sbot"}'
 
-# A bot's own user id never changes, so health asks once and keeps it in
-# <state dir>/bot-id. Seeding it here means `users/@me` is never called, so
-# the queued replies below stay in step whichever case ran first; the
-# uncached path has its own case.
-# 1.14.0: its Discord name too, read again once a day by the same call: seeded fresh.
-seed_id() { printf '777\n' > "$1/bot-id"; printf '%s sbot\n' "$(date +%s)" > "$1/discord-name"; }
-# The guild a channel belongs to cannot change either, so health keeps it in
-# <state dir>/channel-guild beside the channel it was learned for, and stops
-# asking. 900 is the channel every bot in these fixtures is set up with; a
-# cache written for a DIFFERENT channel must be ignored, which has its own
-# case below.
-# Since 1.11.0 the line is "<channel> <guild> <name> <read at, epoch s>" and is read again once it is a day old: seeded
-# fresh, so no run re-reads it. guild_of prints the first three fields of a bot's line.
-SEED_S=$(date +%s); seed_guild() { printf '900 5 general %s\n' "$SEED_S" > "$1/channel-guild"; }
-guild_of() { local c="" g="" n="" t=""; { read -r c g n t < "$1/channel-guild"; } 2>/dev/null || :; printf '%s' "$c $g $n"; }
 
 # The bots. Names are chosen so the glob order health walks them in is the
 # order their answers are queued below. allowFrom is 111 and 222 (from
@@ -2482,124 +2455,6 @@ seed_id "$HR/b8cap"; seed_guild "$HR/b8cap"
 # already answered, and correctly ignored.
 snowflake_for 500 > "$HR/b8cap/last-message-id"
 HD="$HR/b1ok"   # the bot the single-bot cases below drive
-
-# Every health run begins with ONE unauthenticated GET /gateway, to tell "the
-# network is blocked" from "this bot's token was refused" -- indistinguishable
-# otherwise, and a run with no proxy once blamed every bot's token. Then each
-# bot in turn asks four things: who am I, the channel's messages, the channel
-# (for its guild id) and that guild's active threads.
-# CURL_REPLIES is one reply per LINE, so a queued value must not contain a
-# newline: one that does becomes several replies and every later call reads
-# the wrong one -- silently, as a confident wrong verdict. Caught here.
-queue_line() {
-  case $1 in *$'\n'*) echo "FAIL: a queued curl reply must be one line: $1"; exit 1;; esac
-  printf '%s\n' "$1" >> "$CURL_REPLIES"
-}
-queue() { printf '200 {"url":"wss://x"}\n' > "$CURL_REPLIES"; for l in "$@"; do queue_line "$l"; done; }
-queue_unreachable() { printf '403 {"message":"blocked"}\n' > "$CURL_REPLIES"; }
-# Two replies, not four: a bot's own user id and its channel's guild never
-# change, so both are kept in the state dir and asked for once -- two fewer
-# HTTP calls and two fewer jq per bot per run on a five-minute timer. Every
-# bot here is seeded with both, so neither `users/@me` nor `channels/<id>` is
-# called; each uncached path has its own case.
-qbot() {  # $1 = the messages array this bot's channel read returns
-  queue_line "200 $1"
-  queue_line '200 {"threads":[]}'
-}
-NONE='[]'
-MENTION="[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"111\"},\"mentions\":[{\"id\":\"777\"}]}]"
-# field_of <bot> <field> <health --json output>: that bot's field, read off the `jq .` layout health prints ("bot" first,
-# then "verdict" and "detail"; a string with its quotes and trailing comma cut). Empty for a bot the output does not name.
-field_of() {
-  local line seen=0
-  while IFS= read -r line; do
-    if [ $seen = 0 ]; then
-      [ "$line" != "    \"bot\": \"$1\"," ] || seen=1
-    else
-      case $line in
-        "    \"$2\": \""*) line=${line#*: \"}; line=${line%\",}; line=${line//\\\\/$'\001'}; line=${line//\\\"/\"}; printf '%s\n' "${line//$'\001'/\\}"; return;;
-        "    \"bot\": "*) return;;
-      esac
-    fi
-  done <<<"$3"
-}
-verdict_of() { field_of "$1" verdict "$2"; }
-detail_of()  { field_of "$1" detail "$2"; }
-
-# A stand-in for a bot's plugin server, so "is this bot up" has something
-# real to find. health matches argv FIRST -- argv[0] is bun, an argument
-# under a .../discord/ directory, last argument "start" -- and only then
-# reads that pid's environ for the bot it serves. That order is the point:
-# every child of a bot session inherits DISCORD_STATE_DIR (this very test
-# script does), so matching on the environment alone would count them all
-# and call a healthy bot a duplicate. A real `bun run` is used rather than a
-# renamed process, so the argv the check looks for is the argv bun produces.
-FAKE_PLUGIN="$HOME/fake-servers/discord/0.0.4"; mkdir -p "$FAKE_PLUGIN"
-printf '{"name":"fake-discord","scripts":{"start":"sleep 300"}}\n' > "$FAKE_PLUGIN/package.json"
-SERVERS=""
-count_fake_servers() {  # $1 = state dir, $2 = the candidates (default: every bun); the same argv-then-environ order health uses
-  local n=0 c a p hit x cands
-  # The same narrowing the product uses: `pgrep -x bun` cuts the candidates
-  # from every process on the machine to the handful that could be a server
-  # (4 of 792 measured). This is polled in a loop, so the full walk was paid
-  # dozens of times a run.
-  if [ -n "${2:-}" ]; then cands=$2
-  elif cands=$(pgrep -x bun 2>/dev/null); then
-    cands=$(printf '/proc/%s/cmdline ' $cands)
-  else
-    cands=$(printf '%s ' /proc/[0-9]*/cmdline)
-  fi
-  for c in $cands; do
-    { mapfile -d '' -t a < "$c"; } 2>/dev/null || continue
-    [ "${#a[@]}" -ge 2 ] || continue
-    [ "${a[0]##*/}" = bun ] || continue
-    [ "${a[${#a[@]}-1]}" = start ] || continue
-    hit=no; for x in "${a[@]}"; do case $x in */discord/*) hit=yes; break;; esac; done
-    [ "$hit" = yes ] || continue
-    p=${c#/proc/}; p=${p%/cmdline}
-    grep -qzxF "DISCORD_STATE_DIR=$1" "/proc/$p/environ" 2>/dev/null && n=$((n + 1))
-  done
-  printf '%s' "$n"
-}
-start_server() {  # $1 = the bot state dir this server serves
-  local pid
-  # setsid, and kill -PGID below: `bun run start` runs the script as a CHILD
-  # process, so signalling bun's own pid leaves that child orphaned --
-  # measured, the `sleep` outlived its bun, and a run on another machine left
-  # 11 behind. perl's setsid rather than setsid(1), as the wrapper does, so
-  # this works where only perl is present.
-  DISCORD_STATE_DIR="$1" perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- \
-    bun run --cwd "$FAKE_PLUGIN" --shell=bun --silent start >/dev/null 2>&1 &
-  pid=$!; SERVERS="$SERVERS $pid"; KILL_AT_EXIT="$KILL_AT_EXIT $pid"
-  # Polled through /proc, never through health: health drains CURL_REPLIES. Only the pid just started is a candidate
-  # (perl execs bun in place): a pgrep per poll cost 20 ms on a host with ~600 processes.
-  for _ in $(seq 250); do
-    [ "$(count_fake_servers "$1" "/proc/$pid/cmdline")" = 1 ] && return 0
-    nap 0.02
-  done
-  echo "FAIL: the stand-in plugin server for $1 never appeared"; exit 1
-}
-stop_servers() {
-  local p
-  for p in $SERVERS; do kill -TERM -"$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || :; done
-  for p in $SERVERS; do wait "$p" 2>/dev/null || :; done
-  SERVERS=""
-}
-# Stops the most recently started server and waits for the count to drop.
-# Starting and stopping these dominates this section's wall time, so a case
-# needing one fewer takes this rather than a full teardown and rebuild.
-stop_one_server() {  # $1 = the state dir, for the wait
-  local last=${SERVERS##* } want
-  [ -n "$last" ] || return 0
-  want=$(( $(count_fake_servers "$1") - 1 ))
-  kill -TERM -"$last" 2>/dev/null || kill -TERM "$last" 2>/dev/null || :
-  wait "$last" 2>/dev/null || :
-  SERVERS=${SERVERS% *}
-  for _ in $(seq 250); do
-    [ "$(count_fake_servers "$1")" -le "$want" ] && return 0
-    nap 0.02
-  done
-}
 
 # b1ok and b2stale are up, b6dup has two (one token, two sessions), b3down
 # has none. The rest need none: their verdict is decided before the server
@@ -2986,39 +2841,6 @@ out=$(PATH="$HOME/psbin:$PATH" CLAUDE_DISCORD_PROC="$FP" bash "$S" health --json
 [ "$(field_of sbot servers "$out")" = 1 ] || { echo "FAIL: a telegram-shaped bun server with sbot's DISCORD_STATE_DIR must not be counted (Linux): $out"; exit 1; }
 rm -rf "$HOME/psbin" "$HOME/ps.argv" "$HOME/ps.env" "$HOME/ps.calls" "$HOME/ps.fail" "$FP"
 echo "ok: without /proc the servers are counted from ps -axww argv first, then ps -Eww -p for those pids only (never -ax); another bot's server and a shell with the same state dir do not count; a telegram plugin server with the bot's state dir does not count (macOS and Linux); a failing ps is unknown"
-# 1.18.0: a server whose environ names the bot's path before the move (<project>/.claude/discord-agents/<bot>: a job
-# respawned on it) counts as one on the path after it does: a moved bot never reads as down.
-NEWSD="$HOME/.claude-discord/projects/$(skey "$SP")/bots/sbot" OLDSD="$SP/.claude/discord-agents/sbot"
-mkdir -p "${OLDSD%/*}"; ln -s "$NEWSD" "$OLDSD"   # the link the move leaves while a job record names the old path; without it such a server reads as down (accepted)
-start_server "$OLDSD"; start_server "$NEWSD"
-queue "200 $NONE" '200 {"threads":[]}'
-out=$(bash "$S" health --json 2>/dev/null) || :
-[ "$(field_of sbot servers "$out")" = 3 ] || { echo "FAIL: health counts a server under either path: $(field_of sbot servers "$out") servers: $out"; exit 1; }
-stop_one_server "$NEWSD"; stop_one_server "$OLDSD"; rm -rf "$SP/.claude/discord-agents"
-echo "ok: health counts a bun server whose DISCORD_STATE_DIR is the bot's path before the move (through the link the move left) as well as one on its path after it"
-# (I-1) A 1.17 job record and a server's environ hold the start's LOGICAL $PWD: a project reached through a link is recorded
-# (records/projects, pwd -P) as the real path, while the record and the environ name the link's. compat keeps the per-bot
-# link, health counts the server, --resume finds the bot: the path's last part and what it resolves to decide, not its spelling.
-RP="$HOME/real/p3"; LP="$HOME/link/p3"; RB="$RP/.claude/discord-agents/b"; mkdir -p "$RB" "$HOME/link"; ln -s "$RP" "$LP"
-jq --arg p "$(cd "$RP" && pwd -P)" '.projects[$p].hasTrustDialogAccepted = true' "$HOME/.claude.json" > "$HOME/cj.tmp" && mv "$HOME/cj.tmp" "$HOME/.claude.json"   # a --bg start checks the trust
-printf "DISCORD_CHANNEL_ID='900'\nDISCORD_USER_ID='111'\nDISCORD_ALLOW_IDS=''\n" > "$RP/.claude/discord-agents/config.env"
-printf 'DISCORD_BOT_TOKEN=tokP3\n' > "$RB/.env"; echo none > "$RB/mode"; jq -n '{dmPolicy:"allowlist", allowFrom:["111"], groups:{"900":{requireMention:true, allowFrom:["111"]}}}' > "$RB/access.json"
-echo "$ID_SEEN" > "$RB/last-message-id"; seed_id "$RB"; seed_guild "$RB"
-mkdir -p "$HOME/.claude/jobs/lk000001"; jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$LP/.claude/discord-agents/b\"}}" '{sessionId: "1111aaaa-2222-3333-4444-555555555555", respawnFlags: ["--settings", $s]}' > "$HOME/.claude/jobs/lk000001/state.json"
-RPF="$HOME/.claude-discord/records/projects"; cp "$RPF" "$HOME/rpf.keep"; printf '%s\n' "$(cd "$RP" && pwd -P)" >> "$RPF"
-out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
-RBN="$HOME/.claude-discord/projects/$(skey "$RP")/bots/b"
-[ "$(readlink "$RB")" = "$RBN" ] && grep -q lk000001 <<<"$out" || { echo "FAIL: a job record naming the old path through a link of the project must keep the bot's link: $out / $(ls -la "$RP/.claude/discord-agents" 2>&1)"; exit 1; }
-start_server "$LP/.claude/discord-agents/b"
-queue "200 $NONE" '200 {"threads":[]}'
-out=$(cd "$RP" && bash "$S" health --json 2>/dev/null) || :
-[ "$(field_of b servers "$out")" = 1 ] || { echo "FAIL: health must count a server whose environ names the old path through a link of the project: $out"; exit 1; }
-stop_one_server "$LP/.claude/discord-agents/b"
-mkdir -p "${RBN%/b}/c"; printf 'DISCORD_BOT_TOKEN=tokC\n' > "${RBN%/b}/c/.env"; echo none > "${RBN%/b}/c/mode"   # a second bot: with one, a start picks it with no record at all
-out=$(cd "$RP" && bash "$S" --bg --resume 1111aaaa-2222-3333-4444-555555555555 2>&1) || :   # the launcher stub prints the exec line; the claude stub here refuses a launch
-grep -q -- '-n b' <<<"$out" || { echo "FAIL: --resume must find the bot from a job record naming the old path through a link of the project: $out"; exit 1; }
-cp "$HOME/rpf.keep" "$RPF"; rm -rf "$HOME/rpf.keep" "$HOME/.claude/jobs/lk000001" "$HOME/link" "$HOME/real"
-echo "ok: a job record and a server environ naming the old path in the start's logical spelling (the project through a link) keep the link at compat, count in health and resolve --resume"
 stop_servers
 cd "$HP"
 
