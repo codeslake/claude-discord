@@ -200,23 +200,22 @@ for t in '66 v 300' '9 u 301' '66 v 302' '9 u 303'; do
   case $out in *additionalContext*) inj=$((inj + 1));; esac
 done
 [ "$inj" = 1 ] || { echo "FAIL: the People line's order does not re-prime a session: $inj injections over 4 turns of 2 people, $(<"$DSD/user-names")"; exit 1; }
-# The ids access.json names (the channel group's allowFrom, the top-level one) and config.env's owner, by id.
+# The ids access.json names (the channel group's allowFrom, the top-level one) and everyone who wrote here, by id (config.env's owner is not read, 1.18.1: 111 is named by user-names here).
 jq '.groups["999"].allowFrom = ["501"] | .allowFrom = ["502"]' "$DSD/access.json.keep" > "$DSD/access.json"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1n","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"999\" message_id=\"225\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}')
-printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext' | grep -q '^People in this channel (mention one as <@id> to reach them): u <@9>, v <@66>, Mx owner q <@77>, Own 5 er <@111>, <@501>, <@502>$' || { echo "FAIL: the People line must name the channel group's allowFrom, the top-level one and the owner, in id order: $out"; exit 1; }
+printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext' | grep -q '^People in this channel (mention one as <@id> to reach them): u <@9>, v <@66>, Mx owner q <@77>, Own 5 er <@111>, <@501>, <@502>$' || { echo "FAIL: the People line must name the channel group's allowFrom, the top-level one and everyone who wrote here, in id order: $out"; exit 1; }
 jq '.groups["999"].allowFrom = [] | .allowFrom = []' "$DSD/access.json.keep" > "$DSD/access.json"
-# An allowFrom of the wrong shape costs only its ids, never the channel; an access.json that is empty leaves config.env's
-# channel (jq_edit empties the file for a moment as it writes).
+# An allowFrom of the wrong shape costs only its ids, never the channel; an access.json that is empty is no channel and no
+# ids (jq_edit empties the file for a moment as it writes; config.env is not read, 1.18.1).
 jq '.groups["999"].allowFrom = ["501"] | .allowFrom = "3"' "$DSD/access.json.keep" > "$DSD/access.json"
 out=$(DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<'{"session_id":"s1o","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"999\" message_id=\"226\" user=\"u\" user_id=\"9\" ts=\"t\">\nhi\n</channel>"}')
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')
 grep -q ' in channel 999\. ' <<<"$ctx" && grep -q '^People in this channel (mention one as <@id> to reach them): .*Own 5 er <@111>, <@501>$' <<<"$ctx" || { echo "FAIL: a top-level allowFrom that is no array must cost only its own ids, not the channel or the group's: $ctx"; exit 1; }
-jq '.groups = {"998": true}' "$DSD/access.json.keep" > "$DSD/access.json"   # 998: not config.env's channel, which a fallback would answer
+jq '.groups = {"998": true}' "$DSD/access.json.keep" > "$DSD/access.json"   # 998: not config.env's channel
 (DISCORD_STATE_DIR=$DSD; . "$PC/hooks/lib/discord.sh"; resolve_channel; [ "$bot_channel" = 998 ]) || { echo "FAIL: a group that is no object must still name the channel"; exit 1; }
-cfg_ch=$(sed -n "s/^DISCORD_CHANNEL_ID='\{0,1\}\([0-9]*\)'\{0,1\}$/\1/p" "$RS/config.env")
 for body in '' '  '; do
   printf '%s' "$body" > "$DSD/access.json"
-  (DISCORD_STATE_DIR=$DSD; . "$PC/hooks/lib/discord.sh"; resolve_channel; [ -n "$cfg_ch" ] && [ "$bot_channel" = "$cfg_ch" ] && [ -z "$bot_access_ids" ]) || { echo "FAIL: an empty access.json ('$body') must leave config.env's channel ($cfg_ch)"; exit 1; }
+  (DISCORD_STATE_DIR=$DSD; . "$PC/hooks/lib/discord.sh"; resolve_channel; [ -z "$bot_channel" ] && [ -z "$bot_access_ids" ]) || { echo "FAIL: an empty access.json ('$body') is no channel and no ids (config.env is not read)"; exit 1; }
 done
 jq '.groups["999"].allowFrom = [] | .allowFrom = []' "$DSD/access.json.keep" > "$DSD/access.json"
 # 21 writers: the file keeps the newest 20, the one who wrote last is last. Twenty of them are written straight into the file, so one real prompt takes it past the cap.
@@ -225,7 +224,7 @@ i=21; DISCORD_STATE_DIR="$DSD" bash "$H/on-prompt" <<<"{\"session_id\":\"s1m\",\
 [ "$(wc -l < "$DSD/user-names")" = 20 ] && [ "$(tail -n 1 "$DSD/user-names")" = '5021 p21' ] && ! grep -q '^77 ' "$DSD/user-names" || { echo "FAIL: user-names must keep the newest 20, newest last: $(<"$DSD/user-names")"; exit 1; }
 mv -f "$DSD/access.json.keep" "$DSD/access.json"
 rm -f "$DSD/user-names" "$DSD"/turns/s1[nm] "$DSD"/turns/s1[nm].primed
-echo "ok: on-prompt names the channel's people (access.json, config.env's owner, everyone who has written) as <@id>, labelled with the name each last wrote under, stripped of < > @ \" ( ) ,, the 20 newest writers kept"
+echo "ok: on-prompt names the channel's people (access.json, everyone who has written; never config.env) as <@id>, labelled with the name each last wrote under, stripped of < > @ \" ( ) ,, the 20 newest writers kept"
 
 # UserPromptSubmit also fires for a Discord message that arrives mid-turn, so
 # two prompts with no Stop in between are one turn, even when the first was
@@ -1105,7 +1104,7 @@ rm -rf "$PL" "$HOME/dotrepo/cl" "$P2/cl.before"
 i0=$(ls -i "$HOME/dotrepo/settings.json" | awk '{print $1}')
 FOREIGN='{"model":"x","hooks":{"Stop":[{"hooks":[{"type":"command","command":"mine"}]}]}}'
 printf '%s\n' "$FOREIGN" > "$HOME/.claude/settings.json"; plant_old "$HOME/.claude/settings.json"; cp "$HOME/.claude/settings.json" "$P2/global.before"
-STPF="$HOME/.claude-discord/records/projects"; mv "$STPF" "$STPF.strip"; printf '%s\n' "$(cd "$P2" && pwd -P)" "$HOME/gone project" > "$STPF"   # these only, put back after
+only_projects "$P2" "$HOME/gone project"   # these only (every project with a state dir is weighed, 1.18.1), the rest back after
 mkdir -p "$(bdir "$P2" "unrun")"; : > "$(bdir "$P2" "unrun")/.env"   # set up, never ran the plugin
 err=$(printf '\nn\n\n' | bash "$S" setup gamma 2>&1 >/dev/null)
 cmp -s "$HOME/.claude/settings.json" "$P2/global.before" && cmp -s "$HOME/dotrepo/settings.json" "$P2/dot.before" &&
@@ -1122,7 +1121,7 @@ printf '%s\n' "$FOREIGN" > "$HOME/dotrepo/global.json"; plant_old "$HOME/dotrepo
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat must exit 0 here: $out"; exit 1; }
 [ -L "$HOME/.claude/settings.json" ] && [ "$(jq -c . "$HOME/dotrepo/global.json")" = "$(jq -c . <<<"$FOREIGN")" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] ||
   { echo "FAIL: update strips the old hook entries from the user-global settings, through its symlink, and from a recorded project's symlinked one: $(<"$HOME/dotrepo/global.json") / $(<"$HOME/dotrepo/settings.json")"; exit 1; }
-mv "$STPF.strip" "$STPF"
+all_projects
 # By hand from the link's own directory: a bare name with a relative target resolves from there.
 echo '{}' > "$HOME/dotrepo/settings.json"; plant_old "$HOME/dotrepo/settings.json"; ln -s dotrepo/settings.json "$HOME/rel.json"
 (cd "$HOME" && bash "$PC/hooks/lib/old-hooks.sh" rel.json) && [ -L "$HOME/rel.json" ] && [ "$(jq -c . "$HOME/dotrepo/settings.json")" = '{}' ] || { echo "FAIL: by hand, a bare-name link with a relative target must edit that target"; exit 1; }
@@ -1508,7 +1507,6 @@ plant_markers; out=$(sweep_here 2>&1)
 # compat: two recorded projects, one bot each; only the visible one is swept, checkin/ too, and the other left whole.
 PU2="$HOME/project_unseen"; mkdir -p "$(bdir "$PU2" "unseen")/plugin-sessions" "$(pstate "$PU2")/checkin"
 : > "$(bdir "$PU2" "unseen")/.env"; : > "$(bdir "$PU2" "unseen")/plugin-sessions/gone9"; : > "$(pstate "$PU2")/checkin/gone9"
-SWPF="$HOME/.claude-discord/records/projects"; mv "$SWPF" "$SWPF.sweep"; printf '%s\n%s\n' "$PDP" "$PU2" > "$SWPF"   # these two only, put back after
 printf '[{"name":"dead","id":"aaaa0001","sessionId":"live1","state":"working"},{"name":"dead","id":"dddd0002","sessionId":"done2","state":"done"}]\n' > "$HOME/agents.json"
 plant_markers; : > "$HOME/agents.calls"
 bash "$S" compat >/dev/null 2>&1 || { echo "FAIL: compat must exit 0 here"; exit 1; }
@@ -1516,7 +1514,7 @@ bash "$S" compat >/dev/null 2>&1 || { echo "FAIL: compat must exit 0 here"; exit
   [ -e "$(bdir "$PU2" "unseen")/plugin-sessions/gone9" ] && [ -e "$(pstate "$PU2")/checkin/gone9" ] &&
   [ "$(<"$HOME/agents.calls")" = "agents --json --all" ] ||
   { echo "FAIL: update's compat step sweeps every visible bot of every recorded project, once: $(markers) / $(ls -R "$(pstate "$PU2")") / $(<"$HOME/agents.calls")"; exit 1; }
-mv "$SWPF.sweep" "$SWPF"; cp "$HOME/agents.full.json" "$HOME/agents.json"
+cp "$HOME/agents.full.json" "$HOME/agents.json"
 echo "ok: the marker sweep takes a bot's plugin-sessions/ and turns/ markers (and checkin/) of sessions claude agents no longer lists, keeps done ones, never a bot the listing does not show (by name or pinned job), nothing on a failed or non-array listing; compat sweeps every recorded project once; a start sweeps nothing"
 
 # tools/local-bots: not a hook, run by hand, reusing the "dead"
@@ -2135,8 +2133,9 @@ echo "ok: events records history silently on its first call (and starts arc-seen
 
 # A bot moved to another channel by editing its access.json (config.env still
 # says 42): the identity text of on-prompt and of the start path names it.
-# With several groups the channel is not known: the identity falls back to
-# config.env.
+# With several groups the channel is not known: on-prompt says there is none
+# (1.18.1: the hooks never read config.env); the start prompt still falls back
+# to config.env (setup's defaults, sourced by the start as before).
 cp "$R4/mgr/access.json" "$P4/access.before"
 jq '.groups = {"4343": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$PC/hooks/turn/on-prompt" <<<'{"session_id":"ch1","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"800\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
@@ -2145,11 +2144,11 @@ out=$(bash "$S" --name mgr 2>&1)
 grep -q 'sharing the Discord channel 4343,' <<<"$out" || { echo "FAIL: the start prompt must name the access.json channel: $out"; exit 1; }
 jq '.groups = {"4343": .groups["42"], "4444": .groups["42"]}' "$P4/access.before" > "$R4/mgr/access.json"
 out=$(DISCORD_STATE_DIR="$R4/mgr" bash "$PC/hooks/turn/on-prompt" <<<'{"session_id":"ch2","prompt":"<channel source=\"plugin:discord:discord\" chat_id=\"4343\" message_id=\"801\" user=\"u\" user_id=\"111\" ts=\"t\">\nhi\n</channel>"}')
-grep -q 'in channel 42\.' <<<"$out" || { echo "FAIL: with several groups the identity falls back to config.env's channel: $out"; exit 1; }
+grep -q ' with no channel (its access.json names no single channel)\.' <<<"$out" && ! grep -q 'in channel 42' <<<"$out" || { echo "FAIL: with several groups the identity says there is no channel (config.env is not read): $out"; exit 1; }
 out=$(bash "$S" --name mgr 2>&1)
 grep -q 'sharing the Discord channel 42,' <<<"$out" || { echo "FAIL: with several groups the start prompt falls back to config.env's channel: $out"; exit 1; }
 cp "$P4/access.before" "$R4/mgr/access.json"
-echo "ok: a bot moved by editing its access.json identifies with that channel (on-prompt and the start prompt); with several groups both fall back to config.env"
+echo "ok: a bot moved by editing its access.json identifies with that channel (on-prompt and the start prompt); with several groups on-prompt says it has no channel and the start prompt falls back to config.env"
 
 cd "$P"   # back to the project whose alpha bot the refresh tests drive
 # --- refresh ---------------------------------------------------------------
@@ -2950,46 +2949,40 @@ bash "$S" health --uninstall-timer | grep -q 'no timer was installed' || { echo 
 rm -f "$HOME/bin/systemctl"
 echo "ok: health installs no timer (--install-timer and --proxy are refused), and --uninstall-timer removes one an older version left, or says there was none"
 
-# health --all: every project in records/projects, one document (host, version, home, patch, projects[].bots[] with
-# owner_id), exit 0 whenever it printed it (over ssh a non-zero exit means "no answer"). --patch runs the patch step
-# first and carries its rc and stderr. A project whose .claude/discord-agents is missing is an entry with `error`, never
-# pruned (a volume mounted late). Neither health.log nor
-# logger is written at a monitor's cadence; a health run by hand keeps both.
-PF="$HOME/.claude-discord/records/projects"
-# project-upper was set up above and never ran health: only setup can have recorded it.
-grep -qxF "$(cd "$PU" && pwd -P)" "$PF" || { echo "FAIL: setup must record its project in records/projects: $(cat "$PF" 2>&1)"; exit 1; }
-mv "$PF" "$PF.suite"
+# health --all: every project with a state dir (projects/*/project; records/projects retired in 1.18.1), one document
+# (host, version, home, patch, projects[].bots[] with owner_id), exit 0 whenever it printed it (over ssh a non-zero exit
+# means "no answer"). --patch runs the patch step first and carries its rc and stderr. A project whose folder is missing
+# is an entry with `error`, never pruned (a volume mounted late). Neither health.log nor logger is written at a
+# monitor's cadence; a health run by hand keeps both.
+# project-upper was set up above and never ran health: its key dir's `project` is the record.
+[ "$(cat "$HOME/.claude-discord/projects/$(skey "$PU")/project" 2>/dev/null)" = "$(cd "$PU" && pwd -P)" ] || { echo "FAIL: setup must record its project (projects/<key>/project): $(ls "$HOME/.claude-discord/projects" 2>&1)"; exit 1; }
 # The project --all walks is a copy of single-project whose path has a space, a quote and a $; the gone one a space.
 SPS="$HOME/single pro'ject \$x"; cp -a "$SP" "$SPS"; SDS="$(bdir "$SPS" "sbot")"; cp -a "$(bdir "$SP" sbot)" "$SDS"; cp "$(pstate "$SP")/config.env" "$(pstate "$SPS")/"
-printf '%s\n' "$HOME/gone project" > "$PF"
 printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "$HOME/logger.calls"\n' > "$HOME/bin/logger"; chmod +x "$HOME/bin/logger"
 rm -f "$HOME/logger.calls" "$SDS/health.log"
 (cd "$SPS" && queue "200 $NONE" '200 {"threads":[]}' && bash "$S" health >/dev/null 2>&1) || :
-grep -qxF "$(cd "$SPS" && pwd -P)" "$PF" || { echo "FAIL: a health run in a project must record it: $(<"$PF")"; exit 1; }
 [ -s "$SDS/health.log" ] && [ -s "$HOME/logger.calls" ] || { echo "FAIL: control: a health run by hand keeps health.log and the journal line"; exit 1; }
 rm -f "$HOME/logger.calls" "$SDS/health.log"
-# A project whose health crashes (config.env exits 3), listed with a CRLF; its config.env also appends a line to the list, as a concurrent setup would during the walk; the walked project listed twice.
-CP="$HOME/crash proj"; mkdir -p "$(bdir "$CP" "cbot")"; printf 'echo "%s" >> "%s"\nexit 3\n' "$HOME/appended project" "$PF" > "$(pstate "$CP")/config.env"
-printf '%s\n%s\r\n' "$(cd "$SPS" && pwd -P)" "$(cd "$CP" && pwd -P)" >> "$PF"
+# A project whose health crashes (config.env exits 3).
+CP="$HOME/crash proj"; mkdir -p "$(bdir "$CP" "cbot")"; printf 'exit 3\n' > "$(pstate "$CP")/config.env"
+only_projects "$HOME/gone project" "$SPS" "$CP"
 PCACHE=$HOME/.claude/plugins/cache/claude-plugins-official/discord
 mkdir -p "$PCACHE/0.0.98"; printf 'nothing to patch here\n' > "$PCACHE/0.0.98/server.ts"
 queue "200 $MENTION" '200 {"threads":[]}'
 rc=0; doc=$(cd "$HOME" && bash "$S" health --all --json --patch 2>/dev/null) || rc=$?
+all_projects
 [ "$rc" = 0 ] || { echo "FAIL: health --all --json must exit 0 when it printed the document, a finding or not (rc=$rc): $doc"; exit 1; }
 jq -e --arg home "$HOME" --arg p "$(cd "$SPS" && pwd -P)" --arg cp "$(cd "$CP" && pwd -P)" '
   (.host | length > 0) and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+ \\(")) and .home == $home
   and .patch.rc == 1 and (.patch.output | test("0.0.98/server.ts: bot-authors no longer matches"))
-  and (.projects | length) == 4 and .projects[3].project == $home + "/appended project" and (.projects[3].error | startswith("project folder missing"))
-  and .projects[1].project == $p and (.projects[1] | has("error") | not)
-  and .projects[0].project == $home + "/gone project" and .projects[0].bots == [] and (.projects[0].error | startswith("project folder missing: " + $home + "/gone project/.claude/discord-agents"))
-  and .projects[2].project == $cp and .projects[2].bots == [] and .projects[2].error == "health exited 3 with no document"
-  and .projects[1].bots[0].bot == "sbot" and .projects[1].bots[0].verdict == "stale" and .projects[1].bots[0].owner_id == "111"' <<<"$doc" >/dev/null ||
+  and (.projects | length) == 3
+  and (first(.projects[] | select(.project == $home + "/gone project")) | .bots == [] and (.error | startswith("project folder missing: " + $home + "/gone project")))
+  and (first(.projects[] | select(.project == $p)) | (has("error") | not) and .bots[0].bot == "sbot" and .bots[0].verdict == "stale" and .bots[0].owner_id == "111")
+  and (first(.projects[] | select(.project == $cp)) | .bots == [] and .error == "health exited 3 with no document")' <<<"$doc" >/dev/null ||
   { echo "FAIL: health --all --json --patch: wrong document: $doc"; exit 1; }
 [ ! -e "$SDS/health.log" ] && [ ! -e "$HOME/logger.calls" ] || { echo "FAIL: health --all must write no health.log line and call no logger"; exit 1; }
-grep -qxF "$HOME/gone project" "$PF" || { echo "FAIL: --all must never prune a project whose folder is missing (an unmounted volume): $(<"$PF")"; exit 1; }
-grep -qxF "$HOME/appended project" "$PF" || { echo "FAIL: a line appended to records/projects during the walk must survive the prune rewrite: $(<"$PF")"; exit 1; }
-rm -rf "$PCACHE/0.0.98" "$HOME/bin/logger" "$HOME/logger.calls" "$SPS" "$CP"; mv "$PF.suite" "$PF"
-echo "ok: health --all --json --patch prints one document (host, version, home, the patch step's rc and stderr, each project's bots with owner_id; a project path with a space, a quote and a \$), exits 0 with a finding, reports a missing project folder as an error and keeps its line, and writes no health.log or journal line; setup and a health run record their project"
+rm -rf "$PCACHE/0.0.98" "$HOME/bin/logger" "$HOME/logger.calls" "$SPS" "$CP"
+echo "ok: health --all --json --patch prints one document (host, version, home, the patch step's rc and stderr, each project with a state dir and its bots with owner_id; a project path with a space, a quote and a \$), exits 0 with a finding, reports a missing project folder as an error and keeps its key dir, and writes no health.log or journal line"
 
 stop_servers
 cd "$P"
@@ -3830,13 +3823,14 @@ rc=0; out=$(cd "$HOME" && bash "$S" --version --bot "$(a_hex "$MP")" "$(a_hex ac
 rm -f "$HOME/ssh.log" "$MON"/h1.* "$MON"/h2.*
 echo "ok: bot token: read from the terminal with its echo off, only there (no terminal: exit 3, nothing read); Discord asked who it is with it on curl's stdin; a token of another bot or one Discord refuses changes nothing; y replaces .env by rename, mode 600, its other lines kept, and logs the fact; the token is never printed; --host runs it on the bot's host under ssh -t (a host before 1.14.0: exit 5)"
 # bot rename: a name that is none, a name taken, a reserved one, one of another bot of this machine but for its case
-# (this project's mgr, another project's b1ok), a manager's to a name with a backend here, and a session renaming its own
-# bot are refused before Discord is asked (exit 2, exit 1).
-: > "$CURL_LOG"; A=""; MB2=$HOME/.claude-discord/records/monitor; mkdir -p "$MB2/accM"; echo dev-manager > "$AD/mode"; printf 'local\n' > "$AD/hosts"
-for w in "acc rename a.b" "acc rename mgr" "acc rename hosts" "acc rename add" "acc rename hooks" "acc rename -ab" "acc rename MGR" "acc rename B1OK" "acc rename accM"; do BRC=0; bash "$S" bot $w </dev/null >/dev/null 2>&1 || BRC=$?; A="$A$BRC "; done
+# (this project's mgr, another project's b1ok), and a session renaming its own bot are refused before Discord is asked
+# (exit 2, exit 1). A manager's name with a backend in another project is no refusal since 1.18.1 (records are keyed by
+# the project).
+: > "$CURL_LOG"; A=""; MB2=$HOME/.claude-discord/records/monitor/$(skey "$MP"); echo dev-manager > "$AD/mode"; printf 'local\n' > "$AD/hosts"
+for w in "acc rename a.b" "acc rename mgr" "acc rename hosts" "acc rename add" "acc rename hooks" "acc rename -ab" "acc rename MGR" "acc rename B1OK"; do BRC=0; bash "$S" bot $w </dev/null >/dev/null 2>&1 || BRC=$?; A="$A$BRC "; done
 BRC=0; BO=$(DISCORD_STATE_DIR=$AD bash "$S" bot acc rename acc2 2>&1) || BRC=$?
-echo none > "$AD/mode"; rm -rf "$AD/hosts" "$MB2/accM"
-[ "$A$BRC" = "2 1 2 2 2 2 1 1 1 2" ] && grep -q 'a session cannot rename its own bot' <<<"$BO" && [ ! -s "$CURL_LOG" ] ||
+echo none > "$AD/mode"; rm -rf "$AD/hosts"
+[ "$A$BRC" = "2 1 2 2 2 2 1 1 2" ] && grep -q 'a session cannot rename its own bot' <<<"$BO" && [ ! -s "$CURL_LOG" ] ||
   { echo "FAIL: bot rename refuses a name that is none, one taken, a reserved one and its own session's bot before asking Discord: $A$BRC $BO"; exit 1; }
 # No terminal: what it would do is printed, nothing is done (exit 3). Discord refusing the name (it allows about two
 # changes an hour) changes nothing here.
@@ -3867,7 +3861,8 @@ case "$1" in
   *) printf 'PLAIN %s\n' "$(printf '%s ' "$@" | tr '\n' ' ')" >> "$HOME/claude.calls";;
 esac
 STUB
-chmod +x "$HOME/claude.live"; cp "$HOME/claude.live" "$HOME/bin/claude"; printf 'HANDOFF_ACC\n' > "$AD/handoff.md"; mkdir -p "$HOME/.claude-discord/scratch/acc"
+SCR2=$HOME/.claude-discord/scratch/$(skey "$MP")   # a bot's scratch, keyed by the project (1.18.1)
+chmod +x "$HOME/claude.live"; cp "$HOME/claude.live" "$HOME/bin/claude"; printf 'HANDOFF_ACC\n' > "$AD/handoff.md"; mkdir -p "$SCR2/acc"
 # It runs, and its workspace is not trusted (a start would be refused): refused before anything is stopped. One of its
 # two sessions does not stop (a stop that fails, here a session that outlives `claude stop`): nothing here is renamed
 # and nothing is started (two sessions on one token both answer), what Discord was told is said, and so is the session
@@ -3887,7 +3882,7 @@ rm -f "$HOME/claude.calls"
 bt - y acc rename acc2
 [ "$BRC" = 0 ] && grep -qx '    it runs (1 session): stopped, renamed, started again as acc2 from its handoff.md' <<<"$BO" &&
   grep -qx "claude-discord: bot: renamed: $MR/acc2 (and on Discord)" <<<"$BO" && grep -qx '    its session runs again as acc2' <<<"$BO" && [ "${BO##*$'\n'}" = "renamed: acc -> acc2" ] &&
-  [ ! -e "$AD" ] && [ -f "$MR/acc2/.env" ] && [ -d "$HOME/.claude-discord/scratch/acc2" ] && ! kill -0 "$OLD" 2>/dev/null &&
+  [ ! -e "$AD" ] && [ -f "$MR/acc2/.env" ] && [ -d "$SCR2/acc2" ] && ! kill -0 "$OLD" 2>/dev/null &&
   [ "$(jq -c '[.peers[] | [.name, .bot_id]]' "$(pstate "$MP")/peers.json")" = '[["peerbot","555"],["acc2","777"]]' ] &&
   [ "$(sed -n '2s/ .*//p' "$CURL_LOG")" = "-s" ] && grep -q -- "-X PATCH -H @- -H Content-Type: application/json --data-binary {\"username\":\"acc2\"} https://discord.com/api/v10/users/@me$" "$CURL_LOG" &&
   [ "$(sort -u "$CURL_STDIN_LOG")" = "Authorization: Bot tokAccUnique" ] && [ "$(<"$HOME/claude.calls")" = "STOP acc11111" ] &&
@@ -3900,18 +3895,18 @@ rename: acc -> acc2" ] || { echo "FAIL: bot rename of a running bot, y: Discord 
 # bot's stays, said (M3).
 sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; sed 's/"name":"acc"/"name":"acc2"/' "$HOME/claude.live" > "$HOME/bin/claude"; : > "$HOME/launch.fails"
 : > "$CURL_REPLIES"; queue_line '200 {"id":"777","bot":true,"username":"acc2"}'; queue_line '200 {"id":"777","bot":true,"username":"acc4"}'
-mkdir -p "$HOME/.claude-discord/scratch/acc4"
+mkdir -p "$SCR2/acc4"
 bt - y acc2 rename acc4; rm -f "$HOME/launch.fails"
 [ "$BRC" = 1 ] && grep -qx '    acc4 did not start (above): claude-discord --bg --name acc4' <<<"$BO" && [ "${BO##*$'\n'}" = "renamed: acc2 -> acc4" ] && [ -d "$MR/acc4" ] &&
   grep -qx '    it runs (1 session): stopped, renamed, started again as acc4 with no handoff.md: an empty context that catches up from the channel (its conversation is not carried over)' <<<"$BO" &&
-  grep -qx "    its scratch directory stays $HOME/.claude-discord/scratch/acc2: $HOME/.claude-discord/scratch/acc4 is there already" <<<"$BO" && [ -d "$HOME/.claude-discord/scratch/acc2" ] ||
+  grep -qx "    its scratch directory stays $SCR2/acc2: $SCR2/acc4 is there already" <<<"$BO" && [ -d "$SCR2/acc2" ] ||
   { echo "FAIL: bot rename whose start fails after the directory moved is exit 1 and still ends with the renamed line; its plan says a session with no handoff starts empty; a scratch directory of the new name already there keeps the bot's, said: rc=$BRC $BO"; exit 1; }
-mv "$MR/acc4" "$MR/acc2"; rm -rf "$HOME/.claude-discord/scratch/acc4" "$HOME/claude.calls"
+mv "$MR/acc4" "$MR/acc2"; rm -rf "$SCR2/acc4" "$HOME/claude.calls"
 cp "$HOME/claude.keep" "$HOME/bin/claude"
 # A manager whose name Discord has already (the TUI's `=`), here only its case: Discord is not asked to change it; its
 # directory and its backend's state move (through a temporary name, so a case-insensitive file system renames them too)
 # and name the new manager, stopped as its owner left it, and its watcher record on each ledger host is renamed.
-MB2=$HOME/.claude-discord/records/monitor; mkdir -p "$MB2/acc2"; : > "$MB2/acc2/stopped"; printf '{"version":1,"manager":"acc2","bots":{}}\n' > "$MB2/acc2/state.json"
+MB2=$HOME/.claude-discord/records/monitor/$(skey "$MP"); mkdir -p "$MB2/acc2"; : > "$MB2/acc2/stopped"; printf '{"version":1,"manager":"acc2","bots":{}}\n' > "$MB2/acc2/state.json"
 echo dev-manager > "$MR/acc2/mode"; printf '# ledger\nlocal\nh1 X=1\n' > "$MR/acc2/hosts"; read -r HID < "$HOME/.claude-discord/host-id"
 : > "$MON/h1.out"; rm -f "$MON/h1.rc" "$HOME/ssh.log"; : > "$CURL_LOG"; : > "$CURL_REPLIES"; queue_line '200 {"id":"777","bot":true,"username":"ACC2"}'
 bt - y acc2 rename ACC2
@@ -3925,7 +3920,7 @@ bt - y acc2 rename ACC2
 # What a TUI still on the old name runs (its periodic --ensure, its Q's --stop) makes no record for that name again.
 bash "$S" monitor --ensure acc2 --holder tui $$ >/dev/null 2>&1 || :; bash "$S" monitor --stop acc2 >/dev/null 2>&1 || :
 [ ! -e "$MB2/acc2" ] || { echo "FAIL: monitor --ensure and --stop of a name whose bot directory and records moved away make no records/monitor for it: $(ls -R "$MB2/acc2")"; exit 1; }
-mv "$MR/ACC2" "$AD"; echo none > "$AD/mode"; rm -rf "$AD/hosts" "$AD/handoff.md" "$AD/handoff.prev.md" "$MB2/ACC2" "$HOME/.claude-discord/scratch/acc2" "$HOME/ssh.log" "$HOME/claude.calls"
+mv "$MR/ACC2" "$AD"; echo none > "$AD/mode"; rm -rf "$AD/hosts" "$AD/handoff.md" "$AD/handoff.prev.md" "$MB2/ACC2" "$SCR2/acc2" "$HOME/ssh.log" "$HOME/claude.calls"
 # The directory's rename(2) fails (the project's directory unwritable here): what was stopped runs again, and a manager's
 # stopped marker its owner left stays. On a case-insensitive file system ACC and acc are one directory (a symlink here):
 # the marker under the new name is then the owner's, and the rename made none to take back.
@@ -4050,15 +4045,14 @@ cp "$HOME/claude.keep" "$HOME/bin/claude"; kill "$OLD" 2>/dev/null || :; rm -rf 
 echo "ok: bot recover: a bad word and its own session refused (exit 2); no terminal prints the plan (exit 3); its last session (pinned-job, then the newest plugin-sessions marker) listed as started here is respawned after the one question, logged, its status passed on, or, when its current session id (sessions/<pid>.json) differs from its job record's, stopped and resumed under the current id; none listed: a fresh --bg start, an untrusted workspace refused before the question; two listed refused, --fresh stops every one then starts one, a stop that fails starts nothing, a transcript that moved within 15 minutes refuses --fresh; a failed listing runs nothing; --host needs 1.16.0 and sends the act under ssh -t"
 # bot add: no terminal, nothing is read (exit 3). A bot whose Discord name is no name here (it is renamed on Discord
 # first), and one set up here already (its id in a bot-id: one token, one session), are refused; nothing is written.
-# So are a user's token (no bot), and a manager whose name has a backend on this machine.
-was=$(ls "$MR"); rc=0; out=$(bash "$S" bot add </dev/null 2>&1) || rc=$?; mkdir -p "$MB2/accM"
+# So is a user's token (no bot). A manager name with a backend in another project is no refusal since 1.18.1.
+was=$(ls "$MR"); rc=0; out=$(bash "$S" bot add </dev/null 2>&1) || rc=$?
 : > "$CURL_REPLIES"; queue_line '200 {"id":"999","bot":true,"username":"New Bot"}'; queue_line '200 {"id":"777","bot":true,"username":"acc9"}'
-queue_line '200 {"id":"5","bot":false,"username":"human"}'; queue_line '200 {"id":"994","bot":true,"username":"accM"}'
-bt "$TOK_NEW" - add; A=$BRC$BO; bt "$TOK_NEW" - add; A2=$BRC$BO; bt "$TOK_NEW" - add; A3=$BRC$BO; bt "$TOK_NEW" - add --mode dev-manager; rmdir "$MB2/accM"
+queue_line '200 {"id":"5","bot":false,"username":"human"}'
+bt "$TOK_NEW" - add; A=$BRC$BO; bt "$TOK_NEW" - add; A2=$BRC$BO; bt "$TOK_NEW" - add; A3=$BRC$BO
 [ "$rc" = 3 ] && [[ $A == 1*"Discord calls this bot 'New Bot', and a bot's name here is its Discord username"*"Rename it in the Developer Portal first"* ]] &&
-  [[ $A2 == 1*"that token's bot (777) is set up in $AD already"* ]] && [[ $A3 == 1*"that token is no bot's (Discord says it is a user's)"* ]] &&
-  [ "$BRC" = 1 ] && grep -q "$MB2/accM is there: a manager named accM has a backend on this machine" <<<"$BO" && [ "$(ls "$MR")" = "$was" ] ||
-  { echo "FAIL: bot add reads nothing without a terminal (exit 3), and refuses a bot whose Discord name is no name here, one set up already, a user's token and a manager name with a backend: rc=$rc $out / $A / $A2 / $A3 / rc=$BRC $BO"; exit 1; }
+  [[ $A2 == 1*"that token's bot (777) is set up in $AD already"* ]] && [[ $A3 == 1*"that token is no bot's (Discord says it is a user's)"* ]] && [ "$(ls "$MR")" = "$was" ] ||
+  { echo "FAIL: bot add reads nothing without a terminal (exit 3), and refuses a bot whose Discord name is no name here, one set up already and a user's token: rc=$rc $out / $A / $A2 / $A3"; exit 1; }
 # A setup that fails (here at its first write, the bot's directory under an unwritable bots/) leaves no half bot.
 chmod 555 "$MR"; : > "$CURL_REPLIES"; queue_line '200 {"id":"995","bot":true,"username":"halfbot"}'
 bt "$TOK_NEW" y add; chmod 755 "$MR"
@@ -4116,7 +4110,7 @@ printf "$HEAD$LOCAL" > "$MR/mgr/hosts"; rm -rf "$AD" "$(pstate "$MP")/peers.json
 # state.json with old `since` times, never by waiting. The local host's command is the shim, stubbed to print
 # $HOME/mon/local.out; ssh is the stub above. MB is the monitor's state dir.
 export CLAUDE_DISCORD_MONITOR_TICK=0.01 CLAUDE_DISCORD_MONITOR_PASS=60 CLAUDE_DISCORD_MONITOR_HOST_CAP=0.03 CLAUDE_DISCORD_MONITOR_LOCK_WAIT=0.10
-MB="$HOME/.claude-discord/records/monitor/mgr"
+MB="$HOME/.claude-discord/records/monitor/$(skey "$MP")/mgr"   # keyed by the project (1.18.1)
 mv "$HOME/.local/bin/claude-discord" "$HOME/shim.real"
 # $HOME/mon/local.sleep delays it and local.rc is its exit status, as for the ssh stub.
 printf '#!/bin/bash\nprintf "%%s|%%s\\n" "$*" "${HTTPS_PROXY:-}" >> "$HOME/local.calls"\n[ ! -f "$HOME/mon/local.sleep" ] || /bin/sleep "$(<"$HOME/mon/local.sleep")"\n[ ! -f "$HOME/clock" ] || echo $(( $(<"$HOME/clock") + 1000 )) > "$HOME/clock"\ncat "$HOME/mon/local.out" 2>/dev/null\n[ ! -f "$HOME/mon/local.rc" ] || exit "$(<"$HOME/mon/local.rc")"\n' > "$HOME/.local/bin/claude-discord"
@@ -4238,7 +4232,6 @@ mkdir -p "$MB"; echo '{"version":1,"manager":"mg' > "$MB/state.json"; head -c 26
 SMR=$(broot "$HOME/sweepmon") SMS=$(pstate "$HOME/sweepmon"); mkdir -p "$SMR/swm/plugin-sessions" "$SMR/swm/turns" "$SMS/checkin" "$HOME/swbin"; : > "$SMR/swm/.env"
 for f in swm/plugin-sessions/live1 swm/plugin-sessions/done2 swm/plugin-sessions/gone3 swm/turns/live1 swm/turns/gone3 swm/turns/gone3.replied; do : > "$SMR/$f"; done; : > "$SMS/checkin/live1"; : > "$SMS/checkin/gone3"
 printf '#!/bin/sh\n[ "$*" = "agents --json --all" ] && echo %s\n' "'[{\"name\":\"swm\",\"id\":\"aaaa0001\",\"sessionId\":\"live1\",\"state\":\"working\"},{\"name\":\"swm\",\"id\":\"dddd0002\",\"sessionId\":\"done2\",\"state\":\"done\"}]'" > "$HOME/swbin/claude"; chmod +x "$HOME/swbin/claude"
-SWPF="$HOME/.claude-discord/records/projects"; mv "$SWPF" "$SWPF.mon"; printf '%s\n' "$HOME/sweepmon" > "$SWPF"
 holder
 (cd "$MP" && PATH="$HOME/swbin:$PATH" CLAUDE_DISCORD_MONITOR_SWEEP=0 TMPDIR=$HOME/ro bash "$S" monitor --ensure mgr --holder tui "$HPID" && TMPDIR=$HOME/ro bash "$S" monitor --ensure mgr)
 wait_log 1 ' pass (hosts=|failed)'
@@ -4290,7 +4283,7 @@ grep -q 'exit reason=signal$' "$MB/monitor.log" || { echo "FAIL: the exit must b
 grep -q 'state unreadable, starting empty$' "$MB/monitor.log" || { echo "FAIL: a state.json that is not valid must be said and replaced: $(<"$MB/monitor.log")"; exit 1; }
 [ -z "$(ls -A "$HOME/ro")" ] || { echo "FAIL: nothing may be written to TMPDIR"; exit 1; }
 chmod 755 "$HOME/ro"
-mv "$SWPF.mon" "$SWPF"; rm -rf "$HOME/sweepmon" "$HOME/swbin"
+rm -rf "$HOME/sweepmon" "$HOME/swbin"
 # Off Linux a start time comes from `ps -o lstart=`, printed in the caller's zone and locale; the record is written by a
 # hook and compared by the monitor, which may differ in both. Reached here through a pid with no /proc entry, with a ps
 # (its own dir, this call only) that prints one fixed time as macOS ps does: the same string under two zones and locales.
@@ -4407,7 +4400,7 @@ for want in '<@111> [patchfail] h1' '<@222> [down] d1 on h1 (~/ws/p)' '<@222> [s
   grep -qF -- "$want" <<<"$C1" || { echo "FAIL: missing post '$want': $C1"; exit 1; }
 done
 st=$(printf '%s\n' "$P1" | jq -c 'select(.content | startswith("<@222> [stale] st "))')
-[ "$(jq -r .content <<<"$st")" = "$(printf "<@222> [stale] st on h1 (~/ws/p)\n사유: why stale\n복구: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord refresh st --force'")" ] &&
+[ "$(jq -r .content <<<"$st")" = "$(printf "<@222> [stale] st on h1 (~/ws/p)\n사유: why stale\n복구: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord bot st recover'")" ] &&
   [ "$(jq -c .allowed_mentions <<<"$st")" = '{"users":["222"]}' ] || { echo "FAIL: a finding names owner, session, reason and recovery command, and pings only the owner: $st"; exit 1; }
 [ "$(printf '%s\n' "$P1" | jq -c 'select(.content | startswith("[recovered]")) | .allowed_mentions' | sort -u)" = '{"parse":[]}' ] || { echo "FAIL: a recovery line pings nobody"; exit 1; }
 [ "$(printf '%s\n' "$P1" | jq -c 'select(.content | contains("] nm on ")) | [(.content | startswith("[stale] nm on h1")), .allowed_mentions]')" = '[true,{"parse":[]}]' ] || { echo "FAIL: a bot with no owner_id is posted with no mention and pings nobody: $(grep '] nm on' <<<"$C1")"; exit 1; }
@@ -4429,8 +4422,8 @@ grep -q 'ledger: host skipped' "$MB/monitor.log" && ! grep -q ProxyCommand "$HOM
 [ "$(printf '%s\n' "$P1" | jq -r 'select(.content | contains("[nostate]")) | .content | length')" = 1900 ] || { echo "FAIL: a message is cut to 1900 characters"; exit 1; }
 grep -q 'ControlPath=none h2 ' "$HOME/ssh.log" && grep -q 'host h2 ssh-failed rc=255 (retried with ControlPath=none)' "$MB/monitor.log" &&
   [ "$s_h2" = ok ] || { echo "FAIL: ssh exit 255 is retried with ControlPath=none before the host counts as down"; exit 1; }
-grep -qxF "복구: ssh h2 'cd \"/home/u/it'\\''s \\\$x here\" && ~/.local/bin/claude-discord refresh '\\''s p'\\''\\'\\'''\\''q'\\'' --force'" <<<"$C1" ||
-  { echo "FAIL: a project path with a space, a quote and a \$, and a bot name with a space and a quote, must be quoted for both shells: $(grep 'refresh ' <<<"$C1")"; exit 1; }
+grep -qxF "복구: ssh h2 'cd \"/home/u/it'\\''s \\\$x here\" && ~/.local/bin/claude-discord bot '\\''s p'\\''\\'\\'''\\''q'\\'' recover'" <<<"$C1" ||
+  { echo "FAIL: a project path with a space, a quote and a \$, and a bot name with a space and a quote, must be quoted for both shells: $(grep ' recover' <<<"$C1")"; exit 1; }
 [ "$s_h5" = true ] || { echo "FAIL: a host that connected and went silent past the cap is blind, not hostdown: $(jq -c .hosts.h5 "$MB/state.json")"; exit 1; }
 [ "$s_lap2" = hostdown ] || { echo "FAIL: a laptop silent past the cap is hostdown (asleep), never a posted blind: $(jq -c .hosts.lap2 "$MB/state.json")"; exit 1; }
 [ "$s_frozen" = true ] ||
@@ -4502,7 +4495,7 @@ wait_log 1 'post h1\|/home/u/ws/p\|nf stale 200$'; next_pass
 jq -e '.bots["h1|/home/u/ws/p|nf"].posted == "stale" and .monitor.post_failed == false
   and ([.alerts[] | select(.key == "h1|/home/u/ws/p|nf") | [.status, .retried]] == [["failed", null], ["sent", true]])' "$MB/state.json" >/dev/null &&
   ! posts | grep -qv '\[stale\] nf' || { echo "FAIL: the pending post must be sent on a later pass, and nothing else posted: $(posts)"; exit 1; }
-[ "$(posts | tail -n 1 | jq -r .content)" = "$(printf "<@222> [stale] nf on h1 (~/ws/p)\nreason: why stale\nfix: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord refresh nf --force'")" ] || { echo "FAIL: ALERT_LANG=EN must give English labels: $(posts | tail -n 1)"; exit 1; }
+[ "$(posts | tail -n 1 | jq -r .content)" = "$(printf "<@222> [stale] nf on h1 (~/ws/p)\nreason: why stale\nfix: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord bot nf recover'")" ] || { echo "FAIL: ALERT_LANG=EN must give English labels: $(posts | tail -n 1)"; exit 1; }
 jq -e --arg sp "h2|/home/u/it's \$x here|s p'q" '(.hosts | keys) == ["h1", "h2", "h3", "h4", "lap", "lap2", "local"]
   and (.bots | keys) == ["h1|/home/u/ws/p|nf", "h1|/home/u/ws/p|tm", $sp, "h3|/home/u/ws/p|y", "h3|/home/u/ws/p|z", "local|/home/u/ws/p|r1"]
   and (.hosts.h4 | .posted == "blind" and (.left_s | type) == "number") and (.hosts.h1 | has("left_s") | not)' "$MB/state.json" >/dev/null &&
@@ -4654,10 +4647,10 @@ rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_MONITOR_LOCK_WAIT=0.01 bash "$S" monitor 
 rf=refused; [ ! -L /proc/self/ns/pid ] || { rf=$(readlink /proc/self/ns/pid); rf=refused.${rf//[!0-9]/}; }
 [ -z "$(ls "$MB" | command grep '^refused')" ] || { echo "FAIL: a foreground refusal must leave no refused marker: $(ls "$MB")"; exit 1; }
 rc2=0; (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_DISCORD_MONITOR_LOCK_WAIT=0.01 bash "$S" monitor --keep mgr --detach >/dev/null 2>&1) || rc2=$?
-[ "$rc2" = 1 ] && [ "$(ls "$MB" | command grep '^refused')" = "$rf" ] && bash -c '. "$1"; bot_name=mgr; keeper_alive' x "$D/hooks/lib/discord.sh" ||
+[ "$rc2" = 1 ] && [ "$(ls "$MB" | command grep '^refused')" = "$rf" ] && bash -c '. "$1"; bot_name=mgr bot_key=$2; keeper_alive' x "$D/hooks/lib/discord.sh" "$(skey "$MP")" ||
   { echo "FAIL: a detached start refused for an unseen lock must leave $rf, which keeper_alive honours (rc=$rc2): $(ls "$MB")"; exit 1; }
 rm -f "$MB/$rf"; : > "$MB/refused.1"
-! bash -c '. "$1"; bot_name=mgr; keeper_alive' x "$D/hooks/lib/discord.sh" ||
+! bash -c '. "$1"; bot_name=mgr bot_key=$2; keeper_alive' x "$D/hooks/lib/discord.sh" "$(skey "$MP")" ||
   { echo "FAIL: a refused marker of another pid namespace (refused.1) must not stop this side's start (own: $rf)"; exit 1; }
 : > "$MB/$rf"   # stale: the next start that gets through (the keeper below, once the lock is free) clears it, not the other side's
 kill "$LP" 2>/dev/null || :; wait "$LP" 2>/dev/null || :
@@ -4717,12 +4710,13 @@ rc=0; (cd "$MP" && bash "$S" monitor --locked mgr </dev/null >/dev/null 2>&1) ||
   { echo "FAIL: a monitor started while the stopped marker stands must exit before it writes its pid or logs a start (rc=$rc, lock '$(<"$MB/lock")')"; exit 1; }
 : > "$MB/lock"
 # --start (and every monitor verb) works from anywhere: the project above the cwd that has the bot, else the recorded one.
-want=$(( $(starts) + 1 )); PFK=$(cat "$HOME/.claude-discord/records/projects" 2>/dev/null || :); printf '%s\n' "$MP" > "$HOME/.claude-discord/records/projects"
+want=$(( $(starts) + 1 )); only_projects "$MP"
 printf '%s\n' "$(date +%s)" > "$MB/${rf/refused/last-start}"   # an automatic start a moment ago: --start does not wait for the backoff
-rc=0; out=$(cd "$HOME" && bash "$S" monitor --start mgr 2>&1) || rc=$?; printf '%s\n' "$PFK" > "$HOME/.claude-discord/records/projects"
-[ "$rc" = 0 ] || { echo "FAIL: monitor --start from outside the project must find the recorded project (rc=$rc): $out"; exit 1; }
+rc=0; out=$(cd "$HOME" && bash "$S" monitor --start mgr 2>&1) || rc=$?
+[ "$rc" = 0 ] || { all_projects; echo "FAIL: monitor --start from outside the project must find the project with a state dir that has it (rc=$rc): $out"; exit 1; }
 KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 1000 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.002; n=$((n + 1)); done
 wait_log "$want" 'Z start$'
+all_projects   # after the keeper's first --ensure read the key dir (the parking's restore is two renames)
 [ "$out" = "claude-discord: started the backend of mgr (a keeper and the monitor, detached); stop it with: claude-discord monitor --stop mgr" ] &&
   [ -n "$KP" ] && [ ! -e "$MB/stopped" ] && jq -e '.monitor | has("stopped_by_user") | not' "$MB/state.json" >/dev/null ||
   { echo "FAIL: --start clears the marker and starts the keeper, saying so in one line: '$out' '$KP' $(jq -c .monitor "$MB/state.json")"; exit 1; }
@@ -4780,8 +4774,8 @@ echo "ok: monitor --keep refuses no ledger, a non-manager and a lock held by a m
 # next prompt with the keeper killed starts one again, and after monitor --stop starts nothing. A record whose pid runs
 # another bot's keeper, the monitor or no monitor.sh at all is no keeper.
 export CLAUDE_DISCORD_KEEP_INTERVAL=0.05
-# Only this project recorded: the suite's other dev-manager setups would each get a backend.
-PFB=$(cat "$HOME/.claude-discord/records/projects" 2>/dev/null || :); printf '%s\n' "$MP" > "$HOME/.claude-discord/records/projects"
+# Only this manager listed (records/managers, 1.18.1): the suite's other dev-manager setups would each get a backend.
+MGRS="$HOME/.claude-discord/records/managers"; MGRSK=$(cat "$MGRS" 2>/dev/null || :); printf '%s mgr\n' "$(skey "$MP")" > "$MGRS"
 printf '{"session_id":"sMon","source":"compact"}' > "$HOME/ss.json"; printf '{"session_id":"sMon","prompt":"hi"}' > "$HOME/up.json"
 mstate '.hosts = "x"'   # this monitor's reducer fails every pass (a state whose hosts is no object): below
 hook() { env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$PC/hooks/turn/$1" < "$HOME/$2" >/dev/null 2>&1; }
@@ -4796,7 +4790,7 @@ rm -f "$MB"/last-start*; want=$(( $(starts) + 1 )); hook on-session-start ss.jso
 # clears it: the cadence block above).
 n=0; while ! jq -e '.monitor.error | startswith("the reducer rejected its input at ")' "$MB/state.json" >/dev/null 2>&1 && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 [ "$n" -lt 500 ] || { echo "FAIL: a failed reducer must write state.json with monitor.error: $(jq -c .monitor "$MB/state.json")"; exit 1; }
-ka() { bash -c '. "$1"; bot_name=mgr; keeper_alive' x "$D/hooks/lib/discord.sh"; }
+ka() { bash -c '. "$1"; bot_name=mgr bot_key=$2; keeper_alive' x "$D/hooks/lib/discord.sh" "$(skey "$MP")"; }
 ka || { echo "FAIL: keeper_alive must see the running keeper $KP"; exit 1; }
 old=$KP; kill -9 "$old"; n=0; while running "$old" && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 ! ka || { echo "FAIL: keeper_alive must see a keeper killed with -9 as dead"; exit 1; }
@@ -4860,18 +4854,16 @@ n=0; while [ ! -s "$HOME/fx.pid" ] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1
   { echo "FAIL: a prompt with a keeper record naming a live pid that is no keeper must start the keeper: $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
 kill "$SP" 2>/dev/null || :; wait "$SP" 2>/dev/null || :
 # Every bot's hook starts the keeper from the project, without the calling session's own DISCORD_STATE_DIR, CLAUDE_PROJECT_DIR,
-# CLAUDE_PLUGIN_ROOT and CLAUDECODE (the keeper and its monitor outlive that session); a manager name that two recorded projects
-# share starts ONE keeper (one state dir per name); a manager with no .env is not started (the front refuses it every time).
+# CLAUDE_PLUGIN_ROOT and CLAUDECODE (the keeper and its monitor outlive that session); a line of records/managers whose ledger
+# is gone starts nothing (the front would refuse it every time); a line twice is one start.
 rm -f "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/fx2.rec" "$MB"/last-start*; rm -f "$MB"/holders/keeper-*
 printf '#!/bin/sh\nprintf "%%s %%s|%%s|%%s|%%s|%%s\\n" "$PWD" "$*" "${DISCORD_STATE_DIR-unset}" "${CLAUDE_PROJECT_DIR-unset}" "${CLAUDE_PLUGIN_ROOT-unset}" "${CLAUDECODE-unset}" >> "$HOME/fx2.rec"\n' > "$FX/bin/claude-discord"
-DUP="$HOME/dupproj"; mkdir -p "$(bdir "$DUP" "mgr")" "$(bdir "$DUP" "noenv")"
-for b in mgr noenv; do echo dev-manager > "$(bdir "$DUP" "$b")/mode"; echo local > "$(bdir "$DUP" "$b")/hosts"; done
-echo DISCORD_BOT_TOKEN=x > "$(bdir "$DUP" "mgr")/.env"
-printf '%s\n' "$MP" "$DUP" > "$HOME/.claude-discord/records/projects"
+DUP="$HOME/dupproj"; mkdir -p "$(bdir "$DUP" "noledger")"; echo dev-manager > "$(bdir "$DUP" "noledger")/mode"; echo DISCORD_BOT_TOKEN=x > "$(bdir "$DUP" "noledger")/.env"
+printf '%s mgr\n%s noledger\n%s mgr\n' "$(skey "$MP")" "$(skey "$DUP")" "$(skey "$MP")" > "$MGRS"
 env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDECODE=1 CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1
 n=0; while [ ! -s "$HOME/fx2.rec" ] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done; nap 0.05
 [ "$(<"$HOME/fx2.rec")" = "$MP monitor --keep mgr --detach|unset|unset|unset|unset" ] ||
-  { echo "FAIL: a prompt must start one keeper per manager name, from its project, with none of the session's own env, and none for a manager with no .env: $(cat "$HOME/fx2.rec" 2>&1)"; exit 1; }
+  { echo "FAIL: a prompt must start one keeper per listed manager (a line twice: once), from its project, with none of the session's own env, and none for a line whose ledger is gone: $(cat "$HOME/fx2.rec" 2>&1)"; exit 1; }
 # A start that keeps failing (the stub starts no keeper, as one that dies at once): the prompt just now wrote this side's
 # last-start, so a second prompt within a minute forks nothing; with that time a minute old (0 here) it starts again.
 LS=$MB/${rf/refused/last-start}
@@ -4882,17 +4874,9 @@ echo 0 > "$LS"
 env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$MP" DISCORD_STATE_DIR="$MR/mgr" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1
 n=0; while [ "$(wc -l < "$HOME/fx2.rec")" != 2 ] && [ "$n" -lt 500 ]; do nap 0.002; n=$((n + 1)); done
 [ "$(wc -l < "$HOME/fx2.rec")" = 2 ] && [ "$(<"$LS")" != 0 ] || { echo "FAIL: a prompt over a minute after the last start must start again and record the time: $(cat "$HOME/fx2.rec") '$(<"$LS")'"; exit 1; }
-# And setup refuses a dev-manager name another recorded project already runs, naming that project (the same project may re-run).
-D3="$HOME/dupproj3"; mkdir -p "$(bdir "$D3" "mgr")"; echo DISCORD_BOT_TOKEN=x > "$(bdir "$D3" "mgr")/.env"; echo '{}' > "$(bdir "$D3" "mgr")/access.json"
-rc=0; out=$(cd "$D3" && printf 'dev-manager\n\n\n' | bash "$S" setup mgr --mode 2>&1) || rc=$?
-[ "$rc" = 2 ] && grep -qE "already a dev-manager with a hosts ledger in ($MP|$DUP);" <<<"$out" && [ ! -e "$(bdir "$D3" "mgr")/mode" ] ||
-  { echo "FAIL: setup --mode dev-manager must refuse a name another recorded project runs as a manager, writing no mode (rc=$rc): $out"; exit 1; }
-rc=0; out=$(cd "$D3" && printf 'none\n' | bash "$S" setup mgr --mode 2>&1) || rc=$?
-[ "$rc" = 0 ] && [ "$(<"$(bdir "$D3" "mgr")/mode")" = none ] || { echo "FAIL: only the dev-manager mode is refused (rc=$rc): $out"; exit 1; }
-rm -rf "$D3"
 rm -rf "$DUP" "$HOME/fx2.rec"
 rm -rf "$FX" "$HOME/fx.rec" "$HOME/fx.pid" "$HOME/ss.json" "$HOME/up.json" "$MB/holders/keeper-$SP"
-printf '%s\n' "$PFB" > "$HOME/.claude-discord/records/projects"
+printf '%s\n' "$MGRSK" > "$MGRS"
 echo "ok: a dev-manager's SessionStart returns at once with only its context on stdout while the keeper's start is still running; a start that keeps failing is tried once a minute, not on every prompt"
 
 # The monitor keeps its keeper up, as the keeper keeps it (1.10.4): a backend started as its owner starts it, so without
@@ -4969,35 +4953,36 @@ rc=0; out=$(cd "$MP" && CLAUDE_DISCORD_UV=/nonexistent/uv bash "$S" tui mgr 2>&1
 [ "$rc" = 1 ] && grep -q 'tui needs uv' <<<"$out" || { echo "FAIL: without uv, tui must say so (rc=$rc): $out"; exit 1; }
 rc=0; out=$(cd "$P" && bash "$S" tui alpha 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'no hosts ledger' <<<"$out" || { echo "FAIL: tui for a bot without a ledger must refuse (rc=$rc): $out"; exit 1; }
-PFB=$(cat "$HOME/.claude-discord/records/projects" 2>/dev/null || :); : > "$HOME/.claude-discord/records/projects"   # nothing recorded: the none case
+only_projects   # no project with a state dir: the none case
 rc=0; out=$(cd / && bash "$S" tui mgr 2>&1) || rc=$?
+all_projects
 [ "$rc" = 1 ] && grep -q 'no project above / with a manager bot' <<<"$out" && ! grep -q '/\.claude/discord-agents/' <<<"$out" || { echo "FAIL: tui outside any project must say there is no project above, not name /.claude/discord-agents/<bot> (rc=$rc): $out"; exit 1; }
 # Two dev-manager bots with a ledger of their own (not borrowed from other blocks' fixtures): which one is not guessed.
 TP="$HOME/tuiproj"; mkdir -p "$(bdir "$TP" "m1")" "$(bdir "$TP" "m2")"
 for b in m1 m2; do echo dev-manager > "$(bdir "$TP" "$b")/mode"; echo local > "$(bdir "$TP" "$b")/hosts"; done
 rc=0; out=$(cd "$TP" && bash "$S" tui </dev/null 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -q 'name the manager bot' <<<"$out" || { echo "FAIL: with two manager bots and no terminal, tui must ask for the name (rc=$rc): $out"; exit 1; }
-# Outside any project: the recorded projects' manager bots (records/projects); the TUI runs from the chosen project's root.
+# Outside any project: the manager bots of the projects with a state dir (1.18.1: projects/*/project); the TUI runs from the chosen project's root.
 NP="$HOME/notaproject"; mkdir -p "$NP" "$(bdir "$HOME/tuiproj2" mgr)"
 echo dev-manager > "$(bdir "$HOME/tuiproj2" mgr)/mode"; echo local > "$(bdir "$HOME/tuiproj2" mgr)/hosts"
-printf '%s\n' "$HOME/gone" "$MP" > "$HOME/.claude-discord/records/projects"
+only_projects "$HOME/gone" "$MP"
 rm -f "$HOME/uv.args" "$HOME/uv.cwd"
 (cd "$NP" && bash "$S" tui 2>/dev/null </dev/null) || { echo "FAIL: tui outside a project must use the one recorded manager bot (a missing folder skipped)"; exit 1; }
 [ "$(<"$HOME/uv.args")" = "run --script $PC/tui/claude_discord_tui.py --bot mgr --state-dir $MB --claude-discord $PC/bin/claude-discord --version-line $VLINE" ] && [ "$(<"$HOME/uv.cwd")" = "$(cd -P "$MP" && pwd -P)" ] || { echo "FAIL: tui outside a project must run the recorded bot from its project root: $(cat "$HOME/uv.args" "$HOME/uv.cwd" 2>&1)"; exit 1; }
 # Inside a plain bot's project (no manager there): the recorded manager, as from outside any project.
 rm -f "$HOME/uv.args" "$HOME/uv.cwd"
 (cd "$P" && bash "$S" tui 2>/dev/null </dev/null) && [ "$(<"$HOME/uv.cwd")" = "$(cd -P "$MP" && pwd -P)" ] || { echo "FAIL: tui in a project with no manager bot must use the recorded manager: $(cat "$HOME/uv.args" "$HOME/uv.cwd" 2>&1)"; exit 1; }
-printf '%s\n' "$MP" "$TP" > "$HOME/.claude-discord/records/projects"
+all_projects; only_projects "$MP" "$TP"
 (cd "$NP" && bash "$S" tui m2 2>/dev/null </dev/null) && [ "$(<"$HOME/uv.cwd")" = "$(cd -P "$TP" && pwd -P)" ] && grep -q -- '--bot m2 ' "$HOME/uv.args" || { echo "FAIL: tui <bot> outside a project must pick the project that has it: $(cat "$HOME/uv.args" "$HOME/uv.cwd" 2>&1)"; exit 1; }
 rc=0; out=$(cd "$NP" && bash "$S" tui </dev/null 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -q mgr <<<"$out" && grep -q m1 <<<"$out" && grep -q m2 <<<"$out" || { echo "FAIL: tui outside a project with several recorded managers and no terminal must exit 2 naming them (rc=$rc): $out"; exit 1; }
-printf '%s\n' "$MP" "$HOME/tuiproj2" > "$HOME/.claude-discord/records/projects"
+all_projects; only_projects "$MP" "$HOME/tuiproj2"
 rc=0; out=$(cd "$NP" && bash "$S" tui mgr </dev/null 2>&1) || rc=$?
 [ "$rc" = 2 ] && grep -qF "$MP" <<<"$out" && grep -qF "$HOME/tuiproj2" <<<"$out" || { echo "FAIL: a manager name in two recorded projects, no terminal, must exit 2 naming both (rc=$rc): $out"; exit 1; }
-printf '%s\n' "$P" > "$HOME/.claude-discord/records/projects"   # recorded, but no dev-manager with a ledger
+all_projects; only_projects "$P"   # a state dir, but no dev-manager with a ledger
 rc=0; out=$(cd "$NP" && bash "$S" tui </dev/null 2>&1) || rc=$?
 [ "$rc" = 1 ] && grep -q 'writes one' <<<"$out" || { echo "FAIL: tui outside a project with no recorded manager bot must exit 1 (rc=$rc): $out"; exit 1; }
-printf '%s\n' "$PFB" > "$HOME/.claude-discord/records/projects"
+all_projects
 # Stopped by its owner: tui starts nothing itself (the TUI asks, and shows the stop in its bar).
 (cd "$MP" && env -u CLAUDE_DISCORD_NO_AUTOSTART bash "$S" tui </dev/null 2>/dev/null); nap 0.1
 [ -z "$(ls "$MB/holders")" ] || { echo "FAIL: tui must not start a backend its owner stopped without a yes: $(ls "$MB/holders")"; exit 1; }

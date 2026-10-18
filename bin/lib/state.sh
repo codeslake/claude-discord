@@ -15,8 +15,26 @@
 # (truncated and hashed there): the key only has to be stable, and `project` is the authority; transcript_moved then
 # does not find the transcript, which reads as "not moving".
 proj_key() { local LC_ALL=C; printf '%s\n' "${1//[^A-Za-z0-9]/-}"; }
-# proj_list: every project with a state dir (projects/*/project), one a line. Unused until Task 4 retires records/projects.
-proj_list() { local f p; for f in "$helpers"/projects/*/project; do p=""; { IFS= read -r p < "$f"; } 2>/dev/null || :; [ -z "$p" ] || printf '%s\n' "$p"; done; }
+# proj_arr: pl, every project with a state dir (projects/*/project), builtins only; proj_list prints them one a line. The
+# project list since 1.18.1 (records/projects, the 1.16 list, is read by compat alone until it is renamed .1.16): a
+# project joins it at its first setup or start after 1.18.0.
+proj_arr() { local f p; pl=(); for f in "$helpers"/projects/*/project; do p=""; { IFS= read -r p < "$f"; } 2>/dev/null || :; [ -z "$p" ] || pl+=("$p"); done; }
+proj_list() { proj_arr; [ "${#pl[@]}" = 0 ] || printf '%s\n' "${pl[@]}" 2>/dev/null; }   # 2>: a reader that stops early (bot's b_set_up) closes the pipe
+# write_managers: records/managers, "<key> <bot>" a line per dev-manager bot with a hosts ledger and a token under
+# projects/*/bots/*/ (temp + rename). The hooks' revive_backends reads it with builtins on every prompt and rebuilds a
+# missing one through this; written by setup (--mode, bot add), bot rename, the move and compat.
+write_managers() {
+  local f=$helpers/records/managers d m k out=""
+  for d in "$helpers"/projects/*/bots/*/; do
+    d=${d%/}
+    [ -f "$d/hosts" ] && [ -f "$d/.env" ] || continue
+    m=""; { read -r m < "$d/mode"; } 2>/dev/null || :
+    [ "$m" = dev-manager ] || continue
+    k=${d%/bots/*}; k=${k##*/}
+    out="$out$k ${d##*/}"$'\n'
+  done
+  { (umask 077; mkdir -p "$helpers/records" && printf '%s' "$out" > "$f.tmp.$$") && mv -f "$f.tmp.$$" "$f"; } 2>/dev/null || rm -f "$f.tmp.$$"
+}
 # proj_dirs <project, physical path>: pd_key; pd_state (config.env, peers.json, checkin/); pd_root (the bot dirs' parent);
 # pd_new (1 for the 1.18.0 shape: that key's `project` names the path; empty for the old shape, both dirs the old one).
 # Builtins only: the wrapper's every call and the hooks' revive come through here.
@@ -88,8 +106,8 @@ pmv() { perl -e 'rename $ARGV[0], $ARGV[1] or exit 1' "$1" "$2"; }
 # exits 0, as for a non-bot. rename(2) refused (another filesystem): copied, compared (diff -r), the source removed and
 # the link made, but only when no session of the bot runs (live_sessions; unknown counts as running), else left for the
 # bot's next start or update, said. The 1.8-1.16 hooks link goes; the .gitignore stays while the directory does
-# (unlink_old). records/monitor/<bot> and scratch/<bot> stay: Task 4 moves them with their readers. 1 for a refusal
-# (the key is another project's); 0 otherwise, whatever was left and said.
+# (unlink_old). records/monitor/<bot> and scratch/<bot> are compat's (move_backend, move_scratch: the backend must be
+# stopped around its move). 1 for a refusal (the key is another project's); 0 otherwise, whatever was left and said.
 move_project() {
   local p=$1 src=$1/.claude/discord-agents dst n rc=0
   [ -d "$src" ] && [ ! -L "$src" ] || return 0
@@ -135,7 +153,23 @@ move_project() {
     exit 0
   ) || rc=1
   [ "$rc" = 0 ] || echo "claude-discord: could not enter $p; its state was not moved" >&2
+  write_managers
   return 0
+}
+# move_scratch <project, physical path>: ~/.claude-discord/scratch/<bot> (before 1.18.1) -> scratch/<key>/<bot> for each
+# bot of the project, by rename (another filesystem: left, said), a link scratch/<bot> left in its place for a session
+# that read the dev-manager rule before 1.18.1; unlink_old (with `say`) removes it once no session of the bot runs.
+move_scratch() {
+  local b n s
+  proj_dirs "$1"
+  for b in "$pd_root"/*/; do
+    b=${b%/}; n=${b##*/}; s=$helpers/scratch/$n
+    [ -f "$b/.env" ] && [ -d "$s" ] && [ ! -L "$s" ] || continue
+    [ ! -e "$helpers/scratch/$pd_key/$n" ] || { echo "claude-discord: $s left: $helpers/scratch/$pd_key/$n is there already" >&2; continue; }
+    mkdir -p "$helpers/scratch/$pd_key" && pmv "$s" "$helpers/scratch/$pd_key/$n" || { echo "claude-discord: $s could not be renamed into $helpers/scratch/$pd_key/ (another filesystem?): left there" >&2; continue; }
+    ln -s "$helpers/scratch/$pd_key/$n" "$s" 2>/dev/null || :
+    echo "claude-discord: $n's scratch moved to $helpers/scratch/$pd_key/$n ($s a link to it while a session started before 1.18.1 may write there)"
+  done
 }
 # unlink_old <project, physical path> [say]: each link <project>/.claude/discord-agents/<bot> the move left goes once no
 # ${CLAUDE_CONFIG_DIR:-~/.claude}/jobs/*/state.json names a path ending in /.claude/discord-agents/<bot> (a respawn, a
@@ -145,11 +179,22 @@ move_project() {
 # longer. With `say` (compat, setup) a link whose bot has a FOREGROUND session (a live row with no job id: `claude agents`
 # lists it with a pid alone; one not answering counts too) stays too: a row with a job id whose record names the new
 # path is a background session on the new place already (lmd79, 2026-10-18: photo-bot's), and keeps nothing. A link missing for a bot a record names (a move cut between its rename and its
-# link) is made again. Then the directory itself with its .gitignore, once it holds nothing else.
+# link) is made again. Then the directory itself with its .gitignore, once it holds nothing else. With `say` too: a
+# bot's scratch link (move_scratch) goes once `claude agents` lists no session of the bot (one started before 1.18.1
+# may still write to the old name; one started after reads the rule's new path).
 unlink_old() {
   local src=$1/.claude/discord-agents b n j live fg rest="" jobs="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/jobs"
-  [ -d "$src" ] && [ ! -L "$src" ] || return 0
   proj_dirs "$1"
+  if [ "${2:-}" = say ]; then
+    for b in "$pd_root"/*/; do
+      b=${b%/}; n=${b##*/}
+      [ -L "$helpers/scratch/$n" ] && [ "$(readlink "$helpers/scratch/$n")" = "$helpers/scratch/$pd_key/$n" ] || continue
+      type live_sessions >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/sessions.sh"
+      live=$(cd "$1" && live_sessions "$n" "$b" </dev/null) || live=unknown
+      [ -n "$live" ] || rm -f "$helpers/scratch/$n"
+    done
+  fi
+  [ -d "$src" ] && [ ! -L "$src" ] || return 0
   if [ -n "$pd_new" ]; then
     for b in "$pd_root"/*/; do
       b=${b%/}; n=${b##*/}
@@ -239,18 +284,17 @@ sweep_project() {
   done
   [ -z "$all" ] || sweep_files "${2%/}"/checkin/*
 }
-# sweep_recorded <projects file>: every bot of every project the file lists (records/projects), either shape, from one
-# listing. Optional: no claude, no jq, a listing that fails, hangs past 5 s or is no array sweeps nothing, silently.
+# sweep_recorded: every bot of every project with a state dir (proj_arr), either shape, from one listing. Optional: no
+# claude, no jq, a listing that fails, hangs past 5 s or is no array sweeps nothing, silently.
 sweep_recorded() {
-  local l p t=()
-  command -v jq >/dev/null 2>&1 && command -v claude >/dev/null 2>&1 && [ -f "$1" ] || return 0
+  local l p t=() pl
+  command -v jq >/dev/null 2>&1 && command -v claude >/dev/null 2>&1 || return 0
+  proj_arr; [ "${#pl[@]}" -gt 0 ] || return 0
   if command -v timeout >/dev/null 2>&1; then t=(timeout 5); else t=(perl -e 'alarm 5; exec @ARGV or exit 127'); fi   # macOS: no timeout(1)
   l=$(${t[@]+"${t[@]}"} claude agents --json --all 2>/dev/null) && sweep_list "$l" || return 0
-  while IFS= read -r p || [ -n "$p" ]; do
-    p=${p%$'\r'}
-    [ -n "$p" ] || continue
+  for p in "${pl[@]}"; do
     proj_dirs "$p"
     [ ! -d "$pd_root" ] || sweep_project "$pd_root" "$pd_state" 2>/dev/null || :
-  done < "$1"
+  done
   return 0
 }

@@ -28,7 +28,7 @@
 #   claude-discord monitor --check <bot>    asks the running monitor for a pass at its next tick (the TUI's Check now,
 #                                           and after it changed the ledger); starts nothing.
 #
-# Everything it keeps is under ~/.claude-discord/records/monitor/<bot>/:
+# Everything it keeps is under ~/.claude-discord/records/monitor/<key>/<bot>/ (<key>: the project's, state.sh):
 #   lock                       the flock target (fd 9 of the monitor), holding its pid
 #   keeper.lock                the flock target of the keeper (fd 8), held for its whole life
 #   state.json (+ .tmp)        what the TUI shows; `posted` makes a restart quiet. Never a token and never the value
@@ -72,7 +72,9 @@ while [ $# -gt 0 ]; do
 done
 case $bot in ''|.|..|*/*) echo "$usage" >&2; exit 2;; esac
 . "${BASH_SOURCE[0]%/*}/../bin/lib/state.sh"; proj_cwd; dir=$pd_root/$bot pstate=$pd_state   # either shape (1.18.0: ~/.claude-discord/projects/<key>/bots/<bot>; config.env beside bots/)
-M=$HOME/.claude-discord/records/monitor/$bot
+# The records are keyed by the project (1.18.1), so two projects may each have a manager of one name. CLAUDE_DISCORD_MONITOR_DIR
+# names them elsewhere: compat's --stop of a backend started before 1.18.1 at records/monitor/<bot>, and its rollback.
+M=${CLAUDE_DISCORD_MONITOR_DIR:-$HOME/.claude-discord/records/monitor/$pd_key/$bot}
 # The ledger is the on/off switch: no hosts file, no monitor. --stop needs none: it stops what runs.
 [ -n "$stop" ] || { [ -f "$dir/hosts" ] && [ -f "$dir/.env" ]; } || { echo "claude-discord: monitor: $dir has no hosts ledger (claude-discord setup $bot --mode writes one)" >&2; exit 1; }
 # --stop of a name with neither a bot directory here nor records (a manager renamed away, a TUI still on its old name):
@@ -559,7 +561,7 @@ def cd: if .host == "local" then "claude-discord" else "~/.local/bin/claude-disc
 def wrap($e): if $e.host == "local" then . else "ssh \($e.host) \u0027\(gsub("\u0027"; "\u0027\\\u0027\u0027"))\u0027" end;
 def fix: . as $e
   | if   .verdict == "down"        then ("cd \(cdp) && \(cd) --bg --name \(qbot)" | wrap($e))
-    elif .verdict == "stale"       then ("cd \(cdp) && \(cd) refresh \(qbot) --force" | wrap($e))
+    elif .verdict == "stale"       then ("cd \(cdp) && \(cd) bot \(qbot) recover" | wrap($e))
     elif .verdict == "duplicate"   then (if .host == "local" then "" else "on \(.host): " end) + "claude agents, then claude stop <id> for the copy that is not the bot\u0027s"
     elif .verdict == "unreachable" then "check DISCORD_BOT_TOKEN in the bot\u0027s state dir, ~/.claude-discord/projects/\(.project | gsub("[^A-Za-z0-9]"; "-"))/bots/\(.bot)/.env, and the bot\u0027s channel permissions"
     elif .verdict == "nostate"     then (if .host == "local" then "" else "on \(.host): " end) + "claude agents by hand; the daemon is unwell"
@@ -851,7 +853,7 @@ run_pass() {
   # markers are its own monitor's; on a shared home, the bots this side's `claude agents` does not list are left.
   if [ -n "$has_local" ] && [ $((SECONDS - swept)) -ge "${sweep%%.*}" ]; then
     swept=$SECONDS
-    sweep_recorded "$HOME/.claude-discord/records/projects" 2>/dev/null 9>&- || :
+    sweep_recorded 2>/dev/null 9>&- || :
   fi
   log "pass hosts=$hosts bots=$nb findings=$findings posted=$posted $(( SECONDS - t0 ))s"
 }

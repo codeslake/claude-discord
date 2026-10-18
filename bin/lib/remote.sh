@@ -9,7 +9,7 @@
 # 5 not added: the host did not answer or has no claude-discord (--no-probe adds it unchecked).
 # h_manager <verb> <its flag that names the manager>: which manager bot's ledger a verb acts on (hosts, and access --host).
 # In the project above the cwd: its dev-manager bots that have a ledger (only the one named, with
-# --bot); none there: the same among the recorded projects (records/projects), as `tui` and `monitor` find theirs.
+# --bot); none there: the same among the projects with a state dir (proj_arr), as `tui` and `monitor` find theirs.
 # Exactly one must be left. This verb never asks (the TUI and scripts run it): it names the candidates and exits 2.
 # Uses hb (the manager named, or empty); sets hd (its bot dir), hb and hf (its ledger).
 h_manager() {
@@ -27,12 +27,10 @@ h_manager() {
       h_cands=$h_cands$d$'\n'; h_n=$((h_n + 1))
     done
   }
-  ! find_proj || h_scan "$pd_project"   # the project above the cwd (physical, as records/projects holds its paths)
-  if [ "$h_n" = 0 ] && [ -f "$helpers/records/projects" ]; then
-    while IFS= read -r p || [ -n "$p" ]; do
-      p=${p%$'\r'}
-      [ -z "$p" ] || h_scan "$p"
-    done < "$helpers/records/projects"
+  ! find_proj || h_scan "$pd_project"   # the project above the cwd (physical, as `project` files hold their paths)
+  if [ "$h_n" = 0 ]; then
+    proj_arr
+    for p in ${pl[@]+"${pl[@]}"}; do h_scan "$p"; done
   fi
   [ "$h_n" != 0 ] || { echo "claude-discord: $1: no dev-manager bot${hb:+ '$hb'} with a hosts ledger in the project above $PWD or in a recorded one (claude-discord setup <bot> --mode writes the ledger)" >&2; exit 1; }
   [ "$h_n" = 1 ] || { echo "claude-discord: $1: $h_n manager bots have a ledger; name one with $2 <manager>, in its project when two share a name:" >&2; printf '%s' "$h_cands" | sed 's/^/  /' >&2; exit 2; }

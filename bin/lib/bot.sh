@@ -86,7 +86,7 @@ if [ "${1:-}" = bot ]; then
     bw=$bot; [ "$act" != add ] || bw=""
     ! find_proj "$bw" || cd "$pd_project"
   fi
-  proj_cwd; root=$pd_root proj_state=$pd_state; d=$root/$bot M=$helpers/records/monitor
+  proj_cwd; root=$pd_root proj_state=$pd_state; d=$root/$bot M=$helpers/records/monitor/$pd_key SCR=$helpers/scratch/$pd_key   # a manager's records and a bot's scratch, keyed by the project (1.18.1)
   bn=${bot//[[:cntrl:]]/}   # the name as it is printed
   b_host_name=$(uname -n); b_host_name=${b_host_name%%.*}
   [ "$act" = add ] || [ -f "$d/.env" ] || { echo "claude-discord: bot: no bot '$bn' set up in $root (claude-discord setup <bot>)" >&2; exit 1; }
@@ -133,20 +133,8 @@ if [ "${1:-}" = bot ]; then
     read -r -p "$1 [y/N] " a || a=""
     case $a in y|Y) ;; *) echo "claude-discord: bot: answered no; nothing was changed" >&2; exit 4;; esac
   }
-  # b_mgr_free <name> [<its old name>]: no manager of that name has a backend on this machine, or exit 1 naming where one
-  # is: one backend (state dir, keeper, monitor) per manager NAME on a machine (setup says why).
-  b_mgr_free() {
-    local p
-    [ ! -e "$M/$1" ] || [ "$M/$1" -ef "$M/${2:-}" ] || { echo "claude-discord: bot: $M/$1 is there: a manager named $1 has a backend on this machine; nothing was changed" >&2; exit 1; }
-    while IFS= read -r p || [ -n "$p" ]; do
-      p=${p%$'\r'}
-      [ -n "$p" ] || continue
-      proj_dirs "$p"; [ -f "$pd_root/$1/hosts" ] || continue
-      echo "claude-discord: bot: '$1' is a dev-manager with a hosts ledger in $p: one backend serves one manager name per machine; nothing was changed" >&2; exit 1
-    done < <(cat "$helpers/records/projects" 2>/dev/null)
-  }
-  # b_set_up [<a bot dir to skip>]: b_where, the first bot directory of this machine (this project's, then the recorded
-  # projects') that is the bot $b_id (its bot-id) or holds $tok (the token line of its .env, compared here: never printed
+  # b_set_up [<a bot dir to skip>]: b_where, the first bot directory of this machine (this project's, then the other
+  # projects' with a state dir) that is the bot $b_id (its bot-id) or holds $tok (the token line of its .env, compared here: never printed
   # or passed on); "" for none. b_how says which: id or token. One bot, one session: two sessions on one token both answer.
   b_set_up() {
     local p f id l
@@ -165,10 +153,10 @@ if [ "${1:-}" = bot ]; then
         l=""
         [ -z "$b_where" ] || return 0
       done
-    done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null)
+    done < <(printf '%s\n' "$PWD"; proj_list)
   }
-  # b_case_free <name> [<this bot's dir>]: no other bot of this machine (a bot directory of this project or a recorded
-  # one, or a manager's records/monitor/<name>) has that name but for its case, or exit 1 naming it: on a
+  # b_case_free <name> [<this bot's dir>]: no other bot of this machine (a bot directory of this project or another
+  # with a state dir, or a manager's records/monitor/<key>/<name> of this project) has that name but for its case, or exit 1 naming it: on a
   # case-insensitive file system the two are one directory, and the hooks compare names without case. The bot itself
   # (its directory, a manager's own records) is none other.
   b_case_free() {
@@ -185,7 +173,7 @@ if [ "${1:-}" = bot ]; then
         shopt -u nocasematch
         echo "claude-discord: bot: '$1' is the name of $f but for its case: on a case-insensitive file system they are one directory, and the hooks compare names without case; nothing was changed" >&2; exit 1
       done
-    done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null)
+    done < <(printf '%s\n' "$PWD"; proj_list)
     shopt -u nocasematch
   }
   # b_mv <from> <to>: rename(2); when both are one directory (a case-only rename on a case-insensitive file system),
@@ -225,7 +213,6 @@ if [ "${1:-}" = bot ]; then
       echo "claude-discord: bot: that token is the token of $b_where already: two sessions on one token both answer; nothing was changed" >&2; exit 1
     fi
     [ -z "$b_where" ] || { echo "claude-discord: bot: that token's bot ($b_id) is set up in $b_where already: two sessions on one token both answer; nothing was changed" >&2; exit 1; }
-    [ "$b_mode" != dev-manager ] || b_mgr_free "$new"
     printf '%s\n' "claude-discord: bot: add $new (Discord $b_id) on $b_host_name, $root/$new" \
       "    it listens in channel $DISCORD_CHANNEL_ID (config.env): an @mention required, from $DISCORD_USER_ID${DISCORD_ALLOW_IDS:+ and $DISCORD_ALLOW_IDS}" \
       "    mode: $b_mode$([ "$b_mode" != dev-manager ] || echo ": a hosts ledger (this machine) and its monitor, which posts in #bot-health-check")" \
@@ -406,8 +393,8 @@ if [ "${1:-}" = bot ]; then
   #   the bot's directory, with its token, access.json, mode, ledger, logs, caches and handoff: one rename(2);
   #   its running session: stopped first, started again under the new name after, from its handoff.md when it has one;
   #   this bot's line in the peers.json of each project of this machine, found by its id (a bot skips its own NAME there);
-  #   its scratch directory, ~/.claude-discord/scratch/<name>;
-  #   a manager's backend: its keeper and monitor stopped, records/monitor/<name> (state, alerts, log) moved, state.json's
+  #   its scratch directory, ~/.claude-discord/scratch/<key>/<name>;
+  #   a manager's backend: its keeper and monitor stopped, records/monitor/<key>/<name> (state, alerts, log) moved, state.json's
   #   manager renamed, the backend started again unless its owner had stopped it, and its watcher record on each host
   #   of its ledger renamed (over ssh, as hosts add wrote it).
   # Not here: the monitor's row of the old name leaves at its next pass, unannounced; peers on other machines keep the old
@@ -421,7 +408,6 @@ if [ "${1:-}" = bot ]; then
     { echo "claude-discord: bot: a session cannot rename its own bot: it is stopped on the way. Run it in a terminal outside $bn's session" >&2; exit 2; }
   mode=""; { read -r mode < "$d/mode"; } 2>/dev/null || :
   mgr=""; [ "$mode" != dev-manager ] || [ ! -f "$d/hosts" ] || [ "$new" = "$bot" ] || mgr=1
-  [ -z "$mgr" ] || b_mgr_free "$new" "$bot"
   b_case_free "$new" "$d"
   tok=""
   { while IFS= read -r l || [ -n "$l" ]; do case $l in DISCORD_BOT_TOKEN=*) tok=${l#DISCORD_BOT_TOKEN=}; break;; esac; done < "$d/.env"; } 2>/dev/null || :
@@ -494,19 +480,20 @@ if [ "${1:-}" = bot ]; then
   b_mv "$d" "$nd" ||
     { b_undo; echo "claude-discord: bot: could not rename $d: nothing here was renamed$b_again" >&2; exit 1; }
   b_log "$nd" "rename: $bn -> $new"
+  write_managers
   b_rc=0 b_warn=""
   # This bot's line in each project's peers.json, by its id.
   while IFS= read -r p || [ -n "$p" ]; do
     p=${p%$'\r'}
     [ -n "$p" ] || continue
     proj_dirs "$p"; [ -f "$pd_state/peers.json" ] || continue
-    jq_edit "$pd_state/peers.json" --arg id "$b_id" --arg n "$new" \
+    peers_edit "$pd_state/peers.json" --arg id "$b_id" --arg n "$new" \
       'if (.peers | type) == "array" then .peers |= map(if type == "object" and ((.bot_id // "") | tostring) == $id then .name = $n else . end) else . end'
-  done < <(printf '%s\n' "$PWD"; cat "$helpers/records/projects" 2>/dev/null)
-  if [ -d "$helpers/scratch/$bot" ] && { [ ! -e "$helpers/scratch/$new" ] || [ "$helpers/scratch/$new" -ef "$helpers/scratch/$bot" ]; }; then
-    b_mv "$helpers/scratch/$bot" "$helpers/scratch/$new" 2>/dev/null || b_warn="$b_warn"$'\n'"    its scratch directory stays $helpers/scratch/$bot"
-  elif [ -d "$helpers/scratch/$bot" ]; then   # the new name's is there already (a bot of that name once): neither is touched, said (1.14.1)
-    b_warn="$b_warn"$'\n'"    its scratch directory stays $helpers/scratch/$bot: $helpers/scratch/$new is there already"
+  done < <(printf '%s\n' "$PWD"; proj_list)
+  if [ -d "$SCR/$bot" ] && { [ ! -e "$SCR/$new" ] || [ "$SCR/$new" -ef "$SCR/$bot" ]; }; then
+    b_mv "$SCR/$bot" "$SCR/$new" 2>/dev/null || b_warn="$b_warn"$'\n'"    its scratch directory stays $SCR/$bot"
+  elif [ -d "$SCR/$bot" ]; then   # the new name's is there already (a bot of that name once): neither is touched, said (1.14.1)
+    b_warn="$b_warn"$'\n'"    its scratch directory stays $SCR/$bot: $SCR/$new is there already"
   fi
   if [ -n "$mgr" ]; then
     [ -z "$b_made" ] || rm -f "$M/$new/stopped"

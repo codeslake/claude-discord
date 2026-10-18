@@ -24,37 +24,21 @@ thread_tool=$plugin_root/tools/thread
 # the ids its access.json lets in there (that group's allowFrom, then the
 # top-level one; one a line). The channel is the single
 # group key in its access.json: the plugin reads that file on every message,
-# and moving a bot to another channel is an edit there, which config.env's
-# DISCORD_CHANNEL_ID (written once, at setup) does not follow. Without
-# exactly one digits-only key (the file missing or unreadable, no group, or
-# several) it is config.env's DISCORD_CHANNEL_ID. The start path in
-# claude-discord applies the same rule.
+# and moving a bot to another channel is an edit there. Without exactly one
+# digits-only key (the file missing or unreadable, no group, or several) the
+# bot has no channel (1.18.1: config.env, setup's defaults, is not read at run
+# time; it is one file for every bot of the project).
 resolve_channel() {
   local out
-  config_channel
+  bot_channel="" bot_access_ids=""
   # One jq for both answers (a jq start is 10 ms with jq 1.6, and every prompt asks): the channel on the first line,
   # then the ids that channel's group and the top-level allowFrom name, one a line. An allowFrom of the wrong shape
-  # costs only the ids, never the channel (try), and a file jq reads as nothing (empty) leaves config.env's channel.
-  out=$(jq -r --arg fb "$bot_channel" '((.groups | objects | keys) // []) as $k
-    | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) as $ch
+  # costs only the ids, never the channel (try).
+  out=$(jq -r '((.groups | objects | keys) // []) as $k
+    | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else "" end) as $ch
     | $ch, try ((.groups[$ch].allowFrom // [])[], (.allowFrom // [])[]) catch empty' "$DISCORD_STATE_DIR/access.json" 2>/dev/null) && [ -n "$out" ] || return 0
   bot_channel=${out%%$'\n'*}
   case $out in *$'\n'*) bot_access_ids=${out#*$'\n'};; esac
-}
-
-# config_channel: sets bot_channel to config.env's DISCORD_CHANNEL_ID (empty
-# without one) and empties bot_access_ids: resolve_channel's fallback, read
-# with builtins. thread-guard applies the access.json half inside its own jq.
-config_channel() {
-  local config="$proj_state/config.env" line
-  bot_channel="" bot_access_ids=""
-  if [ -f "$config" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      case $line in DISCORD_CHANNEL_ID=*) bot_channel=${line#DISCORD_CHANNEL_ID=}; break;; esac
-    done < "$config"
-    bot_channel=${bot_channel#\'}
-    bot_channel=${bot_channel%\'}
-  fi
 }
 
 # proj_state: the project's state dir (config.env, peers.json, checkin/); bots_root: its bot dirs' parent; project_dir:
@@ -290,32 +274,27 @@ hook_session() {
   case $sid in .*) return 1;; esac
 }
 
-# revive_backends: every dev-manager bot with a hosts ledger in the projects recorded on this machine
-# (records/projects, as tui and health --all read it) gets its keeper started, detached, when none runs and its owner
-# did not stop it. Any bot's session start and prompt run it, so a backend killed by a restart comes back with the
-# first bot that wakes. No records, no manager, every keeper alive: builtins only (no fork on Linux), and silent.
+# revive_backends: every manager of this machine (records/managers: "<key> <bot>" a line, written by setup, bot rename
+# and compat; state.sh write_managers) gets its keeper started, detached, when none runs and its owner did not stop it.
+# Any bot's session start and prompt run it, so a backend killed by a restart comes back with the first bot that wakes.
+# No file: built once by write_managers (state.sh sourced for that alone: a glob, no fork). No manager, every keeper
+# alive: builtins only (no fork on Linux), and silent. A line twice is one backend (keeper_alive cannot see a keeper
+# just backgrounded); a line whose ledger is gone starts nothing.
 # CLAUDE_DISCORD_NO_AUTOSTART turns it off on a machine (the other side of a shared home; the suite).
 revive_backends() {
-  local pf="$HOME/.claude-discord/records/projects" p d m k q bots bot_name bot_project seen=" " LC_ALL=C
-  [ -z "${CLAUDE_DISCORD_NO_AUTOSTART:-}" ] && [ -f "$pf" ] || return 0
-  while IFS= read -r p || [ -n "$p" ]; do
-    p=${p%$'\r'}; [ -n "$p" ] || continue
-    # Either shape (state.sh's proj_dirs, inlined: no fork): the key's `project` names the project, or the 1.16 dir.
-    k=${p//[^A-Za-z0-9]/-} q=""; { IFS= read -r q < "$HOME/.claude-discord/projects/$k/project"; } 2>/dev/null || :
-    if [ "$q" = "$p" ]; then bots=$HOME/.claude-discord/projects/$k/bots; else bots=$p/.claude/discord-agents; fi
-    for d in "$bots"/*/; do
-      d=${d%/}
-      [ -f "$d/hosts" ] && [ -f "$d/.env" ] || continue   # the front refuses a bot with no .env, on every prompt
-      m=""; { read -r m < "$d/mode"; } 2>/dev/null
-      [ "$m" = dev-manager ] || continue
-      # One state dir per bot name: a second project's manager of the same name is not a second backend (and its start
-      # would race the first's, as keeper_alive cannot see a keeper just backgrounded).
-      bot_name=${d##*/} bot_project=$p
-      case $seen in *" $bot_name "*) continue;; esac
-      seen="$seen$bot_name "
-      keeper_alive || ensure_keeper
-    done
-  done < "$pf"
+  local mf="$HOME/.claude-discord/records/managers" k b q bot_name bot_key bot_project seen=" "
+  [ -z "${CLAUDE_DISCORD_NO_AUTOSTART:-}" ] || return 0
+  [ -f "$mf" ] || { . "$plugin_root/bin/lib/state.sh" && write_managers; } 2>/dev/null || :
+  [ -f "$mf" ] || return 0
+  while read -r k b || [ -n "$k" ]; do
+    [ -n "$k" ] && [ -n "$b" ] || continue
+    case $seen in *" $k/$b "*) continue;; esac
+    seen="$seen$k/$b "
+    q=""; { IFS= read -r q < "$HOME/.claude-discord/projects/$k/project"; } 2>/dev/null || :
+    [ -n "$q" ] && [ -f "$HOME/.claude-discord/projects/$k/bots/$b/hosts" ] || continue
+    bot_name=$b bot_key=$k bot_project=$q
+    keeper_alive || ensure_keeper
+  done < "$mf"
 }
 # ensure_keeper: the manager bot's backend (a keeper and its monitor), started detached when none runs. The --keep
 # front checks (one keeper per bot; nothing while the owner's --stop marker stands) and returns at once; stdio closed
@@ -325,7 +304,7 @@ ensure_keeper() {
   # A start that keeps failing (the keeper dies at once) would fork this on every prompt of every bot: at most one
   # attempt a minute per pid namespace. The time is stored as epoch seconds and read with no fork on Linux
   # (EPOCHSECONDS is bash 5; `date` elsewhere). Not --start's or the TUI's: they never come through here.
-  local d="$HOME/.claude-discord/records/monitor/$bot_name" f="" now last="" ns=""
+  local d="$HOME/.claude-discord/records/monitor/$bot_key/$bot_name" f="" now last="" ns=""
   [ ! -L /proc/self/ns/pid ] || { ns=$(readlink /proc/self/ns/pid); ns=${ns//[!0-9]/}; ns=${ns:+.$ns}; }
   f=$d/last-start$ns now=${EPOCHSECONDS:-$(date +%s)}
   { read -r last < "$f"; } 2>/dev/null
@@ -339,10 +318,11 @@ ensure_keeper() {
 # keeper_alive: the backend is up, was stopped on purpose (the `stopped` marker) or was refused for good (`refused.<pid namespace id>`,
 # this side's own: a monitor this side cannot see), so a prompt starts nothing. A live
 # keeper is a holders/keeper-<pid> record whose pid runs `bash <root>/monitor/monitor.sh <wrapper> --keep <bot>`: a pid
-# reused by another program or another bot's keeper is none. Linux reads /proc/<pid>/cmdline with no fork (on-prompt
+# reused by another program or another bot's keeper is none (a same-named manager of another project keeps its own
+# records under its key). Linux reads /proc/<pid>/cmdline with no fork (on-prompt
 # asks on every prompt); elsewhere one `ps` fork per record.
 keeper_alive() {
-  local d="$HOME/.claude-discord/records/monitor/$bot_name" f p s a0 a1 a2 a3 a4 ns
+  local d="$HOME/.claude-discord/records/monitor/$bot_key/$bot_name" f p s a0 a1 a2 a3 a4 ns
   [ ! -e "$d/stopped" ] || return 0
   # The marker is per pid namespace (monitor.sh names it); the readlink fork happens only when some marker exists.
   # Decided: a marker of a namespace that no longer exists is not removed (it costs one readlink per prompt).

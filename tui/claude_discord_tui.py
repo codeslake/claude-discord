@@ -566,9 +566,16 @@ def bar_text(state: dict, note: str = "", stopped: bool = False, refused: bool =
     return bar
 
 
+def proj_key(project: str) -> str:
+    """The project's state key, as bin/lib/state.sh's proj_key makes it: every byte of the UTF-8 path that is not
+    [A-Za-z0-9] a dash (bash in the C locale works on bytes: one Hangul syllable is three dashes)."""
+    return bytes(c if c in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" else 45 for c in project.encode()).decode()
+
+
 def load_names(state: dict) -> dict:
-    """id -> display name, from the `user-names` file of every bot on this machine (written by on-prompt: `<id> <name>`).
-    A remote bot's file is out of reach, so its ids get a name only when that person wrote to a local bot too."""
+    """id -> display name, from the `user-names` file of every bot on this machine (written by on-prompt: `<id> <name>`,
+    in ~/.claude-discord/projects/<key>/bots/<bot>/ since 1.18.0). A remote bot's file is out of reach, so its ids get a
+    name only when that person wrote to a local bot too."""
     names = {}
     for b in obj(state.get("bots")).values():
         b = obj(b)
@@ -576,7 +583,7 @@ def load_names(state: dict) -> dict:
         if b.get("host") != "local" or not bot or not project:
             continue
         try:
-            text = (Path(project) / ".claude" / "discord-agents" / bot / "user-names").read_text(errors="replace")
+            text = (Path.home() / ".claude-discord" / "projects" / proj_key(project) / "bots" / bot / "user-names").read_text(errors="replace")
         except OSError:
             continue
         for line in text.splitlines():

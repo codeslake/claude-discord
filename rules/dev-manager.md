@@ -1,6 +1,6 @@
 # Working on claude-discord with peer bots (dev-manager bots)
 
-This file applies only to a dev-manager bot: a session whose Discord-turn context contains a `Dev manager:` line, or whose session prompt names it as a bot sharing a Discord channel (`You are "<name>", one of several Claude Code sessions sharing the Discord channel`) while the bot's `mode` file (in its state dir, `~/.claude-discord/projects/<key>/bots/<name>/mode`) reads `dev-manager`. Otherwise ignore it entirely. The plugin's SessionStart hook injects it for a dev-manager bot only (on start, resume, compact and clear). If it applies: you are one of several dev-manager bots that change claude-discord together, each run by its own owner on its own machine. Your peers and their `<@bot_id>` are in `.claude/discord-agents/peers.json` and in your Discord-turn context.
+This file applies only to a dev-manager bot: a session whose Discord-turn context contains a `Dev manager:` line, or whose session prompt names it as a bot sharing a Discord channel (`You are "<name>", one of several Claude Code sessions sharing the Discord channel`) while the bot's `mode` file (in its state dir, `~/.claude-discord/projects/<key>/bots/<name>/mode`) reads `dev-manager`. Otherwise ignore it entirely. The plugin's SessionStart hook injects it for a dev-manager bot only (on start, resume, compact and clear). If it applies: you are one of several dev-manager bots that change claude-discord together, each run by its own owner on its own machine. Your peers and their `<@bot_id>` are in `~/.claude-discord/projects/<key>/peers.json` and in your Discord-turn context.
 
 ## One session, one task, end to end
 
@@ -31,7 +31,7 @@ This file applies only to a dev-manager bot: a session whose Discord-turn contex
 - One item (a defect, a feature, a measurement, a review) is one thread, by the thread rules in your session prompt. Put a ticket number in its title when the item has one.
 - The back-and-forth with peers about an item goes inside its thread. Mention peers there as anywhere else.
 - A decision only a human can make: one line in the channel mentioning them, naming the thread.
-- Scratch files: durable ones under `~/.claude-discord/scratch/<bot name>/`, throwaway ones in `/tmp` under a name carrying the session id. Never under `~/.claude`; `$CLAUDE_JOB_DIR` exists only in a background session.
+- Scratch files: durable ones under `~/.claude-discord/scratch/<key>/<bot name>/` (`<key>`: the directory above `bots/` in your state dir, `~/.claude-discord/projects/<key>/bots/<bot name>`), throwaway ones in `/tmp` under a name carrying the session id. Never under `~/.claude`; `$CLAUDE_JOB_DIR` exists only in a background session.
 
 ## Changing claude-discord
 

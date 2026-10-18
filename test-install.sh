@@ -342,7 +342,7 @@ bash "$C/bin/claude-discord" update --bogus >/dev/null 2>&1 && { echo "FAIL: upd
 jq '.version = "1.7.9"' "$SRC/.claude-plugin/plugin.json" > "$SRC/p.json" && mv "$SRC/p.json" "$SRC/.claude-plugin/plugin.json" && git -C "$SRC" -c user.email=t@t -c user.name=t commit -qam old-version
 rm -rf "$HOME/.claude-discord/compat"
 rc=0; out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || rc=$?
-[ "$rc" = 0 ] && grep -q 'before the compat copy (1.8.0)' <<<"$out" && [ ! -e "$HOME/.claude-discord/compat" ] || { echo "FAIL: update must skip compat from code before 1.8.0, with a line (rc=$rc): $out"; exit 1; }
+[ "$rc" = 0 ] && grep -q 'before the compat step (1.8.0)' <<<"$out" && [ ! -e "$HOME/.claude-discord/compat" ] || { echo "FAIL: update must skip compat from code before 1.8.0, with a line (rc=$rc): $out"; exit 1; }
 rm -rf "$UP" "$UC"
 echo "ok: --version prints the version and the clone's sha (a link's is the source's); update pulls the source behind a link once, runs the pulled commit's patch step, refills the runtime copy and the shim and asks for /reload-plugins; --all pulls each real clone once, prunes a removed project, skips a detached (pinned) clone without failing, and exits 1 on a diverged clone (left as it was) or an unwritable shim"
 
@@ -385,8 +385,9 @@ grep -q 'share one' <<<"$out" && grep -qF -- "\"DISCORD_STATE_DIR\": \"$CA/.clau
 echo "ok: a start in a project whose key another project holds says so and launches on the old path (setup alone refuses)"
 # (d) a project of the old shape (<project>/.claude/discord-agents/) with two bots, moved by compat: every bot dir by
 # rename (same inode), config.env, peers.json and checkin/ with it, a link per bot whose old path a job record names, the
-# hooks link gone, the .gitignore kept, a manager's records/monitor and scratch left where they are (Task 4 moves them
-# with their readers), the records/projects line kept, and a second run changing nothing.
+# hooks link gone, the .gitignore kept, a manager's records/monitor and scratch moved under the key (1.18.1; the backend
+# stopped by its owner stays stopped; the scratch link goes at once, since the listing shows no session of ob1), the
+# records/projects list renamed .1.16 (its one line has a key dir now), and a second run changing nothing.
 OLDP="$HOME/old shape"; OR="$OLDP/.claude/discord-agents"; mkdir -p "$OR/ob1/turns" "$OR/ob2/plugin-sessions" "$OR/checkin"
 printf "DISCORD_CHANNEL_ID='7'\nDISCORD_USER_ID='8'\nDISCORD_ALLOW_IDS=''\n" > "$OR/config.env"; echo '{"peers":[]}' > "$OR/peers.json"; : > "$OR/checkin/s1"
 printf 'DISCORD_BOT_TOKEN=t1\n' > "$OR/ob1/.env"; echo dev-manager > "$OR/ob1/mode"; printf '# ledger\nlocal\n' > "$OR/ob1/hosts"; echo '{}' > "$OR/ob1/access.json"; : > "$OR/ob1/turns/t1"
@@ -397,7 +398,7 @@ cp -a "$OR" "$HOME/old-shape.ref"; i1=$(stat -c %i "$OR/ob1"); i2=$(stat -c %i "
 JOBS="$HOME/.claude/jobs"; mkdir -p "$JOBS/mv000001" "$JOBS/mv000002"
 jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$OR/ob1\"}}" '{sessionId: "0b100000-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JOBS/mv000001/state.json"
 jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$OR/ob2\"}}" '{sessionId: "0b200000-1111-2222-3333-444444444444", respawnFlags: ["--settings", $s]}' > "$JOBS/mv000002/state.json"
-OPF=$HOME/.claude-discord/records/projects; OPFK=$(cat "$OPF" 2>/dev/null || :); printf '%s\n' "$OLDP" > "$OPF"
+OPF=$HOME/.claude-discord/records/projects; printf '%s\n' "$OLDP" > "$OPF"   # the 1.16 list (nothing writes it since 1.18.1)
 cp "$HOME/bin/claude" "$HOME/claude.before-move"; printf '#!/bin/bash\ncase $1 in agents) echo "[]";; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"   # no session of any bot runs
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
 OS="$HOME/.claude-discord/projects/$(skey "$OLDP")"
@@ -406,12 +407,13 @@ OS="$HOME/.claude-discord/projects/$(skey "$OLDP")"
   cmp -s "$HOME/old-shape.ref/config.env" "$OS/config.env" && cmp -s "$HOME/old-shape.ref/peers.json" "$OS/peers.json" && [ -e "$OS/checkin/s1" ] &&
   [ "$(readlink "$OR/ob1")" = "$OS/bots/ob1" ] && [ "$(readlink "$OR/ob2")" = "$OS/bots/ob2" ] && [ ! -e "$OR/hooks" ] && [ ! -L "$OR/hooks" ] &&
   [ "$(<"$OR/.gitignore")" = "*" ] && [ ! -e "$OR/config.env" ] && [ ! -e "$OR/peers.json" ] && [ ! -e "$OR/checkin" ] &&
-  [ "$(stat -c %a "$OS")" = 700 ] && [ "$(stat -c %a "$OS/bots")" = 700 ] && [ -e "$MON1/stopped" ] && [ -f "$SCR1/f" ] && grep -qxF "$OLDP" "$OPF" ||
+  [ "$(stat -c %a "$OS")" = 700 ] && [ "$(stat -c %a "$OS/bots")" = 700 ] && [ ! -e "$MON1" ] && [ -e "$HOME/.claude-discord/records/monitor/$(skey "$OLDP")/ob1/stopped" ] &&
+  [ -f "$HOME/.claude-discord/scratch/$(skey "$OLDP")/ob1/f" ] && [ ! -L "$SCR1" ] && [ ! -e "$SCR1" ] && [ ! -e "$OPF" ] && grep -qxF "$OLDP" "$OPF.1.16" ||
   { echo "FAIL: compat moves a project's state by rename, leaves a link per bot, and is idempotent: $out / $(find "$OR" "$OS" 2>&1)"; exit 1; }
 snap=$(find "$OR" "$OS" -printf '%p %y %m %i\n' | sort)
 out2=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: a second compat failed: $out2"; exit 1; }
 [ "$(find "$OR" "$OS" -printf '%p %y %m %i\n' | sort)" = "$snap" ] || { echo "FAIL: compat moves a project's state by rename, leaves a link per bot, and is idempotent: the second run changed something: $out2"; exit 1; }
-echo "ok: compat moves a 1.16 project's bots, config.env, peers.json and checkin/ into ~/.claude-discord/projects/<key>/ by rename, leaves a link per bot a job record names, drops the hooks link, keeps the .gitignore, touches no records/monitor or scratch, and a second run changes nothing"
+echo "ok: compat moves a 1.16 project's bots, config.env, peers.json and checkin/ into ~/.claude-discord/projects/<key>/ by rename, leaves a link per bot a job record names, drops the hooks link, keeps the .gitignore, moves a stopped manager's records/monitor and scratch under the key, retires the 1.16 list, and a second run changes nothing"
 # (g) the link goes only when no jobs/<id>/state.json names its old path; after the last, discord-agents/ and its .gitignore.
 rm -rf "$JOBS/mv000002"
 # (M-4) No job record, but a foreground session of ob2 on the old path (`claude agents` lists it with a pid, no id): kept, said.
@@ -483,7 +485,7 @@ out=$(cd "$OLDS" && bash "$S" --name sb 2>&1)
 SS="$HOME/.claude-discord/projects/$(skey "$OLDS")"
 grep -qF -- "\"DISCORD_STATE_DIR\": \"$SS/bots/sb\"" <<<"$out" && [ -f "$SS/bots/sb/.env" ] && [ -f "$SS/config.env" ] && [ ! -e "$OLDS/.claude/discord-agents" ] ||
   { echo "FAIL: a start in a project of the old shape moves it first and starts on the new path: $out / $(find "$OLDS" "$SS" 2>&1)"; exit 1; }
-printf '%s\n' "$OPFK" > "$OPF"
+rm -f "$OPF" "$OPF.1.16"
 echo "ok: a start in a 1.16-shaped project moves its state first and launches on the new path"
 
 
@@ -514,7 +516,7 @@ printf "DISCORD_CHANNEL_ID='900'\nDISCORD_USER_ID='111'\nDISCORD_ALLOW_IDS=''\n"
 printf 'DISCORD_BOT_TOKEN=tokP3\n' > "$RB/.env"; echo none > "$RB/mode"; jq -n '{dmPolicy:"allowlist", allowFrom:["111"], groups:{"900":{requireMention:true, allowFrom:["111"]}}}' > "$RB/access.json"
 echo "$ID_SEEN" > "$RB/last-message-id"; seed_id "$RB"; seed_guild "$RB"
 mkdir -p "$HOME/.claude/jobs/lk000001"; jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$LP/.claude/discord-agents/b\"}}" '{sessionId: "1111aaaa-2222-3333-4444-555555555555", respawnFlags: ["--settings", $s]}' > "$HOME/.claude/jobs/lk000001/state.json"
-RPF="$HOME/.claude-discord/records/projects"; cp "$RPF" "$HOME/rpf.keep"; printf '%s\n' "$(cd "$RP" && pwd -P)" >> "$RPF"
+RPF="$HOME/.claude-discord/records/projects"; printf '%s\n' "$(cd "$RP" && pwd -P)" > "$RPF"   # the 1.16 list: this project is not moved yet
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
 RBN="$HOME/.claude-discord/projects/$(skey "$RP")/bots/b"
 [ "$(readlink "$RB")" = "$RBN" ] && grep -q lk000001 <<<"$out" || { echo "FAIL: a job record naming the old path through a link of the project must keep the bot's link: $out / $(ls -la "$RP/.claude/discord-agents" 2>&1)"; exit 1; }
@@ -529,9 +531,126 @@ stop_one_server "$LP/.claude/discord-agents/b"
 mkdir -p "${RBN%/b}/c"; printf 'DISCORD_BOT_TOKEN=tokC\n' > "${RBN%/b}/c/.env"; echo none > "${RBN%/b}/c/mode"   # a second bot: with one, a start picks it with no record at all
 out=$(cd "$RP" && bash "$S" --bg --resume 1111aaaa-2222-3333-4444-555555555555 2>&1) || :   # the launcher stub prints the exec line; the claude stub here refuses a launch
 grep -q -- '-n b' <<<"$out" || { echo "FAIL: --resume must find the bot from a job record naming the old path through a link of the project: $out"; exit 1; }
-cp "$HOME/rpf.keep" "$RPF"; rm -rf "$HOME/rpf.keep" "$HOME/.claude/jobs/lk000001" "$HOME/link" "$HOME/real"
+rm -rf "$RPF" "$RPF.1.16" "$HOME/.claude/jobs/lk000001" "$HOME/link" "$HOME/real"
 echo "ok: a job record and a server environ naming the old path in the start's logical spelling (the project through a link) keep the link at compat, count in health and resolve --resume"
 stop_servers
+
+# --- many bots per project (1.18.1, Task 4): nothing is keyed by a bot's name alone ----------------------------------
+# (a, d) Two projects each with a manager named mgr: setup of the second succeeds (1.18.0 refused it), records/managers
+# lists both keys, a missing file is rebuilt from projects/*/bots/*/hosts by the hooks, and revive_backends starts two
+# keepers (monitor --keep mgr --detach from each project), each with its own records/monitor/<key>/mgr.
+M2A="$HOME/mgr one"; M2B="$HOME/mgr two"; mkdir -p "$M2A" "$M2B"
+jq --arg a "$M2A" --arg b "$M2B" '.projects[$a].hasTrustDialogAccepted = true | .projects[$b].hasTrustDialogAccepted = true' "$HOME/.claude.json" > "$HOME/cj.tmp" && mv "$HOME/cj.tmp" "$HOME/.claude.json"
+for p in "$M2A" "$M2B"; do
+  rc=0; out=$(cd "$p" && printf '900\n111\n\ntokM\nn\ndev-manager\n\n\n' | CLAUDE_DISCORD_SETUP_NOASK=1 bash "$S" setup mgr --scope project 2>&1) || rc=$?
+  [ "$rc" = 0 ] && [ -f "$(bdir "$p" mgr)/hosts" ] && [ "$(<"$(bdir "$p" mgr)/mode")" = dev-manager ] || { echo "FAIL: two managers of one name in two projects are two backends: setup of mgr in $p (rc=$rc): $out"; exit 1; }
+done
+KA=$(skey "$M2A") KB=$(skey "$M2B"); MGRS="$HOME/.claude-discord/records/managers"
+grep -qxF -- "$KA mgr" "$MGRS" && grep -qxF -- "$KB mgr" "$MGRS" || { echo "FAIL: two managers of one name in two projects are two backends: records/managers must list both keys: $(cat "$MGRS" 2>&1)"; exit 1; }
+FX="$HOME/fxroot"; mkdir -p "$FX/bin/lib" "$FX/hooks/turn" "$FX/hooks/lib"; cp "$D/hooks/turn/on-prompt" "$FX/hooks/turn/"; cp "$D/hooks/lib/discord.sh" "$FX/hooks/lib/"; cp "$D/bin/lib/state.sh" "$FX/bin/lib/"
+printf '#!/bin/sh\nprintf "%%s %%s\\n" "$PWD" "$*" >> "$HOME/fx.rec"\n' > "$FX/bin/claude-discord"; chmod +x "$FX/bin/claude-discord"
+FXR=$(cd -P "$FX" && pwd -P); printf '{"session_id":"sM2","prompt":"hi"}' > "$HOME/up.json"
+fxhook() { rm -f "$HOME/fx.rec" "$HOME"/.claude-discord/records/monitor/*/mgr/last-start* "$HOME"/.claude-discord/records/monitor/mgr/last-start*; env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_PLUGIN_ROOT="$FXR" CLAUDE_PROJECT_DIR="$M2A" DISCORD_STATE_DIR="$(bdir "$M2A" mgr)" bash "$FXR/hooks/turn/on-prompt" < "$HOME/up.json" >/dev/null 2>&1; nap 0.1; }
+rm -f "$MGRS"; fxhook
+grep -qxF -- "$KA mgr" "$MGRS" 2>/dev/null && grep -qxF -- "$KB mgr" "$MGRS" || { echo "FAIL: a missing records/managers is rebuilt by the hooks from projects/*/bots/*/hosts: $(cat "$MGRS" 2>&1)"; exit 1; }
+printf '%s mgr\n%s mgr\n%s mgr\n' "$KA" "$KB" "$KA" > "$MGRS"; fxhook   # a line twice: one keeper
+[ "$(sort "$HOME/fx.rec" 2>/dev/null)" = "$(printf '%s monitor --keep mgr --detach\n%s monitor --keep mgr --detach\n' "$M2A" "$M2B" | sort)" ] &&
+  [ -s "$HOME/.claude-discord/records/monitor/$KA/mgr/last-start"* ] && [ -s "$HOME/.claude-discord/records/monitor/$KB/mgr/last-start"* ] && [ ! -e "$HOME/.claude-discord/records/monitor/mgr" ] ||
+  { echo "FAIL: two managers of one name in two projects are two backends: revive_backends must start a keeper per manager (key and name) from its project, each with its own records/monitor/<key>/mgr: $(cat "$HOME/fx.rec" 2>&1) / $(ls -R "$HOME/.claude-discord/records/monitor" 2>&1)"; exit 1; }
+rm -rf "$FX" "$HOME/fx.rec" "$HOME/up.json" "$HOME/.claude-discord/records/monitor"
+echo "ok: two projects may each have a manager named mgr: setup accepts the second, records/managers lists both keys (rebuilt by the hooks when missing), and revive_backends starts one keeper per key and name, from its project, with records/monitor/<key>/<bot> each"
+
+# (e) The hooks read the channel and the people from the bot's own access.json, never from config.env: a config.env
+# naming another channel and owner changes nothing in on-prompt's identity and People line, and a removed one neither;
+# with none or several groups there is no channel (the identity says so).
+SD2="$(bdir "$SP" sbot)"; cp "$SD2/access.json" "$HOME/acc.keep"; cp "$(pstate "$SP")/config.env" "$HOME/cfg.keep"
+ehook() { printf '{"session_id":"%s","prompt":"<channel source=\\"plugin:discord:discord\\" chat_id=\\"900\\" message_id=\\"%s\\" user=\\"u\\" user_id=\\"111\\" ts=\\"t\\">\\nhi\\n</channel>"}' "$1" "$2" | CLAUDE_PLUGIN_ROOT="$PC" CLAUDE_PROJECT_DIR="$SP" DISCORD_STATE_DIR="$SD2" bash "$PC/hooks/turn/on-prompt" 2>/dev/null | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null; }
+printf "DISCORD_CHANNEL_ID='7777'\nDISCORD_USER_ID='8888'\nDISCORD_ALLOW_IDS=''\n" > "$(pstate "$SP")/config.env"
+c1=$(ehook e1 901); rm -f "$(pstate "$SP")/config.env"; c2=$(ehook e2 902)
+grep -q ' in channel 900\. ' <<<"$c1" && grep -q '^People in this channel (mention one as <@id> to reach them): u <@111>, <@222>$' <<<"$c1" && [ "$c1" = "$c2" ] ||
+  { echo "FAIL: the hooks read the channel and the people from access.json only: $c1 /// $c2"; exit 1; }
+jq '.groups["901"] = .groups["900"]' "$HOME/acc.keep" > "$SD2/access.json"; c3=$(ehook e3 903)
+grep -q ' with no channel (its access.json names no single channel)\. ' <<<"$c3" && ! grep -q 'in channel' <<<"$c3" || { echo "FAIL: with several groups the identity says there is no channel, not config.env's: $c3"; exit 1; }
+printf '' > "$SD2/access.json"
+(DISCORD_STATE_DIR=$SD2; . "$PC/hooks/lib/discord.sh"; resolve_channel; [ -z "$bot_channel" ] && [ -z "$bot_access_ids" ]) || { echo "FAIL: an empty access.json leaves no channel (config.env is not read): '$(DISCORD_STATE_DIR=$SD2; . "$PC/hooks/lib/discord.sh"; resolve_channel; echo "$bot_channel")'"; exit 1; }
+cp "$HOME/acc.keep" "$SD2/access.json"; cp "$HOME/cfg.keep" "$(pstate "$SP")/config.env"; rm -f "$HOME/acc.keep" "$HOME/cfg.keep" "$SD2"/turns/e[123]*
+echo "ok: on-prompt's identity and People line come from access.json alone (config.env naming another channel and owner, or removed, changes nothing); none or several groups is no channel"
+
+# (f) peers.json is written under peers.json.lock (mkdir, 5 s): held, the writer says the file was not changed and goes
+# on (exit status as without the lock); released, the next write lands.
+PJ="$(pstate "$M2A")/peers.json"; cp "$PJ" "$HOME/pj.keep" 2>/dev/null || : > "$HOME/pj.keep"; mkdir "$PJ.lock"
+rc=0; out=$(cd "$M2A" && printf 'dev-manager\npeerz:700:800:host\n\n' | bash "$S" setup mgr --mode 2>&1) || rc=$?
+[ "$rc" = 0 ] && grep -q "$PJ.lock is held" <<<"$out" && grep -q 'not changed' <<<"$out" && ! grep -q peerz "$PJ" 2>/dev/null || { echo "FAIL: peers.json is written under its lock (rc=$rc): $out / $(cat "$PJ" 2>&1)"; exit 1; }
+rmdir "$PJ.lock"
+rc=0; out=$(cd "$M2A" && printf 'dev-manager\npeerz:700:800:host\n\n' | bash "$S" setup mgr --mode 2>&1) || rc=$?
+[ "$rc" = 0 ] && grep -q peerz "$PJ" && [ ! -e "$PJ.lock" ] || { echo "FAIL: with the lock released the peers line is written and the lock left clean (rc=$rc): $out / $(cat "$PJ" 2>&1)"; exit 1; }
+echo "ok: a held peers.json.lock makes setup --mode (the peers writer) say the file was not changed and go on; released, the write lands and the lock is released"
+
+# (b, c) The backend records of a manager, records/monitor/<bot> before 1.18.1, move to records/monitor/<key>/<bot> at
+# compat with the backend stopped before and started after (as bot rename does): the holder lock and state.json are at
+# the new path, the alerts continue (one appended after the move follows the ones before it), the next pass writes to
+# the new path; scratch/<bot> goes to scratch/<key>/<bot> with a link in its place, which goes once no session of the bot
+# runs. A start at the new path that fails (a --keep that fails once) puts the records back and starts the backend at
+# the old path again: compat exits 1 with the reason.
+export CLAUDE_DISCORD_MONITOR_TICK=0.01 CLAUDE_DISCORD_MONITOR_PASS=60 CLAUDE_DISCORD_MONITOR_HOST_CAP=0.03 CLAUDE_DISCORD_MONITOR_LOCK_WAIT=0.10
+mv "$HOME/.local/bin/claude-discord" "$HOME/shim.real"; mkdir -p "$HOME/mon"
+printf '#!/bin/bash\ncat "$HOME/mon/local.out"\n' > "$HOME/.local/bin/claude-discord"; chmod +x "$HOME/.local/bin/claude-discord"
+mdoc2() { local b bots=""; for b in "$@"; do bots="$bots${bots:+,}{\"bot\":\"$b\",\"verdict\":\"stale\",\"detail\":\"why stale\",\"owner_id\":\"222\",\"servers\":\"1\"}"; done; printf '{"host":"h1","version":"1.18.1 (abc1234)","home":"/home/u","patch":{"rc":0,"output":""},"projects":[{"project":"/home/u/ws/p","bots":[%s]}]}\n' "$bots" > "$HOME/mon/local.out"; }
+OLDM="$HOME/.claude-discord/records/monitor/mgr" NEWM="$HOME/.claude-discord/records/monitor/$KA/mgr"
+alerts() { jq -r '[.alerts[] | .key] | join(" ")' "$1/state.json" 2>/dev/null || :; }
+wait_alerts() { local n=0; while [ "$(alerts "$1")" != "$2" ] && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done; [ "$(alerts "$1")" = "$2" ]; }
+mon_pid() { local l=""; { read -r l < "$1/lock"; } 2>/dev/null || :; case $l in ''|*[!0-9]*) return 1;; esac; [[ $(tr '\0' ' ' < "/proc/$l/cmdline" 2>/dev/null) == *"--locked mgr "* ]] && echo "$l"; }
+wait_mon() { local n=0; while ! mon_pid "$1" >/dev/null && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done; mon_pid "$1" >/dev/null; }
+mdoc2 b1; : > "$CURL_REPLIES"; : > "$CURL_LOG"
+mkdir -p "$HOME/.claude-discord/scratch/mgr"; : > "$HOME/.claude-discord/scratch/mgr/f"
+(cd "$M2A" && CLAUDE_DISCORD_MONITOR_DIR=$OLDM bash "$S" monitor --start mgr >/dev/null 2>&1) || { echo "FAIL: fixture: the backend of mgr did not start at the old path"; exit 1; }
+wait_alerts "$OLDM" 'local|/home/u/ws/p|b1' || { echo "FAIL: fixture: the backend at the old path ran no pass: $(cat "$OLDM/monitor.log" 2>&1)"; exit 1; }
+mdoc2 b1 b2
+rc=0; out=$(cd "$HOME" && bash "$S" compat 2>&1) || rc=$?
+[ "$rc" = 0 ] && [ ! -e "$OLDM" ] && [ -f "$NEWM/state.json" ] && wait_mon "$NEWM" && wait_alerts "$NEWM" 'local|/home/u/ws/p|b1 local|/home/u/ws/p|b2' && grep -qF "$NEWM" <<<"$out" ||
+  { echo "FAIL: the records move with the backend stopped and started: the lock and state.json at the new path, the alerts continuous, the next pass there (rc=$rc): $out / $(ls -R "$HOME/.claude-discord/records/monitor" 2>&1) / $(cat "$NEWM/monitor.log" "$OLDM/monitor.log" 2>&1 | tail -n 20)"; exit 1; }
+[ -f "$HOME/.claude-discord/scratch/$KA/mgr/f" ] && [ "$(readlink "$HOME/.claude-discord/scratch/mgr")" = "$HOME/.claude-discord/scratch/$KA/mgr" ] ||
+  { echo "FAIL: scratch/<bot> moves to scratch/<key>/<bot> with a link in its place: $out / $(ls -la "$HOME/.claude-discord/scratch" 2>&1)"; exit 1; }
+(cd "$M2A" && bash "$S" monitor --stop mgr >/dev/null 2>&1) || :
+n=0; while mon_pid "$NEWM" >/dev/null && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done
+cp "$HOME/bin/claude" "$HOME/claude.keep"; printf '#!/bin/bash\ncase $1 in agents) echo "[]";; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"   # no session of mgr runs
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+[ ! -L "$HOME/.claude-discord/scratch/mgr" ] && [ ! -e "$HOME/.claude-discord/scratch/mgr" ] && [ -f "$HOME/.claude-discord/scratch/$KA/mgr/f" ] || { echo "FAIL: the scratch link goes once no session of the bot runs: $out / $(ls -la "$HOME/.claude-discord/scratch" 2>&1)"; exit 1; }
+cp "$HOME/claude.keep" "$HOME/bin/claude"; rm -f "$HOME/claude.keep"
+echo "ok: compat moves a manager's records/monitor/<bot> to records/monitor/<key>/<bot> with the backend stopped before and started after (lock and state at the new path, the alerts continuous, the next pass there), and scratch/<bot> to scratch/<key>/<bot> behind a link that goes once no session of the bot runs"
+# The rollback: the backend at the old path again, a --keep that fails once at the new path.
+rm -rf "$NEWM"; mdoc2 b1
+(cd "$M2A" && CLAUDE_DISCORD_MONITOR_DIR=$OLDM bash "$S" monitor --start mgr >/dev/null 2>&1) || { echo "FAIL: fixture: the backend of mgr did not start at the old path again"; exit 1; }
+wait_alerts "$OLDM" 'local|/home/u/ws/p|b1' || { echo "FAIL: fixture: the backend at the old path ran no pass (second start): $(cat "$OLDM/monitor.log" 2>&1)"; exit 1; }
+printf '#!/bin/bash\nif [ -e "$HOME/keep.fail" ]; then case "$*" in *" --kept"*) rm -f "$HOME/keep.fail"; exit 1;; esac; fi\nexec %q "$@"\n' "$REALPERL" > "$HOME/bin/perl"; chmod +x "$HOME/bin/perl"; : > "$HOME/keep.fail"
+rc=0; out=$(cd "$HOME" && bash "$S" compat 2>&1) || rc=$?
+[ "$rc" = 1 ] && [ ! -e "$NEWM" ] && [ -f "$OLDM/state.json" ] && wait_mon "$OLDM" && [ ! -e "$HOME/keep.fail" ] && grep -q "did not start at $NEWM" <<<"$out" && grep -qF "back at $OLDM" <<<"$out" ||
+  { echo "FAIL: a failed restart at the new path puts the records back at the old one and starts the backend there again, compat exit 1 with the reason (rc=$rc): $out / $(ls -R "$HOME/.claude-discord/records/monitor" 2>&1) / $(cat "$OLDM/monitor.log" 2>&1 | tail -n 20)"; exit 1; }
+rm -f "$HOME/bin/perl"
+(cd "$M2A" && CLAUDE_DISCORD_MONITOR_DIR=$OLDM bash "$S" monitor --stop mgr >/dev/null 2>&1) || :
+n=0; while mon_pid "$OLDM" >/dev/null && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done
+rm -rf "$OLDM" "$HOME/mon" "$HOME/pj.keep"; mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"
+unset CLAUDE_DISCORD_MONITOR_TICK CLAUDE_DISCORD_MONITOR_PASS CLAUDE_DISCORD_MONITOR_HOST_CAP CLAUDE_DISCORD_MONITOR_LOCK_WAIT
+echo "ok: a records move whose restart fails puts the records back at the old path and starts the backend there again; compat exits 1 and says why"
+
+# (g) records/projects retires: compat reads the union of the file and projects/*/project, and renames the file to
+# records/projects.1.16 only once every line of it has a key dir; health --all, tui and the monitor verbs walk
+# projects/*/project (a project that never started a bot after 1.18.0 is found once it does).
+G1="$HOME/g one"; mkdir -p "$G1/.claude/discord-agents/gb"; printf 'DISCORD_BOT_TOKEN=tg\n' > "$G1/.claude/discord-agents/gb/.env"; echo none > "$G1/.claude/discord-agents/gb/mode"
+printf "DISCORD_CHANNEL_ID='7'\nDISCORD_USER_ID='8'\nDISCORD_ALLOW_IDS=''\n" > "$G1/.claude/discord-agents/config.env"
+GPF="$HOME/.claude-discord/records/projects"; printf '%s\n%s\n' "$G1" "$HOME/gone forever" > "$GPF"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+GS="$HOME/.claude-discord/projects/$(skey "$G1")"
+[ -f "$GS/bots/gb/.env" ] && [ -f "$GPF" ] && [ ! -e "$GPF.1.16" ] || { echo "FAIL: compat moves a project the 1.16 list names and keeps the list while a line of it (a missing folder) has no key dir: $out / $(ls "$HOME/.claude-discord/records" 2>&1)"; exit 1; }
+printf '%s\n' "$G1" > "$GPF"
+out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
+[ ! -e "$GPF" ] && [ -f "$GPF.1.16" ] && [ "$(<"$GPF.1.16")" = "$G1" ] || { echo "FAIL: the 1.16 list is renamed records/projects.1.16 once every line of it has a key dir: $out / $(ls "$HOME/.claude-discord/records" 2>&1)"; exit 1; }
+doc=$(cd "$HOME" && bash "$S" health --all --json 2>/dev/null) || :
+jq -e --arg p "$G1" --arg a "$M2A" 'any(.projects[]; .project == $p and (.bots | length) == 1 and .bots[0].bot == "gb") and any(.projects[]; .project == $a)' <<<"$doc" >/dev/null ||
+  { echo "FAIL: health --all walks projects/*/project (the 1.16 list retired): $doc"; exit 1; }
+rm -f "$GPF.1.16"; rm -rf "$G1"
+echo "ok: compat reads the union of records/projects and projects/*/project, renames the file to records/projects.1.16 once every line has a key dir, and health --all walks the key dirs"
+rm -rf "$M2A" "$M2B"
 
 # Nothing this suite started is still running at the end: a case that detached a keeper or a monitor and did not stop it fails
 # here, by name of the process (sandbox_pids: the sandbox in its argv or as its HOME; an orphaned

@@ -151,8 +151,8 @@ transcript_moved() {
 # the whole story). --keep and --stop are for people; --ensure is the TUI's and the hooks'.
 if [ "${1:-}" = monitor ]; then
   shift
-  # Run from anywhere: the project is the one above the cwd that has the bot, else the recorded one (records/projects),
-  # as tui finds it. Not found: monitor.sh says so (no ledger) from where it is.
+  # Run from anywhere: the project is the one above the cwd that has the bot, else the one project with a state dir
+  # that has it (proj_arr), as tui finds it. Not found: monitor.sh says so (no ledger) from where it is.
   mb="" sk=0
   for a in "$@"; do
     if [ "$sk" -gt 0 ]; then sk=$((sk - 1)); continue; fi
@@ -160,14 +160,12 @@ if [ "${1:-}" = monitor ]; then
   done
   case $mb in ''|.|..|*/*) ;; *)
     if find_proj "$mb"; then cd "$pd_project"
-    elif [ -f "$helpers/records/projects" ]; then
-      mc="" mn=0
-      while IFS= read -r p || [ -n "$p" ]; do
-        p=${p%$'\r'}
-        [ -n "$p" ] || continue
+    else
+      mc="" mn=0; proj_arr
+      for p in ${pl[@]+"${pl[@]}"}; do
         proj_dirs "$p"; [ -f "$pd_root/$mb/hosts" ] || continue
         mc=$p; mn=$((mn + 1))
-      done < "$helpers/records/projects"
+      done
       [ "$mn" != 1 ] || cd "$mc"
     fi;;
   esac
@@ -275,12 +273,15 @@ ver_ge() {
 # git over the network: never a credential prompt (a script would hang on it),
 # and a 120 s ceiling where timeout(1) exists. The ambient git config and
 # environment apply, so a proxy is per clone: git -C <clone> config http.proxy <url>.
-record_project() {
-  local f=$helpers/records/projects p l
-  p=$(pwd -P) || return 0
-  # Already listed (every health run after the first): found with no fork.
-  if [ -f "$f" ]; then while IFS= read -r l || [ -n "$l" ]; do [ "$l" != "$p" ] || return 0; done < "$f"; fi
-  mkdir -p "$helpers/records" 2>/dev/null && printf '%s\n' "$p" >> "$f" 2>/dev/null || :
+# peers_edit <peers.json> <jq arguments>: jq_edit under <file>.lock (mkdir, as pins.json.lock; 50 x 0.1 s), so setup,
+# --mode and bot rename never write one file at once. Held past that: said, the file not changed, status 0 as jq_edit's.
+peers_edit() {
+  local f=$1 n=0
+  until mkdir "$f.lock" 2>/dev/null; do
+    n=$((n + 1)); [ "$n" -lt 50 ] || { echo "claude-discord: $f.lock is held (another claude-discord is writing $f? else rmdir it): $f not changed" >&2; return 0; }
+    sleep 0.1
+  done
+  jq_edit "$@"; rmdir "$f.lock" 2>/dev/null || :
 }
 ledger_write() {
   local f=$1 m=600
@@ -381,7 +382,7 @@ untrusted() {
 }
 
 # host_id: prints this HOME's id, ~/.claude-discord/host-id (one line: 32 lower-case hex digits, random), making it when
-# it is missing. It names a home, not a machine: what a monitor pass reads on a host is that home's records/projects,
+# it is missing. It names a home, not a machine: what a monitor pass reads on a host is that home's projects/*/project,
 # so two ledger lines that reach one home (a container and its host sharing $HOME, two ssh aliases of one account)
 # would report every bot of it twice. `hosts add` compares it. Made once: the id is written to a temp file and
 # hard-linked in, and ln fails when the name is there, so of two first calls at once one wins and both print the

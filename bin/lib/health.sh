@@ -25,65 +25,43 @@ if [ "${1:-}" = health ]; then
     esac
   done
   [ "$do_patch" = no ] || [ "$all" = yes ] || { echo "claude-discord: health --patch needs --all" >&2; exit 2; }
-  # --all: every project in ~/.claude-discord/records/projects, one document.
+  # --all: every project with a state dir (~/.claude-discord/projects/*/project, state.sh proj_arr: a project joins it
+  # at its first setup or start after 1.18.0), one document.
   # This is the one command a monitor pass runs per host (locally or over
   # ssh), so with --json it exits 0 whenever it printed the document: over
   # ssh a non-zero status means "no answer from that host", never "a bot has
   # a finding". Each project is judged by this same script run there with
-  # --nolog; a project whose .claude/discord-agents is missing is reported with an error, never pruned.
+  # --nolog; a project whose folder is missing is reported with an error, never pruned.
   # Before the DISCORD_STATE_DIR fallback below: --all is about the machine,
   # so a bot session's own project must not stand in for the working directory.
   if [ "$all" = yes ]; then
     command -v jq >/dev/null 2>&1 || { echo "claude-discord: health needs jq" >&2; exit 1; }
-    pf=$helpers/records/projects keep="" docs="" prc=null pout="" any=0
+    docs="" prc=null pout="" any=0
     if [ "$do_patch" = yes ]; then
       # The `patch` verb's own function, in a subshell; stderr only: file and patch name.
       prc=0; pout=$(patch_official 2>&1 >/dev/null) || prc=$?
     fi
-    if [ -f "$pf" ]; then
-      snap=$(tr -d '\r' < "$pf")
-      while IFS= read -r p || [ -n "$p" ]; do
-        p=${p%$'\r'}   # a hand-edited CRLF line
-        [ -n "$p" ] || continue
-        case $'\n'$keep in *$'\n'"$p"$'\n'*) continue;; esac   # each project once: the same bots twice would read as two
-        keep="$keep$p"$'\n'
-        # Missing now is not gone for good (a volume not mounted yet, the other side of a shared home): reported, never
-        # pruned, so the monitor reads it as blind and its bots stay known. Only the owner removes a line.
-        proj_dirs "$p"
-        if [ ! -d "$pd_root" ]; then
-          miss="project folder missing: $pd_root (gone for good: delete its line from $pf)"
-          if [ "$as_json" = yes ]; then one=$(jq -nc --arg p "$p" --arg e "$miss" '{project: $p, bots: [], error: $e}'); docs=$docs$one$'\n'; else echo "== $p"; echo "$miss"; any=1; fi
-          continue
-        fi
-        if [ "$as_json" = yes ]; then
-          # </dev/null: the loop's stdin is the list itself, and a reader in the run would eat its lines.
-          orc=0; one=$(cd "$p" 2>/dev/null && "$self_path" health --json --nolog 2>/dev/null </dev/null) || orc=$?
-          # A child that printed no array is a crash, not a project without bots: the monitor reads `error` as blind.
-          # Two plain assignments: bash 3.2 misreads a quoted jq program inside "$( )" inside double quotes.
-          one=$(printf '%s' "${one:-null}" | jq -c --arg p "$p" --arg e "health exited $orc with no document" 'if type == "array" then {project: $p, bots: .} else {project: $p, bots: [], error: $e} end' 2>/dev/null) || one=$(jq -nc --arg p "$p" --arg e "health exited $orc with no document" '{project: $p, bots: [], error: $e}')
-          docs=$docs$one$'\n'
-        else
-          echo "== $p"
-          (cd "$p" 2>/dev/null && "$self_path" health --nolog </dev/null) || any=1
-        fi
-      done < "$pf"
-      # Rewritten only when the walk changed the list (deduped, or empty lines dropped), judged against
-      # the snapshot taken before it, not the live file: a `setup` recording a project
-      # meanwhile would else look like a difference and be erased. Lines now in the file
-      # that the snapshot lacks are appended to the new content. mv, so a concurrent
-      # reader never sees a truncated file.
-      if [ "${keep%$'\n'}" != "$snap" ]; then
-        while IFS= read -r p || [ -n "$p" ]; do
-          p=${p%$'\r'}
-          [ -n "$p" ] || continue
-          case $'\n'$snap$'\n' in *$'\n'"$p"$'\n'*) continue;; esac
-          case $'\n'$keep in *$'\n'"$p"$'\n'*) continue;; esac
-          keep="$keep$p"$'\n'
-        done < "$pf"
-        printf '%s' "$keep" > "$pf.tmp.$$" 2>/dev/null && mv -f "$pf.tmp.$$" "$pf" 2>/dev/null || :
+    proj_arr
+    for p in ${pl[@]+"${pl[@]}"}; do
+      # Missing now is not gone for good (a volume not mounted yet, the other side of a shared home): reported, never
+      # pruned, so the monitor reads it as blind and its bots stay known. Only the owner removes a key dir.
+      proj_dirs "$p"
+      if [ ! -d "$p" ]; then
+        miss="project folder missing: $p (gone for good: remove $pd_state)"
+        if [ "$as_json" = yes ]; then one=$(jq -nc --arg p "$p" --arg e "$miss" '{project: $p, bots: [], error: $e}'); docs=$docs$one$'\n'; else echo "== $p"; echo "$miss"; any=1; fi
+        continue
       fi
-      rm -f "$pf.tmp.$$"
-    fi
+      if [ "$as_json" = yes ]; then
+        orc=0; one=$(cd "$p" 2>/dev/null && "$self_path" health --json --nolog 2>/dev/null </dev/null) || orc=$?
+        # A child that printed no array is a crash, not a project without bots: the monitor reads `error` as blind.
+        # Two plain assignments: bash 3.2 misreads a quoted jq program inside "$( )" inside double quotes.
+        one=$(printf '%s' "${one:-null}" | jq -c --arg p "$p" --arg e "health exited $orc with no document" 'if type == "array" then {project: $p, bots: .} else {project: $p, bots: [], error: $e} end' 2>/dev/null) || one=$(jq -nc --arg p "$p" --arg e "health exited $orc with no document" '{project: $p, bots: [], error: $e}')
+        docs=$docs$one$'\n'
+      else
+        echo "== $p"
+        (cd "$p" 2>/dev/null && "$self_path" health --nolog </dev/null) || any=1
+      fi
+    done
     [ "$as_json" = yes ] || exit "$any"
     h=$(uname -n); h=${h%%.*}
     printf '%s' "$docs" | jq -s --arg host "$h" --arg home "$HOME" --argjson prc "$prc" --arg pout "$pout" \
@@ -125,7 +103,6 @@ if [ "${1:-}" = health ]; then
   fi
 
   [ -d "$root" ] || { echo "claude-discord: no bot set up in $root" >&2; exit 1; }
-  record_project
   command -v jq >/dev/null 2>&1 || { echo "claude-discord: health needs jq" >&2; exit 1; }
   command -v curl >/dev/null 2>&1 || { echo "claude-discord: health needs curl" >&2; exit 1; }
   [ ! -f "$proj_state/config.env" ] || . "$proj_state/config.env"

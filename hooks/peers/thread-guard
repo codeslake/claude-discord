@@ -51,9 +51,8 @@ deny() {
 }
 
 [ -n "$bot_name" ] || exit 0   # not a bot session (a global plugin reaches every session on the machine)
-# The channel by resolve_channel's rule: config.env's here, access.json's single group key inside the one jq below
-# (a process less per reply; only a file of several JSON documents, which the plugin cannot read either, differs).
-config_channel
+# The channel by resolve_channel's rule: access.json's single group key, inside the one jq below (a process less per
+# reply; only a file of several JSON documents, which the plugin cannot read either, differs); none or several: none.
 hook_stdin || exit 0
 
 # A turn with no Discord message in it (typed in the terminal, or woken by a
@@ -85,12 +84,12 @@ pf="$proj_state/peers.json" pa=(--arg pr "") af="$DISCORD_STATE_DIR/access.json"
 [ -f "$af" ] && [ -r "$af" ] && aa=(--rawfile acc "$af")
 peerlines=() ch=""
 { IFS= read -r ch; read -r noreply; read -r mentions; read -r bare; read -r turn; read -r chat; read -r arrow; read -r table; read -r over; read -r peerq; IFS= read -r named
-  while IFS= read -r l; do peerlines+=("$l"); done; } < <(printf '%s' "$input" | jq -r --arg fb "$bot_channel" --arg re "$BARE" --arg self "$bot_name" "${pa[@]}" "${aa[@]}" '
+  while IFS= read -r l; do peerlines+=("$l"); done; } < <(printf '%s' "$input" | jq -r --arg re "$BARE" --arg self "$bot_name" "${pa[@]}" "${aa[@]}" '
   def line: tostring | (split("\n")[0] // "") | sub("^[ \t]+"; "") | sub("[ \t]+$"; "");
   def bare: '"$BARE_Q"';
   def deny: sub("\n+\\z"; "") | {hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: .}} | tojson;
   ($acc | try (fromjson | ((.groups | objects | keys) // []) as $k
-    | if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) catch $fb) as $ch
+    | if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else "" end) catch "") as $ch
   | $ch,
   ((.tool_input.text // "" | tostring) as $t
   | ((.tool_name // "" | line) != "mcp__plugin_discord_discord__edit_message") as $rp

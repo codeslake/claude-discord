@@ -2681,18 +2681,33 @@ async def main():
     await case("missing_wrapper", missing_wrapper, wrapper=lambda d: "/nonexistent/claude-discord", state="all_ok")
     await case("refused", refused, state="all_ok",
                wrapper=lambda d: stub(d, 'echo "$*" > "$(dirname "$0")/args"; echo "claude-discord: monitor: no hosts ledger [x]" >&2; exit 1'))
-    # the display names come from the user-names files of this machine's bots
+    # the state key in Python equals bash's proj_key (bin/lib/state.sh, the 1.18.0 table): every non-alphanumeric BYTE a dash
+    for p, k in [("/home/d.kim4", "-home-d-kim4"), ("/home/d.kim4/projects/my_dotfiles", "-home-d-kim4-projects-my-dotfiles"), ("/a b/c.d", "-a-b-c-d"),
+                 ("/x/a_b", "-x-a-b"), ("/x/a.b", "-x-a-b"), ("/tmp", "-tmp"), ("/p/\ud55c", "-p----")]:
+        assert tui.proj_key(p) == k, (p, tui.proj_key(p))
+    print("ok: proj_key in Python is bash's: every non-alphanumeric byte of the UTF-8 path a dash (a Hangul syllable three)")
+    # the display names come from the user-names files of this machine's bots, under ~/.claude-discord/projects/<key>/bots/<bot>
+    # (1.18.0); the path before the move, <project>/.claude/discord-agents/<bot>, is not read
     with tempfile.TemporaryDirectory() as d:
         s = base()
-        s["bots"][PHOTO]["project"] = d
-        names = Path(d) / ".claude" / "discord-agents" / "photobot" / "user-names"
-        names.parent.mkdir(parents=True)
-        names.write_text("111 dong yong\nnot-an-id x\n222\n333 한글이름\n444 es\x1b]52;c;eA==\x07c\u202eape\t!\n555 \x1b\n")
-        assert tui.load_names(s) == {"111": "dong yong", "333": "한글이름", "444": "es]52;c;eA==cape !"}, tui.load_names(s)
-        # A remote bot's project path is a path on ITS machine: never opened here, even when such a path exists here too.
-        s["bots"][PHOTO]["host"] = "old"
-        assert tui.load_names(s) == {}, tui.load_names(s)
-    print("ok: names are read from the local bots' user-names files (<id> <name>), other lines skipped, control characters dropped")
+        s["bots"][PHOTO]["project"] = d + "/my proj"
+        home_was = os.environ.get("HOME"); os.environ["HOME"] = d
+        try:
+            names = Path(d) / ".claude-discord" / "projects" / tui.proj_key(d + "/my proj") / "bots" / "photobot" / "user-names"
+            names.parent.mkdir(parents=True)
+            names.write_text("111 dong yong\nnot-an-id x\n222\n333 \ud55c\uae00\uc774\ub984\n444 es\x1b]52;c;eA==\x07c\u202eape\t!\n555 \x1b\n")
+            assert tui.load_names(s) == {"111": "dong yong", "333": "\ud55c\uae00\uc774\ub984", "444": "es]52;c;eA==cape !"}, tui.load_names(s)
+            # A remote bot's project path is a path on ITS machine: never opened here, even when such a path exists here too.
+            s["bots"][PHOTO]["host"] = "old"
+            assert tui.load_names(s) == {}, tui.load_names(s)
+            # The old path alone (a project not moved yet) is not read.
+            s["bots"][PHOTO]["host"] = "local"; names.unlink()
+            old = Path(d) / "my proj" / ".claude" / "discord-agents" / "photobot" / "user-names"; old.parent.mkdir(parents=True); old.write_text("111 dong yong\n")
+            assert tui.load_names(s) == {}, tui.load_names(s)
+        finally:
+            if home_was is None: del os.environ["HOME"]
+            else: os.environ["HOME"] = home_was
+    print("ok: names are read from the local bots' user-names files under ~/.claude-discord/projects/<key>/bots/<bot> (<id> <name>), other lines skipped, control characters dropped; the path before the move is not read")
     # q removes the holder record
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "holders").mkdir()

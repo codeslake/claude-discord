@@ -576,6 +576,20 @@ broot() { local d; d=$(pstate "$1") || return 1; printf '%s/bots\n' "$d"; }
 bdir() { local d; d=$(pstate "$1") || return 1; printf '%s/bots/%s\n' "$d" "$2"; }
 # skey <project>: the state key of a project (physical path), the suite's own copy of the rule bin/lib/state.sh's proj_key follows (its table case pins the two equal).
 skey() { local p; p=$(cd "$1" 2>/dev/null && pwd -P) || p=$1; local LC_ALL=C; printf '%s\n' "${p//[^A-Za-z0-9]/-}"; }
+# only_projects <project>...: ~/.claude-discord/projects holds those alone (the rest parked in projects.all; a project
+# with no key dir yet gets one naming it) until all_projects puts everything back: the cases on "every project with a
+# state dir" (health --all, tui, monitor --start from outside, the strip; 1.18.1: records/projects retired) run over a
+# chosen few. Key dirs made while parked are lost with the parking.
+only_projects() {
+  local p k
+  mv "$HOME/.claude-discord/projects" "$HOME/.claude-discord/projects.all"; mkdir "$HOME/.claude-discord/projects"
+  for p in "$@"; do
+    k=$(skey "$p")
+    if [ -d "$HOME/.claude-discord/projects.all/$k" ]; then ln -s "$HOME/.claude-discord/projects.all/$k" "$HOME/.claude-discord/projects/$k"
+    else mkdir -p "$HOME/.claude-discord/projects/$k"; printf '%s\n' "$p" > "$HOME/.claude-discord/projects/$k/project"; fi
+  done
+}
+all_projects() { rm -rf "${HOME:?}/.claude-discord/projects"; mv "$HOME/.claude-discord/projects.all" "$HOME/.claude-discord/projects"; }
 
 P="$HOME/project"; mkdir -p "$P"; cd "$P"; git init -q .
 # A local stand-in for GitHub, built from the WORKING TREE (a clone of $D would

@@ -308,6 +308,11 @@ the session's umask):
   peers.json         a dev-manager's peers (one file per project)
   checkin/<sid>      the check-ins edit-gate reads
   bots/<bot>/        .env (the token, 600), access.json, mode, hosts, turns/, plugin-sessions/, handoff*.md, logs, caches
+~/.claude-discord/records/monitor/<key>/<bot>/   a manager's backend records (state.json, alerts, lock, holders/; 1.18.1)
+~/.claude-discord/scratch/<key>/<bot>/           a bot's durable scratch files (1.18.1)
+~/.claude-discord/records/managers               "<key> <bot>" per manager with a hosts ledger: what every bot's hooks
+                                                 read to revive a dead backend (written by setup, bot rename and compat;
+                                                 rebuilt from projects/*/bots/*/hosts when missing)
 ```
 
 `<key>` is the project's path with every non-alphanumeric character a dash,
@@ -333,8 +338,29 @@ record until `claude rm <id>` or the bot's next start prunes it; `compat`
 says which job holds which link), and the empty `discord-agents/` with its
 `.gitignore` after the last. A bot directory on another filesystem is
 copied, compared and removed instead, but only while no session of it runs;
-otherwise it is left for the next start or update, said. `records/monitor`
-and `scratch/` do not move in 1.18.0.
+otherwise it is left for the next start or update, said.
+
+Since 1.18.1 nothing is keyed by a bot's name alone, so two projects may each
+have a manager called `mgr`: `compat` (every `update`) moves a manager's
+`records/monitor/<bot>` to `records/monitor/<key>/<bot>` with its backend
+stopped before and started again after (as `bot rename` does; one its owner
+had stopped stays stopped; a start at the new path that fails puts the
+records back and starts the backend at the old path again, exit 1), and
+`scratch/<bot>` to `scratch/<key>/<bot>`, leaving `scratch/<bot>` as a link
+until `claude agents` lists no session of the bot (a session started before
+1.18.1 holds the old rule text). `records/projects`, the 1.16 project list, is
+read by `compat` alone (a project it names and nothing else has is moved from
+there) and renamed `records/projects.1.16` once every project it names has a
+key dir; nothing reads it after that, and a downgrade's `health --all` finds
+it only if it is renamed back by hand. The project list is
+`~/.claude-discord/projects/*/project` now: a project that has not run `setup`
+or started a bot since 1.18.0 is found by `health --all`, `tui` and the monitor
+verbs only once it does. The hooks read a bot's channel and people from its own
+`access.json`; `config.env` (setup's answers) is read by `setup`, `bot add` and
+the start alone. `peers.json` is written under `peers.json.lock` (a held lock
+leaves the file as it is, said). Left keyed by name: a host's
+`~/.claude-discord/watchers/<manager>` record (Hosts, below), so two same-named
+managers of one machine checking one host would share it.
 
 ## Modes
 
@@ -380,7 +406,7 @@ its thread, and a decision only a human can make is one channel line naming
 the thread. Discord carries only what a peer must act on (a review, a test
 on its machine, a split, a heads-up, the diff summary before a push) or what
 the human asks it to send, and nothing is echoed either way. Scratch files belong
-under `~/.claude-discord/scratch/<bot name>/` when they must survive, in
+under `~/.claude-discord/scratch/<key>/<bot name>/` when they must survive, in
 `/tmp` under a session-unique name when they need not -- never under
 `~/.claude`, and `$CLAUDE_JOB_DIR` exists only in a background session.
 
@@ -548,8 +574,8 @@ claude-discord bot <bot> recover [--fresh]   # a down or stuck bot brought back:
   stopped; a manager's keeper and monitor are stopped; the bot's directory
   (token, `access.json`, mode, ledger, logs, handoff) is renamed in one step;
   its line in every project's `peers.json` on this machine is renamed, found
-  by its id; `~/.claude-discord/scratch/<bot>` is moved; a manager's
-  `records/monitor/<bot>` is moved and its `state.json` names the new manager,
+  by its id; `~/.claude-discord/scratch/<key>/<bot>` is moved; a manager's
+  `records/monitor/<key>/<bot>` is moved and its `state.json` names the new manager,
   its backend starts again (unless you had stopped it) and its watcher record
   on each ledger host is renamed over ssh; the session starts again under the
   new name. Its conversation does not carry over: `rename` asks the session
@@ -857,7 +883,7 @@ acts for: every bot, or only some.
 | Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
 |---|---|---|---|---|---|---|
 | SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Why: a respawn or an auto-update of the official plugin since the last start, a turn whose Stop never ran, a daemon that would retire an idle bot, a manager's backend killed by a restart. When: every source; the patch, the clean-up and the pin at startup and resume only. | Runs `claude-discord patch` (a failure goes to `health.log`); clears the per-turn files a turn whose Stop never ran left behind, keeping the primed key; pins a background session's job (`~/.claude/jobs/pins.json` and `pinned-job`, see Background sessions); starts a dev-manager's keeper when none runs and its owner did not stop it. No marker sweep and no `claude agents` here (the monitor's pass and update sweep). | 0 B | every bot; the keeper: dev-managers with a hosts ledger |
-| UserPromptSubmit | | `turn/on-prompt` | Why: as above, a backend killed by a restart comes back with the first bot that wakes. When: every prompt. | Starts a dev-manager's keeper when none runs (builtins only when all run: no fork on Linux). | 0 B | every bot (the keepers of this machine's managers) |
+| UserPromptSubmit | | `turn/on-prompt` | Why: as above, a backend killed by a restart comes back with the first bot that wakes. When: every prompt. | Starts a dev-manager's keeper when none runs, for each line of `records/managers` (builtins only when all run: no fork on Linux). | 0 B | every bot (the keepers of this machine's managers) |
 
 Which plugin runs them:
 
@@ -1411,12 +1437,11 @@ TUI), and alive only while one of them is: it exits within 30 s of the last. Eve
 ~/.local/bin/claude-discord health --all --json --patch'` (`local`: the same
 command without ssh), so every ledger host needs the shim and claude-discord
 1.10.0 or later (a host before 1.11.0 is checked the same; the TUI shows `-`
-for its bots' channel, receives and last), and one `claude-discord health`
-run in each bot project to
-enter it in `~/.claude-discord/records/projects`. A project listed there
-whose folder is missing (a volume not mounted yet) alerts as `blind` and is
-never dropped from the list; delete its line by hand once it is gone for
-good. The same call keeps the
+for its bots' channel, receives and last); a project counts once it has a
+state dir there (`~/.claude-discord/projects/<key>/project`: a `setup` or a
+bot start since 1.18.0). A project whose folder is missing (a volume not
+mounted yet) alerts as `blind` and is never dropped; remove its key dir by
+hand once it is gone for good. The same call keeps the
 official plugin patched on that host. It restarts and stops nothing.
 Passes start 5 minutes apart however long the hosts take (a longer pass is
 followed at once by the next). After `claude-discord update` a running
@@ -1467,12 +1492,12 @@ monitor this side cannot see; run --keep where the bots run". It refuses only;
 it never takes the lock over.
 
 A monitor verb works from any directory: it finds the project above the
-current one that has the bot, else the one `records/projects` lists. One
-manager bot name is one backend per machine (its state dir is keyed by the
-name), so `setup --mode dev-manager` refuses a name that another recorded
-project already runs as a manager.
+current one that has the bot, else the one project with a state dir that has
+it. A backend is one per manager and project (its records are keyed by the
+project's key since 1.18.1), so two projects may each run a manager of one
+name.
 
-Everything it keeps is in `~/.claude-discord/records/monitor/<manager>/`:
+Everything it keeps is in `~/.claude-discord/records/monitor/<key>/<manager>/`:
 
 | file | what |
 |---|---|
@@ -1504,7 +1529,7 @@ message there wakes no session.
 ```
 <@owner id> [stale] RVP on lmd42 (~/workspace/tor-aic-research)
 사유: unanswered for 22m -- the plugin server is up, so its hooks or its turn are stuck
-복구: ssh lmd42 'cd ~/workspace/tor-aic-research && ~/.local/bin/claude-discord refresh RVP --force'
+복구: ssh lmd42 'cd ~/workspace/tor-aic-research && ~/.local/bin/claude-discord bot RVP recover'
 ```
 
 | finding | posted after | means |
@@ -1733,7 +1758,7 @@ closed, no monitor or keeper process is left 30 s later, and none comes back
 until `claude-discord monitor --start <manager>`.
 
 **Rollback.** Delete `<manager>/hosts`; `rm -r
-~/.claude-discord/records/monitor ~/.claude-discord/records/projects` removes
+~/.claude-discord/records/monitor ~/.claude-discord/records/managers` removes
 everything the monitor wrote. The other file this release adds is
 `<bot>/delivered`, appended by `on-prompt` in every bot's project; delete it
 and `health` goes back to judging by `last-message-id`.
@@ -1794,7 +1819,7 @@ rest of Claude Code.
 | `refresh` says `<dir> is not a trusted workspace` | `claude --bg` refuses to start in a workspace whose trust was never accepted, and the foreground path does not, so a bot moved to the background with `/bg` can run for weeks without meeting that gate. Run `claude` in the project once and accept the prompt, then retry; `--force` refreshes anyway. The check reads `hasTrustDialogAccepted` and fails **open**, so anything but an explicit `false` proceeds |
 | `refresh` says `start failed, so <bot>'s handoff was put back` | the fresh session did not come up (the line above it says why). The launch consumes `handoff.md` before starting claude, so it is moved back and the retry is not refused for want of one |
 | `claude-discord health: <bot> down` / `[down] <bot>` in `#bot-health-check` | no plugin server for the bot: its session is gone or its worker died. The pasted fix is `cd <project> && claude-discord --bg --name <bot>`; `claude-discord bot <bot> recover` (the TUI's `f` on the row) respawns the bot's last session instead when `claude agents` still lists it (its conversation kept), and starts a fresh one only otherwise |
-| `claude-discord health: <bot> stale — ... hooks or its turn are stuck` | the plugin server is up and the bot still is not answering: the hooks died (see the upgrade row above) or a turn is wedged. First `claude-discord bot <bot> recover` (the TUI's `f` on the row): a respawn, the conversation kept. `claude-discord refresh <bot> --force` and `claude-discord bot <bot> recover --fresh` discard it (the latter refuses while a transcript of the session moved in the last 15 minutes: a session busy with something other than Discord reads `busy`, not `stale`, since 1.17.1) |
+| `claude-discord health: <bot> stale — ... hooks or its turn are stuck` | the plugin server is up and the bot still is not answering: the hooks died (see the upgrade row above) or a turn is wedged. First `claude-discord bot <bot> recover` (the TUI's `f` on the row, and the fix line the monitor posts since 1.18.1): a respawn, the conversation kept. `claude-discord refresh <bot> --force` and `claude-discord bot <bot> recover --fresh` discard it (the latter refuses while a transcript of the session moved in the last 15 minutes: a session busy with something other than Discord reads `busy`, not `stale`, since 1.17.1) |
 | `claude-discord health: <bot> duplicate` | two plugin servers share one token, so every reply is sent twice. `/bg` from a foreground session and a fleet spare both respawn a session without going through the wrapper. `claude agents` lists them; stop the one that is not the bot's |
 | `claude-discord health: <bot> unreachable` | Discord answered 401 or 403: the token was refused, or the bot cannot read the channel. Check `DISCORD_BOT_TOKEN` in `<bot>/.env` and the bot's channel permissions |
 | `claude-discord health: <bot> throttled` / `apierror` | Discord rate-limited (429) or did not answer (000, 5xx). The token was *not* rejected, so nothing is said about the bot this run — these are deliberately not reported as a credential problem |
@@ -1806,7 +1831,7 @@ rest of Claude Code.
 | The TUI says `auto-start refused here: another side holds the monitor lock` | an automatic start on this side met a monitor lock held by a monitor it cannot see (a home shared with a container or host): the hooks start nothing here. Set `CLAUDE_DISCORD_NO_AUTOSTART=1` on the side that must not run a backend, and run `claude-discord monitor --start <manager>` on the side where the bots run (the marker is per pid namespace, so it does not stop the other side; a start that gets through clears it) |
 | The TUI says `stopped by you` | `claude-discord monitor --stop` was run; `claude-discord monitor --start <manager>` starts the backend again |
 | The TUI says `monitor stopped` or `no state yet` | no monitor runs (it was killed with its keeper, or never started); opening the TUI starts it. A reason after it in the red bar is `monitor --ensure` refusing, which `monitor.log` never sees: `no hosts ledger` means `<manager>/hosts` **or** `<manager>/.env` is missing (the message names the ledger for both). With no reason and a monitor that stops again at once, `monitor.log` says why |
-| No alert for a bot on a ledger host | its project is not in that host's `~/.claude-discord/records/projects` (run `claude-discord health` there once), or the host is `noreach`/`hostdown`/`blind` (the TUI shows it) |
+| No alert for a bot on a ledger host | its project has no state dir on that host (`~/.claude-discord/projects/<key>/project`: run `claude-discord setup <bot>` or start a bot there once since 1.18.0), or the host is `noreach`/`hostdown`/`blind` (the TUI shows it) |
 | `claude-discord: tui needs uv` | install uv (https://docs.astral.sh/uv/); only the TUI needs it |
 | `claude-discord health: <bot> nostate` | `claude agents` has not answered for six runs, so whether a turn is running cannot be told, and the unanswered message is no longer being held. The daemon is probably unwell: run `claude agents` by hand |
 | `refresh` says `no running session of <name> ... started in <dir>` | the session was started elsewhere, or is a foreground one renamed with `/rename` (only background sessions have a job record); `claude agents` shows it, stop it by hand, then `refresh --force` |

@@ -1,4 +1,4 @@
-# sourced by bin/claude-discord: select_one git_net src_link prune_installs install_plugin remove_old_install, the compat verb, strip_settings write_hosts parse_install_flags check_install_scope coexist install_all; the install, setup and update verbs
+# sourced by bin/claude-discord: select_one git_net src_link prune_installs install_plugin remove_old_install strip_settings move_backend compat_project, the compat verb, write_hosts parse_install_flags check_install_scope coexist install_all; the install, setup and update verbs
 
 # select_one <label> <default> <option>...: prints the chosen option's first
 # word (an option is "<name>  <hint>"). On a terminal, an @clack-style picker
@@ -76,8 +76,6 @@ prune_installs() {
   printf '%s' "$keep" > "$f.tmp.$$" && { cmp -s "$f.tmp.$$" "$f" || cat "$f.tmp.$$" > "$f"; }
   rm -f "$f.tmp.$$"
 }
-# record_project: this project's root (physical) into records/projects, once.
-# `health --all` walks that list; setup and a health run in a project add to it.
 install_plugin() {  # uses $scope $method $pdir $gdir
   local repo=${CLAUDE_DISCORD_REPO:-https://github.com/codeslake/claude-discord}
   local src=$HOME/.claude-discord/source target ex pat here t
@@ -158,12 +156,10 @@ remove_old_install() {
 # writable) is named, and fails nothing.
 strip_one() { strip_old_hooks "$1" || echo "claude-discord: old claude-discord hook entries left in '$1' (not JSON, or not writable); remove them by hand" >&2; }
 strip_settings() {
-  local p f b targets=() miss="" scanned="" ps=("$PWD")
+  local p f b targets=() miss="" scanned="" ps=("$PWD") pl
   . "$self_root/hooks/lib/old-hooks.sh" 2>/dev/null || return 0
-  # Builtins only (every setup runs this): the records read by read, a file's text by $(<), no cat, no grep.
-  if [ -f "$helpers/records/projects" ]; then
-    while IFS= read -r p || [ -n "$p" ]; do ps+=("$p"); done < "$helpers/records/projects"
-  fi
+  # Builtins only (every setup runs this): the projects by proj_arr, a file's text by $(<), no cat, no grep.
+  proj_arr; ps+=(${pl[@]+"${pl[@]}"})
   for p in "${ps[@]}"; do
     p=${p%$'\r'}; [ -n "$p" ] || continue
     for f in "$p/.claude/settings.json" "$p/.claude/settings.local.json"; do [ ! -L "$f" ] || targets+=("$f"); done
@@ -196,21 +192,80 @@ strip_settings() {
   return 0
 }
 
+# move_backend <project> <bot>: a manager's records/monitor/<bot> (before 1.18.1) -> records/monitor/<key>/<bot>, the
+# backend stopped before and started after, as bot rename does it. The backend that runs is the one started before the
+# update, on the old path (monitor.sh keys by the key only since 1.18.1): CLAUDE_DISCORD_MONITOR_DIR names that path for
+# its --stop, and for the --start that puts it back. A backend its owner had stopped (the `stopped` marker) stays
+# stopped. A start at the new path that fails rolls back: the records go back and the backend starts at the old path
+# again (a move never leaves it down); 1 then, with the reason.
+move_backend() {
+  local p=$1 b=$2 old=$helpers/records/monitor/$2 new was_stopped="" mon=$self_root/monitor/monitor.sh
+  proj_dirs "$p"; new=$helpers/records/monitor/$pd_key/$b
+  [ -d "$old" ] && [ ! -L "$old" ] || return 0
+  # The old path is one per NAME: records put back by a rollback are not a second project's (a same-named manager, set
+  # up since 1.18.1) to take in the same run.
+  case ${mb_seen:-} in *" $b "*) return 0;; esac; mb_seen="${mb_seen:-} $b "
+  # The new path may hold records already: a monitor verb run since the update made it (holders/, a marker), which the
+  # old records replace; one with a state.json is a backend of its own: left, said.
+  if [ -e "$new" ]; then
+    [ ! -s "$new/state.json" ] || { echo "claude-discord: $old left: $new is there already" >&2; return 0; }
+    [ ! -e "$new/stopped" ] || was_stopped=1   # the owner's --stop since the update
+  fi
+  [ ! -e "$old/stopped" ] || was_stopped=1
+  (cd "$p" && CLAUDE_DISCORD_MONITOR_DIR=$old bash "$mon" "$self_path" --stop "$b" </dev/null >/dev/null 2>&1) || :
+  if ! { mkdir -p "${new%/*}" && rm -rf "$new" && pmv "$old" "$new"; }; then
+    echo "claude-discord: $old could not be moved to $new: left there" >&2
+    [ -n "$was_stopped" ] || (cd "$p" && CLAUDE_DISCORD_MONITOR_DIR=$old bash "$mon" "$self_path" --start "$b" </dev/null >/dev/null 2>&1) || :
+    return 1
+  fi
+  if [ -n "$was_stopped" ]; then echo "claude-discord: $b's backend records moved to $new (its backend stays stopped, as its owner left it)"; return 0; fi
+  if (cd "$p" && bash "$mon" "$self_path" --start "$b" </dev/null >/dev/null 2>&1); then
+    echo "claude-discord: $b's backend records moved to $new; its backend started again there"; return 0
+  fi
+  pmv "$new" "$old" || :
+  (cd "$p" && CLAUDE_DISCORD_MONITOR_DIR=$old bash "$mon" "$self_path" --start "$b" </dev/null >/dev/null 2>&1) || :
+  echo "claude-discord: $b's backend did not start at $new: its records are back at $old and its backend started again there (the next update moves them again)" >&2
+  return 1
+}
+# compat_project <project, physical path>: what compat does per project: the 1.16 state moved (move_project), the links
+# a job record no longer needs removed (unlink_old), scratch and a manager's backend records keyed (1.18.1).
+compat_project() {
+  local b
+  move_project "$1" || :
+  move_scratch "$1"
+  proj_dirs "$1"
+  for b in "$pd_root"/*/; do
+    b=${b%/}
+    [ -f "$b/hosts" ] && [ -f "$b/.env" ] || continue
+    move_backend "$1" "${b##*/}" || crc=1
+  done
+  unlink_old "$1" say
+}
 # Run by update from the freshly pulled code (this process holds the old functions).
 if [ "${1:-}" = compat ]; then
   crc=0; remove_old_install || crc=1
   strip_settings
-  # 1.18.0: every recorded project still in the 1.16 shape is moved; a bot's link stays while a job record names its old
-  # path (state.sh: move_project, unlink_old). The very first update to 1.18.0 moves every project of this machine.
+  # Every project with a state dir (proj_arr), then the 1.16 list (records/projects, written by nothing since 1.18.1):
+  # a project not moved yet is only there. The list is renamed .1.16 once every line of it has a key dir (a downgrade's
+  # health --all reads it by its old name only if renamed back); a line whose folder is missing keeps it.
+  proj_arr; seen=$'\n'
+  for p in ${pl[@]+"${pl[@]}"}; do
+    case $seen in *$'\n'"$p"$'\n'*) continue;; esac; seen="$seen$p"$'\n'
+    [ -d "$p" ] || continue
+    compat_project "$p"
+  done
   if [ -f "$helpers/records/projects" ]; then
+    all=1
     while IFS= read -r p || [ -n "$p" ]; do
-      p=${p%$'\r'}; [ -n "$p" ] && [ -d "$p" ] || continue
-      p=$(cd "$p" 2>/dev/null && pwd -P) || continue
-      move_project "$p" || :
-      unlink_old "$p" say
+      p=${p%$'\r'}; [ -n "$p" ] || continue
+      p=$(cd "$p" 2>/dev/null && pwd -P) || { all=""; continue; }
+      case $seen in *$'\n'"$p"$'\n'*) ;; *) seen="$seen$p"$'\n'; compat_project "$p";; esac
+      proj_dirs "$p"; [ -n "$pd_new" ] || all=""
     done < "$helpers/records/projects"
+    [ -z "$all" ] || mv -f "$helpers/records/projects" "$helpers/records/projects.1.16" 2>/dev/null || :
   fi
-  sweep_recorded "$helpers/records/projects" || :
+  write_managers
+  sweep_recorded || :
   exit "$crc"
 fi
 
@@ -471,19 +526,6 @@ EOT
     "none  a plain bot" \
     "dev-manager  coordinates claude-discord changes with peer bots" \
     "autoresearchclaw  reports each AutoResearchClaw iteration to the channel")
-  if [ "$mode" = dev-manager ] && [ -f "$helpers/records/projects" ]; then
-    # One backend (state dir, keeper, monitor) per manager bot NAME on a machine: a second project's manager of the same
-    # name would share it, and two ledgers would be followed by whichever monitor started first.
-    here=$(pwd -P)
-    while IFS= read -r p || [ -n "$p" ]; do
-      p=${p%$'\r'}
-      [ -n "$p" ] && [ "$p" != "$here" ] || continue
-      proj_dirs "$p"
-      [ -f "$pd_root/$name/hosts" ] && [ "$(cat "$pd_root/$name/mode" 2>/dev/null)" = dev-manager ] || continue
-      echo "claude-discord: '$name' is already a dev-manager with a hosts ledger in $p; one backend serves one manager name per machine, so pick another bot name here" >&2
-      exit 2
-    done < "$helpers/records/projects"
-  fi
   printf '%s\n' "$mode" > "$root/$name/mode"
   if [ "$mode" = dev-manager ]; then
     read -rp "Peer dev bots as name:bot_id:owner_id:machine, comma-separated (empty keeps the current list): " peers || :
@@ -491,7 +533,7 @@ EOT
     entry='^[^:]+:[0-9]+:[0-9]+:[^:]+$'
     bad=$(jq -rn --arg in "$peers" --arg re "$entry" '$in | split(",")[] | select(. != "" and (test($re) | not))')
     [ -z "$bad" ] || echo "claude-discord: skipping peers not shaped name:bot_id:owner_id:machine: ${bad//$'\n'/ }" >&2
-    jq_edit "$proj_state/peers.json" --arg in "$peers" --arg re "$entry" '
+    peers_edit "$proj_state/peers.json" --arg in "$peers" --arg re "$entry" '
       reduce ($in | split(",")[] | select(test($re)) | split(":") | {name: .[0], bot_id: .[1], owner_id: .[2], machine: .[3]}) as $p
         (.; if any(.peers[]?; .bot_id == $p.bot_id) then .peers |= map(if .bot_id == $p.bot_id then $p else . end)
             else .peers = (.peers // []) + [$p] end)'
@@ -517,7 +559,7 @@ EOT
     # Only a manager posts to #bot-health-check: any other mode has no ledger, so no monitor.
     rm -f "$root/$name/hosts"
   fi
-  record_project
+  write_managers
   # A manager's backend runs with no session and no TUI: started here, detached, unless one runs or its owner stopped
   # it (the front says which, in one line).
   if [ "$mode" = dev-manager ] && [ -f "$root/$name/hosts" ]; then
@@ -570,7 +612,7 @@ if [ "${1:-}" = update ]; then
   if ver_ge "$(plugin_version "$new")" 1.8.0; then
     "$new/bin/claude-discord" compat || rc=1
   else
-    echo "claude-discord: $new is at $(plugin_version "$new"), before the compat copy (1.8.0); ~/.claude-discord/hooks left as it is"
+    echo "claude-discord: $new is at $(plugin_version "$new"), before the compat step (1.8.0); nothing of this release's layout is moved"
   fi
   mkdir -p "$HOME/.local/bin"
   cmp -s "$new/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||

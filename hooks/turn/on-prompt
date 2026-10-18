@@ -26,13 +26,13 @@ else
   # The same jq answers resolve_channel (hooks/lib/discord.sh) from access.json, read raw: the channel and its ids
   # on one line between the session id and the prompt (US, then RS between ids), a process less per Discord prompt.
   # Only a file of several JSON documents, which the plugin cannot read either, reads as none here.
-  config_channel; af=$DISCORD_STATE_DIR/access.json aa=(--arg acc "")
+  af=$DISCORD_STATE_DIR/access.json aa=(--arg acc "")
   [ -f "$af" ] && [ -r "$af" ] && aa=(--rawfile acc "$af")
-  out=$(printf '%s' "$input" | jq -r --arg fb "$bot_channel" "${aa[@]}" '(.session_id // ""),
+  out=$(printf '%s' "$input" | jq -r "${aa[@]}" '(.session_id // ""),
     ($acc | try (fromjson | ((.groups | objects | keys) // []) as $k
-      | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) as $ch
+      | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else "" end) as $ch
       | "\($ch)\u001f\([try ((.groups[$ch].allowFrom // [])[], (.allowFrom // [])[]) catch empty]
-          | map(if type == "string" then gsub("\u001e"; "\u001f") | gsub("\n"; "\u001e") else tojson end) | join("\u001e"))") catch "\($fb)\u001f"),
+          | map(if type == "string" then gsub("\u001e"; "\u001f") | gsub("\n"; "\u001e") else tojson end) | join("\u001e"))") catch "\u001f"),
     (.prompt // empty)' 2>/dev/null) || exit 0
   session_id=${out%%$'\n'*} out=${out#*$'\n'}
   chl=${out%%$'\n'*} prompt=${out#*$'\n'}
@@ -157,25 +157,25 @@ if [ -n "$session_id" ]; then   # resolve_channel's answers, from the jq above
   bot_channel=${chl%%$'\x1f'*} bot_access_ids=${chl#*$'\x1f'}; bot_access_ids=${bot_access_ids//$'\x1e'/$'\n'}
 fi
 if [ -n "$session_id" ]; then
-  identity="Discord turn. You are $bot_name, the Claude Code session behind the Discord bot $bot_name in channel $bot_channel. Answer a Discord message with the discord reply tool; a question typed in the terminal in the same turn is answered in the terminal. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀, ✅ and ☑️ reactions are added automatically (☑️: read, no reply). One request, one thread: $thread_tool start \"[<area>] <short title>\" posts its channel line and prints the thread id (in a message write a channel or thread as <#id>, a user or bot you only name as plain @name, one who must answer or decide as <@id>, which is how you reach them; a bare id is denied, an id in backticks shows the number), thread close <id> \"<closing line>\" posts the line it lands with inside the thread and ends it; the channel holds only the title line. Unless your mode's rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id."
+  # No single channel in access.json (none or several groups): said so, since 1.18.1 (config.env is not read).
+  where="in channel $bot_channel"; [ -n "$bot_channel" ] || where="with no channel (its access.json names no single channel)"
+  identity="Discord turn. You are $bot_name, the Claude Code session behind the Discord bot $bot_name $where. Answer a Discord message with the discord reply tool; a question typed in the terminal in the same turn is answered in the terminal. Mention a bot as <@id> only when you need it to act or answer; if you were mentioned but nothing is asked of you, do not reply. 👀, ✅ and ☑️ reactions are added automatically (☑️: read, no reply). One request, one thread: $thread_tool start \"[<area>] <short title>\" posts its channel line and prints the thread id (in a message write a channel or thread as <#id>, a user or bot you only name as plain @name, one who must answer or decide as <@id>, which is how you reach them; a bare id is denied, an id in backticks shows the number), thread close <id> \"<closing line>\" posts the line it lands with inside the thread and ends it; the channel holds only the title line. Unless your mode's rules say otherwise, answer a quick request yourself and hand a longer one to a background subagent whose brief names its thread id."
   # Whoever the bot's channel lets in, so a bot can call a person who is not in
   # this turn: plain @name reaches nobody, and a bot that knows no id would
   # write one (owner, 2026-10-08). The ids come from access.json (the channel
-  # group's allowFrom, then the top-level one), config.env's owner and
-  # everyone who has written here (user-names): an empty allowFrom lets the
-  # whole channel in, so it alone would name nobody. A name only once that id
-  # has written here. In id order (by length, then digits, as strings: a
-  # 19-digit id is past a double's precision): user-names moves each writer
+  # group's allowFrom, then the top-level one, where write_access puts the
+  # owner) and everyone who has written here (user-names): an empty allowFrom
+  # lets the whole channel in, so it alone would name nobody. A name only once
+  # that id has written here. In id order (by length, then digits, as strings:
+  # a 19-digit id is past a double's precision): user-names moves each writer
   # to its end, and the line is part of the primed key, so two people taking
   # turns re-sent the whole text at every message (41 of 107 injections on
   # lmd79, 2026-10-16). Sorted inside the awk: no sort process per prompt, and
-  # the awk reads config.env and user-names itself (no sed, no cut).
-  people=$(ids=$bot_access_ids awk -v f="$DISCORD_STATE_DIR/user-names" -v c="$proj_state/config.env" -v q="'" '
+  # the awk reads user-names itself (no sed, no cut).
+  people=$(ids=$bot_access_ids awk -v f="$DISCORD_STATE_DIR/user-names" '
     function add(x) { if (x ~ /^[0-9]+$/ && !seen[x]++) id[++k] = x "" }
     BEGIN {
       m = split(ENVIRON["ids"], a, "\n"); for (i = 1; i <= m; i++) add(a[i])
-      r = "^DISCORD_USER_ID=" q "?[0-9]*" q "?$"
-      while ((getline l < c) > 0) if (l ~ r) { v = substr(l, 17); gsub(q, "", v); add(v) }
       while ((getline l < f) > 0) {
         if ((i = index(l, " "))) { n[substr(l, 1, i - 1)] = substr(l, i + 1); add(substr(l, 1, i - 1)) } else add(l)
       }
