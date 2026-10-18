@@ -557,6 +557,9 @@ printf '%s mgr\n%s mgr\n%s mgr\n' "$KA" "$KB" "$KA" > "$MGRS"; fxhook   # a line
 [ "$(sort "$HOME/fx.rec" 2>/dev/null)" = "$(printf '%s monitor --keep mgr --detach\n%s monitor --keep mgr --detach\n' "$M2A" "$M2B" | sort)" ] &&
   [ -s "$HOME/.claude-discord/records/monitor/$KA/mgr/last-start"* ] && [ -s "$HOME/.claude-discord/records/monitor/$KB/mgr/last-start"* ] && [ ! -e "$HOME/.claude-discord/records/monitor/mgr" ] ||
   { echo "FAIL: two managers of one name in two projects are two backends: revive_backends must start a keeper per manager (key and name) from its project, each with its own records/monitor/<key>/mgr: $(cat "$HOME/fx.rec" 2>&1) / $(ls -R "$HOME/.claude-discord/records/monitor" 2>&1)"; exit 1; }
+echo none > "$(bdir "$M2B" mgr)/mode"; fxhook   # a listed line whose mode is no longer dev-manager: nothing forked for it
+[ "$(cat "$HOME/fx.rec" 2>/dev/null)" = "$M2A monitor --keep mgr --detach" ] || { echo "FAIL: revive_backends starts nothing for a listed manager whose mode is no longer dev-manager: $(cat "$HOME/fx.rec" 2>&1)"; exit 1; }
+echo dev-manager > "$(bdir "$M2B" mgr)/mode"
 rm -rf "$FX" "$HOME/fx.rec" "$HOME/up.json" "$HOME/.claude-discord/records/monitor"
 echo "ok: two projects may each have a manager named mgr: setup accepts the second, records/managers lists both keys (rebuilt by the hooks when missing), and revive_backends starts one keeper per key and name, from its project, with records/monitor/<key>/<bot> each"
 

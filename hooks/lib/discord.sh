@@ -279,10 +279,10 @@ hook_session() {
 # Any bot's session start and prompt run it, so a backend killed by a restart comes back with the first bot that wakes.
 # No file: built once by write_managers (state.sh sourced for that alone: a glob, no fork). No manager, every keeper
 # alive: builtins only (no fork on Linux), and silent. A line twice is one backend (keeper_alive cannot see a keeper
-# just backgrounded); a line whose ledger is gone starts nothing.
+# just backgrounded); a line whose ledger or dev-manager mode is gone starts nothing.
 # CLAUDE_DISCORD_NO_AUTOSTART turns it off on a machine (the other side of a shared home; the suite).
 revive_backends() {
-  local mf="$HOME/.claude-discord/records/managers" k b q bot_name bot_key bot_project seen=" "
+  local mf="$HOME/.claude-discord/records/managers" k b q m bot_name bot_key bot_project seen=" "
   [ -z "${CLAUDE_DISCORD_NO_AUTOSTART:-}" ] || return 0
   [ -f "$mf" ] || { . "$plugin_root/bin/lib/state.sh" && write_managers; } 2>/dev/null || :
   [ -f "$mf" ] || return 0
@@ -292,6 +292,8 @@ revive_backends() {
     seen="$seen$k/$b "
     q=""; { IFS= read -r q < "$HOME/.claude-discord/projects/$k/project"; } 2>/dev/null || :
     [ -n "$q" ] && [ -f "$HOME/.claude-discord/projects/$k/bots/$b/hosts" ] || continue
+    m=""; { read -r m < "$HOME/.claude-discord/projects/$k/bots/$b/mode"; } 2>/dev/null || :
+    [ "$m" = dev-manager ] || continue   # a line whose bot left the mode (setup --mode) forks nothing
     bot_name=$b bot_key=$k bot_project=$q
     keeper_alive || ensure_keeper
   done < "$mf"
