@@ -158,7 +158,9 @@ move_project() {
 }
 # move_scratch <project, physical path>: ~/.claude-discord/scratch/<bot> (before 1.18.1) -> scratch/<key>/<bot> for each
 # bot of the project, by rename (another filesystem: left, said), a link scratch/<bot> left in its place for a session
-# that read the dev-manager rule before 1.18.1; unlink_old (with `say`) removes it once no session of the bot runs.
+# that read the dev-manager rule before 1.18.1. Nothing removes the link: whether such a session runs cannot be judged
+# from every side of a shared home (nor for a session started from a subdirectory or renamed), and a link removed under
+# one makes a fresh scratch/<bot> at its next write; the link is harmless.
 move_scratch() {
   local b n s
   proj_dirs "$1"
@@ -179,21 +181,9 @@ move_scratch() {
 # longer. With `say` (compat, setup) a link whose bot has a FOREGROUND session (a live row with no job id: `claude agents`
 # lists it with a pid alone; one not answering counts too) stays too: a row with a job id whose record names the new
 # path is a background session on the new place already (lmd79, 2026-10-18: photo-bot's), and keeps nothing. A link missing for a bot a record names (a move cut between its rename and its
-# link) is made again. Then the directory itself with its .gitignore, once it holds nothing else. With `say` too: a
-# bot's scratch link (move_scratch) goes once `claude agents` lists no session of the bot (one started before 1.18.1
-# may still write to the old name; one started after reads the rule's new path).
+# link) is made again. Then the directory itself with its .gitignore, once it holds nothing else.
 unlink_old() {
   local src=$1/.claude/discord-agents b n j live fg rest="" jobs="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/jobs"
-  proj_dirs "$1"
-  if [ "${2:-}" = say ]; then
-    for b in "$pd_root"/*/; do
-      b=${b%/}; n=${b##*/}
-      [ -L "$helpers/scratch/$n" ] && [ "$(readlink "$helpers/scratch/$n")" = "$helpers/scratch/$pd_key/$n" ] || continue
-      type live_sessions >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/sessions.sh"
-      live=$(cd "$1" && live_sessions "$n" "$b" </dev/null) || live=unknown
-      [ -n "$live" ] || rm -f "$helpers/scratch/$n"
-    done
-  fi
   [ -d "$src" ] && [ ! -L "$src" ] || return 0
   if [ -n "$pd_new" ]; then
     for b in "$pd_root"/*/; do
@@ -235,6 +225,7 @@ unlink_old() {
 # The marker sweep. A hook leaves a file per session: <bot dir>/plugin-sessions/<sid> (plugin_gate), turns/<sid> and
 # turns/<sid>.{replied,primed,pending} (the turn hooks), and the project's checkin/<sid> (on-reply). Nothing removed a
 # session's files once the session was gone, and every `claude -p` run from a bot's Bash left one more (633 in one bot
+  proj_dirs "$1"
 # dir, 2026-10-16). A file goes when `claude agents --json --all` lists no row whose sessionId or id is the name's part
 # before its first dot; stopped and done rows are listed, so theirs stay (no guess at liveness). Only in a bot dir this
 # daemon can see, one the listing names by the bot's name or its pinned job: the other side of a shared home (a

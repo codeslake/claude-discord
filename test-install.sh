@@ -386,7 +386,7 @@ echo "ok: a start in a project whose key another project holds says so and launc
 # (d) a project of the old shape (<project>/.claude/discord-agents/) with two bots, moved by compat: every bot dir by
 # rename (same inode), config.env, peers.json and checkin/ with it, a link per bot whose old path a job record names, the
 # hooks link gone, the .gitignore kept, a manager's records/monitor and scratch moved under the key (1.18.1; the backend
-# stopped by its owner stays stopped; the scratch link goes at once, since the listing shows no session of ob1), the
+# stopped by its owner stays stopped; scratch/ob1 left as a link, which nothing removes), the
 # records/projects list renamed .1.16 (its one line has a key dir now), and a second run changing nothing.
 OLDP="$HOME/old shape"; OR="$OLDP/.claude/discord-agents"; mkdir -p "$OR/ob1/turns" "$OR/ob2/plugin-sessions" "$OR/checkin"
 printf "DISCORD_CHANNEL_ID='7'\nDISCORD_USER_ID='8'\nDISCORD_ALLOW_IDS=''\n" > "$OR/config.env"; echo '{"peers":[]}' > "$OR/peers.json"; : > "$OR/checkin/s1"
@@ -408,7 +408,7 @@ OS="$HOME/.claude-discord/projects/$(skey "$OLDP")"
   [ "$(readlink "$OR/ob1")" = "$OS/bots/ob1" ] && [ "$(readlink "$OR/ob2")" = "$OS/bots/ob2" ] && [ ! -e "$OR/hooks" ] && [ ! -L "$OR/hooks" ] &&
   [ "$(<"$OR/.gitignore")" = "*" ] && [ ! -e "$OR/config.env" ] && [ ! -e "$OR/peers.json" ] && [ ! -e "$OR/checkin" ] &&
   [ "$(stat -c %a "$OS")" = 700 ] && [ "$(stat -c %a "$OS/bots")" = 700 ] && [ ! -e "$MON1" ] && [ -e "$HOME/.claude-discord/records/monitor/$(skey "$OLDP")/ob1/stopped" ] &&
-  [ -f "$HOME/.claude-discord/scratch/$(skey "$OLDP")/ob1/f" ] && [ ! -L "$SCR1" ] && [ ! -e "$SCR1" ] && [ ! -e "$OPF" ] && grep -qxF "$OLDP" "$OPF.1.16" ||
+  [ -f "$HOME/.claude-discord/scratch/$(skey "$OLDP")/ob1/f" ] && [ "$(readlink "$SCR1")" = "$HOME/.claude-discord/scratch/$(skey "$OLDP")/ob1" ] && [ ! -e "$OPF" ] && grep -qxF "$OLDP" "$OPF.1.16" ||
   { echo "FAIL: compat moves a project's state by rename, leaves a link per bot, and is idempotent: $out / $(find "$OR" "$OS" 2>&1)"; exit 1; }
 snap=$(find "$OR" "$OS" -printf '%p %y %m %i\n' | sort)
 out2=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: a second compat failed: $out2"; exit 1; }
@@ -613,9 +613,9 @@ rc=0; out=$(cd "$HOME" && bash "$S" compat 2>&1) || rc=$?
   { echo "FAIL: scratch/<bot> moves to scratch/<key>/<bot> with a link in its place: $out / $(ls -la "$HOME/.claude-discord/scratch" 2>&1)"; exit 1; }
 (cd "$M2A" && bash "$S" monitor --stop mgr >/dev/null 2>&1) || :
 n=0; while mon_pid "$NEWM" >/dev/null && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done
-cp "$HOME/bin/claude" "$HOME/claude.keep"; printf '#!/bin/bash\ncase $1 in agents) echo "[]";; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"   # no session of mgr runs
+cp "$HOME/bin/claude" "$HOME/claude.keep"; printf '#!/bin/bash\ncase $1 in agents) echo "[]";; *) echo "PLAIN $*";; esac\n' > "$HOME/bin/claude"   # a listing with no session of mgr
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
-[ ! -L "$HOME/.claude-discord/scratch/mgr" ] && [ ! -e "$HOME/.claude-discord/scratch/mgr" ] && [ -f "$HOME/.claude-discord/scratch/$KA/mgr/f" ] || { echo "FAIL: the scratch link goes once no session of the bot runs: $out / $(ls -la "$HOME/.claude-discord/scratch" 2>&1)"; exit 1; }
+[ "$(readlink "$HOME/.claude-discord/scratch/mgr")" = "$HOME/.claude-discord/scratch/$KA/mgr" ] && [ -f "$HOME/.claude-discord/scratch/$KA/mgr/f" ] || { echo "FAIL: the scratch link stays (a session started before 1.18.1 may write there, and a listing cannot see every side): $out / $(ls -la "$HOME/.claude-discord/scratch" 2>&1)"; exit 1; }
 cp "$HOME/claude.keep" "$HOME/bin/claude"; rm -f "$HOME/claude.keep"
 echo "ok: compat moves a manager's records/monitor/<bot> to records/monitor/<key>/<bot> with the backend stopped before and started after (lock and state at the new path, the alerts continuous, the next pass there), and scratch/<bot> to scratch/<key>/<bot> behind a link that goes once no session of the bot runs"
 # The rollback: the backend at the old path again, a --keep that fails once at the new path.
