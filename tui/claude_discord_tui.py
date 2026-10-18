@@ -2659,6 +2659,10 @@ class MonitorTUI(App):
         self.asked = float("-inf")     # when `monitor --check` last asked for a pass (time.monotonic())
         self.ask_lock = threading.Lock()   # ask_pass runs in worker threads
         self.holder = state_dir / "holders" / f"tui-{os.getpid()}"
+        # The plugin's version file, read on every refresh (1.18.2): a TUI left open across `claude-discord update`
+        # reads the files of the version it started on (at 1.18.1 the backend's records moved out from under one, and
+        # it showed '○ not running' and 'no state yet' while the backend ran at the new path), so a change is said.
+        self.plugin_json = Path(wrapper).resolve().parent.parent / ".claude-plugin" / "plugin.json" if wrapper else None
         self.width = 0   # the terminal's: set at mount, then by each Resize (self.size still holds the old one while that event runs)
         self.tab = "bots"
         self.cursor: dict = {t: None for t in TABS}   # the selected row's key, per tab
@@ -2725,6 +2729,17 @@ class MonitorTUI(App):
         self.refresh_state()
         self.set_interval(2, self.refresh_state)
 
+    def updated_to(self) -> str | None:
+        """The plugin's version when it differs from the one this TUI started on (`--version-line`'s first word), else
+        None: no wrapper, no file, no version in it, or the same version."""
+        if not self.plugin_json or not self.version:
+            return None
+        try:
+            v = txt(json.loads(self.plugin_json.read_text()).get("version"))
+        except (OSError, ValueError, AttributeError):
+            return None
+        return v if v and v != self.version.split()[0] else None
+
     def refresh_state(self) -> None:
         path = self.state_dir / "state.json"
         try:
@@ -2761,6 +2776,9 @@ class MonitorTUI(App):
         self.show("#title", title_line(self.state, w, now, live, stopped, self.version))
         self.show("#tabs", tabs_lines(self.tab, len(open_alerts(self.state)), w))
         bar = bar_text(self.state, self.note, stopped, self.refused())
+        up = self.updated_to()
+        if up:   # ahead of every other bar text: what this TUI shows is the old version's view of files that moved on
+            bar = f"claude-discord updated to {up} since this TUI started ({self.version}): press q, then run claude-discord tui again"
         b = self.query_one("#bar", Static)
         b.update(bar or "")
         b.set_class(bar is None, "hidden")

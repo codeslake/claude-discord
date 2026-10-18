@@ -572,12 +572,23 @@ printf "DISCORD_CHANNEL_ID='7777'\nDISCORD_USER_ID='8888'\nDISCORD_ALLOW_IDS=''\
 c1=$(ehook e1 901); rm -f "$(pstate "$SP")/config.env"; c2=$(ehook e2 902)
 grep -q ' in channel 900\. ' <<<"$c1" && grep -q '^People in this channel (mention one as <@id> to reach them): u <@111>, <@222>$' <<<"$c1" && [ "$c1" = "$c2" ] ||
   { echo "FAIL: the hooks read the channel and the people from access.json only: $c1 /// $c2"; exit 1; }
-jq '.groups["901"] = .groups["900"]' "$HOME/acc.keep" > "$SD2/access.json"; c3=$(ehook e3 903)
-grep -q ' with no channel (its access.json names no single channel)\. ' <<<"$c3" && ! grep -q 'in channel' <<<"$c3" || { echo "FAIL: with several groups the identity says there is no channel, not config.env's: $c3"; exit 1; }
+# Several groups (1.18.2): config.env's DISCORD_CHANNEL_ID is the home channel when it is one of them (1.18.1 read
+# nothing from config.env and left such a bot with no channel: junyong-dev-bot and RVP on lmd42 could not `thread start`);
+# a home that is none of the groups, or no config.env, is no channel, as before.
+jq '.groups["901"] = .groups["900"]' "$HOME/acc.keep" > "$SD2/access.json"; printf "DISCORD_CHANNEL_ID='901'\nDISCORD_USER_ID='111'\nDISCORD_ALLOW_IDS=''\n" > "$(pstate "$SP")/config.env"
+c3=$(ehook e3 903)
+grep -q ' in channel 901\. ' <<<"$c3" && ! grep -q 'no channel' <<<"$c3" || { echo "FAIL: with several groups config.env's channel, when it is one of them, is the home channel: $c3"; exit 1; }
+: > "$CURL_LOG"; printf '200 {"id":"5551"}\n200 {"id":"5552"}\n' > "$CURL_REPLIES"   # the two POSTs' replies, no gateway line: the tool asks for none
+tout=$(cd "$SP" && DISCORD_STATE_DIR=$SD2 bash "$PC/tools/thread" start "[t] home" 2>&1) || { echo "FAIL: thread start must work for a bot with several groups and a home channel: $tout"; exit 1; }
+grep -q 'channels/901/messages' "$CURL_LOG" || { echo "FAIL: thread start posts the channel line to the home channel: $(cat "$CURL_LOG")"; exit 1; }
+printf "DISCORD_CHANNEL_ID='7777'\nDISCORD_USER_ID='111'\nDISCORD_ALLOW_IDS=''\n" > "$(pstate "$SP")/config.env"; c4=$(ehook e4 904)
+grep -q ' with no channel (its access.json names no single channel)\. ' <<<"$c4" && ! grep -q 'in channel' <<<"$c4" || { echo "FAIL: with several groups and a config.env channel that is none of them there is no channel: $c4"; exit 1; }
+rm -f "$(pstate "$SP")/config.env"; c5=$(ehook e5 905)
+grep -q ' with no channel (its access.json names no single channel)\. ' <<<"$c5" || { echo "FAIL: with several groups and no config.env there is no channel: $c5"; exit 1; }
 printf '' > "$SD2/access.json"
 (DISCORD_STATE_DIR=$SD2; . "$PC/hooks/lib/discord.sh"; resolve_channel; [ -z "$bot_channel" ] && [ -z "$bot_access_ids" ]) || { echo "FAIL: an empty access.json leaves no channel (config.env is not read): '$(DISCORD_STATE_DIR=$SD2; . "$PC/hooks/lib/discord.sh"; resolve_channel; echo "$bot_channel")'"; exit 1; }
-cp "$HOME/acc.keep" "$SD2/access.json"; cp "$HOME/cfg.keep" "$(pstate "$SP")/config.env"; rm -f "$HOME/acc.keep" "$HOME/cfg.keep" "$SD2"/turns/e[123]*
-echo "ok: on-prompt's identity and People line come from access.json alone (config.env naming another channel and owner, or removed, changes nothing); none or several groups is no channel"
+cp "$HOME/acc.keep" "$SD2/access.json"; cp "$HOME/cfg.keep" "$(pstate "$SP")/config.env"; rm -f "$HOME/acc.keep" "$HOME/cfg.keep" "$SD2"/turns/e[12345]*
+echo "ok: on-prompt's identity and People line come from access.json alone (config.env naming another channel and owner, or removed, changes nothing); none is no channel; several groups take config.env's channel as home when it is one of them (thread start posts there), else no channel"
 
 # (f) peers.json is written under peers.json.lock (mkdir, 5 s): held, the writer says the file was not changed and goes
 # on (exit status as without the lock); released, the next write lands.

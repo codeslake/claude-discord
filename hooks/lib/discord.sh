@@ -28,14 +28,29 @@ thread_tool=$plugin_root/tools/thread
 # digits-only key (the file missing or unreadable, no group, or several) the
 # bot has no channel (1.18.1: config.env, setup's defaults, is not read at run
 # time; it is one file for every bot of the project).
+# home_channel: config.env's DISCORD_CHANNEL_ID (digits, quotes stripped), read with builtins, else "". Only a bot with
+# SEVERAL groups uses it, as its home channel when it is one of them (1.18.2: 1.18.1 read config.env nowhere in the
+# hooks, and such a bot had no channel at all: no thread start, an identity "with no channel").
+home_channel() {
+  local l v
+  home_channel=""
+  [ -r "$proj_state/config.env" ] || return 0
+  while IFS= read -r l || [ -n "$l" ]; do
+    case $l in DISCORD_CHANNEL_ID=*) v=${l#DISCORD_CHANNEL_ID=}; v=${v#[\'\"]}; v=${v%[\'\"]}; case $v in ''|*[!0-9]*) ;; *) home_channel=$v;; esac;; esac
+  done < "$proj_state/config.env"
+}
+# The channel rule, one jq expression shared by resolve_channel, on-prompt and thread-guard: one digit-only group key
+# is the channel; several, with $home among them, is $home; else none.
+CH_RULE='((.groups | objects | keys) // []) as $k
+    | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] elif ($k | length) > 1 and $home != "" and ($k | index($home)) != null then $home else "" end) as $ch'
 resolve_channel() {
   local out
   bot_channel="" bot_access_ids=""
+  home_channel
   # One jq for both answers (a jq start is 10 ms with jq 1.6, and every prompt asks): the channel on the first line,
   # then the ids that channel's group and the top-level allowFrom name, one a line. An allowFrom of the wrong shape
   # costs only the ids, never the channel (try).
-  out=$(jq -r '((.groups | objects | keys) // []) as $k
-    | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else "" end) as $ch
+  out=$(jq -r --arg home "$home_channel" "$CH_RULE"'
     | $ch, try ((.groups[$ch].allowFrom // [])[], (.allowFrom // [])[]) catch empty' "$DISCORD_STATE_DIR/access.json" 2>/dev/null) && [ -n "$out" ] || return 0
   bot_channel=${out%%$'\n'*}
   case $out in *$'\n'*) bot_access_ids=${out#*$'\n'};; esac

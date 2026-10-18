@@ -28,9 +28,9 @@ else
   # Only a file of several JSON documents, which the plugin cannot read either, reads as none here.
   af=$DISCORD_STATE_DIR/access.json aa=(--arg acc "")
   [ -f "$af" ] && [ -r "$af" ] && aa=(--rawfile acc "$af")
-  out=$(printf '%s' "$input" | jq -r "${aa[@]}" '(.session_id // ""),
-    ($acc | try (fromjson | ((.groups | objects | keys) // []) as $k
-      | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else "" end) as $ch
+  home_channel   # config.env's channel, the home of a bot with several groups (1.18.2)
+  out=$(printf '%s' "$input" | jq -r "${aa[@]}" --arg home "$home_channel" '(.session_id // ""),
+    ($acc | try (fromjson | '"$CH_RULE"'
       | "\($ch)\u001f\([try ((.groups[$ch].allowFrom // [])[], (.allowFrom // [])[]) catch empty]
           | map(if type == "string" then gsub("\u001e"; "\u001f") | gsub("\n"; "\u001e") else tojson end) | join("\u001e"))") catch "\u001f"),
     (.prompt // empty)' 2>/dev/null) || exit 0

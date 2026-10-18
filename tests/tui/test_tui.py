@@ -845,11 +845,23 @@ def stub(d, body):
     return str(p)
 
 
-async def case(name, check, wrapper=None, state=None, size=(137, 40)):
+def versioned_wrapper(d):
+    """A wrapper stub laid out as the plugin is (bin/claude-discord beside ../.claude-plugin/plugin.json), at 1.14.1."""
+    root = Path(d) / "plugin"
+    (root / "bin").mkdir(parents=True)
+    (root / ".claude-plugin").mkdir()
+    (root / ".claude-plugin" / "plugin.json").write_text('{"name": "claude-discord", "version": "1.14.1"}')
+    w = root / "bin" / "claude-discord"
+    w.write_text("#!/bin/sh\nexit 0\n")
+    w.chmod(0o755)
+    return str(w)
+
+
+async def case(name, check, wrapper=None, state=None, size=(137, 40), version=""):
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "holders").mkdir()
         (Path(d) / "state.json").write_text(json.dumps(variant(state or name)))
-        app = tui.MonitorTUI(Path(d), "mgr", wrapper(d) if wrapper else None)
+        app = tui.MonitorTUI(Path(d), "mgr", wrapper(d) if wrapper else None, version)
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
             app.names = dict(NAMES)   # the fixture's projects do not exist, so no user-names file is read
@@ -2628,6 +2640,29 @@ async def refused(app, pilot):
     assert args == f"monitor --ensure mgr --holder tui {os.getpid()}", args
 
 
+async def updated_under(app, pilot):
+    """1.18.2: a TUI left open across `claude-discord update` (the backend's records moved under it at 1.18.1, so it read
+    'no state yet' and '○ not running' while the backend ran at the new path): every refresh compares the plugin's
+    version file with the version it started on, and a change puts one line in the red bar, ahead of every other bar
+    text, telling the reader to quit and run the TUI again. The same version: no line; the file unreadable: no line."""
+    pj = Path(app.wrapper).parent.parent / ".claude-plugin" / "plugin.json"
+    assert pj.exists() and app.updated_to() is None, (pj, app.updated_to())
+    app.refresh_state()
+    await pilot.pause()
+    assert "updated to" not in text(app, "#bar"), text(app, "#bar")
+    pj.write_text('{"name": "claude-discord", "version": "9.9.9"}')
+    (app.state_dir / "state.json").unlink()   # what the peer saw: the records gone from under it
+    app.refresh_state()
+    await pilot.pause()
+    bar = text(app, "#bar")
+    assert bar.startswith("claude-discord updated to 9.9.9 since this TUI started (1.14.1 (abc1234)): press q, then run claude-discord tui again"), bar
+    assert "no state yet" not in bar, bar
+    pj.unlink()
+    app.refresh_state()
+    await pilot.pause()
+    assert "updated to" not in text(app, "#bar") and "no state yet" in text(app, "#bar"), text(app, "#bar")
+
+
 async def main():
     pure()
     t0 = time.time()
@@ -2669,6 +2704,7 @@ async def main():
     await case("recover_all", recover_all, state="down_stale", wrapper=recover_cli)
     await case("recover_all_stopped", recover_all_stopped, state="down_stale", wrapper=recover_cli)
     await case("recover_all_held", recover_all_held, state="down_stale3", wrapper=recover_cli)
+    await case("updated_under", updated_under, state="all_ok", wrapper=versioned_wrapper, version="1.14.1 (abc1234)")
     await case("access_long_host_answered", access_long_host_answered, state="all_ok", wrapper=access_cli)
     await case("stopped", stopped)
     await case("stopped_by_user", stopped_by_user)

@@ -83,13 +83,14 @@ pf="$proj_state/peers.json" pa=(--arg pr "") af="$DISCORD_STATE_DIR/access.json"
 [ "$bot_mode" = dev-manager ] && [ -f "$pf" ] && pa=(--rawfile pr "$pf")
 [ -f "$af" ] && [ -r "$af" ] && aa=(--rawfile acc "$af")
 peerlines=() ch=""
+home_channel   # config.env's channel: the home of a bot with several groups (1.18.2), passed to the one jq below
 { IFS= read -r ch; read -r noreply; read -r mentions; read -r bare; read -r turn; read -r chat; read -r arrow; read -r table; read -r over; read -r peerq; IFS= read -r named
-  while IFS= read -r l; do peerlines+=("$l"); done; } < <(printf '%s' "$input" | jq -r --arg re "$BARE" --arg self "$bot_name" "${pa[@]}" "${aa[@]}" '
+  while IFS= read -r l; do peerlines+=("$l"); done; } < <(printf '%s' "$input" | jq -r --arg re "$BARE" --arg self "$bot_name" --arg home "$home_channel" "${pa[@]}" "${aa[@]}" '
   def line: tostring | (split("\n")[0] // "") | sub("^[ \t]+"; "") | sub("[ \t]+$"; "");
   def bare: '"$BARE_Q"';
   def deny: sub("\n+\\z"; "") | {hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: .}} | tojson;
-  ($acc | try (fromjson | ((.groups | objects | keys) // []) as $k
-    | if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else "" end) catch "") as $ch
+  ($acc | try (fromjson | '"$CH_RULE"'
+    | $ch) catch "") as $ch
   | $ch,
   ((.tool_input.text // "" | tostring) as $t
   | ((.tool_name // "" | line) != "mcp__plugin_discord_discord__edit_message") as $rp
