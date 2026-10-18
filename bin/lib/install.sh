@@ -1,4 +1,4 @@
-# sourced by bin/claude-discord: select_one git_net src_link prune_installs install_plugin remove_old_install strip_settings move_backend compat_project, the compat verb, write_hosts parse_install_flags check_install_scope coexist install_all; the install, setup and update verbs
+# sourced by bin/claude-discord: select_one git_net src_link prune_installs install_plugin remove_old_install strip_settings compat_project, the compat verb, write_hosts parse_install_flags check_install_scope coexist install_all; the install, setup and update verbs
 
 # select_one <label> <default> <option>...: prints the chosen option's first
 # word (an option is "<name>  <hint>"). On a terminal, an @clack-style picker
@@ -192,41 +192,6 @@ strip_settings() {
   return 0
 }
 
-# move_backend <project> <bot>: a manager's records/monitor/<bot> (before 1.18.1) -> records/monitor/<key>/<bot>, the
-# backend stopped before and started after, as bot rename does it. The backend that runs is the one started before the
-# update, on the old path (monitor.sh keys by the key only since 1.18.1): CLAUDE_DISCORD_MONITOR_DIR names that path for
-# its --stop, and for the --start that puts it back. A backend its owner had stopped (the `stopped` marker) stays
-# stopped. A start at the new path that fails rolls back: the records go back and the backend starts at the old path
-# again (a move never leaves it down); 1 then, with the reason.
-move_backend() {
-  local p=$1 b=$2 old=$helpers/records/monitor/$2 new was_stopped="" mon=$self_root/monitor/monitor.sh
-  proj_dirs "$p"; new=$helpers/records/monitor/$pd_key/$b
-  [ -d "$old" ] && [ ! -L "$old" ] || return 0
-  # The old path is one per NAME: records put back by a rollback are not a second project's (a same-named manager, set
-  # up since 1.18.1) to take in the same run.
-  case ${mb_seen:-} in *" $b "*) return 0;; esac; mb_seen="${mb_seen:-} $b "
-  # The new path may hold records already: a monitor verb run since the update made it (holders/, a marker), which the
-  # old records replace; one with a state.json is a backend of its own: left, said.
-  if [ -e "$new" ]; then
-    [ ! -s "$new/state.json" ] || { echo "claude-discord: $old left: $new is there already" >&2; return 0; }
-    [ ! -e "$new/stopped" ] || was_stopped=1   # the owner's --stop since the update
-  fi
-  [ ! -e "$old/stopped" ] || was_stopped=1
-  (cd "$p" && CLAUDE_DISCORD_MONITOR_DIR=$old bash "$mon" "$self_path" --stop "$b" </dev/null >/dev/null 2>&1) || :
-  if ! { mkdir -p "${new%/*}" && rm -rf "$new" && pmv "$old" "$new"; }; then
-    echo "claude-discord: $old could not be moved to $new: left there" >&2
-    [ -n "$was_stopped" ] || (cd "$p" && CLAUDE_DISCORD_MONITOR_DIR=$old bash "$mon" "$self_path" --start "$b" </dev/null >/dev/null 2>&1) || :
-    return 1
-  fi
-  if [ -n "$was_stopped" ]; then echo "claude-discord: $b's backend records moved to $new (its backend stays stopped, as its owner left it)"; return 0; fi
-  if (cd "$p" && bash "$mon" "$self_path" --start "$b" </dev/null >/dev/null 2>&1); then
-    echo "claude-discord: $b's backend records moved to $new; its backend started again there"; return 0
-  fi
-  pmv "$new" "$old" || :
-  (cd "$p" && CLAUDE_DISCORD_MONITOR_DIR=$old bash "$mon" "$self_path" --start "$b" </dev/null >/dev/null 2>&1) || :
-  echo "claude-discord: $b's backend did not start at $new: its records are back at $old and its backend started again there (the next update moves them again)" >&2
-  return 1
-}
 # compat_project <project, physical path>: what compat does per project: the 1.16 state moved (move_project), the links
 # a job record no longer needs removed (unlink_old), scratch and a manager's backend records keyed (1.18.1).
 compat_project() {

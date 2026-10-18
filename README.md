@@ -347,8 +347,13 @@ stopped before and started again after (as `bot rename` does; one its owner
 had stopped stays stopped; a start at the new path that fails puts the
 records back and starts the backend at the old path again, exit 1), and
 `scratch/<bot>` to `scratch/<key>/<bot>`, leaving `scratch/<bot>` as a link
-until `claude agents` lists no session of the bot (a session started before
-1.18.1 holds the old rule text). `records/projects`, the 1.16 project list, is
+(a session started before 1.18.1 holds the old rule text; nothing removes the
+link, which is harmless). A backend started at the new path meanwhile (a
+hook's revive, a TUI) is stopped too and its records replaced by the old
+path's; one whose lock is held by a monitor this side cannot see (the other
+side of a shared home) is not moved: `compat` says to run `update` there. A
+manager whose project `compat` never saw (no key dir and no 1.16 line at the
+update) moves its records at its next start the same way. `records/projects`, the 1.16 project list, is
 read by `compat` alone (a project it names and nothing else has is moved from
 there) and renamed `records/projects.1.16` once every project it names has a
 key dir; nothing reads it after that, and a downgrade's `health --all` finds

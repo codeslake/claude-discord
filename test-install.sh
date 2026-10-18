@@ -592,9 +592,13 @@ echo "ok: a held peers.json.lock makes setup --mode (the peers writer) say the f
 # (b, c) The backend records of a manager, records/monitor/<bot> before 1.18.1, move to records/monitor/<key>/<bot> at
 # compat with the backend stopped before and started after (as bot rename does): the holder lock and state.json are at
 # the new path, the alerts continue (one appended after the move follows the ones before it), the next pass writes to
-# the new path; scratch/<bot> goes to scratch/<key>/<bot> with a link in its place, which goes once no session of the bot
-# runs. A start at the new path that fails (a --keep that fails once) puts the records back and starts the backend at
-# the old path again: compat exits 1 with the reason.
+# the new path; scratch/<bot> goes to scratch/<key>/<bot> with a link in its place, which nothing removes (a session
+# started before 1.18.1 may write there, and whether one runs cannot be judged from every side of a shared home). A
+# backend a hook or a TUI started at the new path meanwhile (its own keeper and monitor, no history) is stopped too and
+# its records replaced by the old path's: one backend after, with the history. A start at the new path that fails (a
+# --keep that fails once) puts the records back and starts the backend at the old path again: compat exits 1 with the
+# reason. A backend this side cannot see (the other side of a shared home holds the lock) is not moved: compat exits 1
+# saying where to run it, and leaves no stopped marker.
 export CLAUDE_DISCORD_MONITOR_TICK=0.01 CLAUDE_DISCORD_MONITOR_PASS=60 CLAUDE_DISCORD_MONITOR_HOST_CAP=0.03 CLAUDE_DISCORD_MONITOR_LOCK_WAIT=0.10
 mv "$HOME/.local/bin/claude-discord" "$HOME/shim.real"; mkdir -p "$HOME/mon"
 printf '#!/bin/bash\ncat "$HOME/mon/local.out"\n' > "$HOME/.local/bin/claude-discord"; chmod +x "$HOME/.local/bin/claude-discord"
@@ -604,14 +608,21 @@ alerts() { jq -r '[.alerts[] | .key] | join(" ")' "$1/state.json" 2>/dev/null ||
 wait_alerts() { local n=0; while [ "$(alerts "$1")" != "$2" ] && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done; [ "$(alerts "$1")" = "$2" ]; }
 mon_pid() { local l=""; { read -r l < "$1/lock"; } 2>/dev/null || :; case $l in ''|*[!0-9]*) return 1;; esac; [[ $(tr '\0' ' ' < "/proc/$l/cmdline" 2>/dev/null) == *"--locked mgr "* ]] && echo "$l"; }
 wait_mon() { local n=0; while ! mon_pid "$1" >/dev/null && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done; mon_pid "$1" >/dev/null; }
+keepers() { local f; for f in "$1"/holders/keeper-*; do [ ! -f "$f" ] || { kill -0 "${f##*-}" 2>/dev/null && echo "${f##*-}"; }; done; }   # the live keeper pids a records dir names
+wait_keeper() { local n=0 k; while :; do k=$(keepers "$1"); [ -n "$k" ] && [ "$k" != "${2:-}" ] && break; [ "$n" -lt 1500 ] || break; nap 0.002; n=$((n + 1)); done; keepers "$1"; }
 mdoc2 b1; : > "$CURL_REPLIES"; : > "$CURL_LOG"
 mkdir -p "$HOME/.claude-discord/scratch/mgr"; : > "$HOME/.claude-discord/scratch/mgr/f"
 (cd "$M2A" && CLAUDE_DISCORD_MONITOR_DIR=$OLDM bash "$S" monitor --start mgr >/dev/null 2>&1) || { echo "FAIL: fixture: the backend of mgr did not start at the old path"; exit 1; }
 wait_alerts "$OLDM" 'local|/home/u/ws/p|b1' || { echo "FAIL: fixture: the backend at the old path ran no pass: $(cat "$OLDM/monitor.log" 2>&1)"; exit 1; }
+# (M-1) A backend at the new path too, as a hook's revive_backends or a TUI starts one between the pull and the move.
+(cd "$M2A" && bash "$S" monitor --start mgr >/dev/null 2>&1) || { echo "FAIL: fixture: the backend of mgr did not start at the new path"; exit 1; }
+wait_mon "$NEWM" && NKP=$(wait_keeper "$NEWM") && [ -n "$NKP" ] || { echo "FAIL: fixture: no backend at the new path: $(ls -R "$NEWM" 2>&1)"; exit 1; }
 mdoc2 b1 b2
 rc=0; out=$(cd "$HOME" && bash "$S" compat 2>&1) || rc=$?
-[ "$rc" = 0 ] && [ ! -e "$OLDM" ] && [ -f "$NEWM/state.json" ] && wait_mon "$NEWM" && wait_alerts "$NEWM" 'local|/home/u/ws/p|b1 local|/home/u/ws/p|b2' && grep -qF "$NEWM" <<<"$out" ||
-  { echo "FAIL: the records move with the backend stopped and started: the lock and state.json at the new path, the alerts continuous, the next pass there (rc=$rc): $out / $(ls -R "$HOME/.claude-discord/records/monitor" 2>&1) / $(cat "$NEWM/monitor.log" "$OLDM/monitor.log" 2>&1 | tail -n 20)"; exit 1; }
+KP2=$(wait_keeper "$NEWM" "$NKP")
+[ "$rc" = 0 ] && [ ! -e "$OLDM" ] && [ -f "$NEWM/state.json" ] && wait_mon "$NEWM" && wait_alerts "$NEWM" 'local|/home/u/ws/p|b1 local|/home/u/ws/p|b2' && grep -qF "$NEWM" <<<"$out" &&
+  [ "$(wc -l <<<"$KP2")" = 1 ] && [ "$KP2" != "$NKP" ] && ! kill -0 "$NKP" 2>/dev/null && [ "$(ps -eo args= | command grep -c "[m]onitor/monitor.sh .* --locked mgr")" = 1 ] ||
+  { echo "FAIL: the records move with the backend stopped and started: the lock and state.json at the new path, the alerts continuous, the next pass there, and a backend started at the new path meanwhile stopped (one keeper, one monitor after; its holder gone) (rc=$rc): $out / keepers=$KP2 nkp=$NKP / $(ls -R "$HOME/.claude-discord/records/monitor" 2>&1) / $(cat "$NEWM/monitor.log" "$OLDM/monitor.log" 2>&1 | tail -n 20)"; exit 1; }
 [ -f "$HOME/.claude-discord/scratch/$KA/mgr/f" ] && [ "$(readlink "$HOME/.claude-discord/scratch/mgr")" = "$HOME/.claude-discord/scratch/$KA/mgr" ] ||
   { echo "FAIL: scratch/<bot> moves to scratch/<key>/<bot> with a link in its place: $out / $(ls -la "$HOME/.claude-discord/scratch" 2>&1)"; exit 1; }
 (cd "$M2A" && bash "$S" monitor --stop mgr >/dev/null 2>&1) || :
@@ -620,7 +631,7 @@ cp "$HOME/bin/claude" "$HOME/claude.keep"; printf '#!/bin/bash\ncase $1 in agent
 out=$(cd "$HOME" && bash "$S" compat 2>&1) || { echo "FAIL: compat failed: $out"; exit 1; }
 [ "$(readlink "$HOME/.claude-discord/scratch/mgr")" = "$HOME/.claude-discord/scratch/$KA/mgr" ] && [ -f "$HOME/.claude-discord/scratch/$KA/mgr/f" ] || { echo "FAIL: the scratch link stays (a session started before 1.18.1 may write there, and a listing cannot see every side): $out / $(ls -la "$HOME/.claude-discord/scratch" 2>&1)"; exit 1; }
 cp "$HOME/claude.keep" "$HOME/bin/claude"; rm -f "$HOME/claude.keep"
-echo "ok: compat moves a manager's records/monitor/<bot> to records/monitor/<key>/<bot> with the backend stopped before and started after (lock and state at the new path, the alerts continuous, the next pass there), and scratch/<bot> to scratch/<key>/<bot> behind a link that goes once no session of the bot runs"
+echo "ok: compat moves a manager's records/monitor/<bot> to records/monitor/<key>/<bot> with the backend stopped before and started after (lock and state at the new path, the alerts continuous, the next pass there; a backend started at the new path meanwhile stopped: one backend after), and scratch/<bot> to scratch/<key>/<bot> behind a link that stays"
 # The rollback: the backend at the old path again, a --keep that fails once at the new path.
 rm -rf "$NEWM"; mdoc2 b1
 (cd "$M2A" && CLAUDE_DISCORD_MONITOR_DIR=$OLDM bash "$S" monitor --start mgr >/dev/null 2>&1) || { echo "FAIL: fixture: the backend of mgr did not start at the old path again"; exit 1; }
@@ -632,9 +643,38 @@ rc=0; out=$(cd "$HOME" && bash "$S" compat 2>&1) || rc=$?
 rm -f "$HOME/bin/perl"
 (cd "$M2A" && CLAUDE_DISCORD_MONITOR_DIR=$OLDM bash "$S" monitor --stop mgr >/dev/null 2>&1) || :
 n=0; while mon_pid "$OLDM" >/dev/null && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done
-rm -rf "$OLDM" "$HOME/mon" "$HOME/pj.keep"; mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"
-unset CLAUDE_DISCORD_MONITOR_TICK CLAUDE_DISCORD_MONITOR_PASS CLAUDE_DISCORD_MONITOR_HOST_CAP CLAUDE_DISCORD_MONITOR_LOCK_WAIT
+rm -rf "$OLDM"
 echo "ok: a records move whose restart fails puts the records back at the old path and starts the backend there again; compat exits 1 and says why"
+# (I-1) The old path's lock held by a monitor this side cannot see (the other side of a shared home: its pid reads as
+# another process here, so --stop stops nothing): the records are not moved, no stopped marker is left, compat exits 1
+# naming where to run it.
+mkdir -p "$OLDM"; printf '{"version":1,"manager":"mgr","monitor":{},"hosts":{},"bots":{},"alerts":[]}\n' > "$OLDM/state.json"
+perl -MFcntl=:flock -e 'open(my $l, ">>", $ARGV[0]) or die; flock($l, LOCK_EX) or die; open(my $w, ">", $ARGV[0]) or die; print $w "$$\n"; close $w; sleep 30' "$OLDM/lock" & LP=$!
+KILL_AT_EXIT="$KILL_AT_EXIT $LP"; n=0; l=""; until [ "$l" = "$LP" ] || [ "$n" -ge 1000 ]; do nap 0.002; n=$((n + 1)); { read -r l < "$OLDM/lock"; } 2>/dev/null || :; done
+rc=0; out=$(cd "$HOME" && bash "$S" compat 2>&1) || rc=$?
+[ "$rc" = 1 ] && [ -f "$OLDM/state.json" ] && [ ! -e "$OLDM/stopped" ] && [ ! -e "$NEWM" ] && grep -q 'runs where this side cannot see it: run update there' <<<"$out" ||
+  { echo "FAIL: a backend this side cannot see (its lock held) is not moved, no stopped marker is left, compat exit 1 saying to run update there (rc=$rc): $out / $(ls -R "$HOME/.claude-discord/records/monitor" 2>&1)"; exit 1; }
+kill "$LP" 2>/dev/null || :; wait "$LP" 2>/dev/null || :; rm -rf "$OLDM"
+echo "ok: a backend whose lock this side cannot see is not moved: no stopped marker, compat exits 1 and says to run update where it runs"
+# (M-2) A manager whose project compat does not know (no key dir, no 1.16 line: never set up or started since 1.18.0):
+# its first start moves its records too, the backend stopped before and started after, and the start goes on.
+UNK="$HOME/unknown mgr"; UR="$UNK/.claude/discord-agents"; mkdir -p "$UR/umgr"
+printf 'DISCORD_BOT_TOKEN=tu\n' > "$UR/umgr/.env"; echo dev-manager > "$UR/umgr/mode"; printf '# ledger\nlocal\n' > "$UR/umgr/hosts"; echo '{}' > "$UR/umgr/access.json"
+printf "DISCORD_CHANNEL_ID='7'\nDISCORD_USER_ID='8'\nDISCORD_ALLOW_IDS=''\n" > "$UR/config.env"
+OLDU="$HOME/.claude-discord/records/monitor/umgr" NEWU="$HOME/.claude-discord/records/monitor/$(skey "$UNK")/umgr"
+mon_pid_u() { local l=""; { read -r l < "$1/lock"; } 2>/dev/null || :; case $l in ''|*[!0-9]*) return 1;; esac; [[ $(tr '\0' ' ' < "/proc/$l/cmdline" 2>/dev/null) == *"--locked umgr "* ]] && echo "$l"; }
+mdoc2 b1
+(cd "$UNK" && CLAUDE_DISCORD_MONITOR_DIR=$OLDU bash "$S" monitor --start umgr >/dev/null 2>&1) || { echo "FAIL: fixture: the backend of umgr did not start at the old path"; exit 1; }
+wait_alerts "$OLDU" 'local|/home/u/ws/p|b1' || { echo "FAIL: fixture: umgr's backend at the old path ran no pass: $(cat "$OLDU/monitor.log" 2>&1)"; exit 1; }
+out=$(cd "$UNK" && bash "$S" --name umgr 2>&1) || :
+n=0; while ! mon_pid_u "$NEWU" >/dev/null && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done
+grep -qF -- "\"DISCORD_STATE_DIR\": \"$HOME/.claude-discord/projects/$(skey "$UNK")/bots/umgr\"" <<<"$out" && [ ! -e "$OLDU" ] && [ "$(alerts "$NEWU")" = 'local|/home/u/ws/p|b1' ] && mon_pid_u "$NEWU" >/dev/null && grep -qF "$NEWU" <<<"$out" ||
+  { echo "FAIL: a start in a project compat never saw moves a manager's old-path records (backend stopped and started) and launches: $out / $(ls -R "$HOME/.claude-discord/records/monitor" 2>&1)"; exit 1; }
+(cd "$UNK" && bash "$S" monitor --stop umgr >/dev/null 2>&1) || :
+n=0; while mon_pid_u "$NEWU" >/dev/null && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done
+rm -rf "$UNK" "$HOME/mon" "$HOME/pj.keep"; mv "$HOME/shim.real" "$HOME/.local/bin/claude-discord"
+unset CLAUDE_DISCORD_MONITOR_TICK CLAUDE_DISCORD_MONITOR_PASS CLAUDE_DISCORD_MONITOR_HOST_CAP CLAUDE_DISCORD_MONITOR_LOCK_WAIT
+echo "ok: a manager's first start in a project compat never saw moves its old-path records with the backend stopped and started, then launches"
 
 # (g) records/projects retires: compat reads the union of the file and projects/*/project, and renames the file to
 # records/projects.1.16 only once every line of it has a key dir; health --all, tui and the monitor verbs walk

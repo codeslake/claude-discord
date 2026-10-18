@@ -572,6 +572,12 @@ if [ ! -f "$dir/.env" ] || [ ! -f "$proj_state/config.env" ]; then
   exit 1
 fi
 . "$proj_state/config.env"
+# A manager's backend records still at records/monitor/<bot> (keyed by the project since 1.18.1): a project compat never
+# saw (no key dir and no 1.16 line at the update) moves them at its manager's first start, as compat does (the backend
+# stopped and started; state.sh move_backend). A failure is said there and the bot starts anyway. Builtins for a bot
+# that is no manager.
+mb_mode=""; { read -r mb_mode < "$dir/mode"; } 2>/dev/null || :
+[ "$mb_mode" != dev-manager ] || [ ! -f "$dir/hosts" ] || move_backend "$project_dir" "$name" || :
 
 # Everything that can refuse the start comes before anything is written (the
 # handoff below is consumed, so a refusal after it would lose it).

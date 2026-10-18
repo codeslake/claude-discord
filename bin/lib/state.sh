@@ -173,6 +173,46 @@ move_scratch() {
     echo "claude-discord: $n's scratch moved to $helpers/scratch/$pd_key/$n ($s a link to it while a session started before 1.18.1 may write there)"
   done
 }
+# move_backend <project, physical path> <bot>: a manager's records/monitor/<bot> (before 1.18.1) -> records/monitor/
+# <key>/<bot>, the backend stopped before and started after, as bot rename does it. Run by compat for each manager, and
+# by a manager's start (a project compat never saw: no key dir and no 1.16 line at its update). The backend that runs
+# is the one started before the update, on the old path (monitor.sh keys by the key only since 1.18.1):
+# CLAUDE_DISCORD_MONITOR_DIR names that path for its --stop, and for the --start that puts it back. A backend at the
+# new path too (a hook's revive_backends or a TUI started one since the update: its own keeper and monitor, no
+# history) is stopped as well and its records replaced by the old path's: one backend after. A backend its owner had
+# stopped (the `stopped` marker, at either path) stays stopped. The old path's lock still held after the --stop is a
+# monitor this side cannot see (the other side of a shared home: --stop reads its pid as another process here): not
+# moved, the marker --stop wrote taken back, said where to run the update, 1. A start at the new path that fails rolls
+# back: the records go back and the backend starts at the old path again (a move never leaves it down); 1 then too.
+move_backend() {
+  local p=$1 b=$2 old=$helpers/records/monitor/$2 new was_stopped="" mon=${BASH_SOURCE[0]%/*}/../../monitor/monitor.sh
+  proj_dirs "$p"; new=$helpers/records/monitor/$pd_key/$b
+  [ -d "$old" ] && [ ! -L "$old" ] || return 0
+  # The old path is one per NAME: records put back by a rollback are not a second project's (a same-named manager, set
+  # up since 1.18.1) to take in the same run.
+  case ${mb_seen:-} in *" $b "*) return 0;; esac; mb_seen="${mb_seen:-} $b "
+  [ ! -e "$old/stopped" ] && [ ! -e "$new/stopped" ] || was_stopped=1
+  [ ! -e "$new" ] || (cd "$p" && bash "$mon" "$self_path" --stop "$b" </dev/null >/dev/null 2>&1) || :
+  (cd "$p" && CLAUDE_DISCORD_MONITOR_DIR=$old bash "$mon" "$self_path" --stop "$b" </dev/null >/dev/null 2>&1) || :
+  if [ -e "$old/lock" ] && ! perl -MFcntl=:flock -e 'open(my $l, ">>", $ARGV[0]) or exit 1; exit(flock($l, LOCK_EX | LOCK_NB) ? 0 : 1)' "$old/lock"; then
+    [ -n "$was_stopped" ] || rm -f "$old/stopped"
+    echo "claude-discord: $b's backend records stay at $old: its backend runs where this side cannot see it: run update there" >&2
+    return 1
+  fi
+  if ! { mkdir -p "${new%/*}" && rm -rf "${new:?}" && pmv "$old" "$new"; }; then
+    echo "claude-discord: $old could not be moved to $new: left there" >&2
+    [ -n "$was_stopped" ] || (cd "$p" && CLAUDE_DISCORD_MONITOR_DIR=$old bash "$mon" "$self_path" --start "$b" </dev/null >/dev/null 2>&1) || :
+    return 1
+  fi
+  if [ -n "$was_stopped" ]; then echo "claude-discord: $b's backend records moved to $new (its backend stays stopped, as its owner left it)"; return 0; fi
+  if (cd "$p" && bash "$mon" "$self_path" --start "$b" </dev/null >/dev/null 2>&1); then
+    echo "claude-discord: $b's backend records moved to $new; its backend started again there"; return 0
+  fi
+  pmv "$new" "$old" || :
+  (cd "$p" && CLAUDE_DISCORD_MONITOR_DIR=$old bash "$mon" "$self_path" --start "$b" </dev/null >/dev/null 2>&1) || :
+  echo "claude-discord: $b's backend did not start at $new: its records are back at $old and its backend started again there (the next update moves them again)" >&2
+  return 1
+}
 # unlink_old <project, physical path> [say]: each link <project>/.claude/discord-agents/<bot> the move left goes once no
 # ${CLAUDE_CONFIG_DIR:-~/.claude}/jobs/*/state.json names a path ending in /.claude/discord-agents/<bot> (a respawn, a
 # daemon restart or a fleet claim comes back on the frozen path; a stopped job keeps its record, and so the link, until
@@ -185,6 +225,7 @@ move_scratch() {
 unlink_old() {
   local src=$1/.claude/discord-agents b n j live fg rest="" jobs="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/jobs"
   [ -d "$src" ] && [ ! -L "$src" ] || return 0
+  proj_dirs "$1"
   if [ -n "$pd_new" ]; then
     for b in "$pd_root"/*/; do
       b=${b%/}; n=${b##*/}
@@ -225,7 +266,6 @@ unlink_old() {
 # The marker sweep. A hook leaves a file per session: <bot dir>/plugin-sessions/<sid> (plugin_gate), turns/<sid> and
 # turns/<sid>.{replied,primed,pending} (the turn hooks), and the project's checkin/<sid> (on-reply). Nothing removed a
 # session's files once the session was gone, and every `claude -p` run from a bot's Bash left one more (633 in one bot
-  proj_dirs "$1"
 # dir, 2026-10-16). A file goes when `claude agents --json --all` lists no row whose sessionId or id is the name's part
 # before its first dot; stopped and done rows are listed, so theirs stay (no guess at liveness). Only in a bot dir this
 # daemon can see, one the listing names by the bot's name or its pinned job: the other side of a shared home (a
