@@ -605,11 +605,11 @@ printf '#!/bin/bash\ncat "$HOME/mon/local.out"\n' > "$HOME/.local/bin/claude-dis
 mdoc2() { local b bots=""; for b in "$@"; do bots="$bots${bots:+,}{\"bot\":\"$b\",\"verdict\":\"stale\",\"detail\":\"why stale\",\"owner_id\":\"222\",\"servers\":\"1\"}"; done; printf '{"host":"h1","version":"1.18.1 (abc1234)","home":"/home/u","patch":{"rc":0,"output":""},"projects":[{"project":"/home/u/ws/p","bots":[%s]}]}\n' "$bots" > "$HOME/mon/local.out"; }
 OLDM="$HOME/.claude-discord/records/monitor/mgr" NEWM="$HOME/.claude-discord/records/monitor/$KA/mgr"
 alerts() { jq -r '[.alerts[] | .key] | join(" ")' "$1/state.json" 2>/dev/null || :; }
-wait_alerts() { local n=0; while [ "$(alerts "$1")" != "$2" ] && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done; [ "$(alerts "$1")" = "$2" ]; }
+wait_alerts() { local n=0; while [ "$(alerts "$1")" != "$2" ] && [ "$n" -lt 7500 ]; do nap 0.002; n=$((n + 1)); done; [ "$(alerts "$1")" = "$2" ]; }
 mon_pid() { local l=""; { read -r l < "$1/lock"; } 2>/dev/null || :; case $l in ''|*[!0-9]*) return 1;; esac; [[ $(tr '\0' ' ' < "/proc/$l/cmdline" 2>/dev/null) == *"--locked mgr "* ]] && echo "$l"; }
-wait_mon() { local n=0; while ! mon_pid "$1" >/dev/null && [ "$n" -lt 1500 ]; do nap 0.002; n=$((n + 1)); done; mon_pid "$1" >/dev/null; }
+wait_mon() { local n=0; while ! mon_pid "$1" >/dev/null && [ "$n" -lt 7500 ]; do nap 0.002; n=$((n + 1)); done; mon_pid "$1" >/dev/null; }
 keepers() { local f; for f in "$1"/holders/keeper-*; do [ ! -f "$f" ] || { kill -0 "${f##*-}" 2>/dev/null && echo "${f##*-}"; }; done; }   # the live keeper pids a records dir names
-wait_keeper() { local n=0 k; while :; do k=$(keepers "$1"); [ -n "$k" ] && [ "$k" != "${2:-}" ] && break; [ "$n" -lt 1500 ] || break; nap 0.002; n=$((n + 1)); done; keepers "$1"; }
+wait_keeper() { local n=0 k; while :; do k=$(keepers "$1"); [ -n "$k" ] && [ "$k" != "${2:-}" ] && break; [ "$n" -lt 7500 ] || break; nap 0.002; n=$((n + 1)); done; keepers "$1"; }
 mdoc2 b1; : > "$CURL_REPLIES"; : > "$CURL_LOG"
 mkdir -p "$HOME/.claude-discord/scratch/mgr"; : > "$HOME/.claude-discord/scratch/mgr/f"
 (cd "$M2A" && CLAUDE_DISCORD_MONITOR_DIR=$OLDM bash "$S" monitor --start mgr >/dev/null 2>&1) || { echo "FAIL: fixture: the backend of mgr did not start at the old path"; exit 1; }
