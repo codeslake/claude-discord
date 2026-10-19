@@ -2789,6 +2789,18 @@ queue "200 $NONE" "200 {\"threads\":[{\"id\":\"35\",\"parent_id\":\"900\",\"last
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(verdict_of sbot "$out")" = stale ] || { echo "FAIL: the bot's later message in a DIFFERENT thread must not clear a stuck one: $out"; exit 1; }
 echo "ok: stale is cleared by the bot's own later message in the same chat, not by one in another thread; an unreadable delivered does not abort health"
+# 1.18.3: a message the bot itself reacted to with the Stop hook's marks (☑️ read-no-reply, ✅ answered) is handled, even
+# when it never reached the session (a project hook that drops a Discord prompt and marks it, the cswap/modhub case of
+# 2026-10-19): read from the page's reactions[] (.me), no extra API call. Another account's ☑️ counts for nothing.
+MINE_TICK="[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"111\"},\"mentions\":[{\"id\":\"777\"}],\"reactions\":[{\"emoji\":{\"name\":\"👀\"},\"me\":true},{\"emoji\":{\"name\":\"☑️\"},\"me\":true}]}]"
+THEIR_TICK="[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"111\"},\"mentions\":[{\"id\":\"777\"}],\"reactions\":[{\"emoji\":{\"name\":\"☑️\"},\"me\":false,\"count\":1}]}]"
+queue "200 $MINE_TICK" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = ok ] || { echo "FAIL: a message the bot itself marked ☑️ or ✅ is handled (a prompt-dropping hook's mark), not stale: $out"; exit 1; }
+queue "200 $THEIR_TICK" '200 {"threads":[]}'
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = stale ] || { echo "FAIL: another account's ☑️ on the message does not count as handled: $out"; exit 1; }
+echo "ok: a message carrying the bot's own ☑️ or ✅ reaction is handled; someone else's is not"
 rm -f "$SD/delivered"; echo "$ID_SEEN" > "$SD/last-message-id"
 echo "ok: stale needs a message never delivered to the session: delivered-and-unanswered is ok (dong-dev-bot's 62-min case too), undelivered in one thread while another is answered is stale"
 # macOS has no /proc: the servers are counted from ps, argv first (ps -axww: bun, a .../discord/ argument, last word

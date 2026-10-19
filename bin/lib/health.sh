@@ -333,7 +333,10 @@ if [ "${1:-}" = health ]; then
   # message, so the message was handled even if no delivered line says so (a
   # catch-up after a refresh gap or a down bot). The bot's reply in ANOTHER
   # thread is a different page and clears nothing: one stuck thread still alerts.
-  addressed_ids() {  # $1 = messages JSON; ids newer than $floor, not in $delivered, no later bot message here; oldest first
+  # addressed_ids: $1 = messages JSON; ids newer than $floor, not in $delivered, no later bot message here, and not
+  # carrying the bot's own ☑️ or ✅ reaction (1.18.3: the Stop hook's marks; a project hook that drops a Discord prompt
+  # before the session sees it marks the message ☑️ itself, README); oldest first.
+  addressed_ids() {
     printf '%s' "$1" | jq -r --arg me "$me" --argjson allow "$allow" \
       --argjson mention "$mention" --arg seen "$floor" --arg delivered "$delivered" '
       ($delivered | split("\n")) as $dl |
@@ -346,6 +349,7 @@ if [ "${1:-}" = health ]; then
           | select($mention == false
                    or ((.mentions // []) | any((.id? // "") == $me))
                    or ((.referenced_message.author.id? // "") == $me))
+          | select((.reactions // []) | any((.me? == true) and ((.emoji.name? // "") | IN("☑️", "✅"))) | not)
           | .id
           | select(type == "string" and test("^[0-9]{17,20}$"))
           | select((. | length) > ($seen | length)

@@ -1148,6 +1148,11 @@ session received the message, not that it answered. A mention that asks
 nothing gets no reply by rule, and a turn may take an hour; neither is a
 fault. Any later message the bot posted in the same chat also clears it, so a
 message lost in a refresh and then answered by the catch-up stops counting.
+So does the bot's own ☑️ or ✅ on the message (1.18.3; read from the page's
+`reactions`, no extra call): the Stop hook puts them on every delivered
+message, and **a project hook that drops a Discord prompt before the session
+sees it must react ☑️ on that message itself**, or `health` reads it as
+unanswered for ever (a cswap hook did, 2026-10-19).
 A message stuck in one thread still reads `stale` while the bot answers
 in another, which `last-message-id` alone could not see. A bot whose hooks
 have not run since 1.10.0 has no `delivered` yet and is judged by
