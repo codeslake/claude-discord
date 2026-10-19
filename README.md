@@ -156,7 +156,7 @@ The hook scripts and tools run from the clone on disk, so a running bot uses the
 new ones at its next hook call. What waits for `/reload-plugins` is the plugin's
 manifest and `hooks/hooks.json` (which hooks are registered) and, in a bot, the
 session prompt (`claude-discord refresh <bot>`); a bot runs `/reload-plugins`
-through the self-reload skill. `~/.claude-discord/runtime/` holds the
+through the self-reload skill, which the plugin ships (`skills/self-reload`, 1.18.5; without it: type `/reload-plugins` in that session, or `claude-discord bot <bot> recover` from another shell). `~/.claude-discord/runtime/` holds the
 two runtime files the patched official plugin imports (`discord-chunk.ts`,
 `discord-proxy.ts`), copied there from the clone by `setup` and `update`, because
 the official plugin's cache is machine-wide while clones are per project.
@@ -178,7 +178,7 @@ On each machine, once:
    It removes nothing from the project: the old settings hook entries and the
    `.claude/rules/claude-discord-*.md` file keep the bot working until the
    plugin's hooks run.
-2. Run `/reload-plugins` in each running bot (the self-reload skill). On the
+2. Run `/reload-plugins` in each running bot (the plugin's self-reload skill, or type it there; or `claude-discord bot <bot> recover` from another shell). On the
    plugin's first hook run in that session, it records the session
    (`<bot dir>/plugin-sessions/<session id>`) and removes this project's own old
    entries from `.claude/settings.json` and `.claude/settings.local.json` (each

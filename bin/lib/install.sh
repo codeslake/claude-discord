@@ -583,6 +583,6 @@ if [ "${1:-}" = update ]; then
   cmp -s "$new/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
     install -m 755 "$new/shim/claude-discord" "$HOME/.local/bin/claude-discord" ||
     { echo "claude-discord: could not install the shim from $new" >&2; rc=1; }
-  echo "claude-discord: run /reload-plugins in running sessions (a bot: the self-reload skill)"
+  echo "claude-discord: run /reload-plugins in running sessions (a bot: the plugin's self-reload skill; by hand: type /reload-plugins in that session, or claude-discord bot <bot> recover from another shell)"
   exit "$rc"
 fi

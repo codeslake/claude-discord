@@ -322,6 +322,10 @@ rm -rf "$HOME/.claude-discord/runtime"; echo stale > "$HOME/.local/bin/claude-di
 out=$(cd "$UP" && bash "$C/bin/claude-discord" update 2>&1) || { echo "FAIL: update failed: $out"; exit 1; }
 grep -q PATCH-CODE-V2 <<<"$out" || { echo "FAIL: update must run the patch step from the code it just pulled: $out"; exit 1; }
 grep -q -- '-> 9.9.9' <<<"$out" && grep -q '/reload-plugins' <<<"$out" && [ "$(grep -c -- "$PC" <<<"$out")" = 1 ] || { echo "FAIL: update must pull the source behind the link once and ask for /reload-plugins: $out"; exit 1; }
+# 1.18.5: the advice works on a machine without the owner's dotfiles: the self-reload skill ships in the plugin
+# (skills/self-reload, SKILL.md + scripts/self_cmd.py executable) and the line also names the no-skill ways.
+[ -f "$PC/skills/self-reload/SKILL.md" ] && [ -x "$PC/skills/self-reload/scripts/self_cmd.py" ] || { echo "FAIL: the plugin ships the self-reload skill (skills/self-reload/SKILL.md, scripts/self_cmd.py executable): $(ls -R "$PC/skills" 2>&1 | head -5)"; exit 1; }
+grep -q "run /reload-plugins in running sessions (a bot: the plugin's self-reload skill; by hand: type /reload-plugins in that session, or claude-discord bot <bot> recover from another shell)" <<<"$out" || { echo "FAIL: update's last line names the shipped skill and the by-hand ways: $out"; exit 1; }
 [ "$(jq -r .version "$PC/.claude-plugin/plugin.json")" = 9.9.9 ] && [ "$(jq -r .version "$CC/.claude-plugin/plugin.json")" != 9.9.9 ] || { echo "FAIL: update must pull the source and only the source"; exit 1; }
 [ -s "$HOME/.claude-discord/runtime/discord-chunk.ts" ] && [ -s "$HOME/.claude-discord/runtime/discord-proxy.ts" ] && cmp -s "$D/shim/claude-discord" "$HOME/.local/bin/claude-discord" || { echo "FAIL: update must refill the runtime copy and refresh the shim"; exit 1; }
 # --all: every recorded link and the clone, the source pulled once, a project removed since setup pruned, live records kept.
