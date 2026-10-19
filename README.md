@@ -239,6 +239,7 @@ claude-discord --name alpha --resume my-bot  # a session NAME or a short id also
                                       # (the positional "claude-discord alpha" still works and warns; a live session is not resumed, use refresh)
 claude-discord setup alpha --reset    # forget alpha's token and policy AND the shared IDs; ask everything again
 claude-discord setup alpha --mode     # change only alpha's mode (and, for dev-manager, its peers); needs alpha already set up
+claude-discord setup --help           # the usage line (1.18.4): a bot's name never starts with -, so an option is never read as one
 claude-discord refresh alpha          # replace the running session with a fresh one, from its handoff
 claude-discord health                 # is every bot in this project still answering? see below
 claude-discord tui [<manager>]        # the manager bot's monitor, its hosts and its bots' access, from any directory; see The monitor and the TUI
