@@ -144,6 +144,19 @@ rc=$?
 [ "$rc" -eq 2 ] && grep -qF "run 'claude-discord setup nosetup' first" <<<"$out" || { echo "FAIL: --mode on an unset bot must exit 2 with a hint, got rc=$rc: $out"; exit 1; }
 [ ! -e "$HOME/.claude-discord/projects/$(skey "$P5")" ] && [ ! -e "$P5/.claude/discord-agents" ] || { echo "FAIL: --mode on an unset bot must create nothing (no key dir, bot dir or config.env): $(find "$HOME/.claude-discord/projects/$(skey "$P5")" "$P5/.claude" 2>&1)"; exit 1; }
 echo "ok: --mode on a bot that is not set up exits 2 with a hint and creates nothing"
+# 1.18.4 (the peer's pmac report): `setup --help` read --help as the bot's name, installed, made the key dir and waited
+# at the token prompt. --help/-h print the usage line; a name starting with - is refused (exit 2) before anything is
+# installed or made, by setup and by a launch alike.
+for a in --help -h; do
+  rc=0; out=$(printf '' | bash "$S" setup $a 2>&1) || rc=$?
+  [ "$rc" = 2 ] && [ "$out" = "usage: claude-discord setup <name> [--scope project|global] [--method link|clone] [--reset|--mode]" ] || { echo "FAIL: setup $a prints the usage line, exit 2: rc=$rc $out"; exit 1; }
+done
+rc=0; out=$(printf '' | bash "$S" setup -x 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -q "bot name must be a plain directory name" <<<"$out" || { echo "FAIL: setup refuses a name starting with -, exit 2: rc=$rc $out"; exit 1; }
+rc=0; out=$(bash "$S" --name -x 2>&1) || rc=$?
+[ "$rc" = 2 ] && grep -q "bot name must be a plain directory name" <<<"$out" || { echo "FAIL: a launch refuses a name starting with -, exit 2: rc=$rc $out"; exit 1; }
+[ ! -e "$HOME/.claude-discord/projects/$(skey "$P5")" ] && [ ! -e "$P5/.claude" ] && [ ! -e "$HOME/.claude-discord/projects/$(skey "$P5")/bots/--help" ] || { echo "FAIL: setup --help, -h and -x must create nothing: $(find "$HOME/.claude-discord/projects/$(skey "$P5")" "$P5/.claude" 2>&1 | head -5)"; exit 1; }
+echo "ok: setup --help and -h print the usage line; a bot name starting with - is refused by setup and by a launch before anything is made"
 
 printf '\n1\n222\n\ntokF\nn\n' | bash "$S" setup five --scope project >/dev/null   # mode kept at its default, none
 cp "$R5/five/.env" "$P5/five.env.before"; cp "$R5/five/access.json" "$P5/five.access.before"

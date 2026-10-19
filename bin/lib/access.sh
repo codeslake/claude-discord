@@ -45,7 +45,7 @@ if [ "${1:-}" = access ]; then
   done
   [ $# -ge 2 ] || { echo "$a_usage" >&2; exit 2; }
   bot=$1 act=$2; shift 2
-  case $bot in ''|.|..|*/*) echo "claude-discord: access: the bot's name must be a plain directory name" >&2; exit 2;; esac
+  case $bot in ''|.|..|*/*|-*) echo "claude-discord: access: the bot's name must be a plain directory name" >&2; exit 2;; esac
   case $act in
     --json) [ $# = 0 ] || { echo "$a_usage" >&2; exit 2; };;
     set)

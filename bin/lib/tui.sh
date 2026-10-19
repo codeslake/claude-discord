@@ -60,7 +60,7 @@ if [ "${1:-}" = tui ]; then
       read -rp "Manager bot: " bot || bot=""
     fi
   fi
-  case $bot in ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$bot'" >&2; exit 2;; esac
+  case $bot in ''|.|..|*/*|-*) echo "claude-discord: bot name must be a plain directory name, got '$bot'" >&2; exit 2;; esac
   [ -f "$root/$bot/hosts" ] || { echo "claude-discord: tui: $root/$bot has no hosts ledger (claude-discord setup $bot --mode writes one)" >&2; exit 1; }
   uv=${CLAUDE_DISCORD_UV:-uv}
   command -v "$uv" >/dev/null 2>&1 || { echo "claude-discord: tui needs uv (https://docs.astral.sh/uv/); nothing else in claude-discord does" >&2; exit 1; }

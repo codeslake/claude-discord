@@ -50,7 +50,7 @@ if [ "${1:-}" = bot ]; then
   bot=$1 act=${2:-} new="" b_mode=none b_start="" b_fresh=""; shift
   [ "$bot" != add ] || act=add
   [ $# = 0 ] || [ "$act" = add ] || shift
-  case $bot in ''|.|..|*/*) echo "claude-discord: bot: the bot's name must be a plain directory name" >&2; exit 2;; esac
+  case $bot in ''|.|..|*/*|-*) echo "claude-discord: bot: the bot's name must be a plain directory name" >&2; exit 2;; esac
   case $act in
     add)
       while [ $# -gt 0 ]; do

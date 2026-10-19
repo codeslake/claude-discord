@@ -563,7 +563,7 @@ if [ -z "$name" ]; then
   esac
 fi
 case $name in
-  ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
+  ''|.|..|*/*|-*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
   hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
 esac
 dir=$root/$name

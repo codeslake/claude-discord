@@ -30,7 +30,7 @@ if [ "${1:-}" = refresh ]; then
     proj_cwd; root=$pd_root
   fi
   [ -n "$name" ] || { echo "usage: claude-discord refresh <name> [--force] [claude args]" >&2; exit 2; }
-  case $name in ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;; esac
+  case $name in ''|.|..|*/*|-*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;; esac
   dir=$root/$name
   [ -f "$dir/.env" ] || { echo "claude-discord: no bot '$name' under $root" >&2; exit 1; }
   if [ "$force" = no ] && [ ! -s "$dir/handoff.md" ]; then

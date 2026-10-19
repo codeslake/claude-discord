@@ -371,7 +371,7 @@ if [ "${1:-}" = install ]; then
   exit 0
 fi
 if [ "${1:-}" = setup ]; then
-  [ -n "${2:-}" ] || { echo "usage: claude-discord setup <name> [--scope project|global] [--method link|clone] [--reset|--mode]" >&2; exit 2; }
+  case ${2:-} in ''|--help|-h) echo "usage: claude-discord setup <name> [--scope project|global] [--method link|clone] [--reset|--mode]" >&2; exit 2;; esac
   name=$2
   # --scope and --method may sit anywhere after the name; the rest keeps its place so ${3:-} still sees --reset/--mode.
   parse_install_flags "${@:3}"
@@ -380,7 +380,7 @@ if [ "${1:-}" = setup ]; then
   [ -z "${CLAUDE_DISCORD_SETUP_NOASK:-}" ] || noask=1
   set -- "$1" "$2" ${rest[@]+"${rest[@]}"}
   case $name in
-    ''|.|..|*/*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;
+    ''|.|..|*/*|-*) echo "claude-discord: bot name must be a plain directory name, got '$name'" >&2; exit 2;;   # -*: an option read as a name (1.18.4: `setup --help` once installed and asked for a token)
     hooks|checkin) echo "claude-discord: bot name '$name' is reserved for the $name directory" >&2; exit 2;;
   esac
   ! reserved_name "$name" || { echo "claude-discord: bot name '$name' is reserved: 'claude-discord ${name/#add/bot add}' is a subcommand" >&2; exit 2; }
