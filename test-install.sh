@@ -75,7 +75,7 @@ out=$(bash "$S" patch 2>&1) && grep -qF "$PCACHE/0.0.3/server.ts" <<<"$out" && !
   [ "$(grep -c 'no token yet; waiting for it' "$PCACHE/0.0.3/server.ts")" = 1 ] && [ "$(grep -c 'process.exit(1)' "$PCACHE/0.0.3/server.ts")" = 1 ] || { echo "FAIL: patch must upgrade a 1.9.3 login to the refused-token loop: $out $(<"$PCACHE/0.0.3/server.ts")"; exit 1; }
 grep -qF "$PCACHE/0.0.2/server.ts" <<<"$out" && ! grep -qF 'return await client.login(t)' "$PCACHE/0.0.2/server.ts" && [ "$(grep -c 'client.on("shardDisconnect", f)' "$PCACHE/0.0.2/server.ts")" = 1 ] &&
   [ "$(grep -c 'code !== "TokenInvalid"' "$PCACHE/0.0.2/server.ts")" = 1 ] && grep -qF '})().catch(err => {' "$PCACHE/0.0.2/server.ts" || { echo "FAIL: patch must upgrade a 1.9.4 login to the one that waits out a 4004 too: $out $(<"$PCACHE/0.0.2/server.ts")"; exit 1; }
-grep -qF "$PCACHE/0.0.8/server.ts" <<<"$out" && ! grep -qF 'TokenInvalid") throw e;' "$PCACHE/0.0.8/server.ts" && [ "$(grep -c 'retrying in 10 s' "$PCACHE/0.0.8/server.ts")" = 1 ] &&
+grep -qF "$PCACHE/0.0.8/server.ts" <<<"$out" && ! grep -qF 'TokenInvalid") throw e;' "$PCACHE/0.0.8/server.ts" && [ "$(grep -c 'login failed (' "$PCACHE/0.0.8/server.ts")" = 1 ] &&
   [ "$(grep -c 'code !== "TokenInvalid"' "$PCACHE/0.0.8/server.ts")" = 1 ] && grep -qF '})().catch(err => {' "$PCACHE/0.0.8/server.ts" || { echo "FAIL: patch must upgrade a 1.14-1.19 login to the one that retries any other login error: $out $(<"$PCACHE/0.0.8/server.ts")"; exit 1; }
 out=$(bash "$S" patch 2>&1) && [ -z "$out" ] || { echo "FAIL: a second patch after the 1.9.3 and 1.9.4 upgrades must change nothing: $out"; exit 1; }
 rm -rf "$PCACHE/0.0.3" "$PCACHE/0.0.2" "$PCACHE/0.0.8"
