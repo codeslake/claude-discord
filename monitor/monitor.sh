@@ -583,7 +583,7 @@ run_cmd() {
 # "R<key US host US subject US remote command US project US bot>".
 reduce='
 def hold: {"down": 300, "duplicate": 300, "unreachable": 300, "throttled": 1800, "apierror": 1800,
-           "stale": 0, "nostate": 0, "patchfail": 0, "hostdown": 1800, "blind": 300, "stale-session": 0};
+           "stale": 0, "nostate": 0, "patchfail": 0, "hostdown": 1800, "blind": 300, "stale-session": 0, "held": 300};
 def good: . == "ok" or . == "busy";
 def short($home): if $home != "" and startswith($home + "/") then "~" + .[($home | length):] else . end;
 # A path with anything but plain characters goes in double quotes, with what the shell would still expand escaped.
@@ -654,10 +654,17 @@ def observe($v; $d; $meta): (. // {}) as $o
 # token or channel) is not a finding. (No apostrophe in these comments: the program is one single-quoted string.)
 def warn_only: .verdict != "unknown" and (hold[.verdict] == null or hold[.verdict] >= 1800 or (.verdict == "hostdown" and .laptop == true));
 def due:
-  # held (1.19.1, bot <bot> hold): what was posted is closed, as by a recovery, with a line of its own. A hold the
-  # SessionEnd hook inferred (1.19.4: its detail starts "its session ended") is said once, with no mention.
-  if ((.verdict | good) or (.verdict == "held" and .posted != "held")) and (.posted // null) != null then "recovery"
-  elif .verdict == "held" then (if (.detail // "" | startswith("its session ended")) and (.posted // null) == null then "finding" else null end)
+  # held (1.19.1, bot <bot> hold): what was posted is closed, as by a recovery, with a line of its own; a hold the
+  # SessionEnd hook inferred (1.19.4: its detail starts "its session ended") is said once, with no mention. Either only
+  # once it has held a whole hold (5 min): the SessionEnd of a respawn holds the bot for the seconds until its SessionStart,
+  # and a pass in between would post [held] and then [recovered]. Once said, `posted` is "held" (apply), so neither
+  # line comes twice.
+  if (.verdict | good) and (.posted // null) != null then "recovery"
+  elif .verdict == "held" then
+    (if ($now_s - .since_s) < hold["held"] then null
+     elif (.posted // null) != null and .posted != "held" then "recovery"
+     elif (.posted // null) == null and (.detail // "" | startswith("its session ended")) then "finding"
+     else null end)
   elif hold[.verdict] != null and ((.verdict == "hostdown" and .laptop == true) | not)
        and (.posted // null) != .verdict and ($now_s - .since_s) >= hold[.verdict] then "finding"
   else null end;
@@ -820,6 +827,8 @@ apply='
     | (if $r.kind == "recover" then .[$r.scope][$r.key] |= (. + {recover_s: $now_s, recover_rc: $r.rc})
        elif $r.status != "sent" then .
        elif $r.kind == "finding" then .[$r.scope][$r.key] |= (. + {posted: .verdict, posted_at: $now, posted_since_s: .since_s})
+       # A [down] closed by [held] (1.19.4): `posted` becomes held, so the inferred-hold line is not said after it.
+       elif ($e.verdict // "") == "held" then .[$r.scope][$r.key] |= (. + {posted: "held", posted_at: $now, posted_since_s: .since_s})
        else .[$r.scope][$r.key] |= del(.posted, .posted_at, .posted_since_s) end)
     | if $r.status == "failed" and $prev.status == "failed" and $prev.kind == $r.kind and $prev.verdict == $r.verdict then .
       else .alerts += [{ts: $now, key: $ak, kind: $r.kind, verdict: $r.verdict, status: $r.status,

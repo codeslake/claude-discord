@@ -1652,7 +1652,9 @@ bot, Ctrl-C and `/exit` only detach it), known by the daemon's `bg settled <job>
 (killed)` line just before; never a reboot, a `docker stop` or the daemon's idle
 retire, which are recovered as before; the monitor says it once, `[held] <bot> on
 <host> (<project>): its session ended (SessionEnd other, no daemon retire
-logged): ...`, with no mention, so a wrong call is seen.
+logged): ...`, with no mention, so a wrong call is seen. Both `[held]` lines
+wait until the bot has been held 5 minutes (a respawn holds it for the seconds
+between its old session's end and its new one's start) and come once.
 `MONITOR_RECOVER=no` in the manager project's `config.env` turns it all off;
 the `[down]` and its fix line are posted as before.
 The TUI's Alerts tab shows each run as `↻ recover` (exit 0) or `↻ recover

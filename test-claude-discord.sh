@@ -5116,18 +5116,20 @@ rs=$(jq -c --arg mp "$MPP" '[.bots["h1|/home/u/ws/p|rv"].recover_rc, .bots["loca
   [ "$rs" = '[0,0,true,"stale-session",["exit 0","exit 0"]]' ] ||
   { echo "FAIL: a posted down is recovered next pass (ssh and local), a duplicate, one recovered within 30 minutes, a frozen host and the manager itself are not, and a stale session is posted with its job: $R1 / $rs / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }
 # hd, posted down, is held now (bot hd hold, 1.19.1): its [down] is closed by a [held] line, and nothing recovers it.
-# he is held by its SessionEnd (1.19.4): said once, with no mention.
-echo "MONITOR_RECOVER=no" >> "$MCFG"; RX=(hd:held he:held)
-rdoc '.projects[0].bots |= map(if .bot == "he" then .detail = "its session ended (SessionEnd other, no daemon retire logged): held" else . end)'
+# he is held by its SessionEnd (1.19.4): said once, with no mention. Both only once held a whole hold (5 min): hx, held
+# by its SessionEnd just now (a respawn's seconds between SessionEnd and SessionStart), is not said.
+echo "MONITOR_RECOVER=no" >> "$MCFG"; RX=(hd:held he:held hx:held)
+rdoc '.projects[0].bots |= map(if .bot == "he" or .bot == "hx" then .detail = "its session ended (SessionEnd other, no daemon retire logged): held" else . end)'
 rm -f "$HOME/ssh.log" "$HOME/local.calls"
 mstate --argjson n "$(date +%s)" --arg mp "$MPP" '.bots["h1|/home/u/ws/p|rv"].recover_s = ($n - 1801) | .bots["local|" + $mp + "|lb"].recover_s = ($n - 1801)
-  | .bots["h1|/home/u/ws/p|hd"] = {host: "h1", bot: "hd", verdict: "down", since: ($n - 900 | todate), since_s: ($n - 900), posted: "down", posted_since_s: ($n - 900)}'
+  | .bots["h1|/home/u/ws/p|hd"] = {host: "h1", bot: "hd", verdict: "held", since: ($n - 900 | todate), since_s: ($n - 900), posted: "down", posted_since_s: ($n - 900)}
+  | .bots["h1|/home/u/ws/p|he"] = {host: "h1", bot: "he", verdict: "held", since: ($n - 900 | todate), since_s: ($n - 900)}'
 for _ in 1 2 3 4; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
 mstart; mstop; R2=$(posts | jq -r .content | sort)
 [ "$R2" = "$(printf '%s\n' "[held] hd on h1 (~/ws/p): held down on purpose after 15m (was down)" "[held] he on h1 (~/ws/p): its session ended (SessionEnd other, no daemon retire logged): held" "[recovered] h1 (/gone/x): the stale session is gone after 0m" | sort)" ] &&
   [ "$(posts | jq -c 'select(.content | startswith("[held] he")) | .allowed_mentions')" = '{"parse":[]}' ] &&
   ! grep -q ' recover --yes' "$HOME/ssh.log" && ! grep -q '^bot ' "$HOME/local.calls" &&
-  jq -e '.bots["h1|/home/u/ws/p|hd"].posted == null' "$MB/state.json" >/dev/null ||
+  jq -e '.bots["h1|/home/u/ws/p|hd"].posted == "held" and .bots["h1|/home/u/ws/p|he"].posted == "held" and .bots["h1|/home/u/ws/p|hx"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: MONITOR_RECOVER=no recovers nothing, a held bot closes its [down] with a [held] line, and a stale session that left the answer posts its recovery: $R2 / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }
 cp "$HOME/mcfg.keep" "$MCFG"; RX=(); rdoc .; rm -f "$HOME/ssh.log"; for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
 mstart; mstop
