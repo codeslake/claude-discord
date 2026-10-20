@@ -1250,6 +1250,9 @@ Three things would make that signal cry wolf, and each is filtered:
 - Threads carry their own messages. One request for the guild's active threads
   answers with every thread's `last_message_id`, so a thread is read only when
   it holds something newer than the hooks recorded; the usual run is two calls.
+  The threads that are read are read together, in one `curl --parallel` call,
+  8 at a time (1.19.2: one after another through a proxy, 48 open threads took
+  49 s and the monitor's 90 s per host ran out); a page that fails is skipped.
 
 Known gap: the plugin also treats a mention of the bot's managed **role** as
 addressing it, and the REST payload carries those separately from user

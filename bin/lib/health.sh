@@ -618,6 +618,7 @@ if [ "${1:-}" = health ]; then
           fi
           if is_id "$gid"; then
             api "guilds/$gid/threads/active"
+            tps=()
             for t in $(printf '%s' "$resp" | jq -r --arg c "$ch" '
                   (.threads // []) | .[] | select((.parent_id // "") == $c)
                   | [(.id // ""), (.last_message_id // "0")] | @tsv' 2>/dev/null |
@@ -626,9 +627,18 @@ if [ "${1:-}" = health ]; then
                     case $tlast in (''|*[!0-9]*) tlast=0;; esac   # (: bash 3.2 ends $( ) at a bare )
                     id_newer "$tlast" "$floor" && printf '%s\n' "$tid"
                   done); do
-              api "channels/$t/messages?limit=50"
-              case $status in 2*) note_oldest "$resp";; *) continue;; esac
+              tps+=(-o "$d/.threads.$$/$t" "https://discord.com/api/v10/channels/$t/messages?limit=50")
             done
+            # Every thread page in ONE curl, 8 at a time (1.19.2): read one after another through a proxy, 48 open
+            # threads of #cswap took 49 s on lmd79 (2026-10-20) and the monitor's 90 s per host ran out. Each answer is
+            # paired with its own status by -w; a page that failed is skipped, as the one-at-a-time loop did.
+            if [ ${#tps[@]} -gt 0 ] && mkdir -p "$d/.threads.$$" 2>/dev/null; then
+              while read -r tst tf; do
+                case $tst in 2*) [ -f "$tf" ] && note_oldest "$(< "$tf")";; esac
+              done < <(printf 'Authorization: Bot %s\n' "$tok" | curl -s --parallel --parallel-max 8 --max-time 10 -H @- \
+                         -w '%{http_code} %{filename_effective}\n' "${tps[@]}" 2>/dev/null)
+              rm -rf "${d:?}/.threads.$$"
+            fi
           fi
         fi
       fi

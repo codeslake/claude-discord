@@ -298,6 +298,20 @@ while IFS= read -r l || [ -n "$l" ]; do printf '%s\n' "$l"; done >> "$CURL_STDIN
 # A held answer, after the request: with $HOME/curl.hold the call says it is under way (curl.held) and answers only when
 # the case lets it (curl.go), so what a case does "during a POST" is done during it on any machine (5 s at most).
 if [ -f "$HOME/curl.hold" ]; then echo 1 > "$HOME/curl.held"; n=0; until [ -e "$HOME/curl.go" ] || [ "$n" -ge 1000 ]; do /bin/sleep 0.005; n=$((n + 1)); done; fi
+# --parallel (health's thread pages, 1.19.2): one queued reply per `-o <file> <url>` pair, in argv order, the body into
+# the file and "<status> <file>" on stdout, as `-w '%{http_code} %{filename_effective}\n'` prints it.
+if [ "$1" = --parallel ] || [[ " $* " == *" --parallel "* ]]; then
+  outs=(); prev=""
+  for a in "$@"; do [ "$prev" != -o ] || outs+=("$a"); prev=$a; done
+  for f in "${outs[@]}"; do
+    line=""; rest=()
+    { IFS= read -r line && while IFS= read -r l; do rest+=("$l"); done; } < "$CURL_REPLIES" 2>/dev/null || :
+    if [ ${#rest[@]} -gt 0 ]; then printf '%s\n' "${rest[@]}" > "$CURL_REPLIES.rest"; else : > "$CURL_REPLIES.rest"; fi && mv "$CURL_REPLIES.rest" "$CURL_REPLIES"
+    [ -n "$line" ] || continue
+    printf '%s' "${line#* }" > "$f"; printf '%s %s\n' "${line%% *}" "$f"
+  done
+  exit 0
+fi
 line=""; rest=()
 { IFS= read -r line && while IFS= read -r l; do rest+=("$l"); done; } < "$CURL_REPLIES" 2>/dev/null || :   # no mapfile: bash 3.2 runs this on a Mac
 if [ -n "$line" ]; then

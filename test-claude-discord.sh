@@ -2757,6 +2757,16 @@ out=$(bash "$S" health --json 2>/dev/null) || :
 [ ! -s "$CURL_REPLIES" ] ||
   { echo "FAIL: only the thread holding something new may be read (31 has nothing new, 32 belongs to another channel): $(wc -l < "$CURL_REPLIES") replies left"; exit 1; }
 echo "ok: health reads a thread only when its last_message_id is newer than the hooks recorded, skips another channel's, and finds a mention inside one"
+# 1.19.2 (lmd79, 2026-10-20: 48 open threads in #cswap read one after another through the proxy took 49 s, and the
+# monitor's 90 s per host ran out): every thread page of a run is ONE curl call, --parallel. 40 threads, the stuck
+# mention in the last one: found, and the thread pages are one call.
+TL=""; for i in $(seq 100 139); do TL="$TL${TL:+,}{\"id\":\"$i\",\"parent_id\":\"900\",\"last_message_id\":\"$ID_STALE\"}"; done
+EMPTY=(); for i in $(seq 39); do EMPTY+=("200 []"); done
+: > "$CURL_LOG"; queue "200 $NONE" "200 {\"threads\":[$TL]}" "${EMPTY[@]}" "200 $MENTION"
+out=$(bash "$S" health --json 2>/dev/null) || :
+[ "$(verdict_of sbot "$out")" = stale ] && [ "$(grep -c 'channels/1[0-3][0-9]/messages' "$CURL_LOG")" = 1 ] && grep -q -- '--parallel' "$CURL_LOG" && [ ! -s "$CURL_REPLIES" ] ||
+  { echo "FAIL: 40 thread pages are read in one parallel curl call and the stuck mention in the last is found: $(verdict_of sbot "$out") calls=$(grep -c 'channels/1[0-3][0-9]/messages' "$CURL_LOG") left=$(wc -l < "$CURL_REPLIES")"; exit 1; }
+echo "ok: health reads every thread page of a run in one parallel curl call (1.19.2)"
 
 # stale is a delivery check (<bot>/delivered, written by on-prompt). A message the session was handed is not stale
 # however long its answer takes (a mention that asks nothing gets no reply by rule); one never handed to it is stale
