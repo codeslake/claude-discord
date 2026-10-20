@@ -1681,7 +1681,13 @@ and stops the backend (after a yes; the same as `monitor --stop`). Opened
 after `--stop`, it asks whether to start the backend again (No by default:
 then it only shows the state). In every popup with buttons `←` `→` move the
 focus from one button to the next and Enter presses the focused one; a
-question opens with the focus on its safe choice (No, Cancel). A red bar under the tabs says what the title
+question opens with the focus on its safe choice (No, Cancel). The mouse
+(1.19.5) does what those keys do: a left click on a tab label switches to it,
+on a row moves the cursor there, and on the selected row opens it as Enter does
+(after the double-click interval, half a second: a double click selects a word
+instead); the wheel moves the cursor a row, and scrolls the pane past the first
+or last row; a click turns a choice or a box in a popup. A drag that selects
+text acts on nothing. A red bar under the tabs says what the title
 cannot: `claude-discord updated to <version> since this TUI started: press q,
 then run claude-discord tui again` (1.18.2, ahead of every other line: a TUI
 left open across an `update` reads the files of the version it started on, and

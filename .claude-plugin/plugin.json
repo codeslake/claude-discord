@@ -1,6 +1,6 @@
 {
   "name": "discord-agents",
-  "version": "1.19.4",
+  "version": "1.19.5",
   "description": "Runs Claude Code sessions behind their own Discord bots: turn hooks, peer guards, thread tools.",
   "author": {
     "name": "codeslake"
