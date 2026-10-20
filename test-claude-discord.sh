@@ -448,19 +448,20 @@ pin bbbb0003 fork
 [ "$(<"$PINS")" = "$(cli_pins 11110001 22220002 bbbb0003)" ] && [ "$(<"$DSD/pinned-job")" = bbbb0003 ] &&
   jq -e '.hooks.SessionStart[0].matcher | split("|") | index("fork") != null' "$D/hooks/hooks.json" >/dev/null ||
   { echo "FAIL: a fork start pins as a resume does, and the SessionStart matcher names fork: $(<"$PINS")"; exit 1; }
-# on-session-end (1.19.4): a person's stop holds the bot (held, so no automatic recover); the daemon's retire does not.
-# send <reason> [job state]: the bot's job ee0000ff ends with that reason. A retire line of this job in daemon.log under
-# a minute old means the daemon ended it; one older than that does not count. clear, and another session's end (a
-# `claude -p` from the bot's shell), write nothing.
+# on-session-end (1.19.4): a person's stop holds the bot (held, so no automatic recover); anything else does not.
+# send <reason> [job state]: the bot's job ee0000ff ends with that reason. "other" holds only with the daemon's
+# "settled <job> (killed)" line under a minute old (claude stop, rm): with none (a SIGTERM: docker stop, a reboot), with
+# a retire's "(done)", or with an old killed line, nothing. clear, and another session's end, write nothing.
 DLOG="$HOME/.claude/daemon.log"; mkdir -p "$J/ee0000ff"
 send() { rm -f "$DSD/held"; printf '%s' "${2:-{\"sessionId\":\"sEnd\"}}" > "$J/ee0000ff/state.json"
   CLAUDE_JOB_DIR="$J/ee0000ff" DISCORD_STATE_DIR="$DSD" bash "$H/on-session-end" <<<"{\"session_id\":\"sEnd\",\"reason\":\"$1\"}" >/dev/null 2>&1 || echo "rc"; [ ! -f "$DSD/held" ] || cut -d' ' -f1-2 "$DSD/held"; }
-: > "$DLOG"; A=$(send prompt_input_exit); B=$(send other); C=$(send clear); E=$(send other '{"sessionId":"sOther"}')
-printf '[%s] [bg] bg retire ee0000ff: idle-prompt, idle 60m\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; F=$(send other)
-printf '[%s] [bg] bg retire ee0000ff: idle-prompt, idle 60m\n' "$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; G=$(send other)
-[ "$A|$B|$C|$E|$F|$G" = "session-end prompt_input_exit|session-end other||||session-end other" ] &&
+: > "$DLOG"; A=$(send prompt_input_exit); B=$(send other); C=$(send clear)
+printf '[%s] [bg] bg settled ee0000ff (killed)\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; E=$(send other '{"sessionId":"sOther"}'); F=$(send other)
+printf '[%s] [bg] bg retire ee0000ff: idle-prompt, idle 60m\n[%s] [bg] bg settled ee0000ff (done)\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; G=$(send other)
+printf '[%s] [bg] bg settled ee0000ff (killed)\n' "$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; K=$(send other)
+[ "$A|$B|$C|$E|$F|$G|$K" = "session-end prompt_input_exit||||session-end other||" ] &&
   jq -e '.hooks.SessionEnd[0].hooks[0].command | endswith("/hooks/turn/on-session-end\"")' "$D/hooks/hooks.json" >/dev/null ||
-  { echo "FAIL: on-session-end holds a bot its person stopped, not one the daemon retired within a minute, nor on clear or another session's end: $A|$B|$C|$E|$F|$G"; exit 1; }
+  { echo "FAIL: on-session-end holds a bot its person stopped (the daemon's killed line under a minute old), not on a SIGTERM, a retire, an old kill, clear or another session's end: $A|$B|$C|$E|$F|$G|$K"; exit 1; }
 rm -rf "$J/ee0000ff" "$DLOG" "$DSD/held"
 pin bbbb0002 resume
 # An id already in the file is someone else's pin: it stays, and this bot

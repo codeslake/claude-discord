@@ -920,7 +920,7 @@ acts for: every bot, or only some.
 | Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
 |---|---|---|---|---|---|---|
 | SessionStart | `startup\|resume\|fork\|compact\|clear` | `turn/on-session-start` | Why: a respawn or an auto-update of the official plugin since the last start, a turn whose Stop never ran, a daemon that would retire an idle bot, a manager's backend killed by a restart. When: every source; the patch, the clean-up and the pin at startup, resume and fork only (fork since 1.19.4: a `--resume` the CLI starts as a fork ran none of them, and the bot was retired 8 h later unpinned). | Runs `claude-discord patch` (a failure goes to `health.log`); clears the per-turn files a turn whose Stop never ran left behind, keeping the primed key; pins a background session's job (`~/.claude/jobs/pins.json` and `pinned-job`, see Background sessions); starts a dev-manager's keeper when none runs and its owner did not stop it. No marker sweep and no `claude agents` here (the monitor's pass and update sweep). | 0 B | every bot; the keeper: dev-managers with a hosts ledger |
-| SessionEnd | | `turn/on-session-end` | Why: (1.19.4) a bot its person stopped (`claude stop`, `claude rm`, a delete in the agent view, `/exit` in a foreground bot) must stay down, and the monitor's automatic recover would bring it back. When: the bot's own session ends (the job of `CLAUDE_JOB_DIR` naming this session). | Writes `<bot dir>/held` (`session-end <reason> <time>`) for reason `prompt_input_exit`, `logout`, or `other` unless `daemon.log` has this job's `bg retire` line under a minute old (the daemon's idle retire: recovered as before); `clear` writes nothing. health reads the bot `held`, the monitor posts one `[held]` line with no mention, boot skips it; its next session start removes the file. | 0 B | every background bot |
+| SessionEnd | | `turn/on-session-end` | Why: (1.19.4) a bot its person stopped (`claude stop`, `claude rm`, a delete in the agent view, `/exit` in a foreground bot) must stay down, and the monitor's automatic recover would bring it back. When: the bot's own session ends (the job of `CLAUDE_JOB_DIR` naming this session). | Writes `<bot dir>/held` (`session-end <reason> <time>`) for reason `prompt_input_exit` or `logout`, and for `other` only with this job's `bg settled <job> (killed)` line in `daemon.log` under a minute old (the daemon's own kill, which `claude stop` and `rm` do, logged about 2 s before the hook; a SIGTERM from a docker stop or a reboot, and an idle retire, log `(done)`, after it: recovered as before); `clear` writes nothing. health reads the bot `held`, the monitor posts one `[held]` line with no mention, boot skips it; its next session start removes the file. | 0 B | every background bot |
 | UserPromptSubmit | | `turn/on-prompt` | Why: as above, a backend killed by a restart comes back with the first bot that wakes. When: every prompt. | Starts a dev-manager's keeper when none runs, for each line of `records/managers` (builtins only when all run: no fork on Linux). | 0 B | every bot (the keepers of this machine's managers) |
 
 Which plugin runs them:
@@ -1648,8 +1648,9 @@ bot's next session start (`recover` by hand, `--bg --name`) removes the file.
 A bot whose own session ended for a person's reason is held the same way by
 the SessionEnd hook (1.19.4): `claude stop`, `claude rm`, a delete in the
 agent view or `/exit` in a foreground bot (in a client attached to a background
-bot, Ctrl-C and `/exit` only detach it), but not the daemon's idle retire (its
-`bg retire` line in `daemon.log`); the monitor says it once, `[held] <bot> on
+bot, Ctrl-C and `/exit` only detach it), known by the daemon's `bg settled <job>
+(killed)` line just before; never a reboot, a `docker stop` or the daemon's idle
+retire, which are recovered as before; the monitor says it once, `[held] <bot> on
 <host> (<project>): its session ended (SessionEnd other, no daemon retire
 logged): ...`, with no mention, so a wrong call is seen.
 `MONITOR_RECOVER=no` in the manager project's `config.env` turns it all off;
