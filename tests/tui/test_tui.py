@@ -2417,6 +2417,11 @@ async def wheel(pilot, down):
     await pilot.pause()
 
 
+async def after_chain(pilot):
+    """Past the double-click interval: a click on the selected row has opened it by then, if it is going to."""
+    await pilot.pause(tui.MonitorTUI.CLICK_CHAIN_TIME_THRESHOLD + 0.15)
+
+
 async def mouse(app, pilot):
     # the tabs: a click on a label (either of its two lines) is the tab key's
     await pilot.click("#tabs", offset=(9, 0))
@@ -2433,12 +2438,14 @@ async def mouse(app, pilot):
     await pilot.click("#body", offset=(20, y))
     assert app.cursor["bots"] == HBOT and not isinstance(app.screen, tui.Detail) and app.opened == set(), (app.cursor["bots"], app.screen)
     await pilot.click("#body", offset=(30, y))
+    await after_chain(pilot)
     assert isinstance(app.screen, tui.Detail) and HANGUL in str(app.screen.query_one("#body-detail").render()), app.screen
     await pilot.press("escape")
     # the second line of an opened row belongs to the row; a line of no row (the KPI band) does nothing
     await pilot.press("space")
     assert app.opened == {HBOT}
     await pilot.click("#body", offset=(5, y + 1))
+    await after_chain(pilot)
     assert isinstance(app.screen, tui.Detail), "the second line of the selected row is the row"
     await pilot.press("escape")
     await pilot.click("#body", offset=(5, 0))
@@ -2450,6 +2457,7 @@ async def mouse(app, pilot):
     await pilot.click("#body", offset=(5, y_of(app, "History") + 3))
     assert app.cursor["alerts"] != "open " + PHOTO and not isinstance(app.screen, tui.Detail), app.cursor
     await pilot.click("#body", offset=(9, y_of(app, "History") + 3))
+    await after_chain(pilot)
     assert isinstance(app.screen, tui.Detail), app.screen
     await pilot.press("escape")
     # the wheel: a row up or down, the cursor kept in view as for the arrows
@@ -2490,6 +2498,53 @@ async def mouse_selection(app, pilot):
     assert app.cursor["bots"] == PHOTO and not isinstance(app.screen, tui.Detail), app.cursor
 
 
+async def mouse_double(app, pilot):
+    """A double click on the selected row opens nothing: the first click waits for the double-click interval, and a second
+    click, a key or a tab change within it cancels the open. A right or middle click is no click at all."""
+    assert app.cursor["bots"] == PHOTO
+    y = y_row(app, "photobot")
+    await pilot.double_click("#body", offset=(5, y))
+    await after_chain(pilot)
+    assert not isinstance(app.screen, tui.Detail) and app.cursor["bots"] == PHOTO, (app.screen, app.cursor)
+    await pilot.click("#body", offset=(5, y))
+    assert not isinstance(app.screen, tui.Detail), "not before the interval is over"
+    await after_chain(pilot)
+    assert isinstance(app.screen, tui.Detail)
+    await pilot.press("escape")
+    await pilot.click("#body", offset=(5, y))   # a key within the interval cancels it
+    await pilot.press("down")
+    await after_chain(pilot)
+    assert not isinstance(app.screen, tui.Detail) and app.cursor["bots"] != PHOTO, (app.screen, app.cursor)
+    await pilot.click("#body", offset=(5, y_row(app, "photobot")))
+    await pilot.click("#tabs", offset=(9, 0))   # a tab label within it too
+    await after_chain(pilot)
+    assert app.tab == "alerts" and not isinstance(app.screen, tui.Detail), (app.tab, app.screen)
+    await pilot.click("#tabs", offset=(2, 0))
+    assert app.tab == "bots"
+    # the other buttons: a right click on the selected row opens nothing
+    app.cursor["bots"] = PHOTO
+    app.paint()
+    await pilot.click("#body", offset=(5, y), button=3)
+    await pilot.click("#body", offset=(5, y), button=2)
+    await after_chain(pilot)
+    assert not isinstance(app.screen, tui.Detail), app.screen
+
+
+async def mouse_wheel_end(app, pilot):
+    """At the first or last row the wheel scrolls the pane itself: what is below the last row (the Configuration tab's
+    Monitor section) is not out of reach in a short window."""
+    await pilot.click("#tabs", offset=(20, 1))
+    assert app.tab == "config"
+    pane = app.query_one("#pane")
+    assert pane.max_scroll_y > 0, "the window is short enough to scroll"
+    for _ in range(30):
+        await wheel(pilot, True)
+    assert pane.scroll_y == pane.max_scroll_y, (pane.scroll_y, pane.max_scroll_y)
+    for _ in range(30):
+        await wheel(pilot, False)
+    assert pane.scroll_y == 0
+
+
 async def mouse_scrolled(app, pilot):
     """A click maps through the pane's scroll offset: the row under the pointer, not the one at the same line of the top."""
     pane = app.query_one("#pane")
@@ -2523,6 +2578,8 @@ async def mouse_popup(app, pilot):
     await pilot.click("#b-host")   # three hosts: around
     await pilot.click("#b-host")
     assert host.value == "local", host.value
+    await pilot.click("#b-host", button=3)   # a right click turns nothing
+    assert host.value == "local"
     await pilot.click("#b-mode")
     assert mode.value != was and app.focused is mode
     await pilot.click("#b-start")
@@ -2841,6 +2898,8 @@ async def main():
     await case("bot_add", bot_add, state="all_ok", wrapper=bot_cli)
     await case("mouse", mouse, state="all_ok")
     await case("mouse_selection", mouse_selection, state="all_ok")
+    await case("mouse_double", mouse_double, state="all_ok")
+    await case("mouse_wheel_end", mouse_wheel_end, state="all_ok", size=(100, 14))
     await case("mouse_scrolled", mouse_scrolled, state="many", size=(100, 20))
     await case("mouse_popup", mouse_popup, state="all_ok", wrapper=bot_cli)
     await case("recover_one", recover_one, state="down_stale", wrapper=recover_cli)

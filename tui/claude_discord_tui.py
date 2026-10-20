@@ -2647,15 +2647,18 @@ class Pane(VerticalScroll, can_focus=False):
     """The tab's body. Never focused: the arrow keys move the row cursor (the app's bindings), not the scroll position.
     The wheel is the arrows': a row up or down, and the pane follows the cursor (paint)."""
 
+    def wheel(self, d: int, event: events.MouseEvent) -> None:
+        """A row when the cursor can move that way; at the first or last row the wheel is the pane's own, so what lies below
+        the last row (the Configuration tab's Monitor section) can be reached."""
+        if self.app.action_move(d):
+            event.prevent_default()
+            event.stop()
+
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        self.app.action_move(1)
-        event.prevent_default()
-        event.stop()
+        self.wheel(1, event)
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        self.app.action_move(-1)
-        event.prevent_default()
-        event.stop()
+        self.wheel(-1, event)
 
 
 class MonitorTUI(App):
@@ -2694,6 +2697,7 @@ class MonitorTUI(App):
         self.opened: set = set()                      # the expanded bot rows
         self.shown: dict = {}                         # widget id -> the Text it shows: an update only when it changes
         self.tab_at: list = []                        # (first cell, end, tab) of each label of #tabs, as the last paint laid them out
+        self.opening = None                           # the timer that opens the selected row a double-click interval after a click on it
         self.line_key: list = []                      # the row key of each line of #body (None: no row), as the last paint laid them out
         self.pressed = None                           # where the mouse button last went down (screen cell)
 
@@ -2836,12 +2840,13 @@ class MonitorTUI(App):
     def plain(self, event: events.Click) -> bool:
         """A click and not a drag. Textual sends a Click to the widget the button went down on, wherever it went up, and
         keeps what a drag selected: only down and up on one cell is a click (that up drops any selection before the Click
-        arrives). A double or triple click is Textual's: it selects the word or the line."""
-        return event.chain == 1 and self.pressed == event.screen_offset
+        arrives). A double or triple click is Textual's: it selects the word or the line. Only the left button clicks."""
+        return event.button == 1 and event.chain == 1 and self.pressed == event.screen_offset
 
     def on_click(self, event: events.Click) -> None:
         """The main view's clicks (a popup's own widgets take theirs): a tab label is the tab key's, a row is selected, and
         the selected one is Enter's."""
+        self.hold()   # any click within the double-click interval takes back the open of the one before
         wid = event.widget.id if event.widget else None
         if len(self.screen_stack) != 1 or wid not in ("tabs", "body") or not self.plain(event):
             return
@@ -2853,29 +2858,43 @@ class MonitorTUI(App):
         key = self.line_key[event.y] if 0 <= event.y < len(self.line_key) else None
         if key is None:
             return
-        if key == self.cursor[self.tab]:
-            self.action_open()
+        if key == self.cursor[self.tab]:   # Enter's, once it is no double click: its second click is Textual's (it selects the line)
+            self.opening = self.set_timer(self.CLICK_CHAIN_TIME_THRESHOLD, self.action_open)
         else:
             self.cursor[self.tab] = key
             self.paint()
 
+    def hold(self) -> None:
+        if self.opening is not None:
+            self.opening.stop()
+            self.opening = None
+
     def action_tab(self, d: int) -> None:
+        self.hold()
         self.tab = TABS[(TABS.index(self.tab) + d) % len(TABS)]
         self.paint()
 
-    def action_move(self, d: int) -> None:
+    def action_move(self, d: int) -> bool:
+        """Moves the cursor a row; whether it moved (not at the first or last row, a row at all)."""
+        self.hold()
         keys = [k for k, _ in self.items(time.time()) if k is not None]
-        if keys:
-            i = keys.index(self.cursor[self.tab]) if self.cursor[self.tab] in keys else 0
-            self.cursor[self.tab] = keys[max(0, min(len(keys) - 1, i + d))]
-            self.paint()
+        if not keys:
+            return False
+        i = keys.index(self.cursor[self.tab]) if self.cursor[self.tab] in keys else 0
+        was, self.cursor[self.tab] = self.cursor[self.tab], keys[max(0, min(len(keys) - 1, i + d))]
+        self.paint()
+        return self.cursor[self.tab] != was
 
     def action_toggle(self) -> None:
+        self.hold()
         if self.tab == "bots" and self.cursor["bots"]:
             self.opened ^= {self.cursor["bots"]}
             self.paint()
 
     def action_open(self) -> None:
+        self.hold()
+        if len(self.screen_stack) != 1:   # the timer of a click: a popup came up since
+            return
         key, alerts = self.cursor[self.tab], seq(self.state.get("alerts"))
         if key is None:
             return
