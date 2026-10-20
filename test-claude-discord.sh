@@ -3965,6 +3965,13 @@ BRC=0; BO=$(DISCORD_STATE_DIR=$AD bash "$S" bot acc recover 2>&1) || BRC=$?
 rc=0; out=$(bash "$S" bot acc recover </dev/null 2>&1) || rc=$?
 [ "$rc" = 3 ] && grep -q 'its last session acc11111 (pinned-job) is listed by claude agents' <<<"$out" && grep -q '^    run: claude respawn acc11111' <<<"$out" &&
   [ ! -e "$HOME/claude.calls" ] && [ ! -e "$AD/recover.log" ] || { echo "FAIL: bot recover with no terminal prints its plan (exit 3) and runs nothing: rc=$rc $out"; exit 1; }
+# --yes (1.19.0, what boot and the monitor run): the plan, then the command with no terminal and no question, logged as
+# `recover --yes`; a bad word beside it still exit 2.
+rc=0; out=$(bash "$S" bot acc recover --yes </dev/null 2>&1) || rc=$?; BRC=0; bash "$S" bot acc recover --yes --x </dev/null >/dev/null 2>&1 || BRC=$?
+[ "$rc $BRC" = "0 2" ] && grep -q '^    run: claude respawn acc11111' <<<"$out" && [[ $out != *"$MK"* ]] && [ "$(<"$HOME/claude.calls")" = "RESPAWN acc11111" ] &&
+  [ "$(cut -d' ' -f4- "$AD/recover.log")" = "recover --yes: claude respawn acc11111 (exit 0)" ] ||
+  { echo "FAIL: bot recover --yes runs its plan with no terminal and no question, logged as recover --yes: rc=$rc $BRC $out / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
+rm -f "$HOME/claude.calls" "$AD/recover.log"
 # At a terminal: n runs nothing (exit 4); y respawns the listed session after the marker and the one question, logs it to
 # recover.log and passes the status on (a respawn that fails: exit 1, said with its status; nothing else is run).
 bt - n acc recover; A=$BRC; [ -e "$HOME/claude.calls" ] || A="$A none"; bt - y acc recover; B="$BRC $BO"

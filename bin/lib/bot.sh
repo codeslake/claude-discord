@@ -13,12 +13,13 @@
 #   bot add [--mode <mode>] [--start]   a new bot in this project: its token read as token reads it, its Discord username
 #                             its name, set up by `setup` with its answers on stdin (the project's channel and owner
 #                             are config.env's; an @mention required), started (`--bg --name`) with --start.
-#   bot <name> recover [--fresh]   (1.16.0, the TUI's f and F) a down bot brought back: `claude respawn <id>` of its last
+#   bot <name> recover [--fresh] [--yes]   (1.16.0, the TUI's f and F) a down bot brought back: `claude respawn <id>` of its last
 #                             session when claude agents still lists it as started in this project (pinned-job, then
 #                             the newest plugin-sessions marker, then live_sessions), else `claude-discord --bg --name`;
 #                             two or more listed: refused. --fresh (a stale bot): every listed session stopped, then
 #                             --bg --name, as refresh --force. The plan is printed with its `run:` line, then the one
-#                             question; the command's status is passed on. recover.log gets a line per run.
+#                             question; the command's status is passed on. recover.log gets a line per run. --yes
+#                             (1.19.0, what boot and the monitor run): no terminal needed, no question asked.
 # Each asks one question at the terminal, after the marker line access set prints (U+2060), and refuses without a
 # terminal on stdin and stdout (exit 3): token and add before they read anything, rename and recover after printing what
 # they would do. The token is never printed, never in an argument list, the environment or a log: read from the terminal
@@ -32,7 +33,7 @@
 if [ "${1:-}" = bot ]; then
   { set +x; } 2>/dev/null   # a token is read below: no xtrace (bash -x, SHELLOPTS=xtrace) may copy it into a transcript
   shift
-  b_usage="usage: claude-discord bot [--host <alias> [--manager <bot>]] [--project <dir>] <bot> token | <bot> rename <new name> | <bot> recover [--fresh] | add [--mode none|dev-manager|autoresearchclaw] [--start]"
+  b_usage="usage: claude-discord bot [--host <alias> [--manager <bot>]] [--project <dir>] <bot> token | <bot> rename <new name> | <bot> recover [--fresh] [--yes] | add [--mode none|dev-manager|autoresearchclaw] [--start]"
   b_name_re='^[A-Za-z0-9_][A-Za-z0-9_-]{1,31}$'   # a bot's name: Discord's username, which it is; never an option's -
   a_host="" a_proj="" hb=""
   while [ $# -gt 0 ]; do
@@ -47,7 +48,7 @@ if [ "${1:-}" = bot ]; then
     esac
   done
   [ $# -ge 1 ] || { echo "$b_usage" >&2; exit 2; }
-  bot=$1 act=${2:-} new="" b_mode=none b_start="" b_fresh=""; shift
+  bot=$1 act=${2:-} new="" b_mode=none b_start="" b_fresh="" b_yes=""; shift
   [ "$bot" != add ] || act=add
   [ $# = 0 ] || [ "$act" = add ] || shift
   case $bot in ''|.|..|*/*|-*) echo "claude-discord: bot: the bot's name must be a plain directory name" >&2; exit 2;; esac
@@ -68,7 +69,7 @@ if [ "${1:-}" = bot ]; then
       c_match "$new" "$b_name_re" || { echo "claude-discord: bot: the new name is 2 to 32 of A-Z a-z 0-9 _ -, not starting with - (Discord's username, which it becomes)" >&2; exit 2; };;
     recover)
       while [ $# -gt 0 ]; do
-        case $1 in --fresh) b_fresh=1; shift;; *) echo "$b_usage" >&2; exit 2;; esac
+        case $1 in --fresh) b_fresh=1; shift;; --yes) b_yes=1; shift;; *) echo "$b_usage" >&2; exit 2;; esac
       done;;
     *) echo "$b_usage" >&2; exit 2;;
   esac
@@ -76,7 +77,7 @@ if [ "${1:-}" = bot ]; then
   if [ -n "$a_host" ]; then
     [ "$act" = rename ] || [ "$act" = recover ] || { [ -t 0 ] && [ -t 1 ]; } || b_noterm   # nothing is read over ssh without a terminal here
     if [ "$act" = add ]; then via_host bot 1.14.0 add --mode "$b_mode" ${b_start:+--start}; fi
-    if [ "$act" = recover ]; then via_host bot 1.16.0 "$bot" recover ${b_fresh:+--fresh}; fi
+    if [ "$act" = recover ]; then via_host bot "$([ -n "$b_yes" ] && echo 1.19.0 || echo 1.16.0)" "$bot" recover ${b_fresh:+--fresh} ${b_yes:+--yes}; fi
     via_host bot 1.14.0 "$bot" "$act" ${new:+"$new"}
   fi
   if [ -n "$a_proj" ]; then
@@ -367,10 +368,12 @@ if [ "${1:-}" = bot ]; then
       *) if [ -n "$b_stops" ]; then echo "    run: $b_stops, then cd $PWD && $b_cmd    (every listed session stopped first; a fresh session, its conversation lost unless handoff.md is there)"
          else echo "    run: cd $PWD && $b_cmd    (no session of $bn is listed, so nothing is stopped; a fresh session)"; fi;;
     esac
-    [ -t 0 ] && [ -t 1 ] || { echo "claude-discord: bot: not a terminal (stdin and stdout), so nothing was run: run it in a terminal to answer" >&2; exit 3; }
-    b_ask "Recover $bn?"
+    if [ -z "$b_yes" ]; then
+      [ -t 0 ] && [ -t 1 ] || { echo "claude-discord: bot: not a terminal (stdin and stdout), so nothing was run: run it in a terminal to answer (or --yes)" >&2; exit 3; }
+      b_ask "Recover $bn?"
+    fi
     # b_rlog <command> <exit>: a line in the bot's recover.log, in the shape of access.log's.
-    b_rlog() { (umask 077; printf '%s %s %s recover%s: %s (exit %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$b_host_name" "${b_fresh:+ --fresh}" "$1" "$2" >> "$d/recover.log") 2>/dev/null || :; }
+    b_rlog() { (umask 077; printf '%s %s %s recover%s: %s (exit %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$b_host_name" "${b_fresh:+ --fresh}${b_yes:+ --yes}" "$1" "$2" >> "$d/recover.log") 2>/dev/null || :; }
     if { [ "$b_do" = fresh ] || [ "$b_do" = takeover ]; } && [ -n "$b_rows" ] && ! stop_sessions "$bn" "$b_rows"; then
       # Nothing is started: a start beside a session that still runs puts two sessions on one token.
       b_rlog "$b_stops" 1

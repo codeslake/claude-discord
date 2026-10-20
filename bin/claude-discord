@@ -88,11 +88,11 @@
 #                                        and started again from its handoff
 #   claude-discord bot [...] add [--mode none|dev-manager|autoresearchclaw] [--start]
 #                                        a new bot from its token; its name is its Discord username
-#   claude-discord bot [...] <name> recover [--fresh]
+#   claude-discord bot [...] <name> recover [--fresh] [--yes]
 #                                        a down bot brought back (the TUI's f and F): claude respawn of
 #                                        its last session while claude agents lists it, else --bg --name;
-#                                        --fresh stops every listed session first. Asks once; the host
-#                                        needs 1.16.0 under --host
+#                                        --fresh stops every listed session first. Asks once (--yes: no
+#                                        terminal, no question); the host needs 1.16.0 under --host (--yes: 1.19.0)
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at

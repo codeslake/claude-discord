@@ -557,7 +557,7 @@ token, its name and a new bot are written by one verb, at a terminal, as
 claude-discord bot <bot> token          # a new token for the bot; the current one is never read
 claude-discord bot <bot> rename <new>   # Discord first, then everything here keyed by the name
 claude-discord bot add [--mode none|dev-manager|autoresearchclaw] [--start]   # a new bot, named by its token
-claude-discord bot <bot> recover [--fresh]   # a down or stuck bot brought back: its last session respawned (conversation kept), or a fresh start
+claude-discord bot <bot> recover [--fresh] [--yes]   # a down or stuck bot brought back: its last session respawned (conversation kept), or a fresh start
 ```
 
 - **token** reads the token with the terminal's echo off (`Token (hidden): `),
@@ -646,14 +646,16 @@ claude-discord bot <bot> recover [--fresh]   # a down or stuck bot brought back:
   with the `run:` line, asks once (`Recover <bot>? [y/N]`, after the marker),
   runs the command and passes its status on; nothing runs on `n` or without a
   terminal, and it does not wait for the plugin server: the monitor's next
-  pass says whether the bot answers. `<bot dir>/recover.log` gets `<time>
-  <user> <host> recover[ --fresh]: <command> (exit <n>)` per run. A session
+  pass says whether the bot answers. `--yes` (1.19.0) runs the plan with no
+  terminal and no question: what `boot` and the monitor's automatic recovery
+  run; every refusal above still holds. `<bot dir>/recover.log` gets `<time>
+  <user> <host> recover[ --fresh][ --yes]: <command> (exit <n>)` per run. A session
   cannot recover its own bot.
 - `--host <alias> [--manager <bot>] --project <dir>` runs any of them on a
   host of a manager's ledger, under `ssh -t`, as `access --host` does: the
   token is typed into that terminal and read there, never put in a command
   line. The host needs claude-discord 1.14.0 (exit 5 otherwise; `recover`
-  needs 1.16.0).
+  needs 1.16.0, `recover --yes` 1.19.0).
 
 `health --json` gives each bot's `discord_name`, Discord's username for it,
 asked once a day (kept in `<bot dir>/discord-name`). When a bot's two names
