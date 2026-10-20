@@ -622,7 +622,9 @@ def recovery_text: ((($now_s - (.posted_since_s // $now_s)) / 60) | floor) as $m
   | (if .verdict == "held" then "[held] \(subject): held down on purpose after \($m)m (was \(.posted))"
      elif .posted == "stale-session" then "[recovered] \(subject): the stale session is gone after \($m)m"
      else "[recovered] \(subject): answering again after \($m)m (was \(.posted))" end) | .[0:1900];
-def payload($kind): if $kind == "finding"
+def payload($kind): if $kind == "finding" and .verdict == "held"
+  then {content: ("[held] \(subject): \(.detail)" | .[0:1900]), allowed_mentions: {parse: []}}
+  elif $kind == "finding"
   then {content: finding_text, allowed_mentions: (if owner != "" then {users: [owner]} else {parse: []} end)}
   else {content: recovery_text, allowed_mentions: {parse: []}} end;
 # group_payload: one message for several bots of one host (an array of entries), each distinct owner mentioned once.
@@ -652,8 +654,10 @@ def observe($v; $d; $meta): (. // {}) as $o
 # token or channel) is not a finding. (No apostrophe in these comments: the program is one single-quoted string.)
 def warn_only: .verdict != "unknown" and (hold[.verdict] == null or hold[.verdict] >= 1800 or (.verdict == "hostdown" and .laptop == true));
 def due:
-  # held (1.19.1, bot <bot> hold): what was posted is closed, as by a recovery, with a line of its own.
-  if ((.verdict | good) or .verdict == "held") and (.posted // null) != null then "recovery"
+  # held (1.19.1, bot <bot> hold): what was posted is closed, as by a recovery, with a line of its own. A hold the
+  # SessionEnd hook inferred (1.19.4: its detail starts "its session ended") is said once, with no mention.
+  if ((.verdict | good) or (.verdict == "held" and .posted != "held")) and (.posted // null) != null then "recovery"
+  elif .verdict == "held" then (if (.detail // "" | startswith("its session ended")) and (.posted // null) == null then "finding" else null end)
   elif hold[.verdict] != null and ((.verdict == "hostdown" and .laptop == true) | not)
        and (.posted // null) != .verdict and ($now_s - .since_s) >= hold[.verdict] then "finding"
   else null end;

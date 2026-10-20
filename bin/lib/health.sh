@@ -88,7 +88,33 @@ if [ "${1:-}" = health ]; then
         stale="$stale$pid"$'\t'"$job"$'\t'"$v"$'\n'
       done
     fi
+    # Unpinned bot jobs (1.19.4): a background bot's job that is not in pins.json is retired by the daemon after 60 min
+    # or 8 h with no message, and the bot reads down (photo-bot, 2026-10-18: started as a fork, which the hook did not
+    # handle). Each job `claude agents` lists with a pid whose record names an existing bot dir: with --patch (the
+    # monitor's run) pinned here with the hook's own function, one line in that bot's health.log and nothing posted;
+    # without it, only said. A job a person unpinned on purpose is pinned again by the monitor: say so in the README.
+    unp="" cdir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+    if agents=$(claude agents --json 2>/dev/null) && [ -n "$agents" ]; then
+      pinned=$(jq -r 'if type == "array" then .[] | strings else empty end' "$cdir/jobs/pins.json" 2>/dev/null) || pinned=""
+      while IFS=$'\t' read -r job; do
+        case $'\n'$pinned$'\n' in *$'\n'"$job"$'\n'*) continue;; esac
+        v=$(jq -r '(.respawnFlags // []) as $f | ($f | index("--settings")) as $i | if $i == null then "" else ($f[$i + 1] | fromjson? | .env.DISCORD_STATE_DIR // "") end' \
+          "$cdir/jobs/$job/state.json" 2>/dev/null) || v=""
+        [ -n "$v" ] && [ -f "$v/.env" ] || continue
+        fixed=false
+        if [ "$do_patch" = yes ] && . "$self_root/hooks/lib/pin.sh" 2>/dev/null && pin_job "$job" "$v" "$cdir/jobs"; then
+          fixed=true
+          printf '%s health: pinned job %s (it was not in pins.json, so the daemon would retire it after 8 h idle)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$job" >> "$v/health.log" 2>/dev/null || :
+        fi
+        unp="$unp$job"$'\t'"$v"$'\t'"$fixed"$'\n'
+      done < <(printf '%s' "$agents" | jq -r '.[]? | objects | select(.pid != null and ((.id // "") | test("^[0-9a-f]{8}$"))) | .id' 2>/dev/null)
+    fi
     if [ "$as_json" != yes ]; then
+      while IFS=$'\t' read -r job v fixed; do
+        [ -n "$job" ] || continue
+        if [ "$fixed" = true ]; then echo "pinned: job $job of $v was not in pins.json; pinned now"
+        else echo "not pinned: job $job of $v is not in pins.json, so the daemon retires it after 8 h with no message; health --all --patch (the monitor's run) pins it"; fi
+      done <<<"$unp"
       while IFS=$'\t' read -r pid job v; do
         [ -n "$pid" ] || continue
         echo "stale session: plugin server pid $pid${job:+ of job $job} runs for $v, which no longer exists: it holds no token and never logs in; $([ -n "$job" ] && echo "claude stop $job" || echo "kill $pid")"
@@ -98,9 +124,10 @@ if [ "${1:-}" = health ]; then
     h=$(uname -n); h=${h%%.*}
     printf '%s' "$docs" | jq -s --arg host "$h" --arg home "$HOME" --argjson prc "$prc" --arg pout "$pout" \
       --arg ver "$(plugin_version "$self_root") ($(git -C "$self_root" rev-parse --short HEAD 2>/dev/null || echo nogit))" \
-      --arg stale "$stale" \
+      --arg stale "$stale" --arg unp "$unp" \
       '{host: $host, version: $ver, home: $home, patch: (if $prc == null then null else {rc: $prc, output: $pout} end), projects: .,
-        stale_sessions: [$stale | split("\n")[] | select(. != "") | split("\t") | {pid: (.[0] | tonumber), job: .[1], state_dir: .[2]}]}'
+        stale_sessions: [$stale | split("\n")[] | select(. != "") | split("\t") | {pid: (.[0] | tonumber), job: .[1], state_dir: .[2]}],
+        unpinned: [$unp | split("\n")[] | select(. != "") | split("\t") | {job: .[0], state_dir: .[1], pinned_now: (.[2] == "true")}]}'
     exit 0
   fi
   # The working directory decides, and only when it holds no bots does the
@@ -727,6 +754,11 @@ if [ "${1:-}" = health ]; then
     # unanswered too). Not a finding: the monitor posts nothing for it and recovers nothing, nor does boot.
     if [ -f "$d/held" ] && [ "$servers" = 0 ]; then
       verdict=held detail="held on purpose (claude-discord bot $bot hold): the monitor and boot leave it down until a session of it starts"
+      # 1.19.4: written by the SessionEnd hook ("session-end <reason> <time>"): the monitor posts this detail once.
+      hl=""; { read -r hl < "$d/held"; } 2>/dev/null || :
+      case $hl in "session-end "*) hl=${hl#session-end }
+        detail="its session ended (SessionEnd ${hl%% *}, no daemon retire logged): held, so the monitor and boot leave it down; claude-discord bot $bot recover brings it back";;
+      esac
     fi
 
     rows=$rows$bot$'\x1f'$verdict$'\x1f'$detail$'\x1f'$servers$'\x1f'${turn:-}$'\x1f'
@@ -775,7 +807,7 @@ if [ "${1:-}" = health ]; then
             mode: .[$i+15], discord_name: (.[$i+16] | if . == "" then null else . end),
             access: (.[$i+13] | (try fromjson catch null) | if type == "object" then .groups |= map(. + {name: ($n[.id] // "")}) else . end) } ]
     | (if $show then . else empty end),
-      (if all(.[]; .verdict == "ok" or .verdict == "busy") then "ok" else "finding" end)
+      (if all(.[]; .verdict == "ok" or .verdict == "busy" or .verdict == "held") then "ok" else "finding" end)
     ' 2>/dev/null) || rows=finding
   verdicts=${rows##*$'\n'}
   if [ "$as_json" = yes ] && [ "$rows" != "$verdicts" ]; then

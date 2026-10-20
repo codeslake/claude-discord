@@ -379,7 +379,7 @@ done
 # stub that prints, as a real patch can: the hook must still keep that output out of its SessionStart context.
 mv "$S" "$S.real"; printf '#!/bin/bash\necho patch stub output\n' > "$S"; chmod +x "$S"
 printf '111 222\n' > "$DSD/turns/sPrime"; : > "$DSD/turns/sPrime.replied"
-for src in startup resume; do
+for src in startup resume fork; do
   : > "$DSD/held"   # 1.19.1: bot <bot> hold; a session of it starting again ends the hold
   DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<"{\"session_id\":\"sPrime\",\"source\":\"$src\"}" >/dev/null
   [ ! -e "$DSD/turns/sPrime" ] && [ ! -e "$DSD/turns/sPrime.replied" ] && [ -f "$DSD/turns/sPrime.primed" ] && [ ! -e "$DSD/held" ] || { echo "FAIL: a $src must clear a turn left over (no Stop ran) and a hold, and keep the primed flag"; exit 1; }
@@ -442,6 +442,27 @@ pin aaaa0001
 [ "$(cat "$PINS"; echo .)" = "$(cli_pins 11110001 22220002 aaaa0001)." ] || { echo "FAIL: the id must be appended with every other entry kept, in order: $(<"$PINS")"; exit 1; }
 pin bbbb0002 resume
 [ "$(<"$PINS")" = "$(cli_pins 11110001 22220002 bbbb0002)" ] && [ "$(<"$DSD/pinned-job")" = bbbb0002 ] || { echo "FAIL: the id pinned last time must be replaced and no other entry touched: $(<"$PINS")"; exit 1; }
+# 1.19.4: a `--resume` the CLI starts as a fork (SessionStart source fork; photo-bot 2026-10-17, never pinned, retired
+# after 8 h idle) pins as a resume does. hooks.json's matcher names fork too, or the hook never runs for it.
+pin bbbb0003 fork
+[ "$(<"$PINS")" = "$(cli_pins 11110001 22220002 bbbb0003)" ] && [ "$(<"$DSD/pinned-job")" = bbbb0003 ] &&
+  jq -e '.hooks.SessionStart[0].matcher | split("|") | index("fork") != null' "$D/hooks/hooks.json" >/dev/null ||
+  { echo "FAIL: a fork start pins as a resume does, and the SessionStart matcher names fork: $(<"$PINS")"; exit 1; }
+# on-session-end (1.19.4): a person's stop holds the bot (held, so no automatic recover); the daemon's retire does not.
+# send <reason> [job state]: the bot's job ee0000ff ends with that reason. A retire line of this job in daemon.log under
+# a minute old means the daemon ended it; one older than that does not count. clear, and another session's end (a
+# `claude -p` from the bot's shell), write nothing.
+DLOG="$HOME/.claude/daemon.log"; mkdir -p "$J/ee0000ff"
+send() { rm -f "$DSD/held"; printf '%s' "${2:-{\"sessionId\":\"sEnd\"}}" > "$J/ee0000ff/state.json"
+  CLAUDE_JOB_DIR="$J/ee0000ff" DISCORD_STATE_DIR="$DSD" bash "$H/on-session-end" <<<"{\"session_id\":\"sEnd\",\"reason\":\"$1\"}" >/dev/null 2>&1 || echo "rc"; [ ! -f "$DSD/held" ] || cut -d' ' -f1-2 "$DSD/held"; }
+: > "$DLOG"; A=$(send prompt_input_exit); B=$(send other); C=$(send clear); E=$(send other '{"sessionId":"sOther"}')
+printf '[%s] [bg] bg retire ee0000ff: idle-prompt, idle 60m\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; F=$(send other)
+printf '[%s] [bg] bg retire ee0000ff: idle-prompt, idle 60m\n' "$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; G=$(send other)
+[ "$A|$B|$C|$E|$F|$G" = "session-end prompt_input_exit|session-end other||||session-end other" ] &&
+  jq -e '.hooks.SessionEnd[0].hooks[0].command | endswith("/hooks/turn/on-session-end\"")' "$D/hooks/hooks.json" >/dev/null ||
+  { echo "FAIL: on-session-end holds a bot its person stopped, not one the daemon retired within a minute, nor on clear or another session's end: $A|$B|$C|$E|$F|$G"; exit 1; }
+rm -rf "$J/ee0000ff" "$DLOG" "$DSD/held"
+pin bbbb0002 resume
 # An id already in the file is someone else's pin: it stays, and this bot
 # must not record it as its own, or its next start (a copy-resume, which gets
 # a new job id) would remove a human's pin.
@@ -5088,12 +5109,16 @@ rs=$(jq -c --arg mp "$MPP" '[.bots["h1|/home/u/ws/p|rv"].recover_rc, .bots["loca
   [ "$rs" = '[0,0,true,"stale-session",["exit 0","exit 0"]]' ] ||
   { echo "FAIL: a posted down is recovered next pass (ssh and local), a duplicate, one recovered within 30 minutes, a frozen host and the manager itself are not, and a stale session is posted with its job: $R1 / $rs / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }
 # hd, posted down, is held now (bot hd hold, 1.19.1): its [down] is closed by a [held] line, and nothing recovers it.
-echo "MONITOR_RECOVER=no" >> "$MCFG"; RX=(hd:held); rdoc .; rm -f "$HOME/ssh.log" "$HOME/local.calls"
+# he is held by its SessionEnd (1.19.4): said once, with no mention.
+echo "MONITOR_RECOVER=no" >> "$MCFG"; RX=(hd:held he:held)
+rdoc '.projects[0].bots |= map(if .bot == "he" then .detail = "its session ended (SessionEnd other, no daemon retire logged): held" else . end)'
+rm -f "$HOME/ssh.log" "$HOME/local.calls"
 mstate --argjson n "$(date +%s)" --arg mp "$MPP" '.bots["h1|/home/u/ws/p|rv"].recover_s = ($n - 1801) | .bots["local|" + $mp + "|lb"].recover_s = ($n - 1801)
   | .bots["h1|/home/u/ws/p|hd"] = {host: "h1", bot: "hd", verdict: "down", since: ($n - 900 | todate), since_s: ($n - 900), posted: "down", posted_since_s: ($n - 900)}'
-for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
+for _ in 1 2 3 4; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
 mstart; mstop; R2=$(posts | jq -r .content | sort)
-[ "$R2" = "$(printf '%s\n' "[held] hd on h1 (~/ws/p): held down on purpose after 15m (was down)" "[recovered] h1 (/gone/x): the stale session is gone after 0m" | sort)" ] &&
+[ "$R2" = "$(printf '%s\n' "[held] hd on h1 (~/ws/p): held down on purpose after 15m (was down)" "[held] he on h1 (~/ws/p): its session ended (SessionEnd other, no daemon retire logged): held" "[recovered] h1 (/gone/x): the stale session is gone after 0m" | sort)" ] &&
+  [ "$(posts | jq -c 'select(.content | startswith("[held] he")) | .allowed_mentions')" = '{"parse":[]}' ] &&
   ! grep -q ' recover --yes' "$HOME/ssh.log" && ! grep -q '^bot ' "$HOME/local.calls" &&
   jq -e '.bots["h1|/home/u/ws/p|hd"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: MONITOR_RECOVER=no recovers nothing, a held bot closes its [down] with a [held] line, and a stale session that left the answer posts its recovery: $R2 / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }

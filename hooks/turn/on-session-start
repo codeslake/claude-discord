@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# SessionStart hook (matcher: startup|resume|compact|clear), by source:
+# SessionStart hook (matcher: startup|resume|fork|compact|clear), by source:
 # - compact, clear: the identity/rules context on-prompt injected once per
 #   session is gone from the transcript, so let the next Discord turn inject
 #   it again (delete turns/<session_id>.primed).
-# - startup, resume: no turn is in flight, so a turns/<session_id> file (and
+# - startup, resume, fork (1.19.4: a `--resume` the CLI starts as a fork; photo-bot 2026-10-17 was never pinned so,
+#   and retired 8 h idle): no turn is in flight, so a turns/<session_id> file (and
 #   its .replied flag) is left over from a turn whose Stop never ran (an
 #   interrupt, a kill). on-prompt would read it as mid-turn; delete both. The
 #   .primed flag stays: a resumed conversation still holds that context.
@@ -58,7 +59,7 @@ EOF2
 # there is no wrapper (the compat copy an old settings entry runs from), and
 # only where a new server can start (startup, resume): a compaction or /clear
 # keeps the running channel server, so a patch there changes nothing it uses.
-if case $source in startup|resume) true;; *) false;; esac &&
+if case $source in startup|resume|fork) true;; *) false;; esac &&
    [ -x "$plugin_root/bin/claude-discord" ] && ! pout=$("$plugin_root/bin/claude-discord" patch 2>&1); then
   printf '%s on-session-start: patch failed: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${pout//$'\n'/ | }" >> "$DISCORD_STATE_DIR/health.log" 2>/dev/null || :
 fi
@@ -80,7 +81,7 @@ revive_backends
 t=$DISCORD_STATE_DIR/turns/$session_id
 case $source in
   compact|clear) rm -f "$t.primed" 2>/dev/null; exit 0 ;;
-  startup|resume) rm -f "$t" "$t.replied" "$t.pending" "$DISCORD_STATE_DIR/held" 2>/dev/null ;;   # .pending: left by a turn before 1.9.3; held (1.19.1): a session of it runs again
+  startup|resume|fork) rm -f "$t" "$t.replied" "$t.pending" "$DISCORD_STATE_DIR/held" 2>/dev/null ;;   # .pending: left by a turn before 1.9.3; held (1.19.1): a session of it runs again
   *) exit 0 ;;
 esac
 
@@ -88,36 +89,6 @@ id=${CLAUDE_JOB_DIR:-}; id=${id##*/}
 [[ $id =~ ^[0-9a-f]{8}$ ]] || exit 0
 jq -e --arg s "$session_id" '.sessionId == $s or .resumeSessionId == $s' \
   "$CLAUDE_JOB_DIR/state.json" >/dev/null 2>&1 || exit 0
-pins=${CLAUDE_JOB_DIR%/*}/pins.json
-old=$(cat "$DISCORD_STATE_DIR/pinned-job" 2>/dev/null) || old=""
-# A pinned-job that is not a job id names nothing this bot pinned: an entry
-# that happens to equal it must not be removed.
-[[ $old =~ ^[0-9a-f]{8}$ ]] || old=""
-# ponytail: a lock left by a crashed CLI is not broken here (the CLI breaks one
-# older than 5 s on its own next pin write); until then this start skips.
-n=0
-until mkdir "$pins.lock" 2>/dev/null; do
-  n=$((n + 1)); [ "$n" -lt 5 ] || exit 0
-  sleep 0.05
-done
-trap 'rmdir "$pins.lock" 2>/dev/null' EXIT
-# jq prints "added" or "kept" (raw, -r) on the first line and the new array
-# on the rest: only an id this start really added is recorded as this bot's.
-if [ -e "$pins" ] && grep -q '[^[:space:]]' "$pins" 2>/dev/null; then
-  new=$(jq -rs --arg id "$id" --arg old "$old" '
-    if length == 1 and (.[0] | type == "array" and all(.[]; type == "string")) then .[0]
-      | if $old != "" and $old != $id then map(select(. != $old)) else . end
-      | if any(.[]; . == $id) then "kept", . else "added", . + [$id] end
-    else empty end' "$pins" 2>/dev/null) || exit 0
-  [ -n "$new" ] || exit 0
-else
-  new=$(jq -rn --arg id "$id" '"added", [$id]') || exit 0
-fi
-added=${new%%$'\n'*}; new=${new#*$'\n'}
-printf '%s' "$new" 2>/dev/null > "$pins.tmp.$$" && mv -f "$pins.tmp.$$" "$pins" 2>/dev/null || { rm -f "$pins.tmp.$$" 2>/dev/null; exit 0; }
-if [ "$added" = added ]; then
-  printf '%s\n' "$id" 2>/dev/null > "$DISCORD_STATE_DIR/pinned-job"
-elif [ "$old" != "$id" ]; then
-  rm -f "$DISCORD_STATE_DIR/pinned-job" 2>/dev/null   # someone else pinned this job
-fi
+. "${0%/*}/../lib/pin.sh" 2>/dev/null || exit 0
+pin_job "$id" "$DISCORD_STATE_DIR" "${CLAUDE_JOB_DIR%/*}" || :
 exit 0

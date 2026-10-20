@@ -165,6 +165,8 @@ bash -n "$D/hooks/turn/on-prompt"
 bash -n "$D/hooks/turn/on-reply"
 bash -n "$D/hooks/turn/on-stop"
 bash -n "$D/hooks/turn/on-session-start"
+bash -n "$D/hooks/turn/on-session-end"
+bash -n "$D/hooks/lib/pin.sh"
 bash -n "$D/hooks/peers/thread-guard"
 bash -n "$D/hooks/peers/edit-gate"
 bash -n "$D/tools/thread"
@@ -179,7 +181,7 @@ bash -n "$D/monitor/monitor.sh"
 # hook command names a script that exists in the repo and is executable.
 jq -e '.name == "discord-agents" and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$D/.claude-plugin/plugin.json" >/dev/null || { echo "FAIL: plugin.json needs name discord-agents and a semver version"; exit 1; }
 cmds=$(jq -r '.hooks[][] .hooks[] .command' "$D/hooks/hooks.json") || { echo "FAIL: hooks.json is not valid"; exit 1; }
-[ "$(printf '%s\n' "$cmds" | wc -l | tr -d ' ')" = 7 ] || { echo "FAIL: hooks.json must register the seven hooks: $cmds"; exit 1; }
+[ "$(printf '%s\n' "$cmds" | wc -l | tr -d ' ')" = 8 ] || { echo "FAIL: hooks.json must register the eight hooks (on-session-end since 1.19.4): $cmds"; exit 1; }
 # One process per reply on each side: on-reply alone after it (checkin merged into it), thread-guard alone before it
 # (mention-guard merged into it).
 [ "$(jq -c '[.hooks.PostToolUse[] | select(.matcher as $m | "mcp__plugin_discord_discord__reply" | test("^(" + $m + ")$")) | .hooks[].command],

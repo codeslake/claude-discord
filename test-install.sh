@@ -570,6 +570,23 @@ txt=$(HOME=$BH bash "$S" health --all 2>/dev/null) || :
   grep -qF "stale session: plugin server pid " <<<"$txt" && grep -qF "runs for $HOME/gone/x, which no longer exists: it holds no token and never logs in; claude stop old00001" <<<"$txt" ||
   { echo "FAIL: health --all lists a server whose state dir is gone, with its session's job, and not one on a linked path: $out / $txt"; exit 1; }
 stop_one_server "$HOME/lk/sbot"; stop_one_server "$HOME/gone/x"; rm -rf "${BH:?}" "$HOME/lk"
+# 1.19.4: a live bot job that is not in pins.json (the daemon retires it after 8 h idle) is pinned by health --all
+# --patch (the monitor's run), with a line in the bot's health.log, and only said without --patch. A live job of no bot
+# (no DISCORD_STATE_DIR in its record) and one already pinned are left alone.
+BH=$HOME/pinbox; mkdir -p "$BH/bin" "$BH/.claude/jobs/a1000001" "$BH/.claude/jobs/b2000002" "$BH/.claude/jobs/c3000003" "$BH/bd"
+printf 'DISCORD_BOT_TOKEN=x\n' > "$BH/bd/.env"
+for j in a1000001 c3000003; do jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$BH/bd\"}}" '{respawnFlags: ["--settings", $s]}' > "$BH/.claude/jobs/$j/state.json"; done
+echo '{"respawnFlags": []}' > "$BH/.claude/jobs/b2000002/state.json"; printf '["c3000003"]' > "$BH/.claude/jobs/pins.json"
+printf '#!/bin/bash\n[ "$1" = agents ] && echo %s\n' "'[{\"id\":\"a1000001\",\"pid\":11},{\"id\":\"b2000002\",\"pid\":12},{\"id\":\"c3000003\",\"pid\":13},{\"id\":\"d4000004\"}]'" > "$BH/bin/claude"; chmod +x "$BH/bin/claude"
+txt=$(HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all 2>/dev/null) || :
+p1=$(<"$BH/.claude/jobs/pins.json")
+out=$(HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all --json --patch 2>/dev/null) || :
+grep -qF "not pinned: job a1000001 of $BH/bd is not in pins.json" <<<"$txt" && [ "$p1" = '["c3000003"]' ] &&
+  [ "$(jq -c '.unpinned' <<<"$out")" = "[{\"job\":\"a1000001\",\"state_dir\":\"$BH/bd\",\"pinned_now\":true}]" ] &&
+  [ "$(jq -c . "$BH/.claude/jobs/pins.json")" = '["c3000003","a1000001"]' ] && grep -q 'health: pinned job a1000001' "$BH/bd/health.log" ||
+  { echo "FAIL: health --all says a live unpinned bot job and --patch pins it (health.log line), leaving a job of no bot and a pinned one alone: $txt / $p1 / $(jq -c .unpinned <<<"$out") / $(cat "$BH/.claude/jobs/pins.json" "$BH/bd/health.log" 2>&1)"; exit 1; }
+rm -rf "${BH:?}"
+echo "ok: health --all pins a live bot job missing from pins.json under --patch (the monitor's run) and only says so without it"
 # held (1.19.1): sbot's own server is the last one up; with it stopped and bot sbot hold, health reads held, not down.
 stop_one_server "$SD"; : > "$SD/held"; queue "200 $NONE" '200 {"threads":[]}'
 out=$(cd "$SP" && bash "$S" health --json 2>/dev/null) || :

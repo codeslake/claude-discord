@@ -898,8 +898,8 @@ acts for: every bot, or only some.
 | Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
 |---|---|---|---|---|---|---|
 | UserPromptSubmit | | `turn/on-prompt` | Why: the session must know which bot it is, how to answer and whom it can reach. When: the first Discord turn of a session, and again after a compaction or `/clear` (`on-session-start` removes the key) or when the text changes (mode, channel, people, peers, an update); a message that is exactly "refresh" (case-insensitive, mentions stripped) every time. | additionalContext: the bot's identity and channel (the channel: `access.json`'s one digit-only group key; with several groups, `config.env`'s `DISCORD_CHANNEL_ID` when it is one of them, 1.18.2; else none), the mention rule, the thread rule, the orchestrator rule, and a People line (every id the channel lets in, from `access.json`, config.env's owner and `user-names`, as `<@id>`, named once that id has written, **in id order**: until 1.17.0 the order followed the latest writer and two people taking turns re-sent the text at every message); a dev-manager also gets its Peers line and working rule. The key it was sent under is `turns/<sid>.primed`. On "refresh": handoff instructions pointing at `claude-discord refresh <bot>`. | ~1.2 KB per injection (358-1,617 B, mean 1,243): 107 injections over 814 Discord turns, 41 of them only a People-line reorder (fixed in 1.17.0) | every bot; Peers line: dev-manager |
-| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Why: the tools' path, and a dev-manager's rules, are not in the prompt. When: every start, resume, compaction and `/clear`. | additionalContext `CLAUDE_DISCORD_TOOLS=<path>`, plus `rules/dev-manager.md` for a dev-manager. After a compaction or `/clear` it removes `turns/<sid>.primed`, so the next Discord turn injects the identity again. | 62 B per source; a dev-manager 5,756 B per source | every bot; the rule: dev-manager |
-| SessionStart | `startup\|resume\|compact\|clear` | `autoresearchclaw/on-start` | Why: the report rule of AutoResearchClaw reports (above). When: every source. | additionalContext `rules/autoresearchclaw.md` (nothing when the file is missing); starts no process. | 3,103 B per source (no such bot on lmd79) | autoresearchclaw bots |
+| SessionStart | `startup\|resume\|fork\|compact\|clear` | `turn/on-session-start` | Why: the tools' path, and a dev-manager's rules, are not in the prompt. When: every start, resume, compaction and `/clear`. | additionalContext `CLAUDE_DISCORD_TOOLS=<path>`, plus `rules/dev-manager.md` for a dev-manager. After a compaction or `/clear` it removes `turns/<sid>.primed`, so the next Discord turn injects the identity again. | 62 B per source; a dev-manager 5,756 B per source | every bot; the rule: dev-manager |
+| SessionStart | `startup\|resume\|fork\|compact\|clear` | `autoresearchclaw/on-start` | Why: the report rule of AutoResearchClaw reports (above). When: every source. | additionalContext `rules/autoresearchclaw.md` (nothing when the file is missing); starts no process. | 3,103 B per source (no such bot on lmd79) | autoresearchclaw bots |
 
 #### Reply guards
 
@@ -919,7 +919,8 @@ acts for: every bot, or only some.
 
 | Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
 |---|---|---|---|---|---|---|
-| SessionStart | `startup\|resume\|compact\|clear` | `turn/on-session-start` | Why: a respawn or an auto-update of the official plugin since the last start, a turn whose Stop never ran, a daemon that would retire an idle bot, a manager's backend killed by a restart. When: every source; the patch, the clean-up and the pin at startup and resume only. | Runs `claude-discord patch` (a failure goes to `health.log`); clears the per-turn files a turn whose Stop never ran left behind, keeping the primed key; pins a background session's job (`~/.claude/jobs/pins.json` and `pinned-job`, see Background sessions); starts a dev-manager's keeper when none runs and its owner did not stop it. No marker sweep and no `claude agents` here (the monitor's pass and update sweep). | 0 B | every bot; the keeper: dev-managers with a hosts ledger |
+| SessionStart | `startup\|resume\|fork\|compact\|clear` | `turn/on-session-start` | Why: a respawn or an auto-update of the official plugin since the last start, a turn whose Stop never ran, a daemon that would retire an idle bot, a manager's backend killed by a restart. When: every source; the patch, the clean-up and the pin at startup, resume and fork only (fork since 1.19.4: a `--resume` the CLI starts as a fork ran none of them, and the bot was retired 8 h later unpinned). | Runs `claude-discord patch` (a failure goes to `health.log`); clears the per-turn files a turn whose Stop never ran left behind, keeping the primed key; pins a background session's job (`~/.claude/jobs/pins.json` and `pinned-job`, see Background sessions); starts a dev-manager's keeper when none runs and its owner did not stop it. No marker sweep and no `claude agents` here (the monitor's pass and update sweep). | 0 B | every bot; the keeper: dev-managers with a hosts ledger |
+| SessionEnd | | `turn/on-session-end` | Why: (1.19.4) a bot its person stopped (`claude stop`, `claude rm`, a delete in the agent view, `/exit` in a foreground bot) must stay down, and the monitor's automatic recover would bring it back. When: the bot's own session ends (the job of `CLAUDE_JOB_DIR` naming this session). | Writes `<bot dir>/held` (`session-end <reason> <time>`) for reason `prompt_input_exit`, `logout`, or `other` unless `daemon.log` has this job's `bg retire` line under a minute old (the daemon's idle retire: recovered as before); `clear` writes nothing. health reads the bot `held`, the monitor posts one `[held]` line with no mention, boot skips it; its next session start removes the file. | 0 B | every background bot |
 | UserPromptSubmit | | `turn/on-prompt` | Why: as above, a backend killed by a restart comes back with the first bot that wakes. When: every prompt. | Starts a dev-manager's keeper when none runs, for each line of `records/managers` (builtins only when all run: no fork on Linux). | 0 B | every bot (the keepers of this machine's managers) |
 
 Which plugin runs them:
@@ -1215,6 +1216,15 @@ state_dir}]` in the `--json` document, which the monitor posts as a
 `[stale-session]` finding. The job is the session's above that server
 (`~/.claude/sessions/<pid>.json`). A path that exists through a link is a
 bot's and is not listed. Linux only: on macOS the list is empty.
+
+**Unpinned jobs** (1.19.4). A background bot's job that is not in
+`~/.claude/jobs/pins.json` is retired by the daemon after 60 minutes or 8 hours
+with no message. `health --all` lists each job `claude agents` shows with a pid
+whose record names a bot dir and which is not pinned (`unpinned: [{job,
+state_dir, pinned_now}]`); with `--patch` (the monitor's run) it pins it there,
+as the SessionStart hook would have, with one line in the bot's `health.log`
+and nothing posted. A job unpinned on purpose with ctrl+t in the agent view is
+pinned again by the monitor.
 
 Three things would make that signal cry wolf, and each is filtered:
 
@@ -1635,6 +1645,13 @@ bot taken down on purpose: `claude-discord bot <bot> hold` (1.19.1) leaves
 not `down` (no finding; a `[down]` already posted is closed by one
 `[held] <bot> ...: held down on purpose` line), and `boot` skips it; the
 bot's next session start (`recover` by hand, `--bg --name`) removes the file.
+A bot whose own session ended for a person's reason is held the same way by
+the SessionEnd hook (1.19.4): `claude stop`, `claude rm`, a delete in the
+agent view or `/exit` in a foreground bot (in a client attached to a background
+bot, Ctrl-C and `/exit` only detach it), but not the daemon's idle retire (its
+`bg retire` line in `daemon.log`); the monitor says it once, `[held] <bot> on
+<host> (<project>): its session ended (SessionEnd other, no daemon retire
+logged): ...`, with no mention, so a wrong call is seen.
 `MONITOR_RECOVER=no` in the manager project's `config.env` turns it all off;
 the `[down]` and its fix line are posted as before.
 The TUI's Alerts tab shows each run as `↻ recover` (exit 0) or `↻ recover

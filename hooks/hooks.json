@@ -11,8 +11,11 @@
     "Stop": [
       {"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-stop\""}]}
     ],
+    "SessionEnd": [
+      {"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-session-end\""}]}
+    ],
     "SessionStart": [
-      {"matcher": "startup|resume|compact|clear", "hooks": [
+      {"matcher": "startup|resume|fork|compact|clear", "hooks": [
         {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/turn/on-session-start\""},
         {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/autoresearchclaw/on-start\""}
       ]}

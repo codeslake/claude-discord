@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# SessionEnd hook (1.19.4): a bot taken down on purpose stays down. A background bot's session ends for a person's
+# reason (`claude stop`, `claude rm`, a delete in the agent view: reason "other"; /exit or Ctrl-C in a foreground
+# bot: "prompt_input_exit"; "logout") or for the daemon's (an idle retire: also "other", logged first in daemon.log
+# as "bg retire <job>: ..."). The person's reasons write <state dir>/held, so health reads the bot held (not down)
+# and neither the monitor's automatic recover nor boot brings it back; the bot's next session start removes it
+# (on-session-start), and the monitor posts one [held] line, so a wrong call is seen. Measured 2026-10-20 (2.1.304/305):
+# Ctrl-C or /exit in a client attached to a background session only detaches it (no SessionEnd), and a daemon restart
+# for an upgrade respawns its workers with no SessionEnd. Only the bot's own session counts: the job of
+# CLAUDE_JOB_DIR whose state.json names this session (a `claude -p` started from the bot's shell inherits both
+# variables, not its session id). Must never block or fail: any failure is silent success.
+[ -n "${DISCORD_STATE_DIR:-}" ] && [ -d "$DISCORD_STATE_DIR" ] || exit 0
+read -r session_id reason <<EOF2
+$(jq -r '"\(.session_id // "") \(.reason // "")"' 2>/dev/null)
+EOF2
+case $reason in prompt_input_exit|logout|other) ;; *) exit 0;; esac   # clear: the session goes on as another
+id=${CLAUDE_JOB_DIR:-}; id=${id##*/}
+[[ $id =~ ^[0-9a-f]{8}$ ]] && [ -n "$session_id" ] || exit 0
+jq -e --arg s "$session_id" '.sessionId == $s or .resumeSessionId == $s' "$CLAUDE_JOB_DIR/state.json" >/dev/null 2>&1 || exit 0
+if [ "$reason" = other ]; then
+  # The daemon's retire of this job within the last minute: not a person's stop. The line is looked for twice, half a
+  # second apart, in case the daemon writes it as the worker goes. A line whose time cannot be read counts (no hold:
+  # a retired bot is better recovered than left down).
+  log=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/daemon.log now=$(date -u +%s)
+  for _ in 1 2; do
+    l=$(tail -n 200 "$log" 2>/dev/null | grep -a "bg retire $id" | tail -n 1) || l=""
+    if [ -n "$l" ]; then
+      ts=${l#\[}; ts=${ts%%\]*}; t=$(date -u -d "$ts" +%s 2>/dev/null) || t=$now
+      [ $((now - t)) -gt 60 ] || exit 0
+    fi
+    sleep 0.5
+  done
+fi
+printf 'session-end %s %s\n' "$reason" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DISCORD_STATE_DIR/held" 2>/dev/null || :
+exit 0
