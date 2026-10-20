@@ -13,6 +13,8 @@
 #   bot add [--mode <mode>] [--start]   a new bot in this project: its token read as token reads it, its Discord username
 #                             its name, set up by `setup` with its answers on stdin (the project's channel and owner
 #                             are config.env's; an @mention required), started (`--bg --name`) with --start.
+#   bot <name> hold           (1.19.1) a bot taken down on purpose: <bot dir>/held, so health reads it `held`, not
+#                             `down`, and neither the monitor nor boot brings it back; its next session start clears it.
 #   bot <name> recover [--fresh] [--yes]   (1.16.0, the TUI's f and F) a down bot brought back: `claude respawn <id>` of its last
 #                             session when claude agents still lists it as started in this project (pinned-job, then
 #                             the newest plugin-sessions marker, then live_sessions), else `claude-discord --bg --name`;
@@ -33,7 +35,7 @@
 if [ "${1:-}" = bot ]; then
   { set +x; } 2>/dev/null   # a token is read below: no xtrace (bash -x, SHELLOPTS=xtrace) may copy it into a transcript
   shift
-  b_usage="usage: claude-discord bot [--host <alias> [--manager <bot>]] [--project <dir>] <bot> token | <bot> rename <new name> | <bot> recover [--fresh] [--yes] | add [--mode none|dev-manager|autoresearchclaw] [--start]"
+  b_usage="usage: claude-discord bot [--host <alias> [--manager <bot>]] [--project <dir>] <bot> token | <bot> rename <new name> | <bot> recover [--fresh] [--yes] | <bot> hold | add [--mode none|dev-manager|autoresearchclaw] [--start]"
   b_name_re='^[A-Za-z0-9_][A-Za-z0-9_-]{1,31}$'   # a bot's name: Discord's username, which it is; never an option's -
   a_host="" a_proj="" hb=""
   while [ $# -gt 0 ]; do
@@ -62,7 +64,7 @@ if [ "${1:-}" = bot ]; then
           *) echo "$b_usage" >&2; exit 2;;
         esac
       done;;
-    token) [ $# = 0 ] || { echo "$b_usage" >&2; exit 2; };;
+    token|hold) [ $# = 0 ] || { echo "$b_usage" >&2; exit 2; };;
     rename)
       [ $# = 1 ] || { echo "$b_usage" >&2; exit 2; }
       new=$1
@@ -78,6 +80,7 @@ if [ "${1:-}" = bot ]; then
     [ "$act" = rename ] || [ "$act" = recover ] || { [ -t 0 ] && [ -t 1 ]; } || b_noterm   # nothing is read over ssh without a terminal here
     if [ "$act" = add ]; then via_host bot 1.14.0 add --mode "$b_mode" ${b_start:+--start}; fi
     if [ "$act" = recover ]; then via_host bot "$([ -n "$b_yes" ] && echo 1.19.0 || echo 1.16.0)" "$bot" recover ${b_fresh:+--fresh} ${b_yes:+--yes}; fi
+    [ "$act" != hold ] || via_host bot 1.19.1 "$bot" hold
     via_host bot 1.14.0 "$bot" "$act" ${new:+"$new"}
   fi
   if [ -n "$a_proj" ]; then
@@ -283,6 +286,12 @@ if [ "${1:-}" = bot ]; then
     b_dname "$d" "$b_user"
     b_log "$d" "token: replaced (bot $b_id)"
     echo "claude-discord: bot: $d/.env written. A running session of $bn logs in with it within 10 s."
+    exit 0
+  fi
+
+  if [ "$act" = hold ]; then
+    (umask 077; : > "$d/held") 2>/dev/null || { echo "claude-discord: bot: $d/held could not be written; nothing was changed" >&2; exit 1; }
+    echo "claude-discord: bot: $bn is held: while no session of it runs, health reads it held (not down), and neither the monitor nor boot brings it back. Its next session start clears it (claude-discord bot $bn recover, or claude-discord --bg --name $bn)"
     exit 0
   fi
 

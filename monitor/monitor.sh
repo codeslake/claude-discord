@@ -619,7 +619,8 @@ def finding_text: labels as $l
      + "[\(.verdict)] \(subject)\n\($l.reason): \(.detail)\n\($l.fix): \(.fix)") | .[0:1900];
 # The recovery line has no label, so it reads the same in both languages.
 def recovery_text: ((($now_s - (.posted_since_s // $now_s)) / 60) | floor) as $m
-  | (if .posted == "stale-session" then "[recovered] \(subject): the stale session is gone after \($m)m"
+  | (if .verdict == "held" then "[held] \(subject): held down on purpose after \($m)m (was \(.posted))"
+     elif .posted == "stale-session" then "[recovered] \(subject): the stale session is gone after \($m)m"
      else "[recovered] \(subject): answering again after \($m)m (was \(.posted))" end) | .[0:1900];
 def payload($kind): if $kind == "finding"
   then {content: finding_text, allowed_mentions: (if owner != "" then {users: [owner]} else {parse: []} end)}
@@ -651,7 +652,8 @@ def observe($v; $d; $meta): (. // {}) as $o
 # token or channel) is not a finding. (No apostrophe in these comments: the program is one single-quoted string.)
 def warn_only: .verdict != "unknown" and (hold[.verdict] == null or hold[.verdict] >= 1800 or (.verdict == "hostdown" and .laptop == true));
 def due:
-  if (.verdict | good) and (.posted // null) != null then "recovery"
+  # held (1.19.1, bot <bot> hold): what was posted is closed, as by a recovery, with a line of its own.
+  if ((.verdict | good) or .verdict == "held") and (.posted // null) != null then "recovery"
   elif hold[.verdict] != null and ((.verdict == "hostdown" and .laptop == true) | not)
        and (.posted // null) != .verdict and ($now_s - .since_s) >= hold[.verdict] then "finding"
   else null end;
@@ -778,15 +780,17 @@ def host_step($r):
   ([$all[] | . + {kind: (.e | due)} | select(.kind != null)] as $due
    # Two or more downs among the bots of one host in one pass, or two or more recoveries from down there, go out as ONE
    # message (the sessions of a host tend to fall and come back together); its key field lists their keys, RS-separated.
-   | ($due | map(select(.scope == "bots" and .e.bot != null and (if .kind == "finding" then .e.verdict else .e.posted end) == "down"))
+   | ($due | map(select(.scope == "bots" and .e.bot != null and .e.verdict != "held" and (if .kind == "finding" then .e.verdict else .e.posted end) == "down"))
       | group_by([.e.host, .kind]) | map(select(length > 1))) as $groups
    | ([$groups[][].key]) as $grouped
    | ($due[] | select(.key as $k | $grouped | index($k) | not)
       | "O" + ([.scope, .key, .kind, (if .kind == "finding" then .e.verdict else .e.posted end), (.kind as $kind | .e | payload($kind) | tojson)] | join("\u001f"))),
      ($groups[] | "O" + (["bots", (map(.key) | join("\u001e")), .[0].kind, "down", (.[0].kind as $kind | map(.e) | group_payload($kind) | tojson)] | join("\u001f")))),
   # A bot the channel was told is down and still is (two passes at least: the hold, then this one) is recovered, once
-  # in 30 minutes; never the manager itself (a session cannot recover its own bot), never with MONITOR_RECOVER=no.
+  # in 30 minutes; never the manager itself (a session cannot recover its own bot), never with MONITOR_RECOVER=no, and
+  # only on a host whose claude-discord knows recover --yes (1.19.0: an older one refuses the word, exit 2).
   ($all[] | select($recover == "yes" and .scope == "bots" and .e.bot != null and .e.verdict == "down" and .e.posted == "down"
+                   and (($s.hosts[.e.host].version // "") | split(" ")[0] | split(".") | map(tonumber? // 0)) >= [1, 19, 0]
                    and ($now_s - (.e.recover_s // 0)) >= 1800
                    and ((.e.host == "local" and .e.bot == $manager and .e.project == $mproj) | not))
    | "R" + ([.key, .e.host, (.e | subject), "cd \(.e | cdp) && ~/.local/bin/claude-discord bot \(.e | qbot) recover --yes", .e.project, .e.bot] | join("\u001f")))

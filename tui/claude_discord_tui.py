@@ -69,7 +69,7 @@ LOUD = PROBLEM + ("nostate", "patchfail", "blind")
 GOOD = ("busy", "ok")
 WORD = {"down": "DOWN", "stale": "STUCK", "duplicate": "DUPLICATE", "unreachable": "UNREACHABLE", "throttled": "rate-limited",
         "apierror": "api error", "nostate": "no state", "blind": "blind", "noreach": "no network", "busy": "working", "ok": "ok",
-        "unknown": "no token", "stale-session": "STALE SESSION"}
+        "unknown": "no token", "stale-session": "STALE SESSION", "held": "held"}
 
 
 # What text another machine wrote (a ledger host's health document is copied into the state as it is, a display name
@@ -188,7 +188,7 @@ def fold_names(label: str, names: list, w: int, n: int = 3) -> list[str]:
 
 def rank(verdict: str) -> int:
     """0 a problem, 1 needs a look (any verdict this version does not know too), 2 healthy, 3 no token."""
-    return 0 if verdict in PROBLEM else 2 if verdict in GOOD else 3 if verdict == "unknown" else 1
+    return 0 if verdict in PROBLEM else 2 if verdict in GOOD else 3 if verdict in ("unknown", "held") else 1   # held: bot <bot> hold (1.19.1)
 
 
 def mark(verdict: str) -> tuple[str, str]:

@@ -713,6 +713,11 @@ if [ "${1:-}" = health ]; then
       case $refresh_tail in *'not trusted'*) detail="$detail; its last refresh failed on workspace trust";; esac
       [ "$trusted" != false ] || detail="$detail; this project is not trusted, so a --bg start will refuse"
     fi
+    # Taken down on purpose (1.19.1, bot <bot> hold): with no server, held, whatever else was found (a message left
+    # unanswered too). Not a finding: the monitor posts nothing for it and recovers nothing, nor does boot.
+    if [ -f "$d/held" ] && [ "$servers" = 0 ]; then
+      verdict=held detail="held on purpose (claude-discord bot $bot hold): the monitor and boot leave it down until a session of it starts"
+    fi
 
     rows=$rows$bot$'\x1f'$verdict$'\x1f'$detail$'\x1f'$servers$'\x1f'${turn:-}$'\x1f'
     rows=$rows${oldest:-}$'\x1f'$last_seen$'\x1f'${age:-0}$'\x1f'$refresh_tail$'\x1f'$trusted$'\x1f'

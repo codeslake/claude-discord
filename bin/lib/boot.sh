@@ -5,6 +5,7 @@
 # `claude agents` lists with a pid, by its pinned job or its name, started in its project, runs: skipped, so a session a
 # person just started from the agents view gets no twin. Every other bot: `bot <bot> recover --yes`, one at a time, in
 # the foreground, which decides respawn, takeover or a fresh start and refuses two listed sessions as it always does.
+# A held bot (bot <bot> hold, 1.19.1) and one with no token in its .env are skipped too.
 # One line per bot; exit 0, or 1 when `claude agents` failed or a recover did.
 if [ "${1:-}" = boot ]; then
   [ $# = 1 ] || { echo "usage: claude-discord boot" >&2; exit 2; }
@@ -19,6 +20,8 @@ if [ "${1:-}" = boot ]; then
     for bd in "$pd_root"/*/; do
       bd=${bd%/}; b=${bd##*/}
       [ -f "$bd/.env" ] || continue
+      if [ -f "$bd/held" ]; then echo "boot: $p $b: held (bot $b hold), skipped"; continue; fi
+      grep -q '^DISCORD_BOT_TOKEN=.' "$bd/.env" 2>/dev/null || { echo "boot: $p $b: no token, skipped"; continue; }
       pin=""; { read -r pin < "$bd/pinned-job"; } 2>/dev/null || :
       pid=$(printf '%s' "$bt_agents" | jq -r --arg n "$b" --arg pin "$pin" --arg cwd "$(cd -P "$p" && pwd)" \
         'first(.[] | objects | select((.name == $n or ($pin != "" and .id == $pin)) and .cwd == $cwd and .pid != null) | .pid) // ""' 2>/dev/null) || pid=""

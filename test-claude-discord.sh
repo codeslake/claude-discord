@@ -380,8 +380,9 @@ done
 mv "$S" "$S.real"; printf '#!/bin/bash\necho patch stub output\n' > "$S"; chmod +x "$S"
 printf '111 222\n' > "$DSD/turns/sPrime"; : > "$DSD/turns/sPrime.replied"
 for src in startup resume; do
+  : > "$DSD/held"   # 1.19.1: bot <bot> hold; a session of it starting again ends the hold
   DISCORD_STATE_DIR="$DSD" bash "$H/on-session-start" <<<"{\"session_id\":\"sPrime\",\"source\":\"$src\"}" >/dev/null
-  [ ! -e "$DSD/turns/sPrime" ] && [ ! -e "$DSD/turns/sPrime.replied" ] && [ -f "$DSD/turns/sPrime.primed" ] || { echo "FAIL: a $src must clear a turn left over (no Stop ran) and keep the primed flag"; exit 1; }
+  [ ! -e "$DSD/turns/sPrime" ] && [ ! -e "$DSD/turns/sPrime.replied" ] && [ -f "$DSD/turns/sPrime.primed" ] && [ ! -e "$DSD/held" ] || { echo "FAIL: a $src must clear a turn left over (no Stop ran) and a hold, and keep the primed flag"; exit 1; }
   printf '111 222\n' > "$DSD/turns/sPrime"; : > "$DSD/turns/sPrime.replied"
 done
 rm -f "$DSD/turns/sPrime" "$DSD/turns/sPrime.replied"
@@ -3972,6 +3973,11 @@ rc=0; out=$(bash "$S" bot acc recover --yes </dev/null 2>&1) || rc=$?; BRC=0; ba
   [ "$(cut -d' ' -f4- "$AD/recover.log")" = "recover --yes: claude respawn acc11111 (exit 0)" ] ||
   { echo "FAIL: bot recover --yes runs its plan with no terminal and no question, logged as recover --yes: rc=$rc $BRC $out / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
 rm -f "$HOME/claude.calls" "$AD/recover.log"
+# hold (1.19.1): the marker, no question, nothing run; a word after it is usage (exit 2).
+rc=0; out=$(bash "$S" bot acc hold </dev/null 2>&1) || rc=$?; BRC=0; bash "$S" bot acc hold x </dev/null >/dev/null 2>&1 || BRC=$?
+[ "$rc $BRC" = "0 2" ] && [ -f "$AD/held" ] && grep -q 'acc is held: ' <<<"$out" && [ ! -e "$HOME/claude.calls" ] ||
+  { echo "FAIL: bot hold writes held and runs nothing; a word after it is usage: rc=$rc $BRC $out"; exit 1; }
+rm -f "$AD/held"
 # At a terminal: n runs nothing (exit 4); y respawns the listed session after the marker and the one question, logs it to
 # recover.log and passes the status on (a respawn that fails: exit 1, said with its status; nothing else is run).
 bt - n acc recover; A=$BRC; [ -e "$HOME/claude.calls" ] || A="$A none"; bt - y acc recover; B="$BRC $BO"
@@ -5040,20 +5046,22 @@ echo "ok: monitor: downs on one host in one pass are one post (each owner mentio
 # The automatic recover and stale sessions (1.19.0). One pass: rv on h1, down and its [down] already posted, is recovered
 # over ssh (bot rv recover --yes, from its project) and said in the channel; lb on local likewise through the shim from
 # its project. Negative controls in the same pass: du (a posted duplicate), rt (recovered 10 minutes ago: once in 30),
-# nr on h6 (a noreach host: frozen) and mgr on local (the manager itself) run nothing. h1's answer names a stale session:
+# nr on h6 (a noreach host: frozen), mgr on local (the manager itself) and ov on h7 (a host before 1.19.0, which would
+# refuse --yes: 1.19.1) run nothing. h1's answer names a stale session:
 # posted at once with the job to stop, the manager's owner mentioned. Then: MONITOR_RECOVER=no runs nothing even with rv's
 # 30 minutes up, the stale session gone posts its recovery; and with the line gone again rv is recovered again.
 cp "$HOME/mcfg.keep" "$MCFG"; MPP=$(cd -P "$MP" && pwd)
-printf 'local\nh1\nh6\n' > "$MR/mgr/hosts"; rm -f "$MON"/h1.* "$MON"/h6.* "$MON"/local.* "$HOME/local.calls" "$HOME/ssh.log"
-mdoc h6 0 nr:noreach > "$MON/h6.out"
-mdoc lambda 0 mgr:down lb:down | jq -c --arg p "$MPP" '.projects[0].project = $p' > "$MON/local.out"
-rdoc() { mdoc h1 0 rv:down du:duplicate rt:down | jq -c "$@" > "$MON/h1.out"; }
+printf 'local\nh1\nh6\nh7\n' > "$MR/mgr/hosts"; rm -f "$MON"/h1.* "$MON"/h6.* "$MON"/h7.* "$MON"/local.* "$HOME/local.calls" "$HOME/ssh.log"
+mdoc h6 0 nr:noreach > "$MON/h6.out"; mdoc h7 0 ov:down | jq -c '.version = "1.18.5 (d9a1776)"' > "$MON/h7.out"
+mdoc lambda 0 mgr:down lb:down | jq -c --arg p "$MPP" '.projects[0].project = $p | .version = "1.19.0 (x)"' > "$MON/local.out"
+rdoc() { mdoc h1 0 rv:down du:duplicate rt:down "${RX[@]}" | jq -c '.version = "1.19.1 (x)"' | jq -c "$@" > "$MON/h1.out"; }; RX=()
 rdoc '.stale_sessions = [{pid: 4242, job: "old00001", state_dir: "/gone/x"}]'
 mstate --argjson n "$(date +%s)" --arg mp "$MPP" '.hosts = {} | .alerts = []
   | def p($v; $s): {verdict: $v, since: ($n - $s | todate), since_s: ($n - $s), posted: $v, posted_since_s: ($n - $s)};
   .bots = {"h1|/home/u/ws/p|rv": ({host: "h1", bot: "rv"} + p("down"; 900)), "h1|/home/u/ws/p|du": ({host: "h1", bot: "du"} + p("duplicate"; 900)),
            "h1|/home/u/ws/p|rt": ({host: "h1", bot: "rt", recover_s: ($n - 600)} + p("down"; 900)),
            "h6|/home/u/ws/p|nr": ({host: "h6", bot: "nr", project: "/home/u/ws/p"} + p("down"; 900)),
+           "h7|/home/u/ws/p|ov": ({host: "h7", bot: "ov"} + p("down"; 900)),
            ("local|" + $mp + "|mgr"): ({host: "local", bot: "mgr"} + p("down"; 900)), ("local|" + $mp + "|lb"): ({host: "local", bot: "lb"} + p("down"; 900))}'
 for _ in 1 2 3 4 5 6; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
 mstart; mstop; R1=$(posts | jq -r .content)
@@ -5062,20 +5070,24 @@ rs=$(jq -c --arg mp "$MPP" '[.bots["h1|/home/u/ws/p|rv"].recover_rc, .bots["loca
 [ "$(posts | grep -c .)" = 3 ] && grep -qxF "[recover] rv on h1 (~/ws/p): ran bot recover --yes (exit 0); the next pass says whether it answers" <<<"$R1" &&
   grep -qF "[recover] lb on lambda (" <<<"$R1" && grep -qxF "<@111> [stale-session] h1 (/gone/x)" <<<"$R1" &&
   grep -qxF "fix: ssh h1 'claude stop old00001'" <<<"$R1" && grep -qF "plugin server pid 4242 of job old00001 runs for /gone/x" <<<"$R1" &&
-  [ "$(grep -c ' recover --yes' "$HOME/ssh.log")" = 1 ] && grep -qF "h1 cd ~/ws/p && ~/.local/bin/claude-discord bot rv recover --yes" "$HOME/ssh.log" &&
+  [ "$(grep -c ' recover --yes' "$HOME/ssh.log")" = 1 ] && ! grep -q 'h7 .*recover' "$HOME/ssh.log" && grep -qF "h1 cd ~/ws/p && ~/.local/bin/claude-discord bot rv recover --yes" "$HOME/ssh.log" &&
   [ "$(grep -c '^bot ' "$HOME/local.calls")" = 1 ] && grep -q '^bot lb recover --yes|' "$HOME/local.calls" &&
   [ "$rs" = '[0,0,true,"stale-session",["exit 0","exit 0"]]' ] ||
   { echo "FAIL: a posted down is recovered next pass (ssh and local), a duplicate, one recovered within 30 minutes, a frozen host and the manager itself are not, and a stale session is posted with its job: $R1 / $rs / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }
-echo "MONITOR_RECOVER=no" >> "$MCFG"; rdoc .; rm -f "$HOME/ssh.log" "$HOME/local.calls"
-mstate --argjson n "$(date +%s)" --arg mp "$MPP" '.bots["h1|/home/u/ws/p|rv"].recover_s = ($n - 1801) | .bots["local|" + $mp + "|lb"].recover_s = ($n - 1801)'
+# hd, posted down, is held now (bot hd hold, 1.19.1): its [down] is closed by a [held] line, and nothing recovers it.
+echo "MONITOR_RECOVER=no" >> "$MCFG"; RX=(hd:held); rdoc .; rm -f "$HOME/ssh.log" "$HOME/local.calls"
+mstate --argjson n "$(date +%s)" --arg mp "$MPP" '.bots["h1|/home/u/ws/p|rv"].recover_s = ($n - 1801) | .bots["local|" + $mp + "|lb"].recover_s = ($n - 1801)
+  | .bots["h1|/home/u/ws/p|hd"] = {host: "h1", bot: "hd", verdict: "down", since: ($n - 900 | todate), since_s: ($n - 900), posted: "down", posted_since_s: ($n - 900)}'
 for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
-mstart; mstop; R2=$(posts | jq -r .content)
-[ "$R2" = "[recovered] h1 (/gone/x): the stale session is gone after 0m" ] && ! grep -q ' recover --yes' "$HOME/ssh.log" && ! grep -q '^bot ' "$HOME/local.calls" ||
-  { echo "FAIL: MONITOR_RECOVER=no recovers nothing, and a stale session that left the answer posts its recovery: $R2 / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }
-cp "$HOME/mcfg.keep" "$MCFG"; rm -f "$HOME/ssh.log"; for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
+mstart; mstop; R2=$(posts | jq -r .content | sort)
+[ "$R2" = "$(printf '%s\n' "[held] hd on h1 (~/ws/p): held down on purpose after 15m (was down)" "[recovered] h1 (/gone/x): the stale session is gone after 0m" | sort)" ] &&
+  ! grep -q ' recover --yes' "$HOME/ssh.log" && ! grep -q '^bot ' "$HOME/local.calls" &&
+  jq -e '.bots["h1|/home/u/ws/p|hd"].posted == null' "$MB/state.json" >/dev/null ||
+  { echo "FAIL: MONITOR_RECOVER=no recovers nothing, a held bot closes its [down] with a [held] line, and a stale session that left the answer posts its recovery: $R2 / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }
+cp "$HOME/mcfg.keep" "$MCFG"; RX=(); rdoc .; rm -f "$HOME/ssh.log"; for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
 mstart; mstop
 grep -qF "h1 cd ~/ws/p && ~/.local/bin/claude-discord bot rv recover --yes" "$HOME/ssh.log" || { echo "FAIL: with the line gone and 30 minutes up, rv is recovered again: $(posts)"; exit 1; }
-rm -f "$HOME/mcfg.keep" "$HOME/local.calls" "$MON"/h6.* "$MON"/local.*
+rm -f "$HOME/mcfg.keep" "$HOME/local.calls" "$MON"/h6.* "$MON"/h7.* "$MON"/local.*
 echo "ok: monitor (1.19.0): a bot still down a pass after its [down] is recovered (bot recover --yes, ssh or local) and said, once in 30 minutes, never a duplicate, a frozen host's bot, the manager itself or with MONITOR_RECOVER=no; a stale session is posted with claude stop <job> and its recovery when it is gone"
 
 # A group too long for one post (about 1900 characters) keeps whole entries and names the rest on a last line: no bot is dropped

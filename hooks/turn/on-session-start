@@ -80,7 +80,7 @@ revive_backends
 t=$DISCORD_STATE_DIR/turns/$session_id
 case $source in
   compact|clear) rm -f "$t.primed" 2>/dev/null; exit 0 ;;
-  startup|resume) rm -f "$t" "$t.replied" "$t.pending" 2>/dev/null ;;   # .pending: left by a turn before 1.9.3
+  startup|resume) rm -f "$t" "$t.replied" "$t.pending" "$DISCORD_STATE_DIR/held" 2>/dev/null ;;   # .pending: left by a turn before 1.9.3; held (1.19.1): a session of it runs again
   *) exit 0 ;;
 esac
 

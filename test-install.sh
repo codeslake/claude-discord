@@ -563,6 +563,11 @@ txt=$(HOME=$BH bash "$S" health --all 2>/dev/null) || :
   grep -qF "stale session: plugin server pid " <<<"$txt" && grep -qF "runs for $HOME/gone/x, which no longer exists: it holds no token and never logs in; claude stop old00001" <<<"$txt" ||
   { echo "FAIL: health --all lists a server whose state dir is gone, with its session's job, and not one on a linked path: $out / $txt"; exit 1; }
 stop_one_server "$HOME/lk/sbot"; stop_one_server "$HOME/gone/x"; rm -rf "${BH:?}" "$HOME/lk"
+# held (1.19.1): sbot's own server is the last one up; with it stopped and bot sbot hold, health reads held, not down.
+stop_one_server "$SD"; : > "$SD/held"; queue "200 $NONE" '200 {"threads":[]}'
+out=$(cd "$SP" && bash "$S" health --json 2>/dev/null) || :
+[ "$(field_of sbot verdict "$out")" = held ] || { echo "FAIL: a bot held on purpose with no server reads held, not down: $out"; exit 1; }
+rm -f "$SD/held"
 echo "ok: health --all lists stale sessions (a plugin server whose state dir is gone) with the job to stop, and leaves a server on a linked path alone"
 stop_servers
 
@@ -746,13 +751,17 @@ for x in a b; do
   printf '%s\n' "$(cd -P "$BH/p$x" && pwd)" > "$BH/.claude-discord/projects/$k/project"
   printf 'DISCORD_BOT_TOKEN=x\n' > "$bd/.env"; printf 'b%s000001\n' "$x" > "$bd/pinned-job"
 done
+# 1.19.1: a held bot (bot hold) and one with no token in its .env are skipped, nothing asked of them.
+kb="$BH/.claude-discord/projects/$(skey "$BH/pb")/bots"; mkdir -p "$kb/bh" "$kb/bn"; printf 'DISCORD_BOT_TOKEN=x\n' > "$kb/bh/.env"; : > "$kb/bh/held"
+printf 'DISCORD_CHANNEL_ID=1\n' > "$kb/bn/.env"
 printf '#!/bin/bash\ncase $1 in agents) echo %s;; respawn) echo "RESPAWN $2" >> "$HOME/calls"; [ ! -e "$HOME/fail" ] || exit 7;; *) echo "PLAIN $*";; esac\n' \
   "'[{\"name\":\"ba\",\"id\":\"ba000001\",\"pid\":4242,\"cwd\":\"$(cd -P "$BH/pa" && pwd)\"},{\"name\":\"bb\",\"id\":\"bb000001\",\"cwd\":\"$(cd -P "$BH/pb" && pwd)\",\"state\":\"done\"}]'" > "$BH/bin/claude"
 chmod +x "$BH/bin/claude"
 rc=0; out=$(cd "$BH" && HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc=$?
 : > "$BH/fail"; rc2=0; out2=$(cd "$BH" && HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc2=$?
 [ "$rc $rc2" = "0 1" ] && grep -qE "^boot: .*/pa ba: running \(pid 4242\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bb: recovered$" <<<"$out" &&
-  grep -qE "^boot: .*/pb bb: failed \(exit 1\): .*claude respawn bb000001 \(exit 7\)" <<<"$out2" && [ "$(<"$BH/calls")" = $'RESPAWN bb000001\nRESPAWN bb000001' ] ||
+  grep -qE "^boot: .*/pb bb: failed \(exit 1\): .*claude respawn bb000001 \(exit 7\)" <<<"$out2" && [ "$(<"$BH/calls")" = $'RESPAWN bb000001\nRESPAWN bb000001' ] &&
+  grep -qE "^boot: .*/pb bh: held \(bot bh hold\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bn: no token, skipped$" <<<"$out" ||
   { echo "FAIL: boot skips a bot listed with a pid, recovers one listed without, says a failure (exit 1): rc=$rc $rc2 / $out / $out2 / $(cat "$BH/calls" 2>&1)"; exit 1; }
 rm -rf "${BH:?}"
 echo "ok: boot recovers every bot of the machine that runs no session (bot recover --yes), skips one that does, and exits 1 when one failed"

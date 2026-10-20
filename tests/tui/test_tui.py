@@ -337,6 +337,7 @@ def pure():
     # line, shown as given. The monitor's automatic recover is a `recover` alert: a warning when it exited 0, an alert else.
     ss = {"host": "h1", "project": "/gone/x", "verdict": "stale-session", "fix": "ssh h1 'claude stop old00001'"}
     assert tui.rank("stale-session") == 0 and tui.mark("stale-session")[0] == "✕ STALE SESSION" and tui.recoverable(fz, ss) == ""
+    assert tui.rank("held") == 3 and tui.mark("held")[0] == "○ held" and tui.recoverable(fz, dict(fz["bots"][PHOTO], verdict="held")) == "", "1.19.1: held on purpose"
     assert tui.kind({"kind": "recover", "detail": "exit 0", "key": "h1|/p|b"}) == ("↻ recover", tui.WARN)
     assert tui.kind({"kind": "recover", "detail": "exit 1", "key": "h1|/p|b"}) == ("↻ recover failed", tui.ALERT)
     dup = dict(s, bots={OLDBOT: dict(s["bots"][OLDBOT], verdict="duplicate", fix="claude agents, then claude stop <id>")})

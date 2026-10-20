@@ -557,6 +557,7 @@ token, its name and a new bot are written by one verb, at a terminal, as
 claude-discord bot <bot> token          # a new token for the bot; the current one is never read
 claude-discord bot <bot> rename <new>   # Discord first, then everything here keyed by the name
 claude-discord bot add [--mode none|dev-manager|autoresearchclaw] [--start]   # a new bot, named by its token
+claude-discord bot <bot> hold   # taken down on purpose: health reads it held, and neither the monitor nor boot brings it back (1.19.1)
 claude-discord bot <bot> recover [--fresh] [--yes]   # a down or stuck bot brought back: its last session respawned (conversation kept), or a fresh start
 ```
 
@@ -745,14 +746,15 @@ lists the old jobs as failed and runs none of them. `claude-discord boot`
 claude-discord boot
 ```
 
-For each bot of each recorded project (the projects `health --all` checks), a
-bot that `claude agents` lists with a pid (its pinned job or its name, started
+For each bot of each recorded project (the projects `health --all` checks)
+that has a token and is not held (`bot <bot> hold`, 1.19.1), a bot that
+`claude agents` lists with a pid (its pinned job or its name, started
 in its project) is running and is skipped, so a session someone just started
 from the agent view gets no twin. Every other bot gets
 `claude-discord bot <bot> recover --yes`: its last session respawned with its
 conversation, or a fresh start when none is listed; two listed sessions are
 refused, as `recover` always does. One line per bot (`running (pid <n>),
-skipped`, `recovered`, or `failed (exit <n>): <recover's last line>`); exit 0,
+skipped`, `held (bot <bot> hold), skipped`, `no token, skipped`, `recovered`, or `failed (exit <n>): <recover's last line>`); exit 0,
 or 1 when `claude agents` failed or a recover did. Run it from the machine's
 start (a container entrypoint, a login script, cron `@reboot`), never from a
 bot's own session: a session cannot recover its own bot.
@@ -1619,8 +1621,15 @@ listed sessions, as at a terminal; the bot's `recover.log` gets the line. Never
 run: for a `duplicate` (which copy to stop is a person's call), for a bot of a
 host that is `noreach`, `hostdown` or `blind` this pass (nothing is said about
 it, see above), and for the manager itself on `local` (a session cannot
-recover its own bot). `MONITOR_RECOVER=no` in the manager project's
-`config.env` turns it off; the `[down]` and its fix line are posted as before.
+recover its own bot). Nor for a bot on a host whose claude-discord is older
+than 1.19.0 (it refuses `--yes`; 1.19.1 reads the host's version), nor for a
+bot taken down on purpose: `claude-discord bot <bot> hold` (1.19.1) leaves
+`<bot dir>/held`, and while no session of it runs `health` reads it `held`,
+not `down` (no finding; a `[down]` already posted is closed by one
+`[held] <bot> ...: held down on purpose` line), and `boot` skips it; the
+bot's next session start (`recover` by hand, `--bg --name`) removes the file.
+`MONITOR_RECOVER=no` in the manager project's `config.env` turns it all off;
+the `[down]` and its fix line are posted as before.
 The TUI's Alerts tab shows each run as `↻ recover` (exit 0) or `↻ recover
 failed`.
 
