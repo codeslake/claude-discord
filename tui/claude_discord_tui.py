@@ -62,14 +62,14 @@ DASH = "-"     # a value the state does not have: an older claude-discord on tha
 WIDE = 110     # below it the KPI band is one line and the table's project, receives and env columns fold away
 STATUS_MIN, BOT_MAX = 15, 45   # at WIDE and above: the status column's least width (it holds `posted just now`) and the bot column's most
 TABS = ("bots", "alerts", "config")
-PROBLEM = ("down", "stale", "duplicate", "unreachable")
+PROBLEM = ("down", "stale", "duplicate", "unreachable", "stale-session")   # stale-session (1.19.0): a server of no bot; fix: claude stop
 # The findings the channel is told within 5 minutes of their appearing. Any other is a warning only (the reducer's
 # warn_only): told after half an hour (throttled, apierror, hostdown) or never (noreach, a verdict this version does not know).
 LOUD = PROBLEM + ("nostate", "patchfail", "blind")
 GOOD = ("busy", "ok")
 WORD = {"down": "DOWN", "stale": "STUCK", "duplicate": "DUPLICATE", "unreachable": "UNREACHABLE", "throttled": "rate-limited",
         "apierror": "api error", "nostate": "no state", "blind": "blind", "noreach": "no network", "busy": "working", "ok": "ok",
-        "unknown": "no token"}
+        "unknown": "no token", "stale-session": "STALE SESSION"}
 
 
 # What text another machine wrote (a ledger host's health document is copied into the state as it is, a display name
@@ -632,6 +632,8 @@ def kind(a: dict, opened: bool = False) -> tuple[str, str]:
     recovered: a server down, a blind host) it is a problem like a bot's."""
     if a.get("kind") == "recovery":
         return "✓ recovered", OK
+    if a.get("kind") == "recover":   # 1.19.0: the monitor ran bot recover --yes; its detail is "exit <status>"
+        return ("↻ recover", WARN) if a.get("detail") == "exit 0" else ("↻ recover failed", ALERT)
     if txt(a.get("key")).count("|") == 1:
         return "○ host", ALERT if opened else DIM
     return ("✕ down", ALERT) if rank(a.get("verdict")) == 0 else ("▲ check", WARN)

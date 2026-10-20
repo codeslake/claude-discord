@@ -314,12 +314,13 @@ tick=${CLAUDE_DISCORD_MONITOR_TICK:-30}        # holder check, seconds
 pass=${CLAUDE_DISCORD_MONITOR_PASS:-300}       # a pass at most this often, but for one asked for (--check):
 gap=${CLAUDE_DISCORD_MONITOR_CHECK_GAP:-60}    # that one this long after the last pass began, at the earliest
 cap=${CLAUDE_DISCORD_MONITOR_HOST_CAP:-90}     # per host, enforced here (no timeout(1) on macOS)
+rcap=${CLAUDE_DISCORD_MONITOR_RECOVER_CAP:-90} # per automatic recover (1.19.0), the same way
 sweep=${CLAUDE_DISCORD_MONITOR_SWEEP:-3600}    # the marker sweep, in a pass at most this often (whole seconds)
 swept=$SECONDS                                 # the first one a whole interval after the start
 # Fractional values are for the suite; bash counts in whole steps. A running
 # host is polled every step (1 s, or a fifth of a tick shorter than 5 s).
-read -r step pass_n cap_n tick_n gap_n < <(awk -v t="$tick" -v p="$pass" -v c="$cap" -v g="$gap" 'BEGIN {
-  s = (t < 5 ? t / 5 : 1); printf "%s %d %d %d %d\n", s, (p / t < 1 ? 1 : int(p / t + 0.5)), int(c / s + 0.5), int(t / s + 0.5), int(g / t + 0.5) }')
+read -r step pass_n cap_n tick_n gap_n rcap_n < <(awk -v t="$tick" -v p="$pass" -v c="$cap" -v g="$gap" -v r="$rcap" 'BEGIN {
+  s = (t < 5 ? t / 5 : 1); printf "%s %d %d %d %d %d\n", s, (p / t < 1 ? 1 : int(p / t + 0.5)), int(c / s + 0.5), int(t / s + 0.5), int(g / t + 0.5), int(r / s + 0.5) }')
 child="" tp="" state="" h_rc=0 local_env=() p_code=000 p_retry="" used=0 part="" stuck=""
 # A pass child runs as its own process group (perl, as for the lock: setsid(1) is util-linux), so the cap and finish
 # kill its whole subtree: a health's $(...) or an ssh's children would otherwise outlive both. The pid survives the exec.
@@ -342,15 +343,17 @@ rotate() {
 write_state() { [ -n "$state" ] || return 0; printf '%s\n' "$state" > "$M/state.json.tmp" 2>/dev/null && mv -f "$M/state.json.tmp" "$M/state.json" 2>/dev/null || :; }
 # read_cfg: lang and mowner from the manager project's config.env (KEY='value'
 # or KEY=value), with no fork: ALERT_LANG (en in any case, anything else ko)
-# and DISCORD_USER_ID, the manager's own owner, whom a host-level finding mentions.
+# and DISCORD_USER_ID, the manager's own owner, whom a host-level finding mentions; MONITOR_RECOVER (1.19.0: no turns
+# the automatic recover off, anything else leaves it on).
 read_cfg() {
   local l v
-  lang=ko mowner=""
+  lang=ko mowner="" recover=yes
   while IFS= read -r l || [ -n "$l" ]; do
     v=${l#*=}; v=${v#\'}; v=${v%\'}
     case $l in
       ALERT_LANG=*) case $v in [eE][nN]) lang=en;; *) lang=ko;; esac;;
       DISCORD_USER_ID=*) mowner=$v;;
+      MONITOR_RECOVER=*) case $v in [nN][oO]|0|[fF][aA][lL][sS][eE]|[oO][fF][fF]) recover=no;; *) recover=yes;; esac;;
     esac
   done 2>/dev/null < "$pstate/config.env"   # 2> first: a missing file's error must not reach monitor.log
 }
@@ -527,6 +530,33 @@ run_host() {  # uses $host $remote, the envs array, and run_pass's step counter 
   done
 }
 
+# run_cmd <host> <remote command> <project> <bot> (1.19.0): one automatic recover, `bot <bot> recover --yes`, run as
+# run_host runs health: its own process group, polled, the tick's checks kept, cut at the cap (c_rc 124). Locally the
+# shim from the bot's project; on a host over ssh with the ledger line's env words (h_envs), as its health ran. Its
+# output is not kept: whether the bot answers is the next pass's to say, and the bot's recover.log has the line.
+run_cmd() {
+  local k0 e="" l
+  if [ "$1" = local ]; then
+    perl -e "$pg" env ${local_env[@]+"${local_env[@]}"} bash -c 'cd -- "$1" && exec "$2" bot "$3" recover --yes' _ "$3" "$HOME/.local/bin/claude-discord" "$4" \
+      >/dev/null 2>&1 < /dev/null 9>&- &
+  else
+    # This host's env words, no here-string (bash 3.2 writes those to TMPDIR): the first line naming it.
+    l=$'\n'$h_envs; l=${l#*$'\n'"$1"$'\x1f'}; [ "$l" = $'\n'"$h_envs" ] || e=${l%%$'\n'*}
+    perl -e "$pg" ssh -o BatchMode=yes -o ConnectTimeout=8 "$1" "${e:+env $e}$2" >/dev/null 2>&1 < /dev/null 9>&- &
+  fi
+  child=$! k0=$k
+  while kill -0 "$child" 2>/dev/null; do
+    k=$((k + 1))
+    if [ $((k - k0)) -gt "$rcap_n" ]; then
+      kill -- -"$child" 2>/dev/null || kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; child="" c_rc=124
+      return 0
+    fi
+    [ $((k % tick_n)) != 0 ] || tick_check
+    sleep "$step" 9>&-
+  done
+  wait "$child" 2>/dev/null; c_rc=$?; child=""
+}
+
 # The reducer: (state, this pass's host results) -> the new state, the log
 # events and the messages to post. One jq program, so every rule of "what
 # counts as a real failure" is in one place:
@@ -542,13 +572,18 @@ run_host() {  # uses $host $remote, the envs array, and run_pass's step counter 
 #   - a bot that left its host's answer is dropped and logged, not announced;
 #   - a host that left the ledger is kept for a day (left_s), frozen with its
 #     bots and their `posted`, so a brief removal posts nothing again; then it
-#     is dropped with its bots, logged, not announced.
+#     is dropped with its bots, logged, not announced;
+#   - (1.19.0) a stale session in a host's answer (a plugin server whose state dir is gone) is an entry of its own,
+#     key host|stale|<job or pid>, posted at once, healed (its recovery posted) once it left the answer;
+#   - (1.19.0) a bot still down a pass after its [down] went out is recovered: an R line, at most every 30 minutes per
+#     bot, never the manager itself, never on a frozen host, not with MONITOR_RECOVER=no.
 # Input, raw lines: the state JSON, then two lines per host, "<host> US <laptop> US <exit status> US <display name> US
 # <env key names, space-separated>" and the answer of the host with its newlines made spaces (still valid JSON when it was).
-# Output lines: "S<state JSON>", "N<bot count>", "E<event>", "O<scope US key US kind US verdict US payload JSON>".
+# Output lines: "S<state JSON>", "N<bot count>", "E<event>", "O<scope US key US kind US verdict US payload JSON>",
+# "R<key US host US subject US remote command US project US bot>".
 reduce='
 def hold: {"down": 300, "duplicate": 300, "unreachable": 300, "throttled": 1800, "apierror": 1800,
-           "stale": 0, "nostate": 0, "patchfail": 0, "hostdown": 1800, "blind": 300};
+           "stale": 0, "nostate": 0, "patchfail": 0, "hostdown": 1800, "blind": 300, "stale-session": 0};
 def good: . == "ok" or . == "busy";
 def short($home): if $home != "" and startswith($home + "/") then "~" + .[($home | length):] else . end;
 # A path with anything but plain characters goes in double quotes, with what the shell would still expand escaped.
@@ -560,7 +595,8 @@ def cd: if .host == "local" then "claude-discord" else "~/.local/bin/claude-disc
 # A remote command goes in single quotes for the local shell that pastes it; the remote shell then reads what cdp quoted.
 def wrap($e): if $e.host == "local" then . else "ssh \($e.host) \u0027\(gsub("\u0027"; "\u0027\\\u0027\u0027"))\u0027" end;
 def fix: . as $e
-  | if   .verdict == "down"        then ("cd \(cdp) && \(cd) --bg --name \(qbot)" | wrap($e))
+  | if   .verdict == "down"        then ("cd \(cdp) && \(cd) bot \(qbot) recover" | wrap($e))
+    elif .verdict == "stale-session" then ((if (.job // "") != "" then "claude stop \(.job)" else "kill \(.pid)" end) | wrap($e))
     elif .verdict == "stale"       then ("cd \(cdp) && \(cd) bot \(qbot) recover" | wrap($e))
     elif .verdict == "duplicate"   then (if .host == "local" then "" else "on \(.host): " end) + "claude agents, then claude stop <id> for the copy that is not the bot\u0027s"
     elif .verdict == "unreachable" then "check DISCORD_BOT_TOKEN in the bot\u0027s state dir, ~/.claude-discord/projects/\(.project | gsub("[^A-Za-z0-9]"; "-"))/bots/\(.bot)/.env, and the bot\u0027s channel permissions"
@@ -583,7 +619,8 @@ def finding_text: labels as $l
      + "[\(.verdict)] \(subject)\n\($l.reason): \(.detail)\n\($l.fix): \(.fix)") | .[0:1900];
 # The recovery line has no label, so it reads the same in both languages.
 def recovery_text: ((($now_s - (.posted_since_s // $now_s)) / 60) | floor) as $m
-  | "[recovered] \(subject): answering again after \($m)m (was \(.posted))" | .[0:1900];
+  | (if .posted == "stale-session" then "[recovered] \(subject): the stale session is gone after \($m)m"
+     else "[recovered] \(subject): answering again after \($m)m (was \(.posted))" end) | .[0:1900];
 def payload($kind): if $kind == "finding"
   then {content: finding_text, allowed_mentions: (if owner != "" then {users: [owner]} else {parse: []} end)}
   else {content: recovery_text, allowed_mentions: {parse: []}} end;
@@ -649,7 +686,8 @@ def host_step($r):
     | (if $was != $hv and ($was != null or ($hv | good | not)) then .events += ["transition \($r.host)|- \($was // "new")->\($hv)"] else . end)
     | if $reach != "ok" then .
       else
-        ($bots | map("\($r.host)|\(.project)|\(.bot)")) as $present
+        ($doc.stale_sessions // [] | map(. + {k: "\($r.host)|stale|\(if (.job // "") != "" then .job else (.pid | tostring) end)"})) as $stale
+        | (($bots | map("\($r.host)|\(.project)|\(.bot)")) + ($stale | map(.k))) as $present
         | ([$doc.projects[] | select(.error != null) | {(.project | tostring): (.error | tostring)}] | add // {}) as $errs
         | reduce $bots[] as $b (.;
             "\($r.host)|\($b.project)|\($b.bot)" as $k
@@ -665,6 +703,14 @@ def host_step($r):
                  # 1.14.0: its Discord username (the TUI says when it is not the bot name); null from an older host.
                  discord_name: ($b.discord_name // null)})
             | if $bw != $b.verdict and ($bw != null or ($b.verdict | good | not)) then .events += ["transition \($k) \($bw // "new")->\($b.verdict)"] else . end)
+        # Stale sessions (1.19.0): no bot, the dead state dir as its project, the owner of the manager, the job to stop.
+        | reduce $stale[] as $s (.;
+            (.state.bots[$s.k].verdict // null) as $bw
+            | .state.bots[$s.k] |= observe("stale-session";
+                "plugin server pid \($s.pid)\(if ($s.job // "") != "" then " of job \($s.job)" else "" end) runs for \($s.state_dir), which no longer exists: it holds no token and never logs in";
+                {host: $r.host, name: (if $r.host == "local" then ($doc.host // "local") else $r.host end),
+                 project: $s.state_dir, home: ($doc.home // ""), owner_id: $mowner, job: ($s.job // ""), pid: $s.pid})
+            | if $bw != "stale-session" then .events += ["transition \($s.k) \($bw // "new")->stale-session"] else . end)
         # A crashed project with no entry at all here (crashed on first sight): an entry of its own, or it would vanish.
         | reduce ($errs | keys[]) as $p (.;
             if any(.state.bots[]; .host == $r.host and .project == $p) then .
@@ -737,30 +783,40 @@ def host_step($r):
    | ([$groups[][].key]) as $grouped
    | ($due[] | select(.key as $k | $grouped | index($k) | not)
       | "O" + ([.scope, .key, .kind, (if .kind == "finding" then .e.verdict else .e.posted end), (.kind as $kind | .e | payload($kind) | tojson)] | join("\u001f"))),
-     ($groups[] | "O" + (["bots", (map(.key) | join("\u001e")), .[0].kind, "down", (.[0].kind as $kind | map(.e) | group_payload($kind) | tojson)] | join("\u001f"))))
+     ($groups[] | "O" + (["bots", (map(.key) | join("\u001e")), .[0].kind, "down", (.[0].kind as $kind | map(.e) | group_payload($kind) | tojson)] | join("\u001f")))),
+  # A bot the channel was told is down and still is (two passes at least: the hold, then this one) is recovered, once
+  # in 30 minutes; never the manager itself (a session cannot recover its own bot), never with MONITOR_RECOVER=no.
+  ($all[] | select($recover == "yes" and .scope == "bots" and .e.bot != null and .e.verdict == "down" and .e.posted == "down"
+                   and ($now_s - (.e.recover_s // 0)) >= 1800
+                   and ((.e.host == "local" and .e.bot == $manager and .e.project == $mproj) | not))
+   | "R" + ([.key, .e.host, (.e | subject), "cd \(.e | cdp) && ~/.local/bin/claude-discord bot \(.e | qbot) recover --yes", .e.project, .e.bot] | join("\u001f")))
 '
 # apply: the POST results back into the state. A sent finding sets `posted`
 # (what makes a restart, and the next pass, quiet); a sent recovery clears it;
 # a failed one changes nothing, so the next pass tries again.
-# Input lines: "<scope> US <key> US <kind> US <verdict> US <status> US <payload JSON>" (the payload may be missing).
+# Input lines: "<scope> US <key> US <kind> US <verdict> US <status> US <payload JSON>" (the payload may be missing), and for
+# a recover (1.19.0) " US <its exit status>" after it: its time and status go on the bot (recover_s, recover_rc) whatever
+# became of the post, so a recover whose post failed is not run again before its 30 minutes.
 apply='
 # A grouped post (keys RS-separated) counts for each of its bots: `posted` stays per bot. Each result becomes one
 # `alerts` record with what the TUI shows: the reason (`detail`; for a recovery, how long it took) and the posted
 # text. A sent post went out on a retry when the last record of its key is a failed one. A POST that keeps failing is
 # recorded once, not once a pass: 100 records are kept, and a Discord outage must not push a day of history out.
 ($results | split("\n") | map(select(. != "") | split("\u001f") | {scope: .[0], key: (.[1] | split("\u001e")[]), kind: .[2], verdict: .[3], status: .[4],
-   text: (.[5] // "" | try (fromjson | .content) catch null)})) as $rs
+   text: (.[5] // "" | try (fromjson | .content) catch null), rc: (.[6] // "" | tonumber? // null)})) as $rs
 | ($now | fromdate) as $now_s
 | reduce $rs[] as $r (.;
     (if $r.scope == "hosts" then $r.key + "|-" else $r.key end) as $ak
     | (.[$r.scope][$r.key] // {}) as $e
     | ((.alerts // []) | map(select(type == "object" and .key == $ak)) | last) as $prev   # a hand-edited element that is no record: skipped, never an error every pass
-    | (if $r.status != "sent" then .
+    | (if $r.kind == "recover" then .[$r.scope][$r.key] |= (. + {recover_s: $now_s, recover_rc: $r.rc})
+       elif $r.status != "sent" then .
        elif $r.kind == "finding" then .[$r.scope][$r.key] |= (. + {posted: .verdict, posted_at: $now, posted_since_s: .since_s})
        else .[$r.scope][$r.key] |= del(.posted, .posted_at, .posted_since_s) end)
     | if $r.status == "failed" and $prev.status == "failed" and $prev.kind == $r.kind and $prev.verdict == $r.verdict then .
       else .alerts += [{ts: $now, key: $ak, kind: $r.kind, verdict: $r.verdict, status: $r.status,
-                        detail: (if $r.kind == "recovery" then "back after \((($now_s - ($e.posted_since_s // $now_s)) / 60) | floor)m" else ($e.detail // "") end)}
+                        detail: (if $r.kind == "recovery" then "back after \((($now_s - ($e.posted_since_s // $now_s)) / 60) | floor)m"
+                                 elif $r.kind == "recover" then "exit \($r.rc // "?")" else ($e.detail // "") end)}
                        + (if $r.status == "sent" then {text: $r.text} else {} end)
                        + (if $r.status == "sent" and $prev.status == "failed" then {retried: true} else {} end)] end)
 | .alerts |= .[-100:]
@@ -768,7 +824,7 @@ apply='
 '
 run_pass() {
   local t0=$SECONDS now_s start line w host laptop hname hkeys remote doc results="" out l rest hosts=0 nb=0 mowner ts="" hj k=0 \
-    lang scope key lk knd verdict payload st posts="" findings=0 posted=0 inflight=""
+    lang scope key lk knd verdict payload st posts="" findings=0 posted=0 inflight="" recover recs="" h_envs="" c_rc rhost rsubj rcmd rproj rbot txt
   local envs=() has_local=""
   local_env=()   # a ledger that lost its local line: POSTs with the monitor's own env
   rotate
@@ -800,6 +856,7 @@ run_pass() {
     done
     [ "$host" != local ] || { local_env=(${envs[@]+"${envs[@]}"}); has_local=1; }
     remote="env $([ ${#envs[@]} = 0 ] || printf '%q ' "${envs[@]}")~/.local/bin/claude-discord health --all --json --patch"
+    h_envs="$h_envs$host"$'\x1f'"$([ ${#envs[@]} = 0 ] || printf '%q ' "${envs[@]}")"$'\n'   # for a recover on this host (run_cmd)
     run_host
     doc=$(< "$M/pass.out") 2>/dev/null || doc=""
     results="$results$host"$'\x1f'"$laptop"$'\x1f'"$h_rc"$'\x1f'"$hname"$'\x1f'"$hkeys"$'\n'"${doc//$'\n'/ }"$'\n'
@@ -810,6 +867,7 @@ run_pass() {
   read_cfg; holders_json
   ts=$(now)
   out=$(printf '%s\n%s' "$state" "$results" | jq -nrR --arg now "$start" --argjson now_s "$now_s" --arg lang "$lang" --arg mowner "$mowner" \
+    --arg recover "$recover" --arg manager "$bot" --arg mproj "$pd_project" \
     --argjson every "$pass" --argjson pass_s "$(( SECONDS - t0 ))" --argjson holders "$hj" "$reduce" 2>/dev/null) ||
     { log "pass failed: the reducer rejected its input"
       # Said in state.json too (the TUI's red bar), or a monitor failing every pass would show its last good pass as current.
@@ -839,8 +897,24 @@ run_pass() {
           fi
           # One command for both: a trap runs between commands, never inside one, so it sees the post once.
           posts="$posts$inflight"$'\x1f'"$st"$'\x1f'"$payload"$'\n' inflight="";;
+      R*) recs="$recs$rest"$'\n';;
     esac
   done < <(printf '%s\n' "$out")
+  # The recovers (1.19.0), after this pass's posts: each run, logged, and said in the channel with its exit status.
+  while IFS=$'\x1f' read -r key rhost rsubj rcmd rproj rbot; do
+    [ -n "$key" ] || continue
+    lock_check; [ ! -e "$M/stopped" ] || finish stopped
+    run_cmd "$rhost" "$rcmd" "$rproj" "$rbot"
+    log "recover $key rc=$c_rc"
+    if [ "$c_rc" = 0 ]; then txt="[recover] $rsubj: ran bot recover --yes (exit 0); the next pass says whether it answers"
+    elif [ "$c_rc" = 124 ]; then txt="[recover failed] $rsubj: bot recover --yes did not finish within ${rcap}s"
+    else txt="[recover failed] $rsubj: bot recover --yes exited $c_rc (its recover.log on that host says why)"; fi
+    payload=$(jq -nc --arg c "$txt" '{content: $c[0:1900], allowed_mentions: {parse: []}}')
+    : > "$M/post.out"; inflight="bots"$'\x1f'"$key"$'\x1f'"recover"$'\x1f'"down"
+    if post "$payload"; then posted=$((posted + 1)); log "post $key recover $p_code"; st=sent
+    else log "post $key recover failed $p_code${p_retry:+ retry_after=$p_retry}"; st=failed; fi
+    posts="$posts$inflight"$'\x1f'"$st"$'\x1f'"$payload"$'\x1f'"$c_rc"$'\n' inflight=""
+  done < <(printf '%s' "$recs")
   rm -f "$M/post.out"
   # A failed apply keeps the state as it was (nothing marked posted: the next pass posts again), never an empty one.
   if [ -n "$posts" ]; then

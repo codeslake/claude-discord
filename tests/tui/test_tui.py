@@ -333,6 +333,12 @@ def pure():
     assert tui.recoverable(fz, fz["bots"][PHOTO]) == "recover" and tui.recoverable(fz, dict(fz["bots"][HBOT], verdict="stale")) == "recover"
     assert tui.recoverable(fz, fz["bots"][WDN]) == "" and tui.recoverable(fz, fz["bots"][HBOT]) == "" and tui.recoverable(fz, fz["bots"][NOTOK]) == "", "cut off; throttled; no token"
     assert tui.recoverable(fz, fz["bots"][OLDBOT]) == "" and tui.recoverable(fz, dict(fz["bots"][OLDBOT], verdict="duplicate")) == "" and tui.recoverable(fz, dict(fz["bots"][PHOTO], host="")) == ""
+    # 1.19.0: a stale session (no bot: a key host|stale|<job>) is a problem `f` does not run; its fix is the claude stop
+    # line, shown as given. The monitor's automatic recover is a `recover` alert: a warning when it exited 0, an alert else.
+    ss = {"host": "h1", "project": "/gone/x", "verdict": "stale-session", "fix": "ssh h1 'claude stop old00001'"}
+    assert tui.rank("stale-session") == 0 and tui.mark("stale-session")[0] == "✕ STALE SESSION" and tui.recoverable(fz, ss) == ""
+    assert tui.kind({"kind": "recover", "detail": "exit 0", "key": "h1|/p|b"}) == ("↻ recover", tui.WARN)
+    assert tui.kind({"kind": "recover", "detail": "exit 1", "key": "h1|/p|b"}) == ("↻ recover failed", tui.ALERT)
     dup = dict(s, bots={OLDBOT: dict(s["bots"][OLDBOT], verdict="duplicate", fix="claude agents, then claude stop <id>")})
     assert [l.plain for k, ls in tui.bots_items(dup, NAMES, 137, set(), T) if k is None for l in ls if l.plain.lstrip().startswith("fix  ")] == ["     fix  claude agents, then claude stop <id>   c copies it"]
     assert tui.BOT_Q.fullmatch("Recover photobot? [y/N] ") and tui.RECOVER_Q.search("Recover xy? [y/N] ")

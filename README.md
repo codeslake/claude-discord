@@ -1581,7 +1581,7 @@ message there wakes no session.
 
 | finding | posted after | means |
 |---|---|---|
-| `stale`, `nostate`, `patchfail` | at once | see the troubleshooting rows; `patchfail` is a patch whose pattern moved |
+| `stale`, `nostate`, `patchfail`, `stale-session` | at once | see the troubleshooting rows; `patchfail` is a patch whose pattern moved; `stale-session` (1.19.0): a plugin server whose state dir is gone, fix `claude stop <job>` |
 | `down`, `duplicate`, `unreachable`, `blind` | 5 min | `blind`: the host answered ssh but gave no health document (no claude-discord there, or one before 1.10.0) |
 | `throttled`, `apierror`, `hostdown` | 30 min | `hostdown`: ssh itself failed, also with `-o ControlPath=none`; never posted for a `laptop` |
 | `noreach` | never | that host cannot reach Discord; logged and shown |
@@ -1600,6 +1600,34 @@ host-level finding mentions the manager project's. Labels are Korean by
 default; `ALERT_LANG='en'` in the manager project's `config.env` makes them
 English (any other value is Korean). The reason and the command are never
 translated.
+
+**Automatic recovery** (1.19.0). A bot still `down` a pass after its `[down]`
+went out (so at least two passes: the 5-minute hold, then the next) is
+brought back by the monitor itself: `claude-discord bot <bot> recover --yes`
+from the bot's project, over ssh with the ledger line's env words on another
+host, through the shim on `local`. It runs after the pass's posts, at most
+once every 30 minutes per bot, cut after 90 s, and is said in the channel with
+no mention:
+
+```
+[recover] rv on lmd42 (~/ws/p): ran bot recover --yes (exit 0); the next pass says whether it answers
+[recover failed] rv on lmd42 (~/ws/p): bot recover --yes exited 1 (its recover.log on that host says why)
+```
+
+`recover` itself decides respawn, takeover or a fresh start and refuses two
+listed sessions, as at a terminal; the bot's `recover.log` gets the line. Never
+run: for a `duplicate` (which copy to stop is a person's call), for a bot of a
+host that is `noreach`, `hostdown` or `blind` this pass (nothing is said about
+it, see above), and for the manager itself on `local` (a session cannot
+recover its own bot). `MONITOR_RECOVER=no` in the manager project's
+`config.env` turns it off; the `[down]` and its fix line are posted as before.
+The TUI's Alerts tab shows each run as `↻ recover` (exit 0) or `↻ recover
+failed`.
+
+**Stale sessions** (1.19.0). A `stale_sessions` entry in a host's `health --all`
+document is posted at once as `[stale-session] <host> (<dead state dir>)`
+with the manager's owner mentioned and `claude stop <job>` as its fix, and a
+`[recovered] ... the stale session is gone` line once it left the document.
 
 **TUI.** `claude-discord tui` shows the monitor's state (outside a project it
 picks among the manager bots of the projects `claude-discord` has recorded:
@@ -1869,7 +1897,7 @@ rest of Claude Code.
 | `refresh` says `handoff.md is missing or empty` | the session did not write it; ask it to, or pass `--force` |
 | `refresh` says `<dir> is not a trusted workspace` | `claude --bg` refuses to start in a workspace whose trust was never accepted, and the foreground path does not, so a bot moved to the background with `/bg` can run for weeks without meeting that gate. Run `claude` in the project once and accept the prompt, then retry; `--force` refreshes anyway. The check reads `hasTrustDialogAccepted` and fails **open**, so anything but an explicit `false` proceeds |
 | `refresh` says `start failed, so <bot>'s handoff was put back` | the fresh session did not come up (the line above it says why). The launch consumes `handoff.md` before starting claude, so it is moved back and the retry is not refused for want of one |
-| `claude-discord health: <bot> down` / `[down] <bot>` in `#bot-health-check` | no plugin server for the bot: its session is gone or its worker died. The pasted fix is `cd <project> && claude-discord --bg --name <bot>`; `claude-discord bot <bot> recover` (the TUI's `f` on the row) respawns the bot's last session instead when `claude agents` still lists it (its conversation kept), and starts a fresh one only otherwise |
+| `claude-discord health: <bot> down` / `[down] <bot>` in `#bot-health-check` | no plugin server for the bot: its session is gone or its worker died. The pasted fix is `cd <project> && claude-discord bot <bot> recover` (1.19.0; before it, `--bg --name <bot>`), which the monitor also runs by itself a pass later (Automatic recovery, above); `claude-discord bot <bot> recover` (the TUI's `f` on the row) respawns the bot's last session instead when `claude agents` still lists it (its conversation kept), and starts a fresh one only otherwise |
 | `claude-discord health: <bot> stale — ... hooks or its turn are stuck` | the plugin server is up and the bot still is not answering: the hooks died (see the upgrade row above) or a turn is wedged. First `claude-discord bot <bot> recover` (the TUI's `f` on the row, and the fix line the monitor posts since 1.18.1): a respawn, the conversation kept. `claude-discord refresh <bot> --force` and `claude-discord bot <bot> recover --fresh` discard it (the latter refuses while a transcript of the session moved in the last 15 minutes: a session busy with something other than Discord reads `busy`, not `stale`, since 1.17.1) |
 | `claude-discord health: <bot> duplicate` | two plugin servers share one token, so every reply is sent twice. `/bg` from a foreground session and a fleet spare both respawn a session without going through the wrapper. `claude agents` lists them; stop the one that is not the bot's |
 | `claude-discord health: <bot> unreachable` | Discord answered 401 or 403: the token was refused, or the bot cannot read the channel. Check `DISCORD_BOT_TOKEN` in `<bot>/.env` and the bot's channel permissions |

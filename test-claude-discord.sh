@@ -3463,7 +3463,7 @@ ac nosuch --json
 [ "$ARC" = 1 ] && grep -q "no bot 'nosuch' set up in $MR" <<<"$AE" || { echo "FAIL: a bot that is not set up is exit 1: rc=$ARC $AE"; exit 1; }
 # One run (bot); access and add are asserted on the wrapper's reserved_name case line, which that run proves is used (1.14.1: review cut 4).
 rc=0; out=$(printf '\n' | bash "$S" setup bot 2>&1) || rc=$?
-[ "$rc" = 2 ] && grep -q "bot name 'bot' is reserved" <<<"$out" && grep -q '^reserved_name() { case \$1 in .*|hosts|access|bot|add|hooks|checkin) return 0;; esac; return 1; }$' "$S" ||
+[ "$rc" = 2 ] && grep -q "bot name 'bot' is reserved" <<<"$out" && grep -q '^reserved_name() { case \$1 in .*|hosts|access|bot|add|hooks|checkin|boot) return 0;; esac; return 1; }$' "$S" ||
   { echo "FAIL: access, bot and add are words claude-discord uses (a subcommand, bot add), so no bot may take the name: rc=$rc $out / $(grep -n '^reserved_name()' "$S")"; exit 1; }
 # A DISCORD_CHANNEL_ID that is no id (the bot's main channel when access.json does not say) is said, before Discord is asked.
 cp "$(pstate "$MP")/config.env" "$HOME/acc.env.was"; printf "DISCORD_CHANNEL_ID='9 9'\nDISCORD_USER_ID='111'\n" > "$(pstate "$MP")/config.env"; : > "$CURL_LOG"
@@ -4555,7 +4555,7 @@ echo "ok: monitor: a failed POST is logged, shown and retried next pass (a 429 u
 eval "$(sed -n "/^reduce='\$/,/^'\$/p; /^apply='\$/,/^'\$/p" "$D/monitor/monitor.sh")"
 rpass() {  # $1 = the pass's start (epoch s), the rest = bot:verdict of h1; RS = the state, read and written
   local ns=$1 now; shift; TZ=UTC printf -v now '%(%Y-%m-%dT%H:%M:%SZ)T' "$ns"
-  RS=$(printf '%s\nh1\x1ffalse\x1f0\x1f\x1f\n%s' "$RS" "$(mdoc h1 0 "$@")" | jq -nrR --arg now "$now" --argjson now_s "$ns" --arg lang en --arg mowner 111 \
+  RS=$(printf '%s\nh1\x1ffalse\x1f0\x1f\x1f\n%s' "$RS" "$(mdoc h1 0 "$@")" | jq -nrR --arg now "$now" --argjson now_s "$ns" --arg lang en --arg mowner 111 --arg recover yes --arg manager mgr --arg mproj /x \
     --argjson every 300 --argjson pass_s 1 --argjson holders '[]' "$reduce") || { echo "FAIL: the reducer rejected a pass ($*)"; exit 1; }
   RS=${RS#S}; RS=${RS%%$'\n'*}
 }
@@ -5017,6 +5017,7 @@ echo "ok: tui runs the script through uv for the project's one manager bot (or t
 # mentioned once; `posted` stays per bot, so one that recovers alone gets its own recovered line, and two that recover
 # in one pass share one.
 printf 'h1\n' > "$MR/mgr/hosts"; rm -f "$MON"/h1.*
+MCFG="$(pstate "$MP")/config.env"; cp "$MCFG" "$HOME/mcfg.keep"; echo "MONITOR_RECOVER=no" >> "$MCFG"   # the grouping alone: the automatic recover has its own block below
 gdoc() { mdoc h1 0 "$@" | jq -c '.projects[0].bots |= map(if .bot == "g2" then .owner_id = "333" else . end)' > "$MON/h1.out"; }
 gpass() { printf '200 {}\n200 {}\n' > "$CURL_REPLIES"; : > "$CURL_LOG"; mstart; mstop; G=$(posts); GC=$(printf '%s\n' "$G" | jq -r .content); }
 gdoc g1:down g2:down g3:down
@@ -5035,6 +5036,47 @@ gdoc g1:ok g2:ok g3:ok; gpass
   jq -e '[.bots[].posted] == [null, null, null] and ([.alerts[].status] | length == 6)' "$MB/state.json" >/dev/null ||
   { echo "FAIL: two recoveries on one host in one pass are one post: $G $(jq -c '[.bots[].posted]' "$MB/state.json")"; exit 1; }
 echo "ok: monitor: downs on one host in one pass are one post (each owner mentioned once), so are recoveries from down; posted stays per bot"
+
+# The automatic recover and stale sessions (1.19.0). One pass: rv on h1, down and its [down] already posted, is recovered
+# over ssh (bot rv recover --yes, from its project) and said in the channel; lb on local likewise through the shim from
+# its project. Negative controls in the same pass: du (a posted duplicate), rt (recovered 10 minutes ago: once in 30),
+# nr on h6 (a noreach host: frozen) and mgr on local (the manager itself) run nothing. h1's answer names a stale session:
+# posted at once with the job to stop, the manager's owner mentioned. Then: MONITOR_RECOVER=no runs nothing even with rv's
+# 30 minutes up, the stale session gone posts its recovery; and with the line gone again rv is recovered again.
+cp "$HOME/mcfg.keep" "$MCFG"; MPP=$(cd -P "$MP" && pwd)
+printf 'local\nh1\nh6\n' > "$MR/mgr/hosts"; rm -f "$MON"/h1.* "$MON"/h6.* "$MON"/local.* "$HOME/local.calls" "$HOME/ssh.log"
+mdoc h6 0 nr:noreach > "$MON/h6.out"
+mdoc lambda 0 mgr:down lb:down | jq -c --arg p "$MPP" '.projects[0].project = $p' > "$MON/local.out"
+rdoc() { mdoc h1 0 rv:down du:duplicate rt:down | jq -c "$@" > "$MON/h1.out"; }
+rdoc '.stale_sessions = [{pid: 4242, job: "old00001", state_dir: "/gone/x"}]'
+mstate --argjson n "$(date +%s)" --arg mp "$MPP" '.hosts = {} | .alerts = []
+  | def p($v; $s): {verdict: $v, since: ($n - $s | todate), since_s: ($n - $s), posted: $v, posted_since_s: ($n - $s)};
+  .bots = {"h1|/home/u/ws/p|rv": ({host: "h1", bot: "rv"} + p("down"; 900)), "h1|/home/u/ws/p|du": ({host: "h1", bot: "du"} + p("duplicate"; 900)),
+           "h1|/home/u/ws/p|rt": ({host: "h1", bot: "rt", recover_s: ($n - 600)} + p("down"; 900)),
+           "h6|/home/u/ws/p|nr": ({host: "h6", bot: "nr", project: "/home/u/ws/p"} + p("down"; 900)),
+           ("local|" + $mp + "|mgr"): ({host: "local", bot: "mgr"} + p("down"; 900)), ("local|" + $mp + "|lb"): ({host: "local", bot: "lb"} + p("down"; 900))}'
+for _ in 1 2 3 4 5 6; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
+mstart; mstop; R1=$(posts | jq -r .content)
+rs=$(jq -c --arg mp "$MPP" '[.bots["h1|/home/u/ws/p|rv"].recover_rc, .bots["local|" + $mp + "|lb"].recover_rc, (.bots["h1|/home/u/ws/p|rt"].recover_s != null),
+  .bots["h1|stale|old00001"].verdict, ([.alerts[] | select(.kind == "recover") | .detail] | sort)]' "$MB/state.json")
+[ "$(posts | grep -c .)" = 3 ] && grep -qxF "[recover] rv on h1 (~/ws/p): ran bot recover --yes (exit 0); the next pass says whether it answers" <<<"$R1" &&
+  grep -qF "[recover] lb on lambda (" <<<"$R1" && grep -qxF "<@111> [stale-session] h1 (/gone/x)" <<<"$R1" &&
+  grep -qxF "fix: ssh h1 'claude stop old00001'" <<<"$R1" && grep -qF "plugin server pid 4242 of job old00001 runs for /gone/x" <<<"$R1" &&
+  [ "$(grep -c ' recover --yes' "$HOME/ssh.log")" = 1 ] && grep -qF "h1 cd ~/ws/p && ~/.local/bin/claude-discord bot rv recover --yes" "$HOME/ssh.log" &&
+  [ "$(grep -c '^bot ' "$HOME/local.calls")" = 1 ] && grep -q '^bot lb recover --yes|' "$HOME/local.calls" &&
+  [ "$rs" = '[0,0,true,"stale-session",["exit 0","exit 0"]]' ] ||
+  { echo "FAIL: a posted down is recovered next pass (ssh and local), a duplicate, one recovered within 30 minutes, a frozen host and the manager itself are not, and a stale session is posted with its job: $R1 / $rs / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }
+echo "MONITOR_RECOVER=no" >> "$MCFG"; rdoc .; rm -f "$HOME/ssh.log" "$HOME/local.calls"
+mstate --argjson n "$(date +%s)" --arg mp "$MPP" '.bots["h1|/home/u/ws/p|rv"].recover_s = ($n - 1801) | .bots["local|" + $mp + "|lb"].recover_s = ($n - 1801)'
+for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
+mstart; mstop; R2=$(posts | jq -r .content)
+[ "$R2" = "[recovered] h1 (/gone/x): the stale session is gone after 0m" ] && ! grep -q ' recover --yes' "$HOME/ssh.log" && ! grep -q '^bot ' "$HOME/local.calls" ||
+  { echo "FAIL: MONITOR_RECOVER=no recovers nothing, and a stale session that left the answer posts its recovery: $R2 / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }
+cp "$HOME/mcfg.keep" "$MCFG"; rm -f "$HOME/ssh.log"; for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
+mstart; mstop
+grep -qF "h1 cd ~/ws/p && ~/.local/bin/claude-discord bot rv recover --yes" "$HOME/ssh.log" || { echo "FAIL: with the line gone and 30 minutes up, rv is recovered again: $(posts)"; exit 1; }
+rm -f "$HOME/mcfg.keep" "$HOME/local.calls" "$MON"/h6.* "$MON"/local.*
+echo "ok: monitor (1.19.0): a bot still down a pass after its [down] is recovered (bot recover --yes, ssh or local) and said, once in 30 minutes, never a duplicate, a frozen host's bot, the manager itself or with MONITOR_RECOVER=no; a stale session is posted with claude stop <job> and its recovery when it is gone"
 
 # A group too long for one post (about 1900 characters) keeps whole entries and names the rest on a last line: no bot is dropped
 # unseen, and posted is set for every one of them.
