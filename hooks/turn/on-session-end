@@ -23,13 +23,21 @@ jq -e --arg s "$session_id" '.sessionId == $s or .resumeSessionId == $s' "$CLAUD
 if [ "$reason" = other ]; then
   # The daemon's kill of this job (claude stop, rm) within the last minute, looked for twice half a second apart. None:
   # a SIGTERM from outside or a retire, so no hold, and the bot is recovered as before. A line whose time cannot be
-  # read (BSD date has no -d) counts as recent.
+  # read counts as none (GNU date -d, else BSD date -j). The daemon's own shutdown (`claude daemon stop`, an update's
+  # --force) kills every worker with the same line, and is no person's stop of this bot: "shutdown requested" or
+  # "service recall" within the minute before it means no hold either.
   log=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/daemon.log now=$(date -u +%s) hit=""
+  epoch() { date -u -d "$1" +%s 2>/dev/null || date -j -u -f %Y-%m-%dT%H:%M:%S "${1%.*}" +%s 2>/dev/null; }
   for _ in 1 2; do
-    l=$(tail -n 200 "$log" 2>/dev/null | grep -aF "bg settled $id (killed)" | tail -n 1) || l=""
+    tl=$(tail -n 200 "$log" 2>/dev/null) || tl=""
+    l=$(printf '%s\n' "$tl" | grep -aF "bg settled $id (killed)" | tail -n 1) || l=""
     if [ -n "$l" ]; then
-      ts=${l#\[}; ts=${ts%%\]*}; t=$(date -u -d "$ts" +%s 2>/dev/null) || t=$now
-      [ $((now - t)) -gt 60 ] || { hit=1; break; }
+      ts=${l#\[}; ts=${ts%%\]*}
+      if t=$(epoch "$ts") && [ $((now - t)) -le 60 ]; then
+        s=$(printf '%s\n' "$tl" | grep -aE "shutdown requested|service recall" | tail -n 1) || s=""
+        if [ -n "$s" ]; then ss=${s#\[}; ss=${ss%%\]*}; u=$(epoch "$ss") && [ $((t - u)) -ge 0 ] && [ $((t - u)) -le 60 ] && exit 0; fi
+        hit=1; break
+      fi
     fi
     sleep 0.5
   done

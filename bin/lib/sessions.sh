@@ -15,11 +15,13 @@ live_sessions() {
         .[] | select((.name == $n or (.id as $i | any($j[]; . == $i))) and .cwd == $cwd and (.id != null or .pid != null))
         | "\(.id // "-") \(.pid // "-")" end' 2>/dev/null
 }
-# stop_sessions <name> <live_sessions' lines>: each stopped, a background one by `claude stop <id>`, a foreground one by
+# stop_sessions <name> <live_sessions' lines> [<bot dir>]: each stopped, a background one by `claude stop <id>`, a foreground one by
 # TERM (what closing its terminal sends); then up to 10 s for their pids to go, then 3 s for the gateway to let the token
 # go. Exit 1, the pids still running in `alive`, when one would not die: a start then would put two sessions on one token;
 # `stopped_ids` then names the ones that did stop (their job ids; `pid <n>` for a foreground one), in the order stopped,
-# so the caller can say what it leaves stopped (1.14.1).
+# so the caller can say what it leaves stopped (1.14.1). With the bot dir (1.19.4), its held is removed once every pid
+# is gone: claude stop makes the old session's SessionEnd hook hold the bot, and these stops are for a restart, so a
+# start that then fails must leave the bot down (recovered), never held.
 stop_sessions() {
   local id pid i
   pids=() ids=() stopped_ids=""
@@ -48,6 +50,7 @@ stop_sessions() {
     i=$((i + 1))
   done
   [ ${#alive[@]} = 0 ] || return 1
+  [ -z "${3:-}" ] || rm -f "$3/held" 2>/dev/null
   # The stopped session's channel server needs a moment to release the token;
   # a fresh gateway login while the old one is still up gets both dropped.
   [ -z "$2" ] || sleep 3

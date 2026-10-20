@@ -383,7 +383,7 @@ if [ "${1:-}" = bot ]; then
     fi
     # b_rlog <command> <exit>: a line in the bot's recover.log, in the shape of access.log's.
     b_rlog() { (umask 077; printf '%s %s %s recover%s: %s (exit %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$b_host_name" "${b_fresh:+ --fresh}${b_yes:+ --yes}" "$1" "$2" >> "$d/recover.log") 2>/dev/null || :; }
-    if { [ "$b_do" = fresh ] || [ "$b_do" = takeover ]; } && [ -n "$b_rows" ] && ! stop_sessions "$bn" "$b_rows"; then
+    if { [ "$b_do" = fresh ] || [ "$b_do" = takeover ]; } && [ -n "$b_rows" ] && ! stop_sessions "$bn" "$b_rows" "$d"; then
       # Nothing is started: a start beside a session that still runs puts two sessions on one token.
       b_rlog "$b_stops" 1
       echo "claude-discord: bot: $bn still runs after stop (pid ${alive[*]}): nothing was started${stopped_ids:+; stopped: $stopped_ids}. Stop it by hand (claude stop <id>), then claude-discord --bg --name $bn" >&2; exit 1
@@ -466,7 +466,7 @@ if [ "${1:-}" = bot ]; then
   b_dname "$d" "$new"
   [ "$new" != "$bot" ] || { echo "claude-discord: bot: Discord calls it $new now, as it is called here"; exit 0; }
   b_again=""; [ -z "$b_disc" ] || b_again=" (Discord calls it $new now: run this again to rename it here)"
-  if [ -n "$live" ] && ! stop_sessions "$bn" "$live"; then
+  if [ -n "$live" ] && ! stop_sessions "$bn" "$live" "$d"; then
     # Nothing is started again: a start beside a session that still runs puts two sessions on one token (the very thing
     # stop_sessions guards). The ones that did stop are named, with the command that starts one.
     echo "claude-discord: bot: $bn still runs after stop (pid ${alive[*]}): nothing here was renamed$b_again. Stop it by hand first${stopped_ids:+; stopped and not started again: $stopped_ids (claude-discord --bg --name $bot starts one)}" >&2; exit 1

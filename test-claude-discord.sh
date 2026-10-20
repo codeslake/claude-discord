@@ -459,9 +459,13 @@ send() { rm -f "$DSD/held"; printf '%s' "${2:-{\"sessionId\":\"sEnd\"}}" > "$J/e
 printf '[%s] [bg] bg settled ee0000ff (killed)\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; E=$(send other '{"sessionId":"sOther"}'); F=$(send other)
 printf '[%s] [bg] bg retire ee0000ff: idle-prompt, idle 60m\n[%s] [bg] bg settled ee0000ff (done)\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; G=$(send other)
 printf '[%s] [bg] bg settled ee0000ff (killed)\n' "$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; K=$(send other)
-[ "$A|$B|$C|$E|$F|$G|$K" = "session-end prompt_input_exit||||session-end other||" ] &&
+# The daemon's own shutdown (claude daemon stop, an update's --force) kills every worker with the same line: no hold.
+printf '[%s] [supervisor] shutdown requested via control socket\n[%s] [bg] bg settled ee0000ff (killed)\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; L=$(send other)
+# A time no date can read counts as none (BSD date has no -d: the old fallback held on any killed line, however old).
+printf '[not-a-time] [bg] bg settled ee0000ff (killed)\n' > "$DLOG"; M=$(send other)
+[ "$A|$B|$C|$E|$F|$G|$K|$L|$M" = "session-end prompt_input_exit||||session-end other||||" ] &&
   jq -e '.hooks.SessionEnd[0].hooks[0].command | endswith("/hooks/turn/on-session-end\"")' "$D/hooks/hooks.json" >/dev/null ||
-  { echo "FAIL: on-session-end holds a bot its person stopped (the daemon's killed line under a minute old), not on a SIGTERM, a retire, an old kill, clear or another session's end: $A|$B|$C|$E|$F|$G|$K"; exit 1; }
+  { echo "FAIL: on-session-end holds a bot its person stopped (the daemon's killed line under a minute old), not on a SIGTERM, a retire, an old kill, the daemon's shutdown, an unreadable time, clear or another session's end: $A|$B|$C|$E|$F|$G|$K|$L|$M"; exit 1; }
 rm -rf "$J/ee0000ff" "$DLOG" "$DSD/held"
 pin bbbb0002 resume
 # An id already in the file is someone else's pin: it stays, and this bot
@@ -4023,7 +4027,9 @@ bt - n acc recover; A=$BRC; [ -e "$HOME/claude.calls" ] || A="$A none"; bt - y a
   { echo "FAIL: bot recover respawns the listed last session after its one question, logs it, and passes the status on: $A / $B / rc=$BRC $BO / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
 # --fresh with exactly one listed session (I3 of the review): it is stopped (STOP before the start) and gone before the
 # fresh start.
-rm -f "$HOME/claude.calls"; bt - y acc recover --fresh; A="$BRC $BO"; kill -0 "$OLD" 2>/dev/null || A="$A gone1"
+# 1.19.4: the stop is ours, for a restart, so the hold the old session's SessionEnd hook writes on it goes once the
+# pid is gone (a start that fails then leaves the bot down, recovered, never held). Planted here as the hook would.
+rm -f "$HOME/claude.calls"; : > "$AD/held"; bt - y acc recover --fresh; A="$BRC $BO"; kill -0 "$OLD" 2>/dev/null || A="$A gone1"; [ ! -e "$AD/held" ] || A="$A held-left"
 [[ $A == 0*"    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc"*"stopping acc (acc11111, pid $OLD)"*"LAUNCHER "*" -n acc "*"ran claude-discord --bg --name acc (exit 0)"*" gone1" ]] &&
   [ "$(<"$HOME/claude.calls")" = "STOP acc11111" ] || { echo "FAIL: bot recover --fresh with one listed session stops it before the fresh start: $A / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
 sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; rm -f "$HOME/claude.calls"

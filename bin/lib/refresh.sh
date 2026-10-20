@@ -100,7 +100,7 @@ if [ "${1:-}" = refresh ]; then
     fi
     echo "claude-discord: no running session named $name found; starting a fresh one (--force)"
   fi
-  if ! stop_sessions "$name" "$live"; then
+  if ! stop_sessions "$name" "$live" "$dir"; then
     echo "claude-discord: session $name still running after stop (pid ${alive[*]}); not starting another. Stop it by hand, then run 'claude-discord refresh $name --force'" >&2
     exit 1
   fi
