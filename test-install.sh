@@ -550,6 +550,20 @@ out=$(cd "$RP" && bash "$S" --bg --resume 1111aaaa-2222-3333-4444-555555555555 2
 grep -q -- '-n b' <<<"$out" || { echo "FAIL: --resume must find the bot from a job record naming the old path through a link of the project: $out"; exit 1; }
 rm -rf "$RPF" "$RPF.1.16" "$HOME/.claude/jobs/lk000001" "$HOME/link" "$HOME/real"
 echo "ok: a job record and a server environ naming the old path in the start's logical spelling (the project through a link) keep the link at compat, count in health and resolve --resume"
+# health --all names a stale session (1.19.0): a plugin server whose DISCORD_STATE_DIR no longer exists (a session of a
+# bot from before the 1.18 move, revived from the agent view: it has no token and never logs in), with the job of the
+# session above it (~/.claude/sessions/<pid>.json); one on a path that exists only through a link is a bot's, not listed.
+# Its own HOME with no project: --all is then the scan alone (the suite's shell is the server's parent here).
+BH=$HOME/stalebox; mkdir -p "$BH/.claude/sessions"; jq -n '{jobId: "old00001", sessionId: "0ld00001-1111-2222-3333-444444444444"}' > "$BH/.claude/sessions/$$.json"
+mkdir -p "$HOME/lk"; ln -s "$SD" "$HOME/lk/sbot"; start_server "$HOME/gone/x"; start_server "$HOME/lk/sbot"
+out=$(HOME=$BH bash "$S" health --all --json 2>/dev/null) || :
+txt=$(HOME=$BH bash "$S" health --all 2>/dev/null) || :
+[ "$(jq -c --arg d "$HOME/gone/x" '[.stale_sessions[] | select(.state_dir == $d) | {job, state_dir}]' <<<"$out")" = "[{\"job\":\"old00001\",\"state_dir\":\"$HOME/gone/x\"}]" ] &&
+  [ "$(jq --arg d "$HOME/lk/sbot" '[.stale_sessions[] | select(.state_dir == $d)] | length' <<<"$out")" = 0 ] &&
+  grep -qF "stale session: plugin server pid " <<<"$txt" && grep -qF "runs for $HOME/gone/x, which no longer exists: it holds no token and never logs in; claude stop old00001" <<<"$txt" ||
+  { echo "FAIL: health --all lists a server whose state dir is gone, with its session's job, and not one on a linked path: $out / $txt"; exit 1; }
+stop_one_server "$HOME/lk/sbot"; stop_one_server "$HOME/gone/x"; rm -rf "${BH:?}" "$HOME/lk"
+echo "ok: health --all lists stale sessions (a plugin server whose state dir is gone) with the job to stop, and leaves a server on a linked path alone"
 stop_servers
 
 # --- many bots per project (1.18.1, Task 4): nothing is keyed by a bot's name alone ----------------------------------

@@ -62,11 +62,45 @@ if [ "${1:-}" = health ]; then
         (cd "$p" 2>/dev/null && "$self_path" health --nolog </dev/null) || any=1
       fi
     done
-    [ "$as_json" = yes ] || exit "$any"
+    # Stale sessions (1.19.0): a plugin server whose DISCORD_STATE_DIR no longer exists serves no bot (a session of a bot
+    # from before the 1.18 move revived from the agent view, 2026-10-20: no token, so it never logs in, and the agent view
+    # shows it running). Found as count_servers finds a server (argv first, then the one environ entry); a path that
+    # exists through a link is a bot's. The job is the one of the nearest session above it (sessions/<pid>.json), so the
+    # fix can name it. Linux only: on macOS the list is empty (no /proc for the parent walk).
+    stale="" proc=${CLAUDE_DISCORD_PROC:-/proc}
+    if [ -d "$proc" ] && cands=$(pgrep -x bun 2>/dev/null); then
+      for pid in $cands; do
+        { mapfile -d '' -t args < "$proc/$pid/cmdline"; } 2>/dev/null || continue   # bash4-ok: reached only where /proc exists
+        [ "${#args[@]}" -ge 2 ] && [ "${args[${#args[@]}-1]}" = start ] || continue
+        hit=no; for a in "${args[@]}"; do case $a in */discord/*) hit=yes; break;; esac; done
+        [ "$hit" = yes ] || continue
+        { v=$(grep -aoE '(^|[^A-Za-z0-9_])DISCORD_STATE_DIR=[^[:cntrl:]]*' "$proc/$pid/environ"); } 2>/dev/null || continue
+        v=${v#*DISCORD_STATE_DIR=}; v=${v%%$'\n'*}
+        [ -n "$v" ] && [ ! -d "$v" ] || continue
+        job="" q=$pid
+        while [ "${q:-0}" -gt 1 ]; do
+          if [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$q.json" ]; then
+            job=$(jq -r '.jobId // ""' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$q.json" 2>/dev/null) || job=""; break
+          fi
+          { st=$(< "$proc/$q/stat"); } 2>/dev/null || break
+          st=${st##*) }; q=${st#* }; q=${q%% *}   # past the command name (it may hold spaces): state, then the parent
+        done
+        stale="$stale$pid"$'\t'"$job"$'\t'"$v"$'\n'
+      done
+    fi
+    if [ "$as_json" != yes ]; then
+      while IFS=$'\t' read -r pid job v; do
+        [ -n "$pid" ] || continue
+        echo "stale session: plugin server pid $pid${job:+ of job $job} runs for $v, which no longer exists: it holds no token and never logs in; $([ -n "$job" ] && echo "claude stop $job" || echo "kill $pid")"
+      done <<<"$stale"
+      exit "$any"
+    fi
     h=$(uname -n); h=${h%%.*}
     printf '%s' "$docs" | jq -s --arg host "$h" --arg home "$HOME" --argjson prc "$prc" --arg pout "$pout" \
       --arg ver "$(plugin_version "$self_root") ($(git -C "$self_root" rev-parse --short HEAD 2>/dev/null || echo nogit))" \
-      '{host: $host, version: $ver, home: $home, patch: (if $prc == null then null else {rc: $prc, output: $pout} end), projects: .}'
+      --arg stale "$stale" \
+      '{host: $host, version: $ver, home: $home, patch: (if $prc == null then null else {rc: $prc, output: $pout} end), projects: .,
+        stale_sessions: [$stale | split("\n")[] | select(. != "") | split("\t") | {pid: (.[0] | tonumber), job: .[1], state_dir: .[2]}]}'
     exit 0
   fi
   # The working directory decides, and only when it holds no bots does the

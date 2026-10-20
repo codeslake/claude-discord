@@ -1199,6 +1199,17 @@ which catches a dead process, dead hooks and a wedged turn alike. The process
 count only names the cause afterwards: none means the bot is down, more than
 one means two sessions share its token.
 
+**Stale sessions** (1.19.0). `health --all` also lists every plugin server on
+the machine whose `DISCORD_STATE_DIR` no longer exists: a session of a bot from
+before a move or a rename, revived from the agent view, which has no token,
+never logs in, and still shows as running there. One line each,
+`stale session: plugin server pid <n> of job <id> runs for <path>, which no
+longer exists: ...; claude stop <id>`, and `stale_sessions: [{pid, job,
+state_dir}]` in the `--json` document, which the monitor posts as a
+`[stale-session]` finding. The job is the session's above that server
+(`~/.claude/sessions/<pid>.json`). A path that exists through a link is a
+bot's and is not listed. Linux only: on macOS the list is empty.
+
 Three things would make that signal cry wolf, and each is filtered:
 
 - An author outside the channel's `allowFrom` is dropped by the plugin before
