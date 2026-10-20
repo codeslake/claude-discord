@@ -50,6 +50,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual import events
 from textual.events import Paste, Resize
 from textual.geometry import Region
 from textual.screen import ModalScreen, Screen
@@ -510,10 +511,13 @@ def title_line(state: dict, width: int, now: float, live: bool, stopped: bool, v
     return Text.assemble(left, " " * (width - left.cell_len - right.cell_len), right)
 
 
-def tabs_lines(tab: str, n_open: int, width: int) -> Text:
-    """The tab row: the active tab filled, and underlined `━` in brand on the rule below it."""
+def tabs_lines(tab: str, n_open: int, width: int, at: list | None = None) -> Text:
+    """The tab row: the active tab filled, and underlined `━` in brand on the rule below it. `at` is given the
+    (first cell, end, tab) of each label as it is laid out: the cells a click on the tabs is matched against."""
     row, under = Text(), Text()
     for t, label in zip(TABS, ("Bots", f"Alerts {n_open}", "Configuration")):
+        if at is not None:
+            at.append((row.cell_len, row.cell_len + len(label) + 2, t))
         row.append(f" {label} ", f"bold on {TAB}" if t == tab else DIM)
         row.append(" ")
         under.append("━" * (len(label) + 2) if t == tab else "─" * (len(label) + 2), BRAND if t == tab else TAB)
@@ -2246,6 +2250,10 @@ class Choice(Static, can_focus=True):
             self.paint()
             self.screen.changed(self)
 
+    def on_click(self, event: events.Click) -> None:   # the focus is taken by Textual on the press
+        if self.app.plain(event):
+            self.action_turn(1)
+
 
 class Check(Static, can_focus=True):
     """A checkbox of a popup, drawn `[✓] label`: space toggles it while it has the focus."""
@@ -2262,6 +2270,10 @@ class Check(Static, can_focus=True):
     def action_flip(self) -> None:
         self.on = not self.on
         self.on_mount()
+
+    def on_click(self, event: events.Click) -> None:
+        if self.app.plain(event):
+            self.action_flip()
 
 
 class BotPopup(Asking, ModalScreen):
@@ -2632,7 +2644,18 @@ class RecoverAll(BotPopup):
 
 
 class Pane(VerticalScroll, can_focus=False):
-    """The tab's body. Never focused: the arrow keys move the row cursor (the app's bindings), not the scroll position."""
+    """The tab's body. Never focused: the arrow keys move the row cursor (the app's bindings), not the scroll position.
+    The wheel is the arrows': a row up or down, and the pane follows the cursor (paint)."""
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self.app.action_move(1)
+        event.prevent_default()
+        event.stop()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self.app.action_move(-1)
+        event.prevent_default()
+        event.stop()
 
 
 class MonitorTUI(App):
@@ -2670,6 +2693,9 @@ class MonitorTUI(App):
         self.cursor: dict = {t: None for t in TABS}   # the selected row's key, per tab
         self.opened: set = set()                      # the expanded bot rows
         self.shown: dict = {}                         # widget id -> the Text it shows: an update only when it changes
+        self.tab_at: list = []                        # (first cell, end, tab) of each label of #tabs, as the last paint laid them out
+        self.line_key: list = []                      # the row key of each line of #body (None: no row), as the last paint laid them out
+        self.pressed = None                           # where the mouse button last went down (screen cell)
 
     def compose(self) -> ComposeResult:
         yield Static("", id="title")
@@ -2776,7 +2802,8 @@ class MonitorTUI(App):
         now, w, stopped = time.time(), self.width, self.stopped() is not None
         live = alive(obj(self.state.get("monitor")).get("pid"), self.bot)
         self.show("#title", title_line(self.state, w, now, live, stopped, self.version))
-        self.show("#tabs", tabs_lines(self.tab, len(open_alerts(self.state)), w))
+        self.tab_at = []
+        self.show("#tabs", tabs_lines(self.tab, len(open_alerts(self.state)), w, self.tab_at))
         bar = bar_text(self.state, self.note, stopped, self.refused())
         up = self.updated_to()
         if up:   # ahead of every other bar text: what this TUI shows is the old version's view of files that moved on
@@ -2789,6 +2816,7 @@ class MonitorTUI(App):
         if self.cursor[self.tab] not in keys:   # the row left the state (or nothing was selected yet): the first one
             self.cursor[self.tab] = keys[0] if keys else None
         text, y, h = render(items, self.cursor[self.tab], w)
+        self.line_key = [k for k, lines in items for _ in lines]   # render() lays the lines out in this order
         if self.show("#body", text):
             self.query_one("#pane", Pane).scroll_to_region(Region(0, y, 1, h), animate=False, force=True)
         self.show("#foot", foot_line(self.tab, w))
@@ -2801,6 +2829,35 @@ class MonitorTUI(App):
         # The row keys belong to the main view: under a Detail or a dialog they do nothing.
         return len(self.screen_stack) == 1 or action not in ("move", "tab", "toggle", "open", "copy", "add", "remove", "laptop", "edit", "name", "token", "align",
                                                              "recover", "recover_all")
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self.pressed = event.screen_offset
+
+    def plain(self, event: events.Click) -> bool:
+        """A click and not a drag. Textual sends a Click to the widget the button went down on, wherever it went up, and
+        keeps what a drag selected: only down and up on one cell is a click (that up drops any selection before the Click
+        arrives). A double or triple click is Textual's: it selects the word or the line."""
+        return event.chain == 1 and self.pressed == event.screen_offset
+
+    def on_click(self, event: events.Click) -> None:
+        """The main view's clicks (a popup's own widgets take theirs): a tab label is the tab key's, a row is selected, and
+        the selected one is Enter's."""
+        wid = event.widget.id if event.widget else None
+        if len(self.screen_stack) != 1 or wid not in ("tabs", "body") or not self.plain(event):
+            return
+        if wid == "tabs":
+            tab = next((t for a, b, t in self.tab_at if a <= event.x < b), None)
+            if tab:
+                self.action_tab(TABS.index(tab) - TABS.index(self.tab))
+            return
+        key = self.line_key[event.y] if 0 <= event.y < len(self.line_key) else None
+        if key is None:
+            return
+        if key == self.cursor[self.tab]:
+            self.action_open()
+        else:
+            self.cursor[self.tab] = key
+            self.paint()
 
     def action_tab(self, d: int) -> None:
         self.tab = TABS[(TABS.index(self.tab) + d) % len(TABS)]

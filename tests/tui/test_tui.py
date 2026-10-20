@@ -23,6 +23,7 @@ os.environ["TZ"] = "UTC"   # HH:MM in the title and the Alerts tab is local time
 time.tzset()
 from rich.cells import cell_len
 from rich.console import Console
+from textual import events
 
 sys.dont_write_bytecode = True   # loading the TUI by path would leave tui/__pycache__ in the repo
 ROOT = Path(__file__).resolve().parents[2]
@@ -2401,6 +2402,139 @@ async def bot_add(app, pilot):
     assert len(app.screen_stack) == 1 and "newbot added" in notes(app), notes(app)
 
 
+# ---- the mouse: a click or the wheel does what the key does -----------------
+def y_of(app, word):
+    """The pane line a word is on: where a click on its row lands (the body is drawn one line per line)."""
+    return next(i for i, l in enumerate(body(app)) if word in l)
+
+
+def y_row(app, bot):
+    return body(app).index(row_of(app, bot))
+
+
+async def wheel(pilot, down):
+    await pilot._post_mouse_events([events.MouseScrollDown if down else events.MouseScrollUp], widget="#pane", offset=(5, 5))
+    await pilot.pause()
+
+
+async def mouse(app, pilot):
+    # the tabs: a click on a label (either of its two lines) is the tab key's
+    await pilot.click("#tabs", offset=(9, 0))
+    assert app.tab == "alerts" and app.cursor["alerts"] == "open " + PHOTO
+    await pilot.click("#tabs", offset=(20, 1))
+    assert app.tab == "config"
+    await pilot.click("#tabs", offset=(100, 0))   # past the labels: nothing
+    assert app.tab == "config"
+    await pilot.click("#tabs", offset=(2, 0))
+    assert app.tab == "bots" and text(app, "#tabs").split("\n")[1].startswith("━")
+    # a row: the click selects it, a click on the selected one is Enter
+    assert app.cursor["bots"] == PHOTO
+    y = y_row(app, HANGUL[:3])
+    await pilot.click("#body", offset=(20, y))
+    assert app.cursor["bots"] == HBOT and not isinstance(app.screen, tui.Detail) and app.opened == set(), (app.cursor["bots"], app.screen)
+    await pilot.click("#body", offset=(30, y))
+    assert isinstance(app.screen, tui.Detail) and HANGUL in str(app.screen.query_one("#body-detail").render()), app.screen
+    await pilot.press("escape")
+    # the second line of an opened row belongs to the row; a line of no row (the KPI band) does nothing
+    await pilot.press("space")
+    assert app.opened == {HBOT}
+    await pilot.click("#body", offset=(5, y + 1))
+    assert isinstance(app.screen, tui.Detail), "the second line of the selected row is the row"
+    await pilot.press("escape")
+    await pilot.click("#body", offset=(5, 0))
+    assert app.cursor["bots"] == HBOT and not isinstance(app.screen, tui.Detail), "the KPI band is no row"
+    # the Alerts tab: the same, a rule line is no row, and Enter's popup
+    await pilot.press("right")
+    await pilot.click("#body", offset=(5, y_of(app, "History")))
+    assert app.cursor["alerts"] == "open " + PHOTO and not isinstance(app.screen, tui.Detail), "a rule line is no row"
+    await pilot.click("#body", offset=(5, y_of(app, "History") + 3))
+    assert app.cursor["alerts"] != "open " + PHOTO and not isinstance(app.screen, tui.Detail), app.cursor
+    await pilot.click("#body", offset=(9, y_of(app, "History") + 3))
+    assert isinstance(app.screen, tui.Detail), app.screen
+    await pilot.press("escape")
+    # the wheel: a row up or down, the cursor kept in view as for the arrows
+    await pilot.click("#tabs", offset=(2, 0))
+    keys = [k for k, _ in app.items(time.time()) if k is not None]
+    app.cursor["bots"] = keys[0]
+    app.paint()
+    await wheel(pilot, True)
+    assert app.cursor["bots"] == keys[1], app.cursor
+    await wheel(pilot, True)
+    assert app.cursor["bots"] == keys[2]
+    for _ in range(3):
+        await wheel(pilot, False)
+    assert app.cursor["bots"] == keys[0], "the first row is the end"
+    assert app.query_one("#pane").scroll_offset.y == 0
+
+
+async def mouse_selection(app, pilot):
+    """Text is selected by dragging in the body: that is no click on a row. Textual sends a Click to the widget the button
+    went down on, wherever it went up; the cursor moves, and a row opens, only when down and up are one cell and nothing is selected."""
+    assert app.cursor["bots"] == PHOTO
+    y = y_row(app, HANGUL[:3])
+    await pilot.mouse_down("#body", offset=(2, y))
+    await pilot._post_mouse_events([events.MouseMove], widget="#body", offset=(40, y), button=1)
+    assert app.screen.selections, "the drag selected text"
+    await pilot._post_mouse_events([events.MouseUp, events.Click], widget="#body", offset=(40, y), button=1)
+    assert app.screen.get_selected_text(), "and the text stays"
+    assert app.cursor["bots"] == PHOTO and not isinstance(app.screen, tui.Detail), "a drag moves no cursor and opens no row"
+    await pilot.click("#body", offset=(40, y))   # a plain click: Textual drops the selection, the row is selected
+    assert app.cursor["bots"] == HBOT and not app.screen.selections
+    # a drag across the tabs does not switch one either
+    await pilot.mouse_down("#tabs", offset=(2, 0))
+    await pilot._post_mouse_events([events.MouseMove], widget="#tabs", offset=(9, 0), button=1)
+    await pilot._post_mouse_events([events.MouseUp, events.Click], widget="#tabs", offset=(9, 0), button=1)
+    assert app.tab == "bots"
+    # a double click: the first click selects the row, the second is Textual's (it selects the line) and opens nothing
+    await pilot.double_click("#body", offset=(5, y_row(app, "photobot")))
+    assert app.cursor["bots"] == PHOTO and not isinstance(app.screen, tui.Detail), app.cursor
+
+
+async def mouse_scrolled(app, pilot):
+    """A click maps through the pane's scroll offset: the row under the pointer, not the one at the same line of the top."""
+    pane = app.query_one("#pane")
+    keys = [k for k, _ in app.items(time.time()) if k is not None]
+    app.cursor["bots"] = keys[-2]
+    await pilot.press("down", "down")
+    await pilot.pause()
+    assert pane.scroll_offset.y > 0 and app.cursor["bots"] == NOTOK
+    top = pane.scroll_offset.y
+    y = next(i for i, l in enumerate(body(app)) if l[2:].startswith("m10") and i >= top)
+    await pilot.click("#body", offset=(10, y))
+    assert app.cursor["bots"] == "local|/home/u/m|m10", app.cursor["bots"]
+    for _ in range(6):   # the wheel walks the cursor on, and the pane follows it
+        await wheel(pilot, False)
+    assert app.cursor["bots"] == keys[keys.index("local|/home/u/m|m10") - 6]
+    _, at, h = tui.render(app.items(time.time()), app.cursor["bots"], 100)
+    assert pane.scroll_offset.y <= at and at + h <= pane.scroll_offset.y + pane.size.height, (pane.scroll_offset, at, h)
+
+
+async def mouse_popup(app, pilot):
+    """Choice and Check turn on a click, as on space, and take the focus."""
+    await pilot.press("a")
+    await settle(app, pilot)
+    pop = app.screen
+    assert isinstance(pop, tui.BotAdd) and app.focused.id == "b-no"
+    host, mode, start = pop.query_one("#b-host"), pop.query_one("#b-mode"), pop.query_one("#b-start")
+    assert host.value == "local" and start.on
+    was = mode.value
+    await pilot.click("#b-host")
+    assert host.value == "old" and app.focused is host and [c.value for c in pop.query(tui.Choice)][:2] == ["old", "/home/u/p"], (host.value, app.focused)
+    await pilot.click("#b-host")   # three hosts: around
+    await pilot.click("#b-host")
+    assert host.value == "local", host.value
+    await pilot.click("#b-mode")
+    assert mode.value != was and app.focused is mode
+    await pilot.click("#b-start")
+    assert not start.on and app.focused is start and "[ ]" in str(start.render()), str(start.render())
+    await pilot.click("#b-start")
+    assert start.on
+    await pilot.mouse_down("#b-host", offset=(2, 0))   # a drag along the line is no click on it
+    await pilot._post_mouse_events([events.MouseMove], widget="#b-host", offset=(30, 0), button=1)
+    await pilot._post_mouse_events([events.MouseUp, events.Click], widget="#b-host", offset=(30, 0), button=1)
+    assert host.value == "local"
+
+
 # 1.16.0: the recovery keys. What `bot <bot> recover` prints up to its question, and after a y.
 R_HEAD = "claude-discord: bot: recover photobot on lmd79, /home/u/rcps/.claude/discord-agents/photobot\r\n"
 R_PLAN = (R_HEAD + "    its last session a8305585 (pinned-job) is listed by claude agents (state done, pid 2533799)\r\n"
@@ -2705,6 +2839,10 @@ async def main():
     await case("access_tail", access_tail, state="all_ok", wrapper=access_cli, size=(137, 24))
     await case("bot_tail", bot_tail, state="all_ok", wrapper=bot_cli, size=(137, 24))
     await case("bot_add", bot_add, state="all_ok", wrapper=bot_cli)
+    await case("mouse", mouse, state="all_ok")
+    await case("mouse_selection", mouse_selection, state="all_ok")
+    await case("mouse_scrolled", mouse_scrolled, state="many", size=(100, 20))
+    await case("mouse_popup", mouse_popup, state="all_ok", wrapper=bot_cli)
     await case("recover_one", recover_one, state="down_stale", wrapper=recover_cli)
     await case("recover_fresh", recover_fresh, state="down_stale", wrapper=recover_cli)
     await case("recover_refused", recover_refused, state="down_stale", wrapper=recover_cli)
