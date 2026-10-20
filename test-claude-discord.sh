@@ -672,7 +672,7 @@ echo "ok: both patches are idempotent, and the channel tag's meta is left alone"
 # server, and one listener is left.
 { printf '%s\n' 'import { EventEmitter } from "events"' 'import { readFileSync, writeFileSync } from "fs"' \
     'const ENV_FILE = process.argv[2], TOKEN = "old", logins: string[] = [], seen: string[] = [], client: any = new EventEmitter()' \
-    'client.login = async (t: string) => { logins.push(t); if (t === "refused") throw Object.assign(new Error("x"), { code: "TokenInvalid" }); if (t === "down" && logins.filter(x => x === "down").length <= 2) throw new Error("Unable to connect") }' \
+    'client.login = async (t: string) => { logins.push(t); if (t === "refused") throw Object.assign(new Error("x"), { code: "TokenInvalid" }); if (t === "down" && logins.filter(x => x === "down").length <= 2) throw new Error("Unable to connect via http://u:pw@proxy:8118") }' \
     'const every = setInterval, later = setTimeout; (globalThis as any).setInterval = (f: any) => every(f, 1); (globalThis as any).setTimeout = (f: any, ms: number) => later(f, ms >= 10000 ? 1 : ms)' \
     'const step = async (f: () => void) => { f(); await new Promise(r => setTimeout(r, 10)); seen.push(logins.join()) }'
   grep '^;(async () => { let bad' "$HOME/fakeplugin/server.ts"; printf '%s\n' 'console.log("threw", err) })' \
@@ -681,8 +681,8 @@ echo "ok: both patches are idempotent, and the channel tag's meta is left alone"
     'await step(() => client.emit("shardDisconnect", { code: 4004 })); await step(() => writeFileSync(ENV_FILE, "DISCORD_BOT_TOKEN=new\n"))' \
     'console.log(seen.join("|"), client.listenerCount("shardDisconnect")); process.exit(0)'; } > "$HOME/login.ts"
 out=$(bun "$HOME/login.ts" "$HOME/login.env" 2>"$HOME/login.err") || :
-[ "$out" = "old|old|old,refused|old,refused,down,down,down|old,refused,down,down,down|old,refused,down,down,down,new 1" ] && grep -qF 'login failed (Unable to connect); retrying in 10 s' "$HOME/login.err" && grep -qF 'retrying in 20 s' "$HOME/login.err" ||
-  { echo "FAIL: the patched login, run (bun): a close other than 4004 changes nothing, a 4004 makes it wait for the next token in .env, a login error other than TokenInvalid retries the same token, backing off: $out $(<"$HOME/login.err")"; exit 1; }
+[ "$out" = "old|old|old,refused|old,refused,down,down,down|old,refused,down,down,down|old,refused,down,down,down,new 1" ] && grep -qF 'login failed (Unable to connect via http://proxy:8118); retrying in 10 s' "$HOME/login.err" && grep -qF 'retrying in 20 s' "$HOME/login.err" && ! grep -qF 'pw@' "$HOME/login.err" ||
+  { echo "FAIL: the patched login, run (bun): a close other than 4004 changes nothing, a 4004 makes it wait for the next token in .env, a login error other than TokenInvalid retries the same token, backing off, a URL credential masked: $out $(<"$HOME/login.err")"; exit 1; }
 echo "ok: late-token replaces the no-token exit and the login once (a token refused at the login or by the gateway after it is waited out)"
 
 CALL='const chunks = chunk(text, limit, mode)'

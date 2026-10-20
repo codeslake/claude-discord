@@ -574,6 +574,10 @@ claude-discord bot <bot> recover [--fresh] [--yes]   # a down or stuck bot broug
   waits for a new token when Discord closes the gateway with 4004 (a token
   reset in the Developer Portal), which discord.js never retries. A session
   started before 1.14.0 has the old loop: `claude-discord refresh <bot> --force`.
+  Any other login error (the network or the proxy down) is logged to the
+  plugin's stderr with credentials in a URL masked and retried, 10 s doubling
+  to 5 min (1.19.3: it ended the server, and Claude Code never restarts a dead
+  MCP server, so the bot stayed deaf until `/reload-plugins`).
   `access.log` gets `token: replaced (bot <id>)`, never the token.
 - **rename** changes the username on Discord (`PATCH /users/@me`; Discord
   allows about two changes an hour) and only then the name here: if Discord
