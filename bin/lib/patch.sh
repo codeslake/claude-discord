@@ -39,7 +39,10 @@ sync_runtime() {
 #                   refuses (TokenInvalid) is waited out the same way until .env
 #                   holds a different one, and so, since 1.14.0, is a token the
 #                   gateway refuses after the login (close 4004: it was reset),
-#                   so a token replaced with `bot <name> token` needs no restart
+#                   so a token replaced with `bot <name> token` needs no restart;
+#                   any other login error (network down, proxy refusing) is
+#                   logged and retried every 10 s, forever: rethrown, it ended
+#                   the server, and Claude Code never restarts a dead MCP server
 #   proxy           bunfig preload pinning fetch and WebSocket to HTTPS_PROXY
 #   failure-cache   a per-bot env in .mcp.json, so Claude Code's 15-minute MCP
 #                   failure cache (keyed on the config hashed after ${VAR}
@@ -77,11 +80,11 @@ patch_official() {
     # Both anchors in one perl run, so a server.ts gets both edits or neither;
     # the replacement text comes in through env, so perl interpolates none of it.
     # The leading ; stops ASI from calling the line above (the real file ends client.once(...) with no ;) with this function.
-    cd_login=';(async () => { let bad = ""; const read = () => { let m; try { m = readFileSync(ENV_FILE, "utf8").match(/^DISCORD_BOT_TOKEN=(.+)$/m) } catch {} return m?.[1].trim() || "" }; const pick = () => { const v = bad ? read() : (TOKEN || read()); return v && v !== bad ? v : "" }; for (;;) { const t = await new Promise<string>(ok => { const v = pick(); if (v) return ok(v); const i = setInterval(() => { const w = pick(); if (w) { clearInterval(i); ok(w) } }, 10000) }); try { await client.login(t); await new Promise<void>(ok => { const f = (ev: any) => { if (ev?.code === 4004) { client.off("shardDisconnect", f); ok() } }; client.on("shardDisconnect", f) }); bad = t; process.stderr.write("discord channel: the gateway refused the token (4004); waiting for a new one in .env (re-read every 10 s)\n") } catch (e) { if ((e as any)?.code !== "TokenInvalid") throw e; bad = t; process.stderr.write("discord channel: the token was refused; waiting for a new one in .env (re-read every 10 s)\n") } } })().catch('
-    if grep -qF '"shardDisconnect"' "$f"; then :
+    cd_login=';(async () => { let bad = ""; const read = () => { let m; try { m = readFileSync(ENV_FILE, "utf8").match(/^DISCORD_BOT_TOKEN=(.+)$/m) } catch {} return m?.[1].trim() || "" }; const pick = () => { const v = bad ? read() : (TOKEN || read()); return v && v !== bad ? v : "" }; for (;;) { const t = await new Promise<string>(ok => { const v = pick(); if (v) return ok(v); const i = setInterval(() => { const w = pick(); if (w) { clearInterval(i); ok(w) } }, 10000) }); try { await client.login(t); await new Promise<void>(ok => { const f = (ev: any) => { if (ev?.code === 4004) { client.off("shardDisconnect", f); ok() } }; client.on("shardDisconnect", f) }); bad = t; process.stderr.write("discord channel: the gateway refused the token (4004); waiting for a new one in .env (re-read every 10 s)\n") } catch (e) { if ((e as any)?.code !== "TokenInvalid") { process.stderr.write("discord channel: login failed (" + ((e as any)?.message ?? e) + "); retrying in 10 s\n"); await new Promise(r => setTimeout(r, 10000)); continue } bad = t; process.stderr.write("discord channel: the token was refused; waiting for a new one in .env (re-read every 10 s)\n") } } })().catch('
+    if grep -qF 'retrying in 10 s' "$f"; then :
     elif grep -qF 'code !== "TokenInvalid"' "$f"; then
-      # 1.9.4 to 1.13.x waited out a refused token only at the login: the login loop is replaced by one that also waits
-      # after a 4004, once.
+      # 1.9.4 to 1.19.x: the login loop is replaced, once. 1.9.4 to 1.13.x waited out a refused token only at the login (not a 4004
+      # after it); every one rethrew any other login error (network down), which ended the server.
       if CD_LOGIN=$cd_login perl -0777 -pi -e 's/^;\(async \(\) => \{ let bad = "";[^\n]*?\}\)\(\)\.catch\(/$ENV{CD_LOGIN}/m and $ok = 1; END { exit !$ok }' "$f"; then mark "$f"
       else echo "claude-discord: patch: $f: late-token no longer matches" >&2; rc=1
       fi
