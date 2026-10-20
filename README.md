@@ -734,6 +734,29 @@ first, against the transcripts of the project you are in: a session name (what
 full id, and it says so on stderr. A full id, or a name it cannot find, is
 passed through and claude decides.
 
+## After a reboot: `boot`
+
+Nothing brings a bot back by itself after the machine or its container
+restarts, or after the Claude Code daemon dies: the daemon that starts next
+lists the old jobs as failed and runs none of them. `claude-discord boot`
+(1.19.0) brings every bot of this machine back once:
+
+```sh
+claude-discord boot
+```
+
+For each bot of each recorded project (the projects `health --all` checks), a
+bot that `claude agents` lists with a pid (its pinned job or its name, started
+in its project) is running and is skipped, so a session someone just started
+from the agent view gets no twin. Every other bot gets
+`claude-discord bot <bot> recover --yes`: its last session respawned with its
+conversation, or a fresh start when none is listed; two listed sessions are
+refused, as `recover` always does. One line per bot (`running (pid <n>),
+skipped`, `recovered`, or `failed (exit <n>): <recover's last line>`); exit 0,
+or 1 when `claude agents` failed or a recover did. Run it from the machine's
+start (a container entrypoint, a login script, cron `@reboot`), never from a
+bot's own session: a session cannot recover its own bot.
+
 ## Dead sessions in the agent view
 
 Claude Code's daemon retires an idle background session after about an hour,

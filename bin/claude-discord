@@ -93,6 +93,8 @@
 #                                        its last session while claude agents lists it, else --bg --name;
 #                                        --fresh stops every listed session first. Asks once (--yes: no
 #                                        terminal, no question); the host needs 1.16.0 under --host (--yes: 1.19.0)
+#   claude-discord boot                   every bot of this machine that runs no session recovered once
+#                                        (bot recover --yes); for a machine or container that just started
 # All run from the project directory: state is ./.claude/discord-agents/<name>/.
 #
 # Origin: d.kim4's wrapper (2026-09-18), published at
@@ -173,7 +175,7 @@ if [ "${1:-}" = monitor ]; then
 fi
 # reserved_name <name>: a word no bot may take as its name (setup, bot rename, bot add): claude-discord's subcommands,
 # `add` (`claude-discord bot add`), and the directories beside the bots.
-reserved_name() { case $1 in setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access|bot|add|hooks|checkin) return 0;; esac; return 1; }
+reserved_name() { case $1 in setup|install|update|patch|compat|refresh|health|monitor|tui|hosts|access|bot|add|hooks|checkin|boot) return 0;; esac; return 1; }
 
 # access.json is written at setup time, so every answer lives in the file the
 # plugin reads and nothing else needs persisting. The run path below keeps a
@@ -468,6 +470,7 @@ case ${1:-} in
   access) libs="remote access";;
   bot) libs="sessions remote bot";;
   tui) libs=tui;;
+  boot) libs="boot";;
 esac
 for l in $libs; do
   [ -r "$lib/$l.sh" ] || { echo "claude-discord: $lib/$l.sh is missing: bin/claude-discord runs beside bin/lib/ (a copy of the one file is no install)" >&2; exit 1; }

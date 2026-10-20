@@ -723,6 +723,26 @@ rm -f "$GPF.1.16"; rm -rf "$G1"
 echo "ok: compat reads the union of records/projects and projects/*/project, renames the file to records/projects.1.16 once every line has a key dir, and health --all walks the key dirs"
 rm -rf "$M2A" "$M2B"
 
+# boot (1.19.0): every bot of every recorded project, once. A bot `claude agents` lists with a pid (its pinned job or its
+# name, started in its project) is skipped; one listed with no pid is recovered (bot recover --yes: its pinned job
+# respawned); a failed recover is said and makes the exit 1. Its own HOME: boot walks every project of the machine.
+BH=$HOME/bootbox; mkdir -p "$BH/pa" "$BH/pb" "$BH/bin"
+for x in a b; do
+  k=$(skey "$BH/p$x"); bd="$BH/.claude-discord/projects/$k/bots/b$x"; mkdir -p "$bd"
+  printf '%s\n' "$(cd -P "$BH/p$x" && pwd)" > "$BH/.claude-discord/projects/$k/project"
+  printf 'DISCORD_BOT_TOKEN=x\n' > "$bd/.env"; printf 'b%s000001\n' "$x" > "$bd/pinned-job"
+done
+printf '#!/bin/bash\ncase $1 in agents) echo %s;; respawn) echo "RESPAWN $2" >> "$HOME/calls"; [ ! -e "$HOME/fail" ] || exit 7;; *) echo "PLAIN $*";; esac\n' \
+  "'[{\"name\":\"ba\",\"id\":\"ba000001\",\"pid\":4242,\"cwd\":\"$(cd -P "$BH/pa" && pwd)\"},{\"name\":\"bb\",\"id\":\"bb000001\",\"cwd\":\"$(cd -P "$BH/pb" && pwd)\",\"state\":\"done\"}]'" > "$BH/bin/claude"
+chmod +x "$BH/bin/claude"
+rc=0; out=$(cd "$BH" && HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc=$?
+: > "$BH/fail"; rc2=0; out2=$(cd "$BH" && HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc2=$?
+[ "$rc $rc2" = "0 1" ] && grep -qE "^boot: .*/pa ba: running \(pid 4242\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bb: recovered$" <<<"$out" &&
+  grep -qE "^boot: .*/pb bb: failed \(exit 1\): .*claude respawn bb000001 \(exit 7\)" <<<"$out2" && [ "$(<"$BH/calls")" = $'RESPAWN bb000001\nRESPAWN bb000001' ] ||
+  { echo "FAIL: boot skips a bot listed with a pid, recovers one listed without, says a failure (exit 1): rc=$rc $rc2 / $out / $out2 / $(cat "$BH/calls" 2>&1)"; exit 1; }
+rm -rf "${BH:?}"
+echo "ok: boot recovers every bot of the machine that runs no session (bot recover --yes), skips one that does, and exits 1 when one failed"
+
 # Nothing this suite started is still running at the end: a case that detached a keeper or a monitor and did not stop it fails
 # here, by name of the process (sandbox_pids: the sandbox in its argv or as its HOME; an orphaned
 # `/bin/sleep 30` names no path of the suite's). Then the reaping itself, which every exit path runs (the EXIT trap): a decoy
