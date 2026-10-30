@@ -93,7 +93,7 @@ if [ "${1:-}" = access ]; then
   # matches); a channel's non-empty list with no id in it (junk, numbers) is "not-an-id", not everyone, and so is a
   # non-empty string or an object with a length key (the plugin filters on a string by substring, and throws on the object,
   # which drops every message); a number, a boolean, another object, null and "" are no filter in the plugin (it filters
-  # only on a positive .length): anyone. Any allowFrom that is not a list of strings gets an N line below ("set it at a terminal"). A name is shown, never trusted: no control character, no bidi
+  # only on a positive .length): anyone. Any allowFrom that is not a list of strings, and any other shape claude-discord does not write (see oddities), gets an N line below ("set it at a terminal"). A name is shown, never trusted: no control character, no bidi
   # override or isolate, no zero-width character or mark (the TUI's UNSAFE set), 40 characters.
   a_defs='
     def isid: type == "string" and test("\\A[0-9]{1,20}\\z");
@@ -264,6 +264,18 @@ if [ "${1:-}" = access ]; then
       elif ($x | startswith("dm-")) then .d.allowFrom |= without($x[3:])
       else . end;
     def canon: . == null or (type == "array" and all(.[]; type == "string"));
+    # The shape claude-discord writes: dmPolicy one of the three the plugin knows, groups an object of objects, a
+    # requireMention that is a boolean, an allowFrom that is a list of strings (absent and null are fine). Anything else
+    # is read by the plugin in ways not modelled here (a group of 7 or "x" listens, anyone with an @mention; a requireMention
+    # of "no" is true, of 0 false; an unknown dmPolicy is pairing; groups an array listens nowhere), so each gets an N line.
+    def oddities:
+      (.dmPolicy | select(. != null and (. | IN("pairing", "allowlist", "disabled") | not)) | {p: "DMs", t: "dmPolicy (\(type))"}),
+      (.allowFrom | select(canon | not) | {p: "DMs", t: "allowFrom (\(type))"}),
+      (.groups | select(. != null and type != "object") | {t: "groups (\(type))"}),
+      ((.groups | objects) | to_entries[] | .key as $k | .value
+       | if type != "object" then {k: $k, t: "the group (\(type))"}
+         else (.requireMention | select(. != null and type != "boolean") | {k: $k, t: "requireMention (\(type))"}),
+              (.allowFrom | select(canon | not) | {k: $k, t: "allowFrom (\(type))"}) end);
     def dmw: if .dm == "disabled" then "disabled" elif .dm != "allowlist" then "pairing" elif .dm_allow == [] then "off" else "allowlist" end;
     . as $doc | policy as $P0
     # The mode after the call: the last mode= word, else the one the bot has.
@@ -321,9 +333,7 @@ if [ "${1:-}" = access ]; then
             (($P0.dm_allow - $P1.dm_allow - ["not-an-id"])[] | line("C"; "DMs"; "- \(who) may no longer DM it")),
             # Warnings: the owner taken off a list or out of every channel, the main channel moved or no longer
             # listened in, a dev-manager cut off from a peer.
-            ([($doc.groups | objects) | to_entries[] | select((.value | type) == "object" and (.value.allowFrom | canon | not)) | {k: .key, t: (.value.allowFrom | type)}] | .[]
-             | line("N"; ""; "\(.k | ch): allowFrom is not a list of ids (\(.t)): set it at a terminal")),
-            (select($doc.allowFrom | canon | not) | line("N"; ""; "DMs: allowFrom is not a list of ids (\($doc.allowFrom | type)): set it at a terminal")),
+            ($doc | oddities | line("N"; ""; (if .k != null then (.k | safe | ch) + ": " elif .p != null then .p + ": " else "" end) + .t + " is not what claude-discord writes: set it at a terminal")),
             (select($owner != "") | $P0.groups[] | . as $o | $G1[$o.id] | select(. != null and .allow != [] and ($o.allow | index($owner)) != null and (.allow | index($owner)) == null)
              | line("N"; ""; "\($owner | who) is the owner of this bot (DISCORD_USER_ID) and can no longer write to it in \($o.id | ch)")),
             (select($owner != "" and any($P0.groups[]; lets($owner)) and all($P1.groups[]; lets($owner) | not))

@@ -900,7 +900,7 @@ for nt_v in '7' 'true' 'false' '{"a":1}' 'null' '""' '{}' '{"length":1}' '[1]' '
   if [ "$nt_v" != null ]; then
     for nt_w in allow:901+222 allow:901+444 channel-901 allow:900-222; do
       nt_with "$nt_v"; nt $nt_w
-      nt_refused "for $nt_w with an allowFrom that is $nt_v" "^warning: #901: allowFrom is not a list of ids ($nt_t): set it at a terminal\$"
+      nt_refused "for $nt_w with an allowFrom that is $nt_v" "^warning: #901: allowFrom ($nt_t) is not what claude-discord writes: set it at a terminal\$"
     done
   fi
   case $nt_v in '{"length":1}'|'[1]'|'["a",2]') continue;; esac
@@ -912,7 +912,7 @@ done
 for nt_v in '"111"' '"111 222"' '"x111x"'; do
   for nt_w in allow:900-222 channel-901 allow:901+222; do
     nt_with "$nt_v"; nt $nt_w
-    nt_refused "for $nt_w with an allowFrom that is the string $nt_v" '^warning: #901: allowFrom is not a list of ids (string): set it at a terminal$' 'it has a warning (above)$'
+    nt_refused "for $nt_w with an allowFrom that is the string $nt_v" '^warning: #901: allowFrom (string) is not what claude-discord writes: set it at a terminal$' 'it has a warning (above)$'
   done
 done
 nt_with '"111"'; nt allow:901-999
@@ -939,13 +939,25 @@ for nt_v in '"111 222"' '7' '{"length":1}'; do
   for nt_w in dm=off dm-222 dm+444 allow:900-222; do
     [ "$nt_v" != 7 ] || case $nt_w in dm=off|dm-222) continue;; esac   # a number is no filter (anyone, "off" already): those change nothing
     NF=$(jq -c --argjson l "$nt_v" '.allowFrom = $l' <<<"$NFA"); nt_reset; nt $nt_w
-    nt_refused "for $nt_w with a top-level allowFrom that is $nt_v" "^warning: DMs: allowFrom is not a list of ids ($nt_t): set it at a terminal\$"
+    nt_refused "for $nt_w with a top-level allowFrom that is $nt_v" "^warning: DMs: allowFrom ($nt_t) is not what claude-discord writes: set it at a terminal\$"
   done
 done
 NF=$(jq -c '.allowFrom = "111 222"' <<<"$NFA"); nt_reset; nt dm=off
 ! grep -q 'already so' <<<"$AO" && grep -q '^    DMs: allowlist -> off$' <<<"$AO" || { echo "FAIL: dm=off on a top-level allowFrom \"111 222\" is a change, not already so: rc=$ARC $AO / $AE"; exit 1; }
 nt_reset; nt dm-222
 ! grep -q 'already so' <<<"$AO" && ! grep -q 'not-an-id' <<<"$AO" || { echo "FAIL: dm-222 on a top-level allowFrom \"111 222\" is no 'already so' and shows no sentinel person: rc=$ARC $AO / $AE"; exit 1; }
+# The rest of the shape claude-discord writes. The plugin reads a group of 7 or "x" as a channel that listens (anyone, with an @mention),
+# a requireMention of "no" as true and of 0 as false, an unknown dmPolicy as pairing, and groups as [] as a server listening nowhere:
+# none of that is modelled, so each gets an N line and a legitimate add with no terminal is refused.
+nt_odd() { NF=$(jq -c "$1" <<<"$NFA"); nt_reset; queue_line "200 $NCH"; queue_line '200 {"id":"1"}'; nt channel+902 allow:902+222
+  nt_refused "for an add with $1" "$2" "${3:-it has a warning (above)\$}"; }   # groups=[]: no group to keep, so the add widens and says so first
+nt_odd '.groups["901"] = 7' '^warning: #901: the group (number) is not what claude-discord writes: set it at a terminal$'
+nt_odd '.groups["901"] = "x"' '^warning: #901: the group (string) is not what claude-discord writes: set it at a terminal$'
+nt_odd '.groups["901"] = {"requireMention":"no"}' '^warning: #901: requireMention (string) is not what claude-discord writes: set it at a terminal$'
+nt_odd '.groups["901"].requireMention = 0' '^warning: #901: requireMention (number) is not what claude-discord writes: set it at a terminal$'
+nt_odd '.groups = []' '^warning: groups (array) is not what claude-discord writes: set it at a terminal$' 'it widens who can drive nt'
+nt_odd '.dmPolicy = "closed"' '^warning: DMs: dmPolicy (string) is not what claude-discord writes: set it at a terminal$'
+nt_odd '.dmPolicy = 7' '^warning: DMs: dmPolicy (number) is not what claude-discord writes: set it at a terminal$'
 # The opposite: a canonical file (arrays of strings, absent keys, no top-level allowFrom) still writes a same-guild add with no terminal.
 NF='{"dmPolicy":"allowlist","groups":{"900":{"requireMention":true,"allowFrom":["111","222"]},"901":{"requireMention":true}}}'
 nt_reset; queue_line "200 $NCH"; queue_line '200 {"id":"1"}'; nt channel+902 allow:902+222

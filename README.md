@@ -496,8 +496,11 @@ filters a non-empty list by exact element, so it is read as a list nobody is on,
 and a sender added to it is new to the bot. A number, a boolean, `null`, `""` or an
 object without a `length` key in place of the list is no filter in the plugin:
 anyone; a non-empty string or an object with a `length` key reads as a list nobody is on.
-Any `allowFrom`, in a channel or for DMs, that is neither absent, `null` nor a list of strings
-is warned about ("set it at a terminal"), and a change with no terminal is not written while one exists.
+Any other shape claude-discord does not write is warned about too ("set it at a terminal"), and a change with no
+terminal is not written while one exists: an `allowFrom`, in a channel or for DMs, that is neither absent, `null` nor a
+list of strings; a `groups` that is not an object; a group that is not an object (the plugin listens in a group of `7` or
+`"x"`, anyone with an @mention); a `requireMention` that is not a boolean (`"no"` is true, `0` is false); a `dmPolicy` that
+is not `pairing`, `allowlist` or `disabled` (the plugin treats it as pairing).
 
 The write is by rename under a lock (`access.json.lock`), mode 600. The
 official plugin reads `access.json` at every message, so **a change applies at
