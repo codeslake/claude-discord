@@ -3560,7 +3560,7 @@ ac acc set allow:900-111 allow:900-222
   { echo "FAIL: the last sender is never removed into an open channel: rc=$ARC $AO / $AE"; exit 1; }
 ac acc set mention:905=off
 [ "$ARC" = 2 ] && grep -q 'mention:905: the bot does not listen in that channel' <<<"$AE" || { echo "FAIL: a rule for a channel that is no group is exit 2: rc=$ARC $AE"; exit 1; }
-for bad in 'dm=pairing;secretpw' $'allow:900+111\nsecretpw' "channel+$(printf '9%.0s' {1..21})"; do
+for bad in 'dm=pairing;secretpw' dm=disabled $'allow:900+111\nsecretpw' "channel+$(printf '9%.0s' {1..21})"; do
   ac acc set dm=off "$bad"
   [ "$ARC" = 2 ] && [ -z "$AO" ] && [ "$AE" = "claude-discord: access: change 2 is not one of the changes access takes (claude-discord access, with no argument, lists them)" ] ||
     { echo "FAIL: '$bad' is no change: exit 2, nothing printed of it: rc=$ARC $AO / $AE"; exit 1; }

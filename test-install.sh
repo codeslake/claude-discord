@@ -855,15 +855,6 @@ nt_reset; nt allow:900-222 mode=dev-manager
 nt_refused "for a change of mode" '^    mode: none -> dev-manager: it gets a hosts ledger' 'it changes the mode$' && [ "$(<"$ND/mode")" = none ] || { echo "FAIL: the mode changed"; exit 1; }
 nt_reset; nt allow:900-111
 nt_refused "for a change that warns (the owner taken off a channel)" '^warning: 111 is the owner of this bot' 'it has a warning (above)$'
-# The plugin's disabled DM policy drops every message, the channels' too: a warning, so no write with no terminal; at a
-# terminal it is asked about and works.
-nt_reset; nt dm=disabled
-nt_refused "for dm=disabled" '^warning: the DM policy becomes disabled: the plugin then drops every message, in its channels too$' 'it has a warning (above)$'
-nt_reset; ARC=0; AO=$(printf 'y\n' | python3 -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' bash -c 'cd "$1" && exec bash "$2" access nt set dm=disabled' x "$NP" "$S" 2>&1) || ARC=$?
-[ "$ARC" = 0 ] && grep -q 'warning: the DM policy becomes disabled' <<<"$AO" && [ "$(jq -r .dmPolicy "$ND/access.json")" = disabled ] ||
-  { echo "FAIL: dm=disabled at a terminal is warned of, asked about and written: rc=$ARC $AO"; exit 1; }
-nt dm=disabled
-[ "$ARC" = 0 ] && grep -q 'is already so; nothing to change' <<<"$AO" || { echo "FAIL: dm=disabled on a bot that is disabled is nothing to change: rc=$ARC $AO"; exit 1; }
 # A list in which no entry is an id (junk, or a number: the plugin compares strings) is not "anyone" (the plugin filters on any
 # non-empty list), and holds nobody known: a sender added to it is new to this bot. An id that is a string counts.
 NFA=$NF

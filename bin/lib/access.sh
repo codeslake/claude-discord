@@ -11,8 +11,7 @@
 #     channel+<channel id>  channel-<channel id>          listen there (an @mention required, from the owner alone) / stop
 #     mention:<channel id>=on|off                         an @mention is required / every message is answered
 #     allow:<channel id>+<user id>  allow:<channel id>-<user id>  allow:<channel id>=any    who may write there
-#     dm=allowlist|pairing|off|disabled  dm+<user id>  dm-<user id>   DMs: off is an allowlist with nobody on it; disabled (the
-#                                plugin's own) drops every message, the channels' too: warned of, so never written with no terminal
+#     dm=allowlist|pairing|off  dm+<user id>  dm-<user id>          DMs: off is an allowlist with nobody on it
 #     mode=none|dev-manager|autoresearchclaw              through `setup <bot> --mode`, its questions answered by Enter
 # A change that widens who can drive the bot is shown first, marked "!" (red at a terminal), then the others; one
 # question is asked for all of them, naming how many widen (1.13.1). Anything but y writes nothing: the file is what
@@ -33,8 +32,8 @@
 if [ "${1:-}" = access ]; then
   shift
   a_usage="usage: claude-discord access [--host <alias> [--manager <bot>]] [--project <dir>] <bot> --json | set <change>...
-  a change: channel+<channel id> | channel-<channel id> | mention:<channel id>=on|off | allow:<channel id>+<user id> | allow:<channel id>-<user id> | allow:<channel id>=any | dm=allowlist|pairing|off|disabled | dm+<user id> | dm-<user id> | mode=none|dev-manager|autoresearchclaw"
-  a_word_re='^(channel[+-][0-9]{1,20}|mention:[0-9]{1,20}=(on|off)|allow:[0-9]{1,20}([+-][0-9]{1,20}|=any)|dm=(allowlist|pairing|off|disabled)|dm[+-][0-9]{1,20}|mode=(none|dev-manager|autoresearchclaw))$'
+  a change: channel+<channel id> | channel-<channel id> | mention:<channel id>=on|off | allow:<channel id>+<user id> | allow:<channel id>-<user id> | allow:<channel id>=any | dm=allowlist|pairing|off | dm+<user id> | dm-<user id> | mode=none|dev-manager|autoresearchclaw"
+  a_word_re='^(channel[+-][0-9]{1,20}|mention:[0-9]{1,20}=(on|off)|allow:[0-9]{1,20}([+-][0-9]{1,20}|=any)|dm=(allowlist|pairing|off)|dm[+-][0-9]{1,20}|mode=(none|dev-manager|autoresearchclaw))$'
   a_host="" a_proj="" hb=""
   while [ $# -gt 0 ]; do
     case $1 in
@@ -316,9 +315,8 @@ if [ "${1:-}" = access ]; then
                else line("C"; "DMs"; "\($a) -> \($b)") end),
             (($P1.dm_allow - $P0.dm_allow)[] | line("W"; "DMs"; "+ \(who) may DM it, and answers its permission prompts")),
             (($P0.dm_allow - $P1.dm_allow)[] | line("C"; "DMs"; "- \(who) may no longer DM it")),
-            # Warnings: DMs disabled, the owner taken off a list or out of every channel, the main channel moved or no longer
+            # Warnings: the owner taken off a list or out of every channel, the main channel moved or no longer
             # listened in, a dev-manager cut off from a peer.
-            (select($P1.dm == "disabled" and $P0.dm != "disabled") | line("N"; ""; "the DM policy becomes disabled: the plugin then drops every message, in its channels too")),
             (select($owner != "") | $P0.groups[] | . as $o | $G1[$o.id] | select(. != null and .allow != [] and ($o.allow | index($owner)) != null and (.allow | index($owner)) == null)
              | line("N"; ""; "\($owner | who) is the owner of this bot (DISCORD_USER_ID) and can no longer write to it in \($o.id | ch)")),
             (select($owner != "" and any($P0.groups[]; $G1[.id] == null and (.allow | index($owner)) != null) and all($P1.groups[]; .allow != [] and (.allow | index($owner)) == null))

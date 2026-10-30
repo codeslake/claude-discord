@@ -447,7 +447,7 @@ claude-discord access <bot> set <change>...   # shows what would change, asks on
 | `mention:<channel id>=on\|off` | an @mention is required / every message is answered |
 | `allow:<channel id>+<user id>`, `allow:<channel id>-<user id>` | a sender is added to, or taken off, that channel's list |
 | `allow:<channel id>=any` | anyone in the channel may write to it (an empty `allowFrom`) |
-| `dm=allowlist\|pairing\|off\|disabled` | the DM policy. `off` is an allowlist with nobody on it; the plugin's own `disabled` drops every message, in the channels too, so it is warned of (and, with no terminal, refused) |
+| `dm=allowlist\|pairing\|off` | the DM policy. `off` is an allowlist with nobody on it; the plugin's own `disabled` is not offered, because it drops every message, in the channels too |
 | `dm+<user id>`, `dm-<user id>` | the DM allowlist: whoever is on it also answers the bot's permission prompts |
 | `mode=none\|dev-manager\|autoresearchclaw` | the bot's mode, through `setup <bot> --mode` with its questions answered by Enter (peers and hosts kept) |
 
@@ -471,10 +471,9 @@ that name is whatever the person chose, so read the id.
   (`Apply this change?`, `Apply these 2 widening changes?`, ...);
 - **anything but `y` writes nothing** (exit 4): `n`, the end of input, any
   other answer. The file is what was shown and agreed to, or as it was;
-- warnings, which ask nothing more: the DM policy becoming `disabled`, the
-  owner taken off a list or left in no channel the bot listens in, the bot's
-  main channel changing or no longer listened in, a dev-manager's peer bot
-  taken off a channel.
+- warnings, which ask nothing more: the owner taken off a list or left in no
+  channel the bot listens in, the bot's main channel changing or no longer
+  listened in, a dev-manager's peer bot taken off a channel.
 
 `set` has no flag to skip its question, and with a terminal it always asks.
 That is a speed bump, not a boundary: whoever can run it can edit `access.json` with
