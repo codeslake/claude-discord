@@ -520,7 +520,8 @@ if [ "${1:-}" = health ]; then
     # A `groups` that is missing or no object reads as no group ($g), not as no answer: a bot that takes DMs only still
     # reports its DM policy, and its channel is config.env's as before.
     cfg=$(jq -r --arg fb "${DISCORD_CHANNEL_ID:-}" '
-      def ids: [arrays[] | tostring | select(test("^[0-9]+$"))] | unique;
+      def ids: [arrays[] | select(type == "string" and test("\\A[0-9]{1,20}\\z"))] | unique;
+      def gids: ids as $v | if $v == [] and . != null and . != [] and . != "" and . != {} then ["not-an-id"] else $v end;
       ((.groups | objects) // {}) as $g
       | ($g | keys) as $k
       | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) as $ch
@@ -529,7 +530,7 @@ if [ "${1:-}" = health ]; then
           (($g[$ch].allowFrom // []) | map(tostring) | unique | @json),
           ({dm: (.dmPolicy | if type == "string" and test("^[A-Za-z]+$") then . else null end), dm_allow: (.allowFrom | ids),
             groups: [$g | to_entries[] | select((.key | test("^[0-9]+$")) and (.value | type) == "object")
-                     | {id: .key, mention: (.value.requireMention != false), allow: (.value.allowFrom | ids)}]} | tojson) ]
+                     | {id: .key, mention: (.value.requireMention != false), allow: (.value.allowFrom | gids)}]} | tojson) ]
       | @tsv' "$d/access.json" 2>/dev/null) || cfg=""
     access=""
     IFS=$'\t' read -r ch mention allow access <<<"$cfg"

@@ -2647,11 +2647,11 @@ echo "ok: health asks for a channel's guild once, keeps it with the channel it w
 # of an older version (two fields) once. No extra jq: the same three calls a run already made carry it all.
 cp "$SD/access.json" "$SD/access.json.keep"
 # Two numeric groups (the channel then comes from config.env, 900), a key that is no channel id, a DM policy, and an
-# allowFrom entry that is not an id (a hand edit): only ids reach the document.
+# allowFrom entry that is not an id (a hand edit): only ids reach the document; a number is no id, and a channel list with no id in it (903: a string, 904: a number list) reads "not-an-id", never anyone.
 # 1.11.1: 902 is a group the guild's list does not have (another guild's channel, a deleted one): its name stays "".
 # The list also has a channel that is no group of this bot (999, never kept), a name with a quote and a backslash, and
 # an element that is no object. The bot's mode file travels in the same document.
-jq '.dmPolicy = "pairing" | .allowFrom = ["111", "1>@everyone"] | .groups["901"] = {requireMention: false, allowFrom: []} | .groups["902"] = {allowFrom: []} | .groups["not-an-id"] = {allowFrom: ["5"]}' "$SD/access.json.keep" > "$SD/access.json"
+jq '.dmPolicy = "pairing" | .allowFrom = ["111", "1>@everyone"] | .groups["901"] = {requireMention: false, allowFrom: []} | .groups["902"] = {allowFrom: []} | .groups["not-an-id"] = {allowFrom: ["5"]} | .groups["903"] = {allowFrom: "111"} | .groups["904"] = {allowFrom: [5]} | .allowFrom += [7]' "$SD/access.json.keep" > "$SD/access.json"
 printf '900 5\n' > "$SD/channel-guild"   # as 1.10 wrote it: no name, no age
 printf '  dev-manager \nsecond line\n' > "$SD/mode"
 : > "$CURL_LOG"
@@ -2668,7 +2668,8 @@ jq -e --arg at "$(date -u -d "@$(( ((ID_SEEN >> 22) + 1420070400000) / 1000 ))" 
   and .last_message_at == $at
   and .mode == "dev-manager"
   and .access == {dm: "pairing", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: ["111", "222"], name: "봇-dev"},
-    {id: "901", mention: false, allow: [], name: "side-\"room\\-x"}, {id: "902", mention: true, allow: [], name: ""}]}' <<<"$out" >/dev/null ||
+    {id: "901", mention: false, allow: [], name: "side-\"room\\-x"}, {id: "902", mention: true, allow: [], name: ""},
+    {id: "903", mention: true, allow: ["not-an-id"], name: ""}, {id: "904", mention: true, allow: ["not-an-id"], name: ""}]}' <<<"$out" >/dev/null ||
   { echo "FAIL: --json must carry channel, channel_name, last_message_at (from the last-message-id snowflake), mode (the first line of the mode file) and access (every numeric group with its name, \"\" for one the guild's list has not; dmPolicy and its allowFrom, ids only): $out"; exit 1; }
 # The guild's list fails (a 200 that is no array: the bot lost a permission) on a line a day old: what 1.11.0 did, the
 # channel alone for the main name (two calls), and the names already kept stay, in the file and in the document.
@@ -2678,7 +2679,7 @@ queue "200 $NONE" '200 {"message":"Missing Access"}' '200 {"guild_id":"5","name"
 out=$(bash "$S" health --json 2>/dev/null) || :
 [ "$(guild_of "$SD")" = "900 5 renamed" ] && [ "$(dcalls guilds/5/channels)" = 1 ] && [ "$(dcalls channels/900)" = 1 ] && [ "$(wc -l < "$CURL_LOG")" = 5 ] && [ ! -s "$CURL_REPLIES" ] &&
   [ "$(sort "$SD/channel-names")" = $'900 봇-dev\n901 side-"room\\-x' ] &&
-  jq -e '.[0] | .verdict == "ok" and .channel_name == "renamed" and .mode == "none" and ([.access.groups[].name] == ["봇-dev", "side-\"room\\-x", ""])' <<<"$out" >/dev/null ||
+  jq -e '.[0] | .verdict == "ok" and .channel_name == "renamed" and .mode == "none" and ([.access.groups[].name] == ["봇-dev", "side-\"room\\-x", "", "", ""])' <<<"$out" >/dev/null ||
   { echo "FAIL: a guild list that is no array falls back to channels/<id> for the main name (two calls) and keeps the names already cached; an empty mode file is none: $(<"$CURL_LOG") / $(cat "$SD/channel-guild" "$SD/channel-names" 2>&1) / $out"; exit 1; }
 # A day and a second old, and both reads fail (HTTP 500): the line keeps its guild and name, the name is still shown, the
 # bot is ok, and the line's age becomes an hour short of a day: the next run the same hour asks for neither again.
@@ -3546,6 +3547,13 @@ ac acc set allow:901=any allow:901+111 allow:901=any channel+903 mention:903=off
 warning: dongyong22 (111) is the owner of this bot (DISCORD_USER_ID) and can no longer write to it in #dev-bots
 warning: peerbot (555) is a peer dev bot (peers.json) and can no longer reach this bot in #dev-bots" ] ||
   { echo "FAIL: the words are applied in order (a channel left and taken again is the same channel with the senders given; =any undone by a later +), and the owner's and a peer's removal are warned of: rc=$ARC $AO / $AE"; exit 1; }
+# Narrowing cuts a peer off as a removal does: 901 lists nobody (everyone), so the peer bot reaches it until a sender is put on it.
+echo dev-manager > "$AD/mode"; jq '.groups["900"].allowFrom += ["555"]' <<<"$ACC" > "$AD/access.json"
+ac acc set allow:901+111
+[ "$ARC" = 3 ] && grep -qx 'warning: peerbot (555) is a peer dev bot (peers.json) and can no longer reach this bot in #bot-health' <<<"$AO" ||
+  { echo "FAIL: a peer bot's open channel narrowed to others is warned of: rc=$ARC $AO / $AE"; exit 1; }
+ac acc set allow:901+111 allow:901+555
+! grep -q 'peerbot (555) is a peer dev bot' <<<"$AO" || { echo "FAIL: a peer put on the narrowed channel is no warning: $AO"; exit 1; }
 echo none > "$AD/mode"; printf '%s\n' "$A_FILE" > "$AD/access.json"
 printf "DISCORD_CHANNEL_ID='901'\nDISCORD_USER_ID='111'\n" > "$HOME/acc.env"; cp "$(pstate "$MP")/config.env" "$HOME/acc.env.was"; cp "$HOME/acc.env" "$(pstate "$MP")/config.env"
 ac acc set channel-901 dm=off; cp "$HOME/acc.env.was" "$(pstate "$MP")/config.env"; rm -f "$HOME/acc.env" "$HOME/acc.env.was"

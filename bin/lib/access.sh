@@ -90,13 +90,13 @@ if [ "${1:-}" = access ]; then
   # $ also matches before a last newline). `policy` is the part of access.json this verb is about, as health --json
   # gives it (dm, dm_allow, groups: id, mention, allow), with the plugin's own defaults: no dmPolicy is pairing, no
   # requireMention is true, no allowFrom is everyone. An id is a string (the plugin compares strings: a number never
-  # matches); a channel's non-empty list with no id in it is "not-an-id", not everyone (the plugin filters on any non-empty
-  # list). A name is shown, never trusted: no control character, no bidi
+  # matches); a channel's non-empty allowFrom with no id in it (a list of junk, a string, a number, an object) is
+  # "not-an-id", not everyone (the plugin filters on any non-empty allowFrom). A name is shown, never trusted: no control character, no bidi
   # override or isolate, no zero-width character or mark (the TUI's UNSAFE set), 40 characters.
   a_defs='
     def isid: type == "string" and test("\\A[0-9]{1,20}\\z");
     def ids: [arrays[] | select(isid)] | unique;
-    def gids: ids as $v | if $v == [] and type == "array" and length > 0 then ["not-an-id"] else $v end;
+    def gids: ids as $v | if $v == [] and . != null and . != [] and . != "" and . != {} then ["not-an-id"] else $v end;
     def policy: {dm: (.dmPolicy | if type == "string" then . else "pairing" end), dm_allow: (.allowFrom | ids),
                  groups: [(.groups | if type == "object" then . else {} end) | to_entries[] | select((.key | isid) and (.value | type) == "object")
                           | {id: .key, mention: (.value.requireMention != false), allow: (.value.allowFrom | gids)}]};
@@ -242,6 +242,7 @@ if [ "${1:-}" = access ]; then
     def has_grp($c): (.d.groups | type) == "object" and (.d.groups | has($c)) and (.d.groups[$c] | type) == "object";
     def without($u): [arrays[] | select(tostring != $u)];
     def with($u): [arrays[]] | if any(.[]; . == $u) then . else . + [$u] end;
+    def lets($u): .allow == [] or (.allow | index($u)) != null;
     def step($x):
       if .err then .
       elif ($x | startswith("channel+")) then $x[8:] as $c
@@ -285,7 +286,7 @@ if [ "${1:-}" = access ]; then
         | def ch: "#" + ($CN[.] // .);
           # A name kept here goes before the id; one only the Discord member list gave (the person chose it) after it.
           def who: . as $u | ($UN[$u] // $PN[$u] // "") | if . != "" then "\(.) (\($u))" else ($MN[$u] // "" | if . == "" then $u else "\($u) (\(.))" end) end;
-          def whos: if . == [] then "anyone" else map(who) | join(", ") end;
+          def whos: if . == [] then "anyone" elif . == ["not-an-id"] then "entries that are no id (nobody)" else map(who) | join(", ") end;
           def rule: if .mention then "an @mention required" else "any message" end;
           def line($k; $l; $t): [$k, $l, $t] | join("\u001f");
           ([$P0.groups[].allow[]] + $P0.dm_allow | unique) as $known
@@ -302,8 +303,8 @@ if [ "${1:-}" = access ]; then
                   elif ($o.mention | not) and $n.mention then line("C"; $n.id | ch; "any message -> an @mention required") else empty end),
                  (if $o.allow != [] and $n.allow == [] then line("W"; $n.id | ch; "from \($o.allow | whos) -> from anyone in the channel")
                   elif $o.allow == [] and $n.allow != [] then line("C"; $n.id | ch; "from anyone -> from \($n.allow | whos)")
-                  else (($n.allow - $o.allow)[] | select(. as $u | $known | index($u)) | line("C"; $n.id | ch; "+ \(who) may write to it there")),
-                       (($o.allow - $n.allow)[] | line("C"; $n.id | ch; "- \(who) may no longer write to it there")) end)
+                  else (($n.allow - $o.allow - ["not-an-id"])[] | select(. as $u | $known | index($u)) | line("C"; $n.id | ch; "+ \(who) may write to it there")),
+                       (($o.allow - $n.allow - ["not-an-id"])[] | line("C"; $n.id | ch; "- \(who) may no longer write to it there")) end)
                end),
             ($P0.groups[] | select($G1[.id] == null) | line("C"; .id | ch; "- stops listening here")),
             ([$P1.groups[] | . as $n | select($G0[$n.id] == null or $G0[$n.id].allow != []) | ($n.allow - $known)[] | {u: ., c: $n.id}] | group_by(.u)[]
@@ -319,7 +320,7 @@ if [ "${1:-}" = access ]; then
             # listened in, a dev-manager cut off from a peer.
             (select($owner != "") | $P0.groups[] | . as $o | $G1[$o.id] | select(. != null and .allow != [] and ($o.allow | index($owner)) != null and (.allow | index($owner)) == null)
              | line("N"; ""; "\($owner | who) is the owner of this bot (DISCORD_USER_ID) and can no longer write to it in \($o.id | ch)")),
-            (select($owner != "" and any($P0.groups[]; $G1[.id] == null and (.allow | index($owner)) != null) and all($P1.groups[]; .allow != [] and (.allow | index($owner)) == null))
+            (select($owner != "" and any($P0.groups[]; lets($owner)) and all($P1.groups[]; lets($owner) | not))
              | line("N"; ""; "\($owner | who) is the owner of this bot (DISCORD_USER_ID) and no channel it listens in lets them write to it any more")),
             (select($owner != "" and ($P0.dm_allow | index($owner)) != null and ($P1.dm_allow | index($owner)) == null)
              | line("N"; ""; "\($owner | who) is the owner of this bot and no longer gets its DMs or its permission prompts")),
@@ -329,7 +330,7 @@ if [ "${1:-}" = access ]; then
             (($P1 | mainof($fb)) as $b | select($b != "" and $G0[$b] != null and $G1[$b] == null)
              | line("N"; ""; "the main channel of the bot, \($b | ch), is no longer one it listens in: its session prompt, its hooks and health still use it")),
             (select($nm == "dev-manager") | $PL[] | . as $p | $P0.groups[] | . as $o | $G1[$o.id]
-             | select(. != null and .allow != [] and ($o.allow | index($p.id)) != null and (.allow | index($p.id)) == null)
+             | select(. != null and ($o | lets($p.id)) and (lets($p.id) | not))
              | line("N"; ""; "\($p.id | who) is a peer dev bot (peers.json) and can no longer reach this bot in \($o.id | ch)")),
             # A peer a word took off, back on the list because the bot enters dev-manager: no removal is shown, so say why.
             ($P1.groups[] | . as $n | $pi[] | select(. as $p | ($G0[$n.id].allow // [] | index($p)) != null and ($Gw[$n.id].allow // [] | index($p)) == null and ($n.allow | index($p)) != null)

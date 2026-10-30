@@ -472,8 +472,9 @@ that name is whatever the person chose, so read the id.
 - **anything but `y` writes nothing** (exit 4): `n`, the end of input, any
   other answer. The file is what was shown and agreed to, or as it was;
 - warnings, which ask nothing more: the owner taken off a list or left in no
-  channel the bot listens in, the bot's main channel changing or no longer
-  listened in, a dev-manager's peer bot taken off a channel.
+  channel the bot listens in (a channel narrowed from anyone to others counts
+  as much as one removed), the bot's main channel changing or no longer
+  listened in, a dev-manager's peer bot taken off or narrowed out of a channel.
 
 `set` has no flag to skip its question, and with a terminal it always asks.
 That is a speed bump, not a boundary: whoever can run it can edit `access.json` with

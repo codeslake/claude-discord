@@ -599,7 +599,16 @@ def pure():
         assert set(m) == {"groups", "dm", "dm_allow", "mode"} and all(g["allow"] == [] and g["mention"] for g in m["groups"].values()) and set(m["groups"]) <= {"9"}, (junk, m)
         tui.access_lines(junk, m, m, 0, "left", 0, 100), tui.access_people(junk, m, m), tui.find_person("x", junk), tui.access_left(junk, m, m)
     assert tui.access_model({"policy": {"dm_allow": [7, "1\n", "22"]}})["dm_allow"] == ["22"]
-    print("ok: the access model is the policy and the mode of access --json's document (off is an allowlist with nobody), and a document of the wrong shape raises nothing")
+    # A channel whose list has entries but no id comes from the CLI as ["not-an-id"]: nobody may write there. It stays a non-empty
+    # list (the editor must never show it as open), it is no person, and a person put on it is one more word.
+    nid = tui.access_model({"policy": {"groups": [{"id": "9", "allow": ["not-an-id"]}, {"id": "8", "allow": ["x", "y"]}, {"id": "7", "allow": []}]}})
+    assert nid["groups"]["9"]["allow"] == ["not-an-id"] and nid["groups"]["8"]["allow"] == [] and nid["groups"]["7"]["allow"] == [], nid
+    assert tui.access_words(nid, nid, "") == [] and tui.access_wide(nid, nid) == set()
+    more = json.loads(json.dumps(nid)); more["groups"]["9"]["allow"].append("222")
+    assert tui.access_words(nid, more, "") == ["allow:9+222"] and tui.access_wide(nid, more) == {"new:222"}
+    assert [p["id"] for p in tui.access_people({}, nid, nid)] == [] and [p["id"] for p in tui.access_people({}, nid, more)] == ["222"]
+    assert "[ ] anyone in the channel" in "\n".join(l.plain for l in tui.access_lines({"channels": [{"id": "9", "name": "n", "kind": "text", "read": True}]}, nid, nid, 0, "left", 0, 112))
+    print("ok: the access model is the policy and the mode of access --json's document (off is an allowlist with nobody), a list with no id in it stays nobody and is no person, and a document of the wrong shape raises nothing")
 
     def edit(**kw):
         now = json.loads(json.dumps(was))

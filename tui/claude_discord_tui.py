@@ -1285,17 +1285,20 @@ class HostEdit(ModalScreen):
 MODES = ("none", "dev-manager", "autoresearchclaw")
 DMS = ("allowlist", "off", "pairing")
 DIGITS = re.compile(r"[0-9]{1,20}")
+NOID = "not-an-id"   # what the CLI sends for a channel list with entries but no id: nobody may write, never everyone
 
 
 def access_model(doc: dict) -> dict:
     """What the editor changes, from the document's policy and mode: {"groups": {channel id: {"mention": bool, "allow":
     [user ids]}} in the document's order, "dm": allowlist | off | pairing | disabled, "dm_allow": [user ids], "mode"}.
     `off` is an allowlist with nobody on it (the plugin's own `disabled` drops every message, in the channels too). A
-    value of the wrong type reads as missing; an id that is not digits is none."""
+    value of the wrong type reads as missing; an id that is not digits is none, except that a channel's list the CLI marks
+    NOID stays as it is (a non-empty list: `anyone` is not ticked for it, and it is no person)."""
     pol = obj(obj(doc).get("policy"))
     digits = lambda v: [i for i in ids(v) if DIGITS.fullmatch(i)]
+    gdigits = lambda v: digits(v) or ([NOID] if ids(v) == [NOID] else [])
     dm, dm_allow = txt(pol.get("dm")), digits(pol.get("dm_allow"))
-    return {"groups": {g["id"]: {"mention": g.get("mention") is not False, "allow": digits(g.get("allow"))} for g in groups(pol) if DIGITS.fullmatch(g["id"])},
+    return {"groups": {g["id"]: {"mention": g.get("mention") is not False, "allow": gdigits(g.get("allow"))} for g in groups(pol) if DIGITS.fullmatch(g["id"])},
             "dm": "disabled" if dm == "disabled" else "pairing" if dm != "allowlist" else "allowlist" if dm_allow else "off",
             "dm_allow": dm_allow, "mode": txt(obj(doc).get("mode")) or "none"}
 
@@ -1355,7 +1358,7 @@ def access_people(doc: dict, was: dict, now: dict, extra=()) -> list[dict]:
     """The people the right pane lists: everyone on a list of the bot, before or now, and `extra` (the ids typed into
     this editor), so one just added or just taken off stays in sight. Each is {"id", "name", "bot", "tag"}: people
     first, then bots, by name; no name is the id."""
-    listed = {u for m in (was, now) for g in m["groups"].values() for u in g["allow"]} | set(was["dm_allow"]) | set(now["dm_allow"]) | set(extra)
+    listed = {u for m in (was, now) for g in m["groups"].values() for u in g["allow"]} - {NOID} | set(was["dm_allow"]) | set(now["dm_allow"]) | set(extra)
     known = {p["id"]: p for p in seq(obj(doc).get("people")) if isinstance(p, dict) and isinstance(p.get("id"), str)}
     owner, peers = txt(obj(doc).get("owner")), ids(obj(doc).get("peers"))
     rows = [{"id": u, "name": txt(known.get(u, {}).get("name")) or u, "bot": known.get(u, {}).get("bot") is True,

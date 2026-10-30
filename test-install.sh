@@ -863,7 +863,7 @@ nt_with '["abc"]'; nt allow:901+444
 nt_refused "for a sender added to a list with no id in it" '^  ! 444: new to this bot: may write to it in #901$' 'it widens who can drive nt'
 ! grep -q 'from anyone' <<<"$AO" || { echo "FAIL: a list with no id in it is not read as anyone: $AO"; exit 1; }
 nt_with '["abc"]'; nt allow:901=any
-nt_refused "for opening a list with no id in it to anyone" '^  ! #901: from not-an-id -> from anyone in the channel$'
+nt_refused "for opening a list with no id in it to anyone" '^  ! #901: from entries that are no id (nobody) -> from anyone in the channel$'
 nt_with '["abc"]'; nt allow:901+222
 [ "$ARC" = 0 ] && [ "$(jq -c '.groups["901"].allowFrom' "$ND/access.json")" = '["abc","222"]' ] ||
   { echo "FAIL: a sender the bot lists already goes onto a list with no id in it, which keeps its entry: rc=$ARC $AO / $AE"; exit 1; }
@@ -874,6 +874,23 @@ nt_refused "for the number itself added as an id" '^  ! 444: new to this bot: ma
 nt_with '["444"]'; nt allow:900+444
 [ "$ARC" = 0 ] && [ "$(jq -c '.groups["900"].allowFrom' "$ND/access.json")" = '["111","222","444"]' ] ||
   { echo "FAIL: a string id in another list is known: rc=$ARC $AO / $AE"; exit 1; }
+# A string, a number or an object as allowFrom is no list, and the plugin still filters on it (a string by includes()): it is a
+# list with no id, nobody known, never anyone. Taking a sender off it would empty it, and one put on it is new to this bot. An
+# empty string is no filter: it is anyone, as an empty list is.
+for nt_v in '"111"' '7' '{"a":1}'; do
+  nt_with "$nt_v"; nt allow:901-999 dm-444
+  [ "$ARC" = 2 ] && grep -q '^claude-discord: access: allow:901: that would leave no sender' <<<"$AE" && [ "$(<"$ND/access.json")" = "$NF" ] ||
+    { echo "FAIL: a removal on an allowFrom that is $nt_v would leave no sender and is refused (exit 2): rc=$ARC $AO / $AE"; exit 1; }
+  nt_with "$nt_v"; nt allow:901+444
+  nt_refused "for a sender added to an allowFrom that is $nt_v" '^  ! 444: new to this bot: may write to it in #901$' 'it widens who can drive nt'
+  ! grep -q 'from anyone' <<<"$AO" || { echo "FAIL: an allowFrom that is $nt_v is not read as anyone: $AO"; exit 1; }
+done
+nt_with '""'; nt allow:901+444
+[ "$ARC" = 0 ] && grep -q '^    #901: from anyone -> from 444$' <<<"$AO" ||
+  { echo "FAIL: an empty string allowFrom is anyone, a sender put on it narrows it: rc=$ARC $AO / $AE"; exit 1; }
+# The sentinel is no person: "abc" stays on the list when 222 is added, so nobody is shown leaving, and a list is told as entries that are no id.
+nt_with '["abc"]'; nt allow:901+222
+! grep -q 'not-an-id' <<<"$AO" || { echo "FAIL: the sentinel of a list with no id is shown as a person: $AO"; exit 1; }
 NF=$NFA
 # The owner (111) can no longer write anywhere: a removal of the channels that listed them, when no channel left lets them
 # (an open channel does). The main channel (900, config.env) no longer listened in is warned of by itself.
@@ -891,6 +908,14 @@ NF=$NFB; nt_reset; nt channel-905
   { echo "FAIL: the owner's channel removed while an open one stays is no warning: rc=$ARC $AO / $AE"; exit 1; }
 NF=$(jq -c '.groups["900"].allowFrom = ["111","222"]' <<<"$NFB"); nt_reset; nt channel-905
 [ "$ARC" = 0 ] || { echo "FAIL: the owner's channel removed while another lists them is no warning: rc=$ARC $AO / $AE"; exit 1; }
+# Narrowing counts as removal: the open channel the owner had is cut down to others, or removed, and none lets them write.
+NFN='{"dmPolicy":"allowlist","allowFrom":["333"],"groups":{"900":{"requireMention":true,"allowFrom":["222"]},"906":{"requireMention":true,"allowFrom":[]}}}'
+NF=$NFN; nt_reset; nt channel-906
+nt_refused "for the owner's only open channel removed" "^$NFO" 'it has a warning (above)$'
+NF=$NFN; nt_reset; nt allow:906+222
+nt_refused "for the owner's open channel narrowed to others" "^$NFO" 'it has a warning (above)$'
+NF=$(jq -c '.groups["900"].allowFrom = ["111","222"]' <<<"$NFN"); nt_reset; nt allow:906+222
+[ "$ARC" = 0 ] && ! grep -q 'owner of this bot' <<<"$AO" || { echo "FAIL: an open channel narrowed while another still lists the owner is no warning: rc=$ARC $AO / $AE"; exit 1; }
 NF=$NFA; nt_reset; nt channel-900 channel-901
 nt_refused "for every channel removed" "^$NFO" && grep -q "^$NFM" <<<"$AO" || { echo "FAIL: every channel removed warns of the owner and of the main channel: $AO"; exit 1; }
 NF=$NFA
