@@ -790,6 +790,78 @@ rc=0; out=$(cd "$BH" && HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc=$
 rm -rf "${BH:?}"
 echo "ok: boot recovers every bot of the machine that runs no session (bot recover --yes), skips one that does, and exits 1 when one failed"
 
+# access set with no terminal writes with no question when nothing in it widens who can drive the bot: no W, N or E
+# line, no mode change, and every channel it adds is in the bot's own server (its main channel's, as Discord says). Else it
+# prints the changes and exits 3 as before. The bot: 900 (the main channel) and 901 (open to anyone) listed; 111 (the owner)
+# and 222 on 900, 333 on the DM allowlist only; 902, 903 and 950 are channels of the server (950 is not, in the stub).
+NP="$HOME/ntproj"; NR=$(broot "$NP"); NS=$(pstate "$NP"); ND="$NR/nt"; mkdir -p "$ND"
+printf "DISCORD_CHANNEL_ID='900'\nDISCORD_USER_ID='111'\n" > "$NS/config.env"; echo none > "$ND/mode"; printf 'DISCORD_BOT_TOKEN=tokNtUnique\n' > "$ND/.env"
+NF='{"dmPolicy":"allowlist","allowFrom":["333"],"groups":{"900":{"requireMention":true,"allowFrom":["111","222"]},"901":{"requireMention":true,"allowFrom":[]}}}'
+NCH='[{"id":"900","type":0},{"id":"901","type":0},{"id":"902","type":0},{"id":"903","type":5},{"id":"904","type":2}]'
+# nt <words>: the call with no terminal (the $(...) takes stdout); nt_reset: the bot as it was, the guild known, curl's log and queue empty.
+nt() { ARC=0; AO=$(cd "$NP" && bash "$S" access nt set "$@" 2>"$HOME/nt.err") || ARC=$?; AE=$(<"$HOME/nt.err"); }
+nt_reset() { printf '%s\n' "$NF" > "$ND/access.json"; rm -f "$ND/access.log" "$ND/access.json.lock"; echo none > "$ND/mode"; printf '900 5 dev-bots %s\n' "$(date +%s)" > "$ND/channel-guild"
+  : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_REPLIES"; }
+# nt_refused <what> <pattern>: exit 3, the changes were printed (a line matching the pattern among them), nothing written, no log line, no post.
+nt_refused() { grep -q -- "$2" <<<"$AO" && [ "$ARC" = 3 ] && grep -q 'not a terminal (stdin and stdout), so nothing was changed' <<<"$AE" && [ "$(<"$ND/access.json")" = "$NF" ] && [ ! -e "$ND/access.log" ] && ! grep -q '/messages' "$CURL_LOG" ||
+  { echo "FAIL: access set with no terminal must refuse (exit 3, nothing written or posted) $1: rc=$ARC $AO / $AE / $(cat "$ND/access.log" "$CURL_LOG" 2>&1)"; exit 1; }; }
+# A channel of the server whose senders are all listed already (222 on 900, 333 on the DM allowlist, the owner): written, logged, one post.
+nt_reset; queue_line "200 $NCH"; queue_line '200 {"id":"1"}'
+nt channel+902 allow:902+222 allow:902+333
+[ "$ARC" = 0 ] && grep -q '^    #902: + listens here: an @mention required, from 111, 222, 333$' <<<"$AO" && grep -q 'written without a question: no terminal here, and nothing in it widens who can drive nt' <<<"$AO" &&
+  [ "$(jq -c '.groups["902"]' "$ND/access.json")" = '{"requireMention":true,"allowFrom":["111","222","333"]}' ] &&
+  [[ $(<"$ND/access.log") =~ ^20[0-9-]{8}T[0-9:]{8}Z\ $(id -un)\ $(uname -n | cut -d. -f1)\ access.json:\ channel\+902\ allow:902\+222\ allow:902\+333\ \(no\ terminal,\ no\ widening\)$ ]] &&
+  [ "$(wc -l < "$CURL_LOG")" = 2 ] && [ "$(grep -c 'channels/902/messages$' "$CURL_LOG")" = 1 ] && grep -q 'guilds/5/channels$' "$CURL_LOG" &&
+  [ "$(sort -u "$CURL_STDIN_LOG")" = "Authorization: Bot tokNtUnique" ] && [[ $AO$AE$(<"$CURL_LOG") != *tokNt* ]] &&
+  grep -q '"content":"[^"]*claude-discord access[^"]*"' "$CURL_LOG" ||
+  { echo "FAIL: a channel of the bot's server whose senders are all listed already is written with no terminal: exit 0, access.log marked, one post in it: rc=$ARC $AO / $AE / $(cat "$ND/access.log" "$CURL_LOG" 2>&1)"; exit 1; }
+# The server is asked for once when it is not cached: the main channel's guild, then its channels. A forum or a news channel counts; a post that fails
+# is logged and is no failure; the same call with 903 (an announcement channel).
+nt_reset; rm -f "$ND/channel-guild"; queue_line '200 {"id":"900","guild_id":"5"}'; queue_line "200 $NCH"; queue_line '403 {"message":"Missing Access"}'
+nt channel+903 allow:903+333
+[ "$ARC" = 0 ] && [ "$(jq -c '.groups["903"].allowFrom' "$ND/access.json")" = '["111","333"]' ] && [ "$(grep -c 'api/v10/' "$CURL_LOG")" = 3 ] && grep -q 'channels/900$' "$CURL_LOG" &&
+  [ "$(tail -n 1 "$ND/access.log" | cut -d' ' -f4-)" = "the post in 903 failed (HTTP 403)" ] ||
+  { echo "FAIL: an uncached server is asked for (channels/<main>, then its channels), a refused post is logged and the command still exits 0: rc=$ARC $AO / $AE / $(cat "$ND/access.log" "$CURL_LOG" 2>&1)"; exit 1; }
+# A change with no new channel asks Discord nothing and posts nothing (a sender off a channel, one off the DM allowlist).
+nt_reset; nt allow:900-222 dm-333
+[ "$ARC" = 0 ] && [ "$(jq -c '.groups["900"].allowFrom' "$ND/access.json")" = '["111"]' ] && [ ! -s "$CURL_LOG" ] && grep -q '(no terminal, no widening)$' "$ND/access.log" ||
+  { echo "FAIL: a change that adds no channel is written with no terminal and asks Discord nothing: rc=$ARC $AO / $AE / $(cat "$CURL_LOG" 2>&1)"; exit 1; }
+# The opposites. A sender the bot lists nowhere (444), also one it has a name for but lists nowhere (555; 901, open to anyone,
+# lists nobody: it makes nobody known): new to this bot, a widening. Nothing is asked of Discord for it.
+printf '555 nobody\n' > "$ND/user-names"
+for w in allow:902+444 allow:902+555; do
+  nt_reset; queue_line "200 $NCH"; nt channel+902 "$w"
+  nt_refused "for $w (a sender new to this bot)" '^  ! [^:]*: new to this bot: may write to it in #902$'
+done
+[ ! -s "$CURL_LOG" ] || { echo "FAIL: a widening is refused before Discord is asked: $(<"$CURL_LOG")"; exit 1; }
+nt_reset; nt channel+902 allow:902=any
+nt_refused "for allow:=any on a new channel" '^  ! #902: anyone in the channel may write to it$'
+nt_reset; nt channel+902 mention:902=off
+nt_refused "for a new channel with no @mention required" '^  ! #902: answers every message there, with no @mention$'
+nt_reset; nt allow:900=any
+nt_refused "for words that widen an existing channel" '^  ! #900: from 111, 222 -> from anyone in the channel$'
+# A channel that is not in the bot's server; a server nobody can name (no cache and no answer, a refusal, no token).
+nt_reset; queue_line "200 $NCH"; nt channel+950
+nt_refused "for a channel of another server" '^    #950: + listens here: an @mention required, from 111$' && grep -q 'guilds/5/channels$' "$CURL_LOG" || { echo "FAIL: the server's channels were not asked for"; exit 1; }
+nt_reset; rm -f "$ND/channel-guild"; nt channel+902
+nt_refused "when the server is not known (Discord does not answer)" '^    #902: + listens here'
+nt_reset; queue_line '200 {"id":"900","guild_id":"5"}'; queue_line '500 {}'; rm -f "$ND/channel-guild"; nt channel+902
+nt_refused "when the server's channels are refused (HTTP 500)" '^    #902: + listens here'
+nt_reset; mv "$ND/.env" "$ND/.env.off"; nt channel+902
+mv "$ND/.env.off" "$ND/.env"; nt_refused "when the bot has no token" '^    #902: + listens here'
+# A mode change in the words, a warning in the result, an owner-less bot: each keeps the question.
+nt_reset; nt allow:900-222 mode=dev-manager
+nt_refused "for a change of mode" '^    mode: none -> dev-manager: it gets a hosts ledger' && [ "$(<"$ND/mode")" = none ] || { echo "FAIL: the mode changed"; exit 1; }
+nt_reset; nt allow:900-111
+nt_refused "for a change that warns (the owner taken off a channel)" '^warning: 111 is the owner of this bot'
+# With a terminal nothing changes: the same words are asked about, and no is no.
+nt_reset; queue_line "200 $NCH"
+ARC=0; AO=$(printf 'n\nn\n' | python3 -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' bash -c 'cd "$1" && exec bash "$2" access nt set channel+902 allow:902+222' x "$NP" "$S" 2>&1) || ARC=$?
+[ "$ARC" = 4 ] && grep -q '^Apply this change? \[y/N\]' <<<"$AO" && [ "$(<"$ND/access.json")" = "$NF" ] && [ ! -s "$CURL_LOG" ] && [ ! -e "$ND/access.log" ] ||
+  { echo "FAIL: at a terminal a change that widens nothing is still asked about: rc=$ARC $AO"; exit 1; }
+nt_reset; rm -rf "${ND:?}" "${NP:?}"
+echo "ok: access set with no terminal writes with no question when nothing widens (no new sender, no open channel, no @mention dropped, no mode, no warning) and every added channel is in the bot's own server: logged as such, one post in each new channel (a refused post is logged, not a failure); a new sender, an open or mention-free channel, a mode, a warning, another server or one nobody can name keep exit 3 with nothing written; at a terminal the question is still asked"
+
 # Nothing this suite started is still running at the end: a case that detached a keeper or a monitor and did not stop it fails
 # here, by name of the process (sandbox_pids: the sandbox in its argv or as its HOME; an orphaned
 # `/bin/sleep 30` names no path of the suite's). Then the reaping itself, which every exit path runs (the EXIT trap): a decoy

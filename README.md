@@ -474,12 +474,16 @@ that name is whatever the person chose, so read the id.
 - warnings, which ask nothing more: the owner taken off a list, the bot's main
   channel changing, a dev-manager's peer bot taken off a channel.
 
-`set` refuses to write unless stdin and stdout are a terminal, and has no flag
-to skip its question. That is a speed bump, not a boundary: whoever can run
-it can edit `access.json` with an editor. It is there so that no script and no
-session writes a bot's access without a person reading the change. Without a
-terminal it prints the changes and exits 3, which is also how to see what a
-set of words would do. A removal never empties a sender list (an empty list is
+`set` has no flag to skip its question, and with a terminal it always asks.
+That is a speed bump, not a boundary: whoever can run it can edit `access.json` with
+an editor. It is there so that no script and no session widens a bot's access
+without a person reading the change. Without a terminal it prints the changes
+and exits 3, which is also how to see what a set of words would do, unless
+nobody new can drive the bot through them: no widening line, no warning, no
+mode change, and every channel added is in the bot's own server (the one its
+main channel is in, as Discord says; not known counts as not). Then it writes
+with no question, logs it as `(no terminal, no widening)` and posts one line in
+each channel it added saying so (a failed post is logged, not an error). A removal never empties a sender list (an empty list is
 everyone): say `allow:<id>=any` to mean that.
 
 The write is by rename under a lock (`access.json.lock`), mode 600. The
@@ -491,7 +495,7 @@ when a DM asks for a pairing code or a code expires: the new file is made from
 the file as it is at the moment of the write, and the write is given up (exit
 1) when the policy changed while the question was open. `<bot dir>/access.log`
 gets a line for each thing done, each with the time, the local account and the
-machine: `access.json: <the change words>` right after the rename (before the
+machine: `access.json: <the change words>` (then `(no terminal, no widening)` when nothing was asked) right after the rename (before the
 mode is set, so a run stopped there still has its write logged), then
 `mode: <old> -> <new>`, or the same followed by `failed (...)` when
 `setup --mode` failed. A mode change reaches the hooks at their next call; the
@@ -541,7 +545,7 @@ A bot named `access`, set up before 1.13.0, is no longer launched by
 | 0 | done, or nothing to change |
 | 1 | it could not: no such bot, `access.json` unreadable or changed meanwhile, a failed write, the lock held 5 s, no manager's ledger for `--host`, a `DISCORD_CHANNEL_ID` in `config.env` that is no id, a mode `setup --mode` did not set |
 | 2 | usage, a word that is not a change, a change that cannot be made, `--host` with several managers' ledgers and no `--manager` |
-| 3 | no terminal: the changes were printed, nothing written |
+| 3 | no terminal, and the changes widen, warn, change the mode or add a channel outside the bot's server (or one that cannot be told): the changes were printed, nothing written |
 | 4 | answered no: nothing written |
 | 5 | `--host`: the host did not answer, or its claude-discord is older than 1.13.0 |
 

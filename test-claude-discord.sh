@@ -3589,8 +3589,8 @@ at 'y\n' acc set mention:900=off allow:900-222 channel+902 dm=pairing
   { echo "FAIL: the new access.json holds the changes and every other key as it was, is mode 600 and was moved in (access.json, its .lock and access.log are all there is): $(jq -c . "$AD/access.json") $(ls -l "$AD")"; exit 1; }
 [[ $(<"$AD/access.log") =~ ^20[0-9-]{8}T[0-9:]{8}Z\ $(id -un)\ $(uname -n | cut -d. -f1)\ access.json:\ mention:900=off\ allow:900-222\ channel\+902\ dm=pairing$ ]] && [ "$(stat -c %a "$AD/access.log")" = 600 ] ||
   { echo "FAIL: access.log has one line for the write: time, account, machine, the change words: $(cat "$AD/access.log" 2>&1)"; exit 1; }
-# A terminal on stdout with stdin from elsewhere is no terminal: nothing is asked, nothing written (exit 3).
-A=$(<"$AD/access.json"); ARC=0; AO=$(python3 -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' bash -c 'exec bash "$0" access acc set mention:901=on </dev/null' "$S" 2>&1) || ARC=$?
+# A terminal on stdout with stdin from elsewhere is no terminal: nothing is asked, nothing written (exit 3; a widening change, since one that widens nothing is written with no question, test-install.sh).
+A=$(<"$AD/access.json"); ARC=0; AO=$(python3 -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' bash -c 'exec bash "$0" access acc set allow:900=any </dev/null' "$S" 2>&1) || ARC=$?
 [ "$ARC" = 3 ] && grep -q 'not a terminal (stdin and stdout), so nothing was changed' <<<"$AO" && [ "$(<"$AD/access.json")" = "$A" ] ||
   { echo "FAIL: stdin that is no terminal is refused even with stdout one (exit 3): rc=$ARC $AO"; exit 1; }
 # Anything but y writes nothing (exit 4): the file is what was shown and agreed to, or as it was. Here the answer is

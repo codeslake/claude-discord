@@ -16,8 +16,10 @@
 # A change that widens who can drive the bot is shown first, marked "!" (red at a terminal), then the others; one
 # question is asked for all of them, naming how many widen (1.13.1). Anything but y writes nothing: the file is what
 # was shown and agreed to, or as it was.
-# It refuses to write unless stdin and stdout are a terminal, and has no flag to skip the question. That is a speed
-# bump, not a boundary: whoever can run this can also edit the file. Without a terminal it prints the changes and exits 3.
+# It has no flag to skip the question, and with a terminal it always asks. That is a speed bump, not a boundary: whoever
+# can run this can also edit the file. Without a terminal it prints the changes and exits 3, unless nobody new can drive
+# the bot through them (no widening, warning or mode change, every channel added in the bot's own server): then it writes
+# with no question, logs "(no terminal, no widening)" and posts one line in each channel it added.
 # --project <dir>: the bot's project (default: the one above the cwd that has the bot).
 # --host <alias>: the bot lives on a host of a manager's ledger (--manager <bot> when the project has several): `local`
 # runs it here with that line's env words, any other alias over ssh with them (a question needs `ssh -t`, so a terminal
@@ -99,25 +101,33 @@ if [ "${1:-}" = access ]; then
     def peerlist: (try fromjson catch null) | [objects | .peers | arrays | .[] | objects | {id: (.bot_id // "" | tostring), name: (.name // "" | safe)} | select(.id | isid)];
     def mainof($fb): if (.groups | length) == 1 then .groups[0].id else $fb end;'
 
+    # Discord is asked as health asks it (the token on curl's stdin, never in an argument): four calls, six when the bot's
+    # id (bot-id) or its server (channel-guild) is not known here yet, each 5 s at most and none started past 12 s, so
+    # the answer arrives inside the cap of the ssh call that may carry it (30 s: access --host).
+    a_t0=$SECONDS status=000 resp="" tok="" gid=""
+    a_api() {  # $1 = path, $2 = a JSON body to POST (else a GET); sets $status and $resp
+      local out=""
+      [ $((SECONDS - a_t0)) -lt 12 ] && out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 5 -w '\n%{http_code}' -H @- ${2:+-H "Content-Type: application/json" -d "$2"} "https://discord.com/api/v10/$1" 2>/dev/null) || out=""
+      status=${out##*$'\n'} resp=${out%$'\n'*}
+      case $status in ''|*[!0-9]*) status=000;; esac
+    }
+    { while IFS= read -r l || [ -n "$l" ]; do case $l in DISCORD_BOT_TOKEN=*) tok=${l#DISCORD_BOT_TOKEN=};; esac; done < "$d/.env"; } 2>/dev/null || :
+    a_gid() {  # $1 = the main channel; sets $gid: its server, from channel-guild (kept by health) or asked of Discord; empty when not known
+      local cch=""
+      gid=""; { read -r cch gid l < "$d/channel-guild"; } 2>/dev/null || :
+      [ "$cch" = "$1" ] && c_match "$gid" '^[0-9]{1,20}$' || gid=""
+      if [ -z "$gid" ] && [ -n "$1" ]; then
+        a_api "channels/$1"; gid=$(printf '%s' "$resp" | jq -r '.guild_id // empty' 2>/dev/null) || gid=""
+        c_match "$gid" '^[0-9]{1,20}$' || gid=""
+      fi
+    }
+
   if [ "$act" = --json ]; then
     a_p=$(jq -r --arg fb "$DISCORD_CHANNEL_ID" "$a_defs"'policy | [mainof($fb), tojson] | join(" ")' "$f" 2>/dev/null) && [ -n "$a_p" ] ||
       { echo "claude-discord: access: $f is not valid JSON" >&2; exit 1; }
     main=${a_p%% *} a_p=${a_p#* }
-    # Discord is asked as health asks it (the token on curl's stdin, never in an argument): four calls, six when the bot's
-    # id (bot-id) or its server (channel-guild) is not known here yet, each 5 s at most and none started past 12 s, so
-    # the answer arrives inside the cap of the ssh call that may carry it (30 s: access --host).
-    a_t0=$SECONDS status=000 resp=""
-    a_api() {  # $1 = path; sets $status and $resp
-      local out=""
-      [ $((SECONDS - a_t0)) -lt 12 ] && out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 5 -w '\n%{http_code}' -H @- "https://discord.com/api/v10/$1" 2>/dev/null) || out=""
-      status=${out##*$'\n'} resp=${out%$'\n'*}
-      case $status in ''|*[!0-9]*) status=000;; esac
-    }
-    tok="" me="" gid="" cch="" errs="" a_g=null a_m=null a_c=null a_mm=null
-    { while IFS= read -r l || [ -n "$l" ]; do case $l in DISCORD_BOT_TOKEN=*) tok=${l#DISCORD_BOT_TOKEN=};; esac; done < "$d/.env"; } 2>/dev/null || :
+    me="" errs="" a_g=null a_m=null a_c=null a_mm=null
     { read -r me < "$d/bot-id"; } 2>/dev/null || :
-    { read -r cch gid l < "$d/channel-guild"; } 2>/dev/null || :
-    [ "$cch" = "$main" ] && c_match "$gid" '^[0-9]{1,20}$' || gid=""
     if [ -z "$tok" ]; then
       errs="no token in $d/.env: Discord was not asked for the channels"
     elif ! command -v curl >/dev/null 2>&1; then
@@ -127,10 +137,7 @@ if [ "${1:-}" = access ]; then
         a_api users/@me; me=$(printf '%s' "$resp" | jq -r '.id // empty' 2>/dev/null) || me=""
         c_match "$me" '^[0-9]{1,20}$' || me=""
       fi
-      if [ -z "$gid" ] && [ -n "$main" ]; then
-        a_api "channels/$main"; gid=$(printf '%s' "$resp" | jq -r '.guild_id // empty' 2>/dev/null) || gid=""
-        c_match "$gid" '^[0-9]{1,20}$' || gid=""
-      fi
+      a_gid "$main"
       if [ -z "$me" ] || [ -z "$gid" ]; then
         errs="Discord did not say who this bot is or which server its channel is in (HTTP $status)"
       else
@@ -222,8 +229,8 @@ if [ "${1:-}" = access ]; then
   # The words are applied in order to the whole document, so every key this verb does not know stays as it is.
   # A diff line is <kind> US <where> US <text>; the kinds: P the policy the diff was made from, as JSON; W a change that
   # widens who can drive the bot (shown first, red); C any other change; N a warning; E a change that cannot be
-  # made (exit 2). Widening is: an @mention no longer required; a channel opened to anyone; DMs to pairing, or back
-  # from disabled; a person added to the DM allowlist (they then answer the bot's permission prompts too); a person
+  # made (exit 2); A a channel the words add (not shown). Widening is: an @mention no longer required; a channel opened
+  # to anyone; DMs to pairing, or back from disabled; a person added to the DM allowlist (they then answer the bot's permission prompts too); a person
   # this bot listed nowhere until now.
   a_prog="$a_defs"'
     def has_grp($c): (.d.groups | type) == "object" and (.d.groups | has($c)) and (.d.groups[$c] | type) == "object";
@@ -278,6 +285,7 @@ if [ "${1:-}" = access ]; then
           ([$P0.groups[].allow[]] + $P0.dm_allow | unique) as $known
         | line("P"; ""; $P0 | tojson),
           (if $err then line("E"; ""; $err) else
+            ($P1.groups[] | select($G0[.id] == null) | line("A"; .id; "")),
             ($P1.groups[] | . as $n | $G0[$n.id] as $o
              | if $o == null then
                  line("C"; $n.id | ch; "+ listens here: \($n | rule), from \($n.allow | whos)"),
@@ -327,10 +335,11 @@ if [ "${1:-}" = access ]; then
   red="" yel="" off=""
   [ ! -t 1 ] || { red=$'\033[1;31m' yel=$'\033[33m' off=$'\033[0m'; }
   # The widenings are shown first, then the other changes, then the warnings; one question is asked for all of them.
-  a_seen="" a_nw=0 a_n=0 a_warn="" a_sw="" a_sc=""
+  a_seen="" a_nw=0 a_n=0 a_warn="" a_sw="" a_sc="" a_add=""
   while IFS=$'\x1f' read -r k where text; do
     case $k in
       P) a_seen=$text;;
+      A) a_add="$a_add $where";;
       E) echo "claude-discord: access: $text" >&2; exit 2;;
       W) a_nw=$((a_nw + 1)); a_sw="$a_sw"$'\n'"$red  ! $where: $text$off";;
       C) a_n=$((a_n + 1)); a_sc="$a_sc"$'\n'"    $where: $text";;
@@ -350,19 +359,38 @@ if [ "${1:-}" = access ]; then
   fi
   if [ "$a_nw" = 0 ] && [ "$a_n" = 0 ]; then echo "claude-discord: access: $bn is already so; nothing to change"; exit 0; fi
   printf '%s%s%s%s\n' "claude-discord: access: $bn on $a_host_name, $f" "$a_sw" "$a_sc" "$a_warn"
-  [ -t 0 ] && [ -t 1 ] || { echo "claude-discord: access: not a terminal (stdin and stdout), so nothing was changed: run it in a terminal to answer for these changes" >&2; exit 3; }
+  # No terminal: nothing is asked, so it writes only a change that gives nobody new a way to drive the bot: no
+  # widening, warning or mode in it, and every channel it adds in the bot's own server (the main channel's, as Discord
+  # says: not known is not so). Else nothing is written (exit 3).
+  a_nt=""
+  a_own() {
+    local main ids c
+    [ -n "$a_add" ] || return 0
+    main=$(jq -r --arg fb "$DISCORD_CHANNEL_ID" "$a_defs"'mainof($fb)' <<<"$a_seen" 2>/dev/null) || return 1
+    [ -n "$tok" ] && command -v curl >/dev/null 2>&1 || return 1
+    a_t0=$SECONDS; a_gid "$main"; [ -n "$gid" ] || return 1
+    a_api "guilds/$gid/channels"; case $status in 2*) ;; *) return 1;; esac
+    ids=$(printf '%s' "$resp" | jq -r '.[]? | objects | .id | tostring' 2>/dev/null) || return 1
+    for c in $a_add; do case $'\n'$ids$'\n' in *$'\n'$c$'\n'*) ;; *) return 1;; esac; done
+  }
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    if [ "$a_nw" = 0 ] && [ -z "$a_warn" ] && [ "$newmode" = "$mode" ] && a_own; then a_nt=1
+    else echo "claude-discord: access: not a terminal (stdin and stdout), so nothing was changed: run it in a terminal to answer for these changes" >&2; exit 3; fi
+  fi
   a_no() { echo "claude-discord: access: answered no; nothing was changed" >&2; exit 4; }
   # One question for the whole change set (1.13.1): y writes all of it; n, the end of input or anything else, none.
-  a_t=$((a_nw + a_n))
-  if [ "$a_nw" = 0 ]; then q="Apply $([ "$a_t" = 1 ] && echo "this change" || echo "these $a_t changes")?"
-  elif [ "$a_nw" = "$a_t" ]; then q="Apply $([ "$a_t" = 1 ] && echo "this widening change" || echo "these $a_t widening changes")?"
-  else q="Apply $a_t changes, $a_nw of them widening?"; fi
-  # Before it, on its own line, a marker: U+2060 alone (no control character, nothing on a terminal), which no Discord
-  # name can hold (safe, in a_defs, takes it out of every name). The TUI asks only after it (1.13.1): a name that ends
-  # in [y/N] can never pass for the question.
-  printf '\342\201\240\n' >&2
-  a=""; read -r -p "$q [y/N] " a || a=""
-  case $a in y|Y) ;; *) a_no;; esac
+  if [ -z "$a_nt" ]; then
+    a_t=$((a_nw + a_n))
+    if [ "$a_nw" = 0 ]; then q="Apply $([ "$a_t" = 1 ] && echo "this change" || echo "these $a_t changes")?"
+    elif [ "$a_nw" = "$a_t" ]; then q="Apply $([ "$a_t" = 1 ] && echo "this widening change" || echo "these $a_t widening changes")?"
+    else q="Apply $a_t changes, $a_nw of them widening?"; fi
+    # Before it, on its own line, a marker: U+2060 alone (no control character, nothing on a terminal), which no Discord
+    # name can hold (safe, in a_defs, takes it out of every name). The TUI asks only after it (1.13.1): a name that ends
+    # in [y/N] can never pass for the question.
+    printf '\342\201\240\n' >&2
+    a=""; read -r -p "$q [y/N] " a || a=""
+    case $a in y|Y) ;; *) a_no;; esac
+  fi
   a_file=""; case $'\n'$a_diff in *$'\n'[WC]$'\x1f'*) a_file=1;; esac   # a change of access.json itself, not of the mode alone
   # access.log: when, who (the account here), on which machine, and what was done: a line for access.json (with the
   # change words, ids only) right after its rename, before setup --mode runs, so a run stopped in setup still has its
@@ -381,10 +409,18 @@ if [ "${1:-}" = access ]; then
       { echo "claude-discord: access: $f changed while you were answering (or is no longer valid JSON); nothing was changed, run it again" >&2; exit 1; }
     (umask 077; printf '%s\n' "$a_new" > "$f.cd.$$") && mv -f "$f.cd.$$" "$f" ||
       { rm -f "$f.cd.$$"; echo "claude-discord: access: could not write $f; it is as it was" >&2; exit 1; }
-    a_log "access.json:$a_words"
+    a_log "access.json:$a_words${a_nt:+ (no terminal, no widening)}"
     exec 7>&-
   fi
   [ -z "$a_file" ] || echo "claude-discord: access: $f written. The plugin reads it at the next message: no restart."
+  if [ -n "$a_nt" ]; then
+    echo "claude-discord: access: written without a question: no terminal here, and nothing in it widens who can drive $bn."
+    # One line in each channel it now listens in; a post that fails is logged and no failure of the change.
+    for c in $a_add; do
+      a_t0=$SECONDS; a_api "channels/$c/messages" "$(jq -cn --arg h "$a_host_name" '{content: ("I now listen in this channel: `claude-discord access` on \($h) added it with no question, because nobody new may drive me through it.")}')"
+      case $status in 2*) ;; *) a_log "the post in $c failed (HTTP $status)";; esac
+    done
+  fi
   if [ "$newmode" != "$mode" ]; then
     # setup --mode, with the mode on its stdin and nothing after it: its peers and hosts questions read the end of
     # input, which keeps both lists (README, Modes).
