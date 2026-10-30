@@ -2647,7 +2647,7 @@ echo "ok: health asks for a channel's guild once, keeps it with the channel it w
 # of an older version (two fields) once. No extra jq: the same three calls a run already made carry it all.
 cp "$SD/access.json" "$SD/access.json.keep"
 # Two numeric groups (the channel then comes from config.env, 900), a key that is no channel id, a DM policy, and an
-# allowFrom entry that is not an id (a hand edit): only ids reach the document; a number is no id, and a channel list with no id in it (903: a string, 904: a number list) reads "not-an-id", never anyone.
+# allowFrom entry that is not an id (a hand edit): only ids reach the document; a number is no id, and a channel list with no id in it (904: a number list) reads "not-an-id", never anyone; a string (903) is anyone for health (it errs toward reporting stale).
 # 1.11.1: 902 is a group the guild's list does not have (another guild's channel, a deleted one): its name stays "".
 # The list also has a channel that is no group of this bot (999, never kept), a name with a quote and a backslash, and
 # an element that is no object. The bot's mode file travels in the same document.
@@ -2669,7 +2669,7 @@ jq -e --arg at "$(date -u -d "@$(( ((ID_SEEN >> 22) + 1420070400000) / 1000 ))" 
   and .mode == "dev-manager"
   and .access == {dm: "pairing", dm_allow: ["111"], groups: [{id: "900", mention: true, allow: ["111", "222"], name: "봇-dev"},
     {id: "901", mention: false, allow: [], name: "side-\"room\\-x"}, {id: "902", mention: true, allow: [], name: ""},
-    {id: "903", mention: true, allow: ["not-an-id"], name: ""}, {id: "904", mention: true, allow: ["not-an-id"], name: ""}]}' <<<"$out" >/dev/null ||
+    {id: "903", mention: true, allow: [], name: ""}, {id: "904", mention: true, allow: ["not-an-id"], name: ""}]}' <<<"$out" >/dev/null ||
   { echo "FAIL: --json must carry channel, channel_name, last_message_at (from the last-message-id snowflake), mode (the first line of the mode file) and access (every numeric group with its name, \"\" for one the guild's list has not; dmPolicy and its allowFrom, ids only): $out"; exit 1; }
 # The guild's list fails (a 200 that is no array: the bot lost a permission) on a line a day old: what 1.11.0 did, the
 # channel alone for the main name (two calls), and the names already kept stay, in the file and in the document.
@@ -2726,19 +2726,22 @@ jq -e '.[0] | .bot == "nobot" and .verdict == "unknown" and .channel == "" and .
 echo "ok: health --json carries channel, channel_name (cached in channel-guild with the time it was read; read again after a day or for a line with no name; a failed read keeps it; a read time with a leading zero is decimal and never ends health early), last_message_at from the snowflake and the access policy (ids only; the DM policy alone when access.json has no groups), and empty or null ones for a bot with no token and no channel"
 echo "ok: health 1.11.1: the daily read is one guilds/<gid>/channels call (two calls the first time ever, none the same day) and gives every access group its name (channel-names, \"\" for a channel the guild has not); a list that fails falls back to channels/<id> and keeps the cached names; mode is the first line of the mode file, none without one"
 
-# A group whose allowFrom is a string (a hand edit): the plugin drops it as no list, so nobody is allowed. The cfg jq read it with
-# `map(tostring)` and died ("cannot iterate over string"), which blanked this bot's whole policy (channel, requireMention, allow
-# and the access document) and read as allowFrom [] = everyone, so a message from anyone counted. Same reading as the access
-# document's: strings only, a non-empty value with no id is nobody.
+# A group whose allowFrom is a string, a number or an object (a hand edit). The plugin filters only on a list or a string
+# (`allowFrom ?? []`, then .length > 0 and .includes()): a number, a boolean or an object has no positive .length and lets
+# anyone in, and a string is a substring filter health cannot read as ids, so health reads all of them as anyone (it errs
+# toward reporting stale). The cfg jq read them with `map(tostring)` and died ("cannot iterate over string"), which blanked
+# this bot's whole policy (channel, requireMention, allow and the access document). A message from anyone counts.
 cp "$SD/access.json" "$SD/access.json.keep"
-jq '.groups["900"].allowFrom = "111"' "$SD/access.json.keep" > "$SD/access.json"
-queue
-qbot "[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"999\"},\"mentions\":[{\"id\":\"777\"}]}]"
-out=$(bash "$S" health --json 2>"$HOME/health.err") || :
-[ "$(verdict_of sbot "$out")" = ok ] && jq -e '.[0] | .channel == "900" and .access.groups[0].allow == ["not-an-id"]' <<<"$out" >/dev/null && ! grep -q 'jq: error' "$HOME/health.err" ||
-  { echo "FAIL: a string allowFrom must read as nobody with no jq error (the bot reported, its policy kept, a message from anyone ignored): $(jq -c '.[0]' <<<"$out") / $(cat "$HOME/health.err")"; exit 1; }
+for hv in '"111"' '7' '{"a":1}'; do
+  jq --argjson v "$hv" '.groups["900"].allowFrom = $v' "$SD/access.json.keep" > "$SD/access.json"
+  queue
+  qbot "[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"999\"},\"mentions\":[{\"id\":\"777\"}]}]"
+  out=$(bash "$S" health --json 2>"$HOME/health.err") || :
+  [ "$(verdict_of sbot "$out")" = stale ] && jq -e '.[0] | .channel == "900" and .access.groups[0].allow == []' <<<"$out" >/dev/null && ! grep -q 'jq: error' "$HOME/health.err" ||
+    { echo "FAIL: an allowFrom that is $hv must read as anyone with no jq error (the bot reported, its policy kept, a message from anyone counted): $(jq -c '.[0]' <<<"$out") / $(cat "$HOME/health.err")"; exit 1; }
+done
 rm -f "$HOME/health.err"; mv "$SD/access.json.keep" "$SD/access.json"
-echo "ok: a group whose allowFrom is a string reads as nobody allowed, with no jq error, and the bot is still reported"
+echo "ok: a group whose allowFrom is a string, a number or an object reads as anyone (as the plugin's number, and an errs-toward-stale string), with no jq error, and the bot is still reported"
 
 # The age is measured from the OLDEST unanswered message, not the newest:
 # with the newest, every fresh message resets the clock, and a wedged bot is
@@ -3568,6 +3571,9 @@ ac acc set allow:901+111
   { echo "FAIL: a peer bot's open channel narrowed to others is warned of: rc=$ARC $AO / $AE"; exit 1; }
 ac acc set allow:901+111 allow:901+555
 ! grep -q 'peerbot (555) is a peer dev bot' <<<"$AO" || { echo "FAIL: a peer put on the narrowed channel is no warning: $AO"; exit 1; }
+# peers.json lists the bot itself too: with no warning for it (only the peers that go onto the lists are named) that call writes with no terminal.
+[ "$ARC" = 0 ] && grep -q 'written without a question' <<<"$AO" || { echo "FAIL: a peer put on the narrowed channel, nothing else in it, is written with no terminal (the bot itself in peers.json is no peer): rc=$ARC $AO / $AE"; exit 1; }
+find "$AD" -maxdepth 1 -name access.log -delete
 echo none > "$AD/mode"; printf '%s\n' "$A_FILE" > "$AD/access.json"
 printf "DISCORD_CHANNEL_ID='901'\nDISCORD_USER_ID='111'\n" > "$HOME/acc.env"; cp "$(pstate "$MP")/config.env" "$HOME/acc.env.was"; cp "$HOME/acc.env" "$(pstate "$MP")/config.env"
 ac acc set channel-901 dm=off; cp "$HOME/acc.env.was" "$(pstate "$MP")/config.env"; rm -f "$HOME/acc.env" "$HOME/acc.env.was"

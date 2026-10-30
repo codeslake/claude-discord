@@ -521,7 +521,7 @@ if [ "${1:-}" = health ]; then
     # reports its DM policy, and its channel is config.env's as before.
     cfg=$(jq -r --arg fb "${DISCORD_CHANNEL_ID:-}" '
       def ids: [arrays[] | select(type == "string" and test("\\A[0-9]{1,20}\\z"))] | unique;
-      def gids: ids as $v | if $v == [] and . != null and . != [] and . != "" and . != {} then ["not-an-id"] else $v end;
+      def gids: . as $a | ids as $v | if ($a | type) == "array" and $v == [] and $a != [] then ["not-an-id"] else $v end;
       ((.groups | objects) // {}) as $g
       | ($g | keys) as $k
       | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) as $ch

@@ -491,9 +491,12 @@ added saying so (a failed post, or one past the 12 seconds the Discord calls
 share, is logged, not an error). To see what words would do, run them at a
 terminal and answer `n` (nothing is written). A removal never empties a sender list (an empty list is everyone): say
 `allow:<id>=any` to mean that. A sender list whose entries are none of them an id
-(`["abc"]`, or a number: the plugin compares strings) is not "anyone": the
-plugin filters on any non-empty list, so it is read as a list nobody is on, and a
-sender added to it is new to the bot.
+(`["abc"]`, or numbers: the plugin compares strings) is not "anyone": the plugin
+filters a non-empty list by exact element, so it is read as a list nobody is on,
+and a sender added to it is new to the bot. A number, a boolean, an object, `null`
+or `""` in place of the list is no filter in the plugin: anyone. A non-empty
+string is matched by substring there (`"111 222"` lets 111 and 222 in): it is
+warned about, and a change with no terminal is not written while one exists.
 
 The write is by rename under a lock (`access.json.lock`), mode 600. The
 official plugin reads `access.json` at every message, so **a change applies at

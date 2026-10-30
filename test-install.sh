@@ -855,8 +855,8 @@ nt_reset; nt allow:900-222 mode=dev-manager
 nt_refused "for a change of mode" '^    mode: none -> dev-manager: it gets a hosts ledger' 'it changes the mode$' && [ "$(<"$ND/mode")" = none ] || { echo "FAIL: the mode changed"; exit 1; }
 nt_reset; nt allow:900-111
 nt_refused "for a change that warns (the owner taken off a channel)" '^warning: 111 is the owner of this bot' 'it has a warning (above)$'
-# A list in which no entry is an id (junk, or a number: the plugin compares strings) is not "anyone" (the plugin filters on any
-# non-empty list), and holds nobody known: a sender added to it is new to this bot. An id that is a string counts.
+# A list in which no entry is an id (junk, or a number: the plugin compares strings) is not "anyone" (the plugin filters on a
+# non-empty list by exact element), and holds nobody known: a sender added to it is new to this bot. An id that is a string counts.
 NFA=$NF
 nt_with() { NF=$(jq -c --argjson l "$1" '.groups["901"].allowFrom = $l' <<<"$NFA"); nt_reset; }
 nt_with '["abc"]'; nt allow:901+444
@@ -874,23 +874,61 @@ nt_refused "for the number itself added as an id" '^  ! 444: new to this bot: ma
 nt_with '["444"]'; nt allow:900+444
 [ "$ARC" = 0 ] && [ "$(jq -c '.groups["900"].allowFrom' "$ND/access.json")" = '["111","222","444"]' ] ||
   { echo "FAIL: a string id in another list is known: rc=$ARC $AO / $AE"; exit 1; }
-# A string, a number or an object as allowFrom is no list, and the plugin still filters on it (a string by includes()): it is a
-# list with no id, nobody known, never anyone. Taking a sender off it would empty it, and one put on it is new to this bot. An
-# empty string is no filter: it is anyone, as an empty list is.
-for nt_v in '"111"' '7' '{"a":1}'; do
-  nt_with "$nt_v"; nt allow:901-999 dm-444
-  [ "$ARC" = 2 ] && grep -q '^claude-discord: access: allow:901: that would leave no sender' <<<"$AE" && [ "$(<"$ND/access.json")" = "$NF" ] ||
-    { echo "FAIL: a removal on an allowFrom that is $nt_v would leave no sender and is refused (exit 2): rc=$ARC $AO / $AE"; exit 1; }
-  nt_with "$nt_v"; nt allow:901+444
-  nt_refused "for a sender added to an allowFrom that is $nt_v" '^  ! 444: new to this bot: may write to it in #901$' 'it widens who can drive nt'
-  ! grep -q 'from anyone' <<<"$AO" || { echo "FAIL: an allowFrom that is $nt_v is not read as anyone: $AO"; exit 1; }
+# What the plugin does with allowFrom (server.ts: `allowFrom ?? []`, filtered only when .length > 0, with .includes(id)): a list
+# filters by exact element, a non-empty STRING by substring ("111 222" lets 111 and 222 in), and a number, a boolean, an object,
+# null, "" and {} have no positive .length, so they let ANYONE in. A number, a boolean or an object reads as anyone here too: a
+# sender put on it narrows it (and the owner is warned when that locks them out); a removal never empties it.
+for nt_v in '7' 'true' 'false' '{"a":1}' 'null' '""' '{}'; do
+  nt_with "$nt_v"; nt allow:901+222
+  [ "$ARC" = 0 ] && grep -q '^    #901: from anyone -> from 222$' <<<"$AO" && [ "$(jq -c '.groups["901"].allowFrom' "$ND/access.json")" = '["222"]' ] ||
+    { echo "FAIL: an allowFrom that is $nt_v is anyone, a sender put on it narrows it: rc=$ARC $AO / $AE"; exit 1; }
+  nt_with "$nt_v"; nt allow:901=any
+  [ "$ARC" = 0 ] && [[ $AO == *"already so; nothing to change"* ]] || { echo "FAIL: allow:901=any on an allowFrom that is $nt_v (already anyone) changes nothing: rc=$ARC $AO / $AE"; exit 1; }
 done
-nt_with '""'; nt allow:901+444
-[ "$ARC" = 0 ] && grep -q '^    #901: from anyone -> from 444$' <<<"$AO" ||
-  { echo "FAIL: an empty string allowFrom is anyone, a sender put on it narrows it: rc=$ARC $AO / $AE"; exit 1; }
+# A non-empty string is a substring filter in the plugin: read as a list with no id (nobody known), and the N line asks for a terminal,
+# so a no-terminal call never writes while one exists (the plugin's "111 222" lets 111 and 222 in, which no id test here can say).
+for nt_v in '"111"' '"111 222"' '"x111x"'; do
+  for nt_w in allow:900-222 channel-901 allow:901+222; do
+    nt_with "$nt_v"; nt $nt_w
+    nt_refused "for $nt_w with an allowFrom that is the string $nt_v" '^warning: #901: allowFrom is a string, matched by substring: set it at a terminal$' 'it has a warning (above)$'
+  done
+done
+nt_with '"111"'; nt allow:901-999
+[ "$ARC" = 2 ] && grep -q '^claude-discord: access: allow:901: that would leave no sender' <<<"$AE" && [ "$(<"$ND/access.json")" = "$NF" ] ||
+  { echo "FAIL: a removal on a string allowFrom would leave no sender and is refused (exit 2): rc=$ARC $AO / $AE"; exit 1; }
+# The owner (111) locked out by a narrowing or a removal while 900 lists only 222 and 901 holds a value: the open readings (a number,
+# a boolean, an object) warn of the owner; the controls ([] and ["111"]) still do; strings are caught by the N line above.
+NFL=$(jq -c '.groups["900"].allowFrom = ["222"]' <<<"$NFA")
+for nt_v in '[]' '["111"]' '7' 'true' '{"a":1}'; do
+  for nt_w in channel-901 allow:901+222; do
+    [ "$nt_v $nt_w" != '["111"] allow:901+222' ] || continue   # 111 stays on the list: the owner is not cut off
+    NFA_SAVE=$NFA; NFA=$NFL; nt_with "$nt_v"; NFA=$NFA_SAVE; nt $nt_w
+    nt_refused "for $nt_w with 111 the owner and 901 holding $nt_v" "^warning: 111 is the owner of this bot (DISCORD_USER_ID) and no channel it listens in lets them write to it any more\$" 'it has a warning (above)$'
+  done
+done
 # The sentinel is no person: "abc" stays on the list when 222 is added, so nobody is shown leaving, and a list is told as entries that are no id.
 nt_with '["abc"]'; nt allow:901+222
 ! grep -q 'not-an-id' <<<"$AO" || { echo "FAIL: the sentinel of a list with no id is shown as a person: $AO"; exit 1; }
+NF=$NFA
+# peers.json is shared: it lists this bot too (nt, 555). The dev-manager peer warning is about the peers that go onto the lists
+# (pb, 666), never the bot itself (nt, 555), so narrowing an open channel while entering dev-manager names no peer line for 555.
+printf '{"peers":[{"name":"nt","bot_id":"555"},{"name":"pb","bot_id":"666"}]}\n' > "$NS/peers.json"
+nt_reset; nt mode=dev-manager allow:901+111
+[ "$ARC" = 3 ] || { echo "FAIL: entering dev-manager with a peer is refused with no terminal: rc=$ARC $AO / $AE"; exit 1; }
+! grep -q '555.*is a peer dev bot' <<<"$AO" || { echo "FAIL: the bot itself (nt, 555 in the shared peers.json) is named as a peer it cuts off: $AO"; exit 1; }
+printf '{"peers":[{"name":"nt","bot_id":"555"}]}\n' > "$NS/peers.json"
+nt_reset; nt mode=dev-manager allow:901+111
+nt_refused "for entering dev-manager (the mode)" '^    mode: none -> dev-manager' 'it changes the mode$'
+! grep -q 'peer dev bot' <<<"$AO" || { echo "FAIL: peers.json listing only the bot gives a peer warning: $AO"; exit 1; }
+# Entering dev-manager with an allowFrom that is no list (a string, a number): the peer merge leaves that group as it is, the diff
+# is made, and it is not "not valid JSON".
+printf '{"peers":[{"name":"pb","bot_id":"666"}]}\n' > "$NS/peers.json"
+for nt_v in '"111"' '7' '{"a":1}'; do
+  nt_with "$nt_v"; nt mode=dev-manager
+  [ "$ARC" = 3 ] && ! grep -q 'not valid JSON' <<<"$AE" && grep -q '^    mode: none -> dev-manager' <<<"$AO" && [ "$(<"$ND/access.json")" = "$NF" ] ||
+    { echo "FAIL: entering dev-manager with an allowFrom that is $nt_v must give a diff, not the JSON error: rc=$ARC $AO / $AE"; exit 1; }
+done
+printf '{"peers":[]}\n' > "$NS/peers.json"
 NF=$NFA
 # The owner (111) can no longer write anywhere: a removal of the channels that listed them, when no channel left lets them
 # (an open channel does). The main channel (900, config.env) no longer listened in is warned of by itself.
