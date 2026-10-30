@@ -2726,6 +2726,20 @@ jq -e '.[0] | .bot == "nobot" and .verdict == "unknown" and .channel == "" and .
 echo "ok: health --json carries channel, channel_name (cached in channel-guild with the time it was read; read again after a day or for a line with no name; a failed read keeps it; a read time with a leading zero is decimal and never ends health early), last_message_at from the snowflake and the access policy (ids only; the DM policy alone when access.json has no groups), and empty or null ones for a bot with no token and no channel"
 echo "ok: health 1.11.1: the daily read is one guilds/<gid>/channels call (two calls the first time ever, none the same day) and gives every access group its name (channel-names, \"\" for a channel the guild has not); a list that fails falls back to channels/<id> and keeps the cached names; mode is the first line of the mode file, none without one"
 
+# A group whose allowFrom is a string (a hand edit): the plugin drops it as no list, so nobody is allowed. The cfg jq read it with
+# `map(tostring)` and died ("cannot iterate over string"), which blanked this bot's whole policy (channel, requireMention, allow
+# and the access document) and read as allowFrom [] = everyone, so a message from anyone counted. Same reading as the access
+# document's: strings only, a non-empty value with no id is nobody.
+cp "$SD/access.json" "$SD/access.json.keep"
+jq '.groups["900"].allowFrom = "111"' "$SD/access.json.keep" > "$SD/access.json"
+queue
+qbot "[{\"id\":\"$ID_STALE\",\"author\":{\"id\":\"999\"},\"mentions\":[{\"id\":\"777\"}]}]"
+out=$(bash "$S" health --json 2>"$HOME/health.err") || :
+[ "$(verdict_of sbot "$out")" = ok ] && jq -e '.[0] | .channel == "900" and .access.groups[0].allow == ["not-an-id"]' <<<"$out" >/dev/null && ! grep -q 'jq: error' "$HOME/health.err" ||
+  { echo "FAIL: a string allowFrom must read as nobody with no jq error (the bot reported, its policy kept, a message from anyone ignored): $(jq -c '.[0]' <<<"$out") / $(cat "$HOME/health.err")"; exit 1; }
+rm -f "$HOME/health.err"; mv "$SD/access.json.keep" "$SD/access.json"
+echo "ok: a group whose allowFrom is a string reads as nobody allowed, with no jq error, and the bot is still reported"
+
 # The age is measured from the OLDEST unanswered message, not the newest:
 # with the newest, every fresh message resets the clock, and a wedged bot is
 # exactly one people keep calling -- so the bots this exists for would never

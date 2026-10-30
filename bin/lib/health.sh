@@ -527,7 +527,7 @@ if [ "${1:-}" = health ]; then
       | (if ($k | length) == 1 and ($k[0] | test("^[0-9]+$")) then $k[0] else $fb end) as $ch
       | [ (if $ch == "" then "-" else $ch end),
           ($g[$ch].requireMention | if . == null then true else . end | tostring),
-          (($g[$ch].allowFrom // []) | map(tostring) | unique | @json),
+          (($g[$ch].allowFrom | gids) | @json),
           ({dm: (.dmPolicy | if type == "string" and test("^[A-Za-z]+$") then . else null end), dm_allow: (.allowFrom | ids),
             groups: [$g | to_entries[] | select((.key | test("^[0-9]+$")) and (.value | type) == "object")
                      | {id: .key, mention: (.value.requireMention != false), allow: (.value.allowFrom | gids)}]} | tojson) ]
