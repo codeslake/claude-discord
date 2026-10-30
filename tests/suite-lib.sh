@@ -297,6 +297,8 @@ cat > "$HOME/bin/curl" <<'EOF'
 printf '%s\n' "$*" >> "$CURL_LOG"
 [ -z "${HTTPS_PROXY:-}${https_proxy:-}" ] || printf '%s|%s\n' "${HTTPS_PROXY:-}" "${https_proxy:-}" >> "$HOME/curl.proxy"   # the env a call ran with (the monitor's POST)
 while IFS= read -r l || [ -n "$l" ]; do printf '%s\n' "$l"; done >> "$CURL_STDIN_LOG" 2>/dev/null
+# $HOME/curl.delay: seconds every call takes before it answers (a slow Discord).
+[ ! -f "$HOME/curl.delay" ] || /bin/sleep "$(<"$HOME/curl.delay")"
 # A held answer, after the request: with $HOME/curl.hold the call says it is under way (curl.held) and answers only when
 # the case lets it (curl.go), so what a case does "during a POST" is done during it on any machine (5 s at most).
 if [ -f "$HOME/curl.hold" ]; then echo 1 > "$HOME/curl.held"; n=0; until [ -e "$HOME/curl.go" ] || [ "$n" -ge 1000 ]; do /bin/sleep 0.005; n=$((n + 1)); done; fi

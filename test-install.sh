@@ -802,8 +802,9 @@ NCH='[{"id":"900","type":0},{"id":"901","type":0},{"id":"902","type":0},{"id":"9
 nt() { ARC=0; AO=$(cd "$NP" && bash "$S" access nt set "$@" 2>"$HOME/nt.err") || ARC=$?; AE=$(<"$HOME/nt.err"); }
 nt_reset() { printf '%s\n' "$NF" > "$ND/access.json"; rm -f "$ND/access.log" "$ND/access.json.lock"; echo none > "$ND/mode"; printf '900 5 dev-bots %s\n' "$(date +%s)" > "$ND/channel-guild"
   : > "$CURL_LOG"; : > "$CURL_STDIN_LOG"; : > "$CURL_REPLIES"; }
-# nt_refused <what> <pattern>: exit 3, the changes were printed (a line matching the pattern among them), nothing written, no log line, no post.
-nt_refused() { grep -q -- "$2" <<<"$AO" && [ "$ARC" = 3 ] && grep -q 'not a terminal (stdin and stdout), so nothing was changed' <<<"$AE" && [ "$(<"$ND/access.json")" = "$NF" ] && [ ! -e "$ND/access.log" ] && ! grep -q '/messages' "$CURL_LOG" ||
+# nt_refused <what> <pattern> [<reason>]: exit 3, the changes were printed (a line matching the pattern among them), the reason said on stderr
+# (a line "why: <reason>" matching the third word, when given), nothing written, no log line, no post.
+nt_refused() { grep -q -- "$2" <<<"$AO" && [ "$ARC" = 3 ] && grep -q -- "^claude-discord: access: why: ${3:-.}" <<<"$AE" && grep -q 'not a terminal (stdin and stdout), so nothing was changed' <<<"$AE" && [ "$(<"$ND/access.json")" = "$NF" ] && [ ! -e "$ND/access.log" ] && ! grep -q '/messages' "$CURL_LOG" ||
   { echo "FAIL: access set with no terminal must refuse (exit 3, nothing written or posted) $1: rc=$ARC $AO / $AE / $(cat "$ND/access.log" "$CURL_LOG" 2>&1)"; exit 1; }; }
 # A channel of the server whose senders are all listed already (222 on 900, 333 on the DM allowlist, the owner): written, logged, one post.
 nt_reset; queue_line "200 $NCH"; queue_line '200 {"id":"1"}'
@@ -831,7 +832,7 @@ nt_reset; nt allow:900-222 dm-333
 printf '555 nobody\n' > "$ND/user-names"
 for w in allow:902+444 allow:902+555; do
   nt_reset; queue_line "200 $NCH"; nt channel+902 "$w"
-  nt_refused "for $w (a sender new to this bot)" '^  ! [^:]*: new to this bot: may write to it in #902$'
+  nt_refused "for $w (a sender new to this bot)" '^  ! [^:]*: new to this bot: may write to it in #902$' 'it widens who can drive nt (the lines marked !)$'
 done
 [ ! -s "$CURL_LOG" ] || { echo "FAIL: a widening is refused before Discord is asked: $(<"$CURL_LOG")"; exit 1; }
 nt_reset; nt channel+902 allow:902=any
@@ -842,18 +843,74 @@ nt_reset; nt allow:900=any
 nt_refused "for words that widen an existing channel" '^  ! #900: from 111, 222 -> from anyone in the channel$'
 # A channel that is not in the bot's server; a server nobody can name (no cache and no answer, a refusal, no token).
 nt_reset; queue_line "200 $NCH"; nt channel+950
-nt_refused "for a channel of another server" '^    #950: + listens here: an @mention required, from 111$' && grep -q 'guilds/5/channels$' "$CURL_LOG" || { echo "FAIL: the server's channels were not asked for"; exit 1; }
+nt_refused "for a channel of another server" '^    #950: + listens here: an @mention required, from 111$' "channel not in the bot's server: 950\$" && grep -q 'guilds/5/channels$' "$CURL_LOG" || { echo "FAIL: the server's channels were not asked for"; exit 1; }
 nt_reset; rm -f "$ND/channel-guild"; nt channel+902
-nt_refused "when the server is not known (Discord does not answer)" '^    #902: + listens here'
+nt_refused "when the server is not known (Discord does not answer)" '^    #902: + listens here' 'server unknown: Discord did not say which server the main channel 900 is in (HTTP 000)$'
 nt_reset; queue_line '200 {"id":"900","guild_id":"5"}'; queue_line '500 {}'; rm -f "$ND/channel-guild"; nt channel+902
-nt_refused "when the server's channels are refused (HTTP 500)" '^    #902: + listens here'
+nt_refused "when the server's channels are refused (HTTP 500)" '^    #902: + listens here' "server unknown: the server's channels: HTTP 500\$"
 nt_reset; mv "$ND/.env" "$ND/.env.off"; nt channel+902
-mv "$ND/.env.off" "$ND/.env"; nt_refused "when the bot has no token" '^    #902: + listens here'
+mv "$ND/.env.off" "$ND/.env"; nt_refused "when the bot has no token" '^    #902: + listens here' 'server unknown: no token in '
 # A mode change in the words, a warning in the result, an owner-less bot: each keeps the question.
 nt_reset; nt allow:900-222 mode=dev-manager
-nt_refused "for a change of mode" '^    mode: none -> dev-manager: it gets a hosts ledger' && [ "$(<"$ND/mode")" = none ] || { echo "FAIL: the mode changed"; exit 1; }
+nt_refused "for a change of mode" '^    mode: none -> dev-manager: it gets a hosts ledger' 'it changes the mode$' && [ "$(<"$ND/mode")" = none ] || { echo "FAIL: the mode changed"; exit 1; }
 nt_reset; nt allow:900-111
-nt_refused "for a change that warns (the owner taken off a channel)" '^warning: 111 is the owner of this bot'
+nt_refused "for a change that warns (the owner taken off a channel)" '^warning: 111 is the owner of this bot' 'it has a warning (above)$'
+# The plugin's disabled DM policy drops every message, the channels' too: a warning, so no write with no terminal; at a
+# terminal it is asked about and works.
+nt_reset; nt dm=disabled
+nt_refused "for dm=disabled" '^warning: the DM policy becomes disabled: the plugin then drops every message, in its channels too$' 'it has a warning (above)$'
+nt_reset; ARC=0; AO=$(printf 'y\n' | python3 -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' bash -c 'cd "$1" && exec bash "$2" access nt set dm=disabled' x "$NP" "$S" 2>&1) || ARC=$?
+[ "$ARC" = 0 ] && grep -q 'warning: the DM policy becomes disabled' <<<"$AO" && [ "$(jq -r .dmPolicy "$ND/access.json")" = disabled ] ||
+  { echo "FAIL: dm=disabled at a terminal is warned of, asked about and written: rc=$ARC $AO"; exit 1; }
+nt dm=disabled
+[ "$ARC" = 0 ] && grep -q 'is already so; nothing to change' <<<"$AO" || { echo "FAIL: dm=disabled on a bot that is disabled is nothing to change: rc=$ARC $AO"; exit 1; }
+# A list in which no entry is an id (junk, or a number: the plugin compares strings) is not "anyone" (the plugin filters on any
+# non-empty list), and holds nobody known: a sender added to it is new to this bot. An id that is a string counts.
+NFA=$NF
+nt_with() { NF=$(jq -c --argjson l "$1" '.groups["901"].allowFrom = $l' <<<"$NFA"); nt_reset; }
+nt_with '["abc"]'; nt allow:901+444
+nt_refused "for a sender added to a list with no id in it" '^  ! 444: new to this bot: may write to it in #901$' 'it widens who can drive nt'
+! grep -q 'from anyone' <<<"$AO" || { echo "FAIL: a list with no id in it is not read as anyone: $AO"; exit 1; }
+nt_with '["abc"]'; nt allow:901=any
+nt_refused "for opening a list with no id in it to anyone" '^  ! #901: from not-an-id -> from anyone in the channel$'
+nt_with '["abc"]'; nt allow:901+222
+[ "$ARC" = 0 ] && [ "$(jq -c '.groups["901"].allowFrom' "$ND/access.json")" = '["abc","222"]' ] ||
+  { echo "FAIL: a sender the bot lists already goes onto a list with no id in it, which keeps its entry: rc=$ARC $AO / $AE"; exit 1; }
+nt_with '[444]'; nt allow:900+444
+nt_refused "for a number in another list (it never matches)" '^  ! 444: new to this bot: may write to it in #900$'
+nt_with '[444]'; nt allow:901+444
+nt_refused "for the number itself added as an id" '^  ! 444: new to this bot: may write to it in #901$'
+nt_with '["444"]'; nt allow:900+444
+[ "$ARC" = 0 ] && [ "$(jq -c '.groups["900"].allowFrom' "$ND/access.json")" = '["111","222","444"]' ] ||
+  { echo "FAIL: a string id in another list is known: rc=$ARC $AO / $AE"; exit 1; }
+NF=$NFA
+# The owner (111) can no longer write anywhere: a removal of the channels that listed them, when no channel left lets them
+# (an open channel does). The main channel (900, config.env) no longer listened in is warned of by itself.
+NFB='{"dmPolicy":"allowlist","allowFrom":["333"],"groups":{"900":{"requireMention":true,"allowFrom":["222"]},"905":{"requireMention":true,"allowFrom":["111"]},"906":{"requireMention":true,"allowFrom":[]}}}'
+NFO='warning: 111 is the owner of this bot (DISCORD_USER_ID) and no channel it listens in lets them write to it any more$'
+NFM='warning: the main channel of the bot, #900, is no longer one it listens in: its session prompt, its hooks and health still use it$'
+NF=$NFB; nt_reset; nt channel-905 channel-906
+nt_refused "for the owner's last channels removed" "^$NFO" 'it has a warning (above)$'
+! grep -q 'main channel' <<<"$AO" || { echo "FAIL: the main channel is still listened in: $AO"; exit 1; }
+NF=$NFB; nt_reset; nt channel-900
+nt_refused "for the main channel removed while others stay" "^$NFM"
+! grep -q 'owner of this bot' <<<"$AO" || { echo "FAIL: the owner can still write: $AO"; exit 1; }
+NF=$NFB; nt_reset; nt channel-905
+[ "$ARC" = 0 ] && [ "$(jq -c '.groups | keys' "$ND/access.json")" = '["900","906"]' ] && [ ! -s "$CURL_LOG" ] ||
+  { echo "FAIL: the owner's channel removed while an open one stays is no warning: rc=$ARC $AO / $AE"; exit 1; }
+NF=$(jq -c '.groups["900"].allowFrom = ["111","222"]' <<<"$NFB"); nt_reset; nt channel-905
+[ "$ARC" = 0 ] || { echo "FAIL: the owner's channel removed while another lists them is no warning: rc=$ARC $AO / $AE"; exit 1; }
+NF=$NFA; nt_reset; nt channel-900 channel-901
+nt_refused "for every channel removed" "^$NFO" && grep -q "^$NFM" <<<"$AO" || { echo "FAIL: every channel removed warns of the owner and of the main channel: $AO"; exit 1; }
+NF=$NFA
+# The Discord calls share the one budget a_own began (12 s; here 2): a post past it is not sent and is logged as failed.
+nt_reset; queue_line "200 $NCH"; queue_line '200 {"id":"1"}'; echo 3 > "$HOME/curl.delay"
+CLAUDE_DISCORD_ACCESS_BUDGET=2 nt channel+902 allow:902+222
+rm -f "$HOME/curl.delay"
+[ "$ARC" = 0 ] && grep -q 'guilds/5/channels$' "$CURL_LOG" && ! grep -q 'channels/902/messages' "$CURL_LOG" && [ "$(jq -c '.groups["902"].allowFrom' "$ND/access.json")" = '["111","222"]' ] &&
+  [ "$(tail -n 1 "$ND/access.log" | cut -d' ' -f4-)" = "the post in 902 failed (HTTP 000)" ] ||
+  { echo "FAIL: a post past the budget the channel check began is not sent, is logged as failed, and the change stays written: rc=$ARC $AO / $AE / $(cat "$ND/access.log" "$CURL_LOG" 2>&1)"; exit 1; }
+nt_reset
 # With a terminal nothing changes: the same words are asked about, and no is no.
 nt_reset; queue_line "200 $NCH"
 ARC=0; AO=$(printf 'n\nn\n' | python3 -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' bash -c 'cd "$1" && exec bash "$2" access nt set channel+902 allow:902+222' x "$NP" "$S" 2>&1) || ARC=$?

@@ -447,7 +447,7 @@ claude-discord access <bot> set <change>...   # shows what would change, asks on
 | `mention:<channel id>=on\|off` | an @mention is required / every message is answered |
 | `allow:<channel id>+<user id>`, `allow:<channel id>-<user id>` | a sender is added to, or taken off, that channel's list |
 | `allow:<channel id>=any` | anyone in the channel may write to it (an empty `allowFrom`) |
-| `dm=allowlist\|pairing\|off` | the DM policy. `off` is an allowlist with nobody on it; the plugin's own `disabled` is not offered, because it drops every message, in the channels too |
+| `dm=allowlist\|pairing\|off\|disabled` | the DM policy. `off` is an allowlist with nobody on it; the plugin's own `disabled` drops every message, in the channels too, so it is warned of (and, with no terminal, refused) |
 | `dm+<user id>`, `dm-<user id>` | the DM allowlist: whoever is on it also answers the bot's permission prompts |
 | `mode=none\|dev-manager\|autoresearchclaw` | the bot's mode, through `setup <bot> --mode` with its questions answered by Enter (peers and hosts kept) |
 
@@ -471,20 +471,29 @@ that name is whatever the person chose, so read the id.
   (`Apply this change?`, `Apply these 2 widening changes?`, ...);
 - **anything but `y` writes nothing** (exit 4): `n`, the end of input, any
   other answer. The file is what was shown and agreed to, or as it was;
-- warnings, which ask nothing more: the owner taken off a list, the bot's main
-  channel changing, a dev-manager's peer bot taken off a channel.
+- warnings, which ask nothing more: the DM policy becoming `disabled`, the
+  owner taken off a list or left in no channel the bot listens in, the bot's
+  main channel changing or no longer listened in, a dev-manager's peer bot
+  taken off a channel.
 
 `set` has no flag to skip its question, and with a terminal it always asks.
 That is a speed bump, not a boundary: whoever can run it can edit `access.json` with
 an editor. It is there so that no script and no session widens a bot's access
 without a person reading the change. Without a terminal it prints the changes
-and exits 3, which is also how to see what a set of words would do, unless
-nobody new can drive the bot through them: no widening line, no warning, no
-mode change, and every channel added is in the bot's own server (the one its
-main channel is in, as Discord says; not known counts as not). Then it writes
-with no question, logs it as `(no terminal, no widening)` and posts one line in
-each channel it added saying so (a failed post is logged, not an error). A removal never empties a sender list (an empty list is
-everyone): say `allow:<id>=any` to mean that.
+and exits 3 (and says why on a second line: the widening, the warning, the mode
+change, the channel that is not in the bot's server, or why that server is not
+known), unless nobody new can drive the bot through them: no widening line, no
+warning, no mode change, and every channel added is in the bot's own server
+(the one its main channel is in, as Discord says; not known counts as not).
+**Then it writes with no question (1.19.6), so a run with no terminal is not a dry run:**
+it logs `(no terminal, no widening)` and posts one line in each channel it
+added saying so (a failed post, or one past the 12 seconds the Discord calls
+share, is logged, not an error). To see what words would do, run them at a
+terminal and answer `n` (nothing is written). A removal never empties a sender list (an empty list is everyone): say
+`allow:<id>=any` to mean that. A sender list whose entries are none of them an id
+(`["abc"]`, or a number: the plugin compares strings) is not "anyone": the
+plugin filters on any non-empty list, so it is read as a list nobody is on, and a
+sender added to it is new to the bot.
 
 The write is by rename under a lock (`access.json.lock`), mode 600. The
 official plugin reads `access.json` at every message, so **a change applies at
@@ -545,7 +554,7 @@ A bot named `access`, set up before 1.13.0, is no longer launched by
 | 0 | done, or nothing to change |
 | 1 | it could not: no such bot, `access.json` unreadable or changed meanwhile, a failed write, the lock held 5 s, no manager's ledger for `--host`, a `DISCORD_CHANNEL_ID` in `config.env` that is no id, a mode `setup --mode` did not set |
 | 2 | usage, a word that is not a change, a change that cannot be made, `--host` with several managers' ledgers and no `--manager` |
-| 3 | no terminal, and the changes widen, warn, change the mode or add a channel outside the bot's server (or one that cannot be told): the changes were printed, nothing written |
+| 3 | no terminal, and the changes widen, warn, change the mode or add a channel outside the bot's server (or one that cannot be told): the changes were printed and the reason, nothing written |
 | 4 | answered no: nothing written |
 | 5 | `--host`: the host did not answer, or its claude-discord is older than 1.13.0 |
 

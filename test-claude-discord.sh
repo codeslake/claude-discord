@@ -3042,7 +3042,7 @@ cd "$P"
 # --- backend monitor ------------------------------------------------------
 # ssh, stubbed for setup's host probe and the monitor's passes: argv to ssh.log; per host, $HOME/mon/<host>.out is
 # printed, .rc is the exit status (.rc2 instead on the ControlPath=none retry; .out is printed with a non-zero one only
-# when .both exists; .trc instead for a call under -t), .sleep delays it, .hold leaves a detached child behind that keeps the output open so long; a byte left on
+# when .both exists; .trc instead for a call under -t; .arc instead for the access call itself, not the version probe before it), .sleep delays it, .hold leaves a detached child behind that keeps the output open so long; a byte left on
 # stdin is reported as "ATE" (a probe must never eat setup's piped answers).
 MON="$HOME/mon"; mkdir -p "$MON"
 cat > "$HOME/bin/ssh" <<'STUB'
@@ -3058,6 +3058,7 @@ if [ -f "$d/$host.sleep" ]; then echo $$ > "$d/$host.pid"; /bin/sleep "$(<"$d/$h
 rc=0; [ ! -f "$d/$host.rc" ] || rc=$(<"$d/$host.rc")
 [ -z "$none" ] || [ ! -f "$d/$host.rc2" ] || rc=$(<"$d/$host.rc2")
 [ -z "$tty" ] || [ ! -f "$d/$host.trc" ] || rc=$(<"$d/$host.trc")
+case "$*" in *--access*) [ ! -f "$d/$host.arc" ] || rc=$(<"$d/$host.arc");; esac
 [ "$rc" != 0 ] && [ ! -f "$d/$host.both" ] || cat "$d/$host.out" 2>/dev/null
 exit "$rc"
 STUB
@@ -3697,6 +3698,11 @@ ac --host h1 --manager mgr --project '/x y/한' acc set dm=pairing
 echo 142 > "$MON/h1.rc"; rm -f "$MON/h1.both"
 ac --host h1 --manager mgr --project '/x y/한' acc --json; : > "$MON/h1.both"
 [ "$ARC" = 5 ] && [ "$AE" = "claude-discord: access: h1 gave no answer within 30s" ] || { echo "FAIL: a host that does not answer within the cap is exit 5, and --json is given 30 s: rc=$ARC $AE"; exit 1; }
+# A set with no terminal here gets the same 30 s, after the version probe's 20 s: the host may write it, and asks Discord to post.
+printf 'claude-discord 1.13.0 (abc1234)\n' > "$MON/h1.out"; rm -f "$MON/h1.rc"; echo 142 > "$MON/h1.arc"; : > "$MON/h1.both"
+ac --host h1 --manager mgr --project '/x y/한' acc set dm=pairing
+rm -f "$MON/h1.arc"
+[ "$ARC" = 5 ] && [ "$AE" = "claude-discord: access: h1 gave no answer within 30s" ] || { echo "FAIL: a set with no terminal is given 30 s, as --json is: rc=$ARC $AE"; exit 1; }
 # A 1.13.0 host that could not do it (no such bot there) prints no version line and says why: that is passed on (exit 1).
 printf "motd: release notes of claude-discord 1.12.0 (old)\\nclaude-discord: access: no bot 'acc'\\007 set up in /x y/.claude/discord-agents (claude-discord setup <bot>)\\n\\n" > "$MON/h1.out"; echo 1 > "$MON/h1.rc"
 ac --host h1 --manager mgr --project '/x y/한' acc --json

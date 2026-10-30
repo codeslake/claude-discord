@@ -11,7 +11,8 @@
 #     channel+<channel id>  channel-<channel id>          listen there (an @mention required, from the owner alone) / stop
 #     mention:<channel id>=on|off                         an @mention is required / every message is answered
 #     allow:<channel id>+<user id>  allow:<channel id>-<user id>  allow:<channel id>=any    who may write there
-#     dm=allowlist|pairing|off  dm+<user id>  dm-<user id>          DMs: off is an allowlist with nobody on it
+#     dm=allowlist|pairing|off|disabled  dm+<user id>  dm-<user id>   DMs: off is an allowlist with nobody on it; disabled (the
+#                                plugin's own) drops every message, the channels' too: warned of, so never written with no terminal
 #     mode=none|dev-manager|autoresearchclaw              through `setup <bot> --mode`, its questions answered by Enter
 # A change that widens who can drive the bot is shown first, marked "!" (red at a terminal), then the others; one
 # question is asked for all of them, naming how many widen (1.13.1). Anything but y writes nothing: the file is what
@@ -26,13 +27,14 @@
 # here). Only hex digits, ids and change words go into the remote command; no name does.
 # Exit status: 0 done, or nothing to change; 1 it could not (no such bot, access.json unreadable or changed meanwhile, a
 # failed write, the lock held 5 s, no manager's ledger for --host); 2 usage, a word that is not a change, or a change
-# that cannot be made; 3 no terminal: nothing written; 4 answered no: nothing written; 5 --host: no answer from the
+# that cannot be made; 3 no terminal and the changes widen, warn, change the mode or add a channel outside the bot's
+# server (or one that cannot be told): nothing written, and a line says which; 4 answered no: nothing written; 5 --host: no answer from the
 # host, or its claude-discord is older than 1.13.0.
 if [ "${1:-}" = access ]; then
   shift
   a_usage="usage: claude-discord access [--host <alias> [--manager <bot>]] [--project <dir>] <bot> --json | set <change>...
-  a change: channel+<channel id> | channel-<channel id> | mention:<channel id>=on|off | allow:<channel id>+<user id> | allow:<channel id>-<user id> | allow:<channel id>=any | dm=allowlist|pairing|off | dm+<user id> | dm-<user id> | mode=none|dev-manager|autoresearchclaw"
-  a_word_re='^(channel[+-][0-9]{1,20}|mention:[0-9]{1,20}=(on|off)|allow:[0-9]{1,20}([+-][0-9]{1,20}|=any)|dm=(allowlist|pairing|off)|dm[+-][0-9]{1,20}|mode=(none|dev-manager|autoresearchclaw))$'
+  a change: channel+<channel id> | channel-<channel id> | mention:<channel id>=on|off | allow:<channel id>+<user id> | allow:<channel id>-<user id> | allow:<channel id>=any | dm=allowlist|pairing|off|disabled | dm+<user id> | dm-<user id> | mode=none|dev-manager|autoresearchclaw"
+  a_word_re='^(channel[+-][0-9]{1,20}|mention:[0-9]{1,20}=(on|off)|allow:[0-9]{1,20}([+-][0-9]{1,20}|=any)|dm=(allowlist|pairing|off|disabled)|dm[+-][0-9]{1,20}|mode=(none|dev-manager|autoresearchclaw))$'
   a_host="" a_proj="" hb=""
   while [ $# -gt 0 ]; do
     case $1 in
@@ -88,14 +90,17 @@ if [ "${1:-}" = access ]; then
   # What every jq program below starts with. An id is digits and nothing else, to the end of the string (\z: Oniguruma's
   # $ also matches before a last newline). `policy` is the part of access.json this verb is about, as health --json
   # gives it (dm, dm_allow, groups: id, mention, allow), with the plugin's own defaults: no dmPolicy is pairing, no
-  # requireMention is true, no allowFrom is everyone. A name is shown, never trusted: no control character, no bidi
+  # requireMention is true, no allowFrom is everyone. An id is a string (the plugin compares strings: a number never
+  # matches); a channel's non-empty list with no id in it is "not-an-id", not everyone (the plugin filters on any non-empty
+  # list). A name is shown, never trusted: no control character, no bidi
   # override or isolate, no zero-width character or mark (the TUI's UNSAFE set), 40 characters.
   a_defs='
     def isid: type == "string" and test("\\A[0-9]{1,20}\\z");
-    def ids: [arrays[] | tostring | select(isid)] | unique;
+    def ids: [arrays[] | select(isid)] | unique;
+    def gids: ids as $v | if $v == [] and type == "array" and length > 0 then ["not-an-id"] else $v end;
     def policy: {dm: (.dmPolicy | if type == "string" then . else "pairing" end), dm_allow: (.allowFrom | ids),
                  groups: [(.groups | if type == "object" then . else {} end) | to_entries[] | select((.key | isid) and (.value | type) == "object")
-                          | {id: .key, mention: (.value.requireMention != false), allow: (.value.allowFrom | ids)}]};
+                          | {id: .key, mention: (.value.requireMention != false), allow: (.value.allowFrom | gids)}]};
     def safe: tostring | gsub("[[:cntrl:]\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]"; "") | .[0:40];
     def named: split("\n") | map(select(test("^[0-9]+ .")) | {key: (split(" ")[0]), value: (sub("^[0-9]+ "; "") | safe)}) | from_entries;
     def peerlist: (try fromjson catch null) | [objects | .peers | arrays | .[] | objects | {id: (.bot_id // "" | tostring), name: (.name // "" | safe)} | select(.id | isid)];
@@ -103,11 +108,13 @@ if [ "${1:-}" = access ]; then
 
     # Discord is asked as health asks it (the token on curl's stdin, never in an argument): four calls, six when the bot's
     # id (bot-id) or its server (channel-guild) is not known here yet, each 5 s at most and none started past 12 s, so
-    # the answer arrives inside the cap of the ssh call that may carry it (30 s: access --host).
-    a_t0=$SECONDS status=000 resp="" tok="" gid=""
+    # the answer arrives inside the cap of the ssh call that may carry it (30 s: access --host). The 12 s is one budget for all of them
+    # (a_bud, CLAUDE_DISCORD_ACCESS_BUDGET for the tests): set may ask for the server's channels and then post.
+    a_t0=$SECONDS status=000 resp="" tok="" gid="" a_bud=${CLAUDE_DISCORD_ACCESS_BUDGET:-12}
+    c_match "$a_bud" '^[0-9]{1,3}$' || a_bud=12
     a_api() {  # $1 = path, $2 = a JSON body to POST (else a GET); sets $status and $resp
       local out=""
-      [ $((SECONDS - a_t0)) -lt 12 ] && out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 5 -w '\n%{http_code}' -H @- ${2:+-H "Content-Type: application/json" -d "$2"} "https://discord.com/api/v10/$1" 2>/dev/null) || out=""
+      [ $((SECONDS - a_t0)) -lt "$a_bud" ] && out=$(printf 'Authorization: Bot %s\n' "$tok" | curl -s --max-time 5 -w '\n%{http_code}' -H @- ${2:+-H "Content-Type: application/json" -d "$2"} "https://discord.com/api/v10/$1" 2>/dev/null) || out=""
       status=${out##*$'\n'} resp=${out%$'\n'*}
       case $status in ''|*[!0-9]*) status=000;; esac
     }
@@ -235,7 +242,7 @@ if [ "${1:-}" = access ]; then
   a_prog="$a_defs"'
     def has_grp($c): (.d.groups | type) == "object" and (.d.groups | has($c)) and (.d.groups[$c] | type) == "object";
     def without($u): [arrays[] | select(tostring != $u)];
-    def with($u): [arrays[]] | if any(.[]; tostring == $u) then . else . + [$u] end;
+    def with($u): [arrays[]] | if any(.[]; . == $u) then . else . + [$u] end;
     def step($x):
       if .err then .
       elif ($x | startswith("channel+")) then $x[8:] as $c
@@ -309,14 +316,20 @@ if [ "${1:-}" = access ]; then
                else line("C"; "DMs"; "\($a) -> \($b)") end),
             (($P1.dm_allow - $P0.dm_allow)[] | line("W"; "DMs"; "+ \(who) may DM it, and answers its permission prompts")),
             (($P0.dm_allow - $P1.dm_allow)[] | line("C"; "DMs"; "- \(who) may no longer DM it")),
-            # Warnings: the owner taken off a list, the main channel moved, a dev-manager cut off from a peer.
+            # Warnings: DMs disabled, the owner taken off a list or out of every channel, the main channel moved or no longer
+            # listened in, a dev-manager cut off from a peer.
+            (select($P1.dm == "disabled" and $P0.dm != "disabled") | line("N"; ""; "the DM policy becomes disabled: the plugin then drops every message, in its channels too")),
             (select($owner != "") | $P0.groups[] | . as $o | $G1[$o.id] | select(. != null and .allow != [] and ($o.allow | index($owner)) != null and (.allow | index($owner)) == null)
              | line("N"; ""; "\($owner | who) is the owner of this bot (DISCORD_USER_ID) and can no longer write to it in \($o.id | ch)")),
+            (select($owner != "" and any($P0.groups[]; $G1[.id] == null and (.allow | index($owner)) != null) and all($P1.groups[]; .allow != [] and (.allow | index($owner)) == null))
+             | line("N"; ""; "\($owner | who) is the owner of this bot (DISCORD_USER_ID) and no channel it listens in lets them write to it any more")),
             (select($owner != "" and ($P0.dm_allow | index($owner)) != null and ($P1.dm_allow | index($owner)) == null)
              | line("N"; ""; "\($owner | who) is the owner of this bot and no longer gets its DMs or its permission prompts")),
             (($P0 | mainof($fb)) as $a | ($P1 | mainof($fb)) as $b | select($a != $b)
              | line("N"; ""; "the main channel of the bot becomes \(if $b == "" then "none" else ($b | ch) end) (was \($a | ch)): its session prompt, its hooks and health use that one"
                     + (if $b != "" and $G1[$b] == null then ", and it does not listen there" else "" end))),
+            (($P1 | mainof($fb)) as $b | select($b != "" and $G0[$b] != null and $G1[$b] == null)
+             | line("N"; ""; "the main channel of the bot, \($b | ch), is no longer one it listens in: its session prompt, its hooks and health still use it")),
             (select($nm == "dev-manager") | $PL[] | . as $p | $P0.groups[] | . as $o | $G1[$o.id]
              | select(. != null and .allow != [] and ($o.allow | index($p.id)) != null and (.allow | index($p.id)) == null)
              | line("N"; ""; "\($p.id | who) is a peer dev bot (peers.json) and can no longer reach this bot in \($o.id | ch)")),
@@ -362,20 +375,25 @@ if [ "${1:-}" = access ]; then
   # No terminal: nothing is asked, so it writes only a change that gives nobody new a way to drive the bot: no
   # widening, warning or mode in it, and every channel it adds in the bot's own server (the main channel's, as Discord
   # says: not known is not so). Else nothing is written (exit 3).
-  a_nt=""
-  a_own() {
+  a_nt="" a_why=""
+  a_own() {  # 0 when every channel the words add is in the bot's server, else 1 with $a_why saying which condition failed
     local main ids c
     [ -n "$a_add" ] || return 0
-    main=$(jq -r --arg fb "$DISCORD_CHANNEL_ID" "$a_defs"'mainof($fb)' <<<"$a_seen" 2>/dev/null) || return 1
-    [ -n "$tok" ] && command -v curl >/dev/null 2>&1 || return 1
-    a_t0=$SECONDS; a_gid "$main"; [ -n "$gid" ] || return 1
-    a_api "guilds/$gid/channels"; case $status in 2*) ;; *) return 1;; esac
-    ids=$(printf '%s' "$resp" | jq -r '.[]? | objects | .id | tostring' 2>/dev/null) || return 1
-    for c in $a_add; do case $'\n'$ids$'\n' in *$'\n'$c$'\n'*) ;; *) return 1;; esac; done
+    main=$(jq -r --arg fb "$DISCORD_CHANNEL_ID" "$a_defs"'mainof($fb)' <<<"$a_seen" 2>/dev/null) || main=""
+    [ -n "$tok" ] || { a_why="server unknown: no token in $d/.env"; return 1; }
+    command -v curl >/dev/null 2>&1 || { a_why="server unknown: no curl here"; return 1; }
+    [ -n "$main" ] || { a_why="server unknown: the bot has no main channel"; return 1; }
+    a_t0=$SECONDS; a_gid "$main"; [ -n "$gid" ] || { a_why="server unknown: Discord did not say which server the main channel $main is in (HTTP $status)"; return 1; }
+    a_api "guilds/$gid/channels"; case $status in 2*) ;; *) a_why="server unknown: the server's channels: HTTP $status"; return 1;; esac
+    ids=$(printf '%s' "$resp" | jq -r '.[]? | objects | .id | tostring' 2>/dev/null) || { a_why="server unknown: the server's channels could not be read"; return 1; }
+    for c in $a_add; do case $'\n'$ids$'\n' in *$'\n'$c$'\n'*) ;; *) a_why="channel not in the bot's server: $c"; return 1;; esac; done
   }
   if [ ! -t 0 ] || [ ! -t 1 ]; then
-    if [ "$a_nw" = 0 ] && [ -z "$a_warn" ] && [ "$newmode" = "$mode" ] && a_own; then a_nt=1
-    else echo "claude-discord: access: not a terminal (stdin and stdout), so nothing was changed: run it in a terminal to answer for these changes" >&2; exit 3; fi
+    if [ "$a_nw" != 0 ]; then a_why="it widens who can drive $bn (the lines marked !)"
+    elif [ -n "$a_warn" ]; then a_why="it has a warning (above)"
+    elif [ "$newmode" != "$mode" ]; then a_why="it changes the mode"
+    elif a_own; then a_nt=1; fi
+    if [ -z "$a_nt" ]; then echo "claude-discord: access: not a terminal (stdin and stdout), so nothing was changed: run it in a terminal to answer for these changes" >&2; echo "claude-discord: access: why: $a_why" >&2; exit 3; fi
   fi
   a_no() { echo "claude-discord: access: answered no; nothing was changed" >&2; exit 4; }
   # One question for the whole change set (1.13.1): y writes all of it; n, the end of input or anything else, none.
@@ -415,9 +433,9 @@ if [ "${1:-}" = access ]; then
   [ -z "$a_file" ] || echo "claude-discord: access: $f written. The plugin reads it at the next message: no restart."
   if [ -n "$a_nt" ]; then
     echo "claude-discord: access: written without a question: no terminal here, and nothing in it widens who can drive $bn."
-    # One line in each channel it now listens in; a post that fails is logged and no failure of the change.
+    # One line in each channel it now listens in, in the budget a_own began; a post that fails (or is past it) is logged and no failure of the change.
     for c in $a_add; do
-      a_t0=$SECONDS; a_api "channels/$c/messages" "$(jq -cn --arg h "$a_host_name" '{content: ("I now listen in this channel: `claude-discord access` on \($h) added it with no question, because nobody new may drive me through it.")}')"
+      a_api "channels/$c/messages" "$(jq -cn --arg h "$a_host_name" '{content: ("I now listen in this channel: `claude-discord access` on \($h) added it with no question, because nobody new may drive me through it.")}')"
       case $status in 2*) ;; *) a_log "the post in $c failed (HTTP $status)";; esac
     done
   fi

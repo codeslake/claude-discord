@@ -171,7 +171,10 @@ via_host() {
     [ "$a_rc" != 255 ] || { echo "claude-discord: $verb: ssh to $a_host failed (exit 255)" >&2; exit 5; }
     exit "$a_rc"
   fi
-  # No terminal here: the host prints the changes and refuses (exit 3). What it printed is another machine's text.
+  # No terminal here: the host prints the changes and refuses (exit 3), or writes with no question a change that gives
+  # nobody new a way to drive the bot (access: its Discord calls, 12 s, then 5 s at most: 30 s as --json). What it printed
+  # is another machine's text.
+  case $h_cap in *.*) ;; *) [ "$h_cap" -ge 30 ] || h_cap=30;; esac
   h_ssh "$a_host" "$a_remote" raw; a_down
   printf '%s\n' "$h_out" | LC_ALL=C tr -d '\000-\010\013-\037\177'
   exit "$h_rc"

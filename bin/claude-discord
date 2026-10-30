@@ -77,8 +77,10 @@
 #                                        server's channels and whether the bot can read each (read-only)
 #   claude-discord access [...] <name> set <change>...
 #                                        shows the changes (widenings first), asks once at the terminal
-#                                        and writes access.json; refuses without a terminal. --host: a bot
-#                                        on a host of a manager's ledger, over ssh (-t for the question)
+#                                        and writes access.json; without a terminal it writes only a change
+#                                        that widens, warns of and adds nothing outside the bot's server,
+#                                        else refuses (exit 3). --host: a bot on a host of a manager's
+#                                        ledger, over ssh (-t for the question)
 #   claude-discord bot [--host <alias> [--manager <name>]] [--project <dir>] <name> token
 #                                        reads a new token with the echo off (never the current one),
 #                                        checks it with Discord as the same bot, asks, writes .env (600)
