@@ -92,8 +92,9 @@ if [ "${1:-}" = access ]; then
   # requireMention is true, no allowFrom is everyone. An id is a string (the plugin compares strings: a number never
   # matches); a channel's non-empty list with no id in it (junk, numbers) is "not-an-id", not everyone, and so is a
   # non-empty string or an object with a length key (the plugin filters on a string by substring, and throws on the object,
-  # which drops every message); a number, a boolean, another object, null and "" are no filter in the plugin (it filters
-  # only on a positive .length): anyone. Any allowFrom that is not a list of strings, and any other shape claude-discord does not write (see oddities), gets an N line below ("set it at a terminal"). A name is shown, never trusted: no control character, no bidi
+  # which drops every message); in a channel a number, a boolean, another object, null and "" are no filter in the plugin
+  # (it filters only on a positive .length): anyone. In DMs it calls .includes on any of them, so those throw and drop
+  # every DM: less access than shown, the safe side. Any allowFrom that is not a list of strings, and any other shape claude-discord does not write (see oddities), gets an N line below ("set it at a terminal"). A name is shown, never trusted: no control character, no bidi
   # override or isolate, no zero-width character or mark (the TUI's UNSAFE set), 40 characters.
   a_defs='
     def isid: type == "string" and test("\\A[0-9]{1,20}\\z");
@@ -268,7 +269,10 @@ if [ "${1:-}" = access ]; then
     # requireMention that is a boolean, an allowFrom that is a list of strings (absent and null are fine). Anything else
     # is read by the plugin in ways not modelled here (a group of 7 or "x" listens, anyone with an @mention; a requireMention
     # of "no" is true, of 0 false; an unknown dmPolicy is pairing; groups an array listens nowhere), so each gets an N line.
+    # mentionPatterns (written by the plugin skill /discord:access, never by claude-discord) makes any matching message an
+    # @mention, so "an @mention required" no longer holds anywhere: any value at all gets one.
     def oddities:
+      (.mentionPatterns | select(. != null) | {t: "mentionPatterns (\(type))"}),
       (.dmPolicy | select(. != null and (. | IN("pairing", "allowlist", "disabled") | not)) | {p: "DMs", t: "dmPolicy (\(type))"}),
       (.allowFrom | select(canon | not) | {p: "DMs", t: "allowFrom (\(type))"}),
       (.groups | select(. != null and type != "object") | {t: "groups (\(type))"}),

@@ -958,6 +958,7 @@ nt_odd '.groups["901"].requireMention = 0' '^warning: #901: requireMention (numb
 nt_odd '.groups = []' '^warning: groups (array) is not what claude-discord writes: set it at a terminal$' 'it widens who can drive nt'
 nt_odd '.dmPolicy = "closed"' '^warning: DMs: dmPolicy (string) is not what claude-discord writes: set it at a terminal$'
 nt_odd '.dmPolicy = 7' '^warning: DMs: dmPolicy (number) is not what claude-discord writes: set it at a terminal$'
+nt_odd '.mentionPatterns = [""]' '^warning: mentionPatterns (array) is not what claude-discord writes: set it at a terminal$'
 # The opposite: a canonical file (arrays of strings, absent keys, no top-level allowFrom) still writes a same-guild add with no terminal.
 NF='{"dmPolicy":"allowlist","groups":{"900":{"requireMention":true,"allowFrom":["111","222"]},"901":{"requireMention":true}}}'
 nt_reset; queue_line "200 $NCH"; queue_line '200 {"id":"1"}'; nt channel+902 allow:902+222
