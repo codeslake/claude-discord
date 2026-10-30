@@ -505,8 +505,11 @@ EOT
     # access.json's groups are kept as they are (see above), so peers go into
     # every existing group's allowFrom, wherever the bot's channel actually
     # is, not only the one keyed by config.env's channel; this bot itself is
-    # skipped by name, and $a + ($ids - $a) keeps it additive, as before.
-    ids=$(jq -c --arg self "$name" '[.peers[]? | select((.name // "" | tostring | ascii_downcase) != ($self | ascii_downcase)) | .bot_id | tostring]' "$proj_state/peers.json" 2>/dev/null) || ids='[]'
+    # skipped (see below), and $a + ($ids - $a) keeps it additive, as before. A group whose allowFrom is not a list is left as it is
+    # (as `access set` does): jq would fail on it and no group would get its peers.
+    # This bot is skipped by its bot-id when it is kept (a peer of the same name and another id is a peer), else by name.
+    self_id=""; { read -r self_id < "$root/$name/bot-id"; } 2>/dev/null || :
+    ids=$(jq -c --arg self "$name" --arg me "$self_id" '[.peers[]? | select(if ($me | test("\\A[0-9]{1,20}\\z")) then (.bot_id | tostring) != $me else (.name // "" | tostring | ascii_downcase) != ($self | ascii_downcase) end) | .bot_id | tostring]' "$proj_state/peers.json" 2>/dev/null) || ids='[]'
     # An EMPTY allowFrom already lets every author through, peers included, and
     # adding ids to it would narrow the group to just those ids -- turning
     # "everyone" into "peers only" without saying so. Such a group is left as
@@ -515,7 +518,7 @@ EOT
     [ "${CLAUDE_DISCORD_ACCESS_PEERS:-}" = written ] ||
     jq_edit "$root/$name/access.json" --argjson ids "${ids:-[]}" \
       'if (.groups | type) == "object"
-       then .groups |= map_values(if (.allowFrom // []) == [] then .
+       then .groups |= map_values(if type != "object" or (.allowFrom | type) != "array" or .allowFrom == [] then .
                                   else .allowFrom = (.allowFrom as $a | $a + ($ids - $a)) end)
        else . end'
     echo "Ask each peer's owner to add this bot's id to their allowFrom; both directions are needed."

@@ -91,14 +91,15 @@ if [ "${1:-}" = access ]; then
   # gives it (dm, dm_allow, groups: id, mention, allow), with the plugin's own defaults: no dmPolicy is pairing, no
   # requireMention is true, no allowFrom is everyone. An id is a string (the plugin compares strings: a number never
   # matches); a channel's non-empty list with no id in it (junk, numbers) is "not-an-id", not everyone, and so is a
-  # non-empty string (the plugin filters on it by substring: its N line below asks for a terminal); a number, a boolean,
-  # an object, null and "" are no filter in the plugin (it filters only on a positive .length): anyone. A name is shown, never trusted: no control character, no bidi
+  # non-empty string or an object with a length key (the plugin filters on a string by substring, and throws on the object,
+  # which drops every message); a number, a boolean, another object, null and "" are no filter in the plugin (it filters
+  # only on a positive .length): anyone. Any allowFrom that is not a list of strings gets an N line below ("set it at a terminal"). A name is shown, never trusted: no control character, no bidi
   # override or isolate, no zero-width character or mark (the TUI's UNSAFE set), 40 characters.
   a_defs='
     def isid: type == "string" and test("\\A[0-9]{1,20}\\z");
     def ids: [arrays[] | select(isid)] | unique;
-    def gids: . as $a | ids as $v | if ($a | type) == "array" then (if $v == [] and $a != [] then ["not-an-id"] else $v end) elif ($a | type) == "string" and $a != "" then ["not-an-id"] else [] end;
-    def policy: {dm: (.dmPolicy | if type == "string" then . else "pairing" end), dm_allow: (.allowFrom | ids),
+    def gids: . as $a | ids as $v | if ($a | type) == "array" then (if $v == [] and $a != [] then ["not-an-id"] else $v end) elif (($a | type) == "string" and $a != "") or (($a | type) == "object" and ($a | has("length"))) then ["not-an-id"] else [] end;
+    def policy: {dm: (.dmPolicy | if type == "string" then . else "pairing" end), dm_allow: (.allowFrom | if type == "array" then ids else gids end),
                  groups: [(.groups | if type == "object" then . else {} end) | to_entries[] | select((.key | isid) and (.value | type) == "object")
                           | {id: .key, mention: (.value.requireMention != false), allow: (.value.allowFrom | gids)}]};
     def safe: tostring | gsub("[[:cntrl:]\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]"; "") | .[0:40];
@@ -207,7 +208,7 @@ if [ "${1:-}" = access ]; then
             | {id: (.user.id | tostring), name: (.nick // .user.global_name // .user.username // "" | safe), bot: (.user.bot == true)}]) as $api
         | ([$PL[] | . + {bot: true}] + [$UN | to_entries[] | {id: .key, name: .value, bot: false}]) as $kept
         | {access: 1, version: $ver, bot: $bot, bot_id: $me, host: $host, project: $project, mode: $mode,
-           owner: (if ($owner | isid) then $owner else "" end), main: $main, peers: [$PL[] | select((.name | ascii_downcase) != ($bot | ascii_downcase)) | .id],
+           owner: (if ($owner | isid) then $owner else "" end), main: $main, peers: [$PL[] | select(if ($me | isid) then .id != $me else (.name | ascii_downcase) != ($bot | ascii_downcase) end) | .id],
            guild: (if ($g | type) == "object" then {id: ($g.id | tostring), name: ($g.name // "" | safe)} else null end),
            policy: $policy,
            channels: ([$gc | sort_by(.position // 0)[] | {id, name: (.name // "" | safe), kind: (if .type == 15 then "forum" elif .type == 5 then "news" else "text" end), read: $R[.id]}]
@@ -262,17 +263,18 @@ if [ "${1:-}" = access ]; then
       elif ($x | startswith("dm+")) then .d.allowFrom |= with($x[3:])
       elif ($x | startswith("dm-")) then .d.allowFrom |= without($x[3:])
       else . end;
+    def canon: . == null or (type == "array" and all(.[]; type == "string"));
     def dmw: if .dm == "disabled" then "disabled" elif .dm != "allowlist" then "pairing" elif .dm_allow == [] then "off" else "allowlist" end;
     . as $doc | policy as $P0
     # The mode after the call: the last mode= word, else the one the bot has.
     | ([$words | split(" ")[] | select(startswith("mode="))] | last // null | if . then .[5:] else $mode end) as $nm
-    | ([$peers | peerlist[] | select((.name | ascii_downcase) != ($bot | ascii_downcase)) | .id]) as $pi
+    | ([$peers | peerlist[] | select(if ($me | isid) then .id != $me else (.name | ascii_downcase) != ($bot | ascii_downcase) end) | .id]) as $pi
     | (reduce ($words | split(" ")[] | select(. != "")) as $x ({d: $doc, any: [], err: null}; step($x))) as $r0
     # Entering dev-manager, the peers of peers.json go into every channel that lists its senders: what `setup --mode`
     # does, done here once, after all the words (wherever mode= stands), so the diff shows it, the question is asked and
     # the file written under the lock holds it; setup is then told not to do it again (CLAUDE_DISCORD_ACCESS_PEERS).
     | (if $nm == "dev-manager" and $mode != "dev-manager" and ($r0.err | not) and (($r0.d.groups | type) == "object")
-       then $r0 | .d.groups |= map_values(if (.allowFrom | type) != "array" or .allowFrom == [] then . else .allowFrom = (.allowFrom as $a | $a + ($pi - $a)) end)
+       then $r0 | .d.groups |= map_values(if type != "object" or (.allowFrom | type) != "array" or .allowFrom == [] then . else .allowFrom = (.allowFrom as $a | $a + ($pi - $a)) end)
        else $r0 end) as $r
     | ($r0.d | policy | .groups | map({key: .id, value: .}) | from_entries) as $Gw
     | ($r.d | policy) as $P1
@@ -315,12 +317,13 @@ if [ "${1:-}" = access ]; then
                elif $a == "disabled" then line("W"; "DMs"; "disabled -> \($b): the bot receives again, in its channels too (disabled drops every message)")
                elif $b == "pairing" then line("W"; "DMs"; "\($a) -> pairing: anyone who shares a server with the bot can DM it and is sent a pairing code")
                else line("C"; "DMs"; "\($a) -> \($b)") end),
-            (($P1.dm_allow - $P0.dm_allow)[] | line("W"; "DMs"; "+ \(who) may DM it, and answers its permission prompts")),
-            (($P0.dm_allow - $P1.dm_allow)[] | line("C"; "DMs"; "- \(who) may no longer DM it")),
+            (($P1.dm_allow - $P0.dm_allow - ["not-an-id"])[] | line("W"; "DMs"; "+ \(who) may DM it, and answers its permission prompts")),
+            (($P0.dm_allow - $P1.dm_allow - ["not-an-id"])[] | line("C"; "DMs"; "- \(who) may no longer DM it")),
             # Warnings: the owner taken off a list or out of every channel, the main channel moved or no longer
             # listened in, a dev-manager cut off from a peer.
-            ([($doc.groups | objects) | to_entries[] | select((.key | isid) and (.value | type) == "object" and (.value.allowFrom | type) == "string" and .value.allowFrom != "") | .key] | .[]
-             | line("N"; ""; "\(. | ch): allowFrom is a string, matched by substring: set it at a terminal")),
+            ([($doc.groups | objects) | to_entries[] | select((.value | type) == "object" and (.value.allowFrom | canon | not)) | {k: .key, t: (.value.allowFrom | type)}] | .[]
+             | line("N"; ""; "\(.k | ch): allowFrom is not a list of ids (\(.t)): set it at a terminal")),
+            (select($doc.allowFrom | canon | not) | line("N"; ""; "DMs: allowFrom is not a list of ids (\($doc.allowFrom | type)): set it at a terminal")),
             (select($owner != "") | $P0.groups[] | . as $o | $G1[$o.id] | select(. != null and .allow != [] and ($o.allow | index($owner)) != null and (.allow | index($owner)) == null)
              | line("N"; ""; "\($owner | who) is the owner of this bot (DISCORD_USER_ID) and can no longer write to it in \($o.id | ch)")),
             (select($owner != "" and any($P0.groups[]; lets($owner)) and all($P1.groups[]; lets($owner) | not))
@@ -340,8 +343,9 @@ if [ "${1:-}" = access ]; then
              | line("N"; ""; "\(who) is a peer dev bot (peers.json): entering dev-manager puts it back in \($n.id | ch)"))
           end)
       end'
+  a_me=""; { read -r a_me < "$d/bot-id"; } 2>/dev/null || :
   a_jq() {  # $1 = diff|doc, $2 = the policy the diff was made from (doc)
-    jq -r --arg out "$1" --arg seen "${2:-}" --arg words "$a_words" --arg owner "$a_owner" --arg fb "$DISCORD_CHANNEL_ID" --arg bot "$bot" \
+    jq -r --arg out "$1" --arg seen "${2:-}" --arg words "$a_words" --arg owner "$a_owner" --arg fb "$DISCORD_CHANNEL_ID" --arg bot "$bot" --arg me "$a_me" \
       --arg mode "$mode" --arg cn "$a_cn" --arg un "$a_un" --arg mn "$a_mn" --arg peers "$a_peers" "$a_prog" "$f"
   }
   a_owner=$DISCORD_USER_ID; c_match "$a_owner" '^[0-9]{1,20}$' || a_owner=""

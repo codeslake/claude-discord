@@ -184,6 +184,18 @@ printf 'dev-manager\npeerx:700:800:host\n' | bash "$S" setup five --mode >/dev/n
 [ "$(jq -c '.groups["1"].allowFrom' "$R5/five/access.json")" = '["222","700"]' ] || { echo "FAIL: the peer must reach access.json's allowFrom: $(jq -c . "$R5/five/access.json")"; exit 1; }
 echo "ok: --mode to dev-manager also asks the peers question and records a peer in peers.json and access.json's allowFrom"
 
+# A group whose allowFrom is not a list (a hand edit) is left as it is: it must not stop the other groups from getting their peers
+# (jq failed on it and "could not update ... leaving it alone" kept all of them from it). And the bot is left out of the peers by its
+# bot-id when it is kept: a peer named five with another id (702) is a peer.
+cp "$R5/five/access.json" "$P5/five.access.keep"; cp "$(pstate "$P5")/peers.json" "$P5/five.peers.keep"
+jq -c '.groups["2"] = {allowFrom: "111 222"} | .groups["3"] = {allowFrom: ["222"]} | .groups["4"] = 7' "$P5/five.access.keep" > "$R5/five/access.json"
+printf '900\n' > "$R5/five/bot-id"
+out=$(printf 'dev-manager\nperty:701:801:host,five:702:802:host,perta:900:803:host\n' | bash "$S" setup five --mode 2>&1) || :
+[ "$(jq -c '.groups["3"].allowFrom, .groups["1"].allowFrom, .groups["2"].allowFrom, .groups["4"]' "$R5/five/access.json" | tr '\n' ' ')" = '["222","700","701","702"] ["222","700","701","702"] "111 222" 7 ' ] ||
+  { echo "FAIL: the peers (not the bot's own id 900) must go into every list group while a group whose allowFrom is a string or a number stays as it is: $(jq -c .groups "$R5/five/access.json") / $out"; exit 1; }
+rm -f "$R5/five/bot-id"; cp "$P5/five.access.keep" "$R5/five/access.json"; cp "$P5/five.peers.keep" "$(pstate "$P5")/peers.json"; rm -f "$P5/five.access.keep" "$P5/five.peers.keep"
+echo "ok: setup's peer merge skips a group whose allowFrom is no list and still adds the peers to the others, and leaves the bot out by its bot-id"
+
 # setup installs the plugin. Fixtures: XP (git, path with a space, trusted), refusals leave the bot untouched.
 XP="$HOME/scope proj"; XR=$(broot "$XP"); XL="$XP/.claude/skills/claude-discord"; GL="$HOME/.claude/skills/claude-discord"
 mkdir -p "$XP"; (cd "$XP" && git init -q .)
@@ -877,11 +889,21 @@ nt_with '["444"]'; nt allow:900+444
 # What the plugin does with allowFrom (server.ts: `allowFrom ?? []`, filtered only when .length > 0, with .includes(id)): a list
 # filters by exact element, a non-empty STRING by substring ("111 222" lets 111 and 222 in), and a number, a boolean, an object,
 # null, "" and {} have no positive .length, so they let ANYONE in. A number, a boolean or an object reads as anyone here too: a
-# sender put on it narrows it (and the owner is warned when that locks them out); a removal never empties it.
-for nt_v in '7' 'true' 'false' '{"a":1}' 'null' '""' '{}'; do
-  nt_with "$nt_v"; nt allow:901+222
-  [ "$ARC" = 0 ] && grep -q '^    #901: from anyone -> from 222$' <<<"$AO" && [ "$(jq -c '.groups["901"].allowFrom' "$ND/access.json")" = '["222"]' ] ||
-    { echo "FAIL: an allowFrom that is $nt_v is anyone, a sender put on it narrows it: rc=$ARC $AO / $AE"; exit 1; }
+# sender put on it narrows it (and the owner is warned when that locks them out); a removal never empties it. Only null (and an
+# absent key) is a canonical shape, though: every other value that is not a list of strings gets an N line, so a call with no
+# terminal never writes while one exists (the plugin's reading of it is not modelled, it is asked about at a terminal).
+nt_with 'null'; nt allow:901+222
+[ "$ARC" = 0 ] && grep -q '^    #901: from anyone -> from 222$' <<<"$AO" && [ "$(jq -c '.groups["901"].allowFrom' "$ND/access.json")" = '["222"]' ] ||
+  { echo "FAIL: an allowFrom that is null is anyone, a sender put on it narrows it: rc=$ARC $AO / $AE"; exit 1; }
+for nt_v in '7' 'true' 'false' '{"a":1}' 'null' '""' '{}' '{"length":1}' '[1]' '["a",2]'; do
+  nt_t=$(jq -r type <<<"$nt_v")
+  if [ "$nt_v" != null ]; then
+    for nt_w in allow:901+222 allow:901+444 channel-901 allow:900-222; do
+      nt_with "$nt_v"; nt $nt_w
+      nt_refused "for $nt_w with an allowFrom that is $nt_v" "^warning: #901: allowFrom is not a list of ids ($nt_t): set it at a terminal\$"
+    done
+  fi
+  case $nt_v in '{"length":1}'|'[1]'|'["a",2]') continue;; esac
   nt_with "$nt_v"; nt allow:901=any
   [ "$ARC" = 0 ] && [[ $AO == *"already so; nothing to change"* ]] || { echo "FAIL: allow:901=any on an allowFrom that is $nt_v (already anyone) changes nothing: rc=$ARC $AO / $AE"; exit 1; }
 done
@@ -890,7 +912,7 @@ done
 for nt_v in '"111"' '"111 222"' '"x111x"'; do
   for nt_w in allow:900-222 channel-901 allow:901+222; do
     nt_with "$nt_v"; nt $nt_w
-    nt_refused "for $nt_w with an allowFrom that is the string $nt_v" '^warning: #901: allowFrom is a string, matched by substring: set it at a terminal$' 'it has a warning (above)$'
+    nt_refused "for $nt_w with an allowFrom that is the string $nt_v" '^warning: #901: allowFrom is not a list of ids (string): set it at a terminal$' 'it has a warning (above)$'
   done
 done
 nt_with '"111"'; nt allow:901-999
@@ -909,6 +931,26 @@ done
 # The sentinel is no person: "abc" stays on the list when 222 is added, so nobody is shown leaving, and a list is told as entries that are no id.
 nt_with '["abc"]'; nt allow:901+222
 ! grep -q 'not-an-id' <<<"$AO" || { echo "FAIL: the sentinel of a list with no id is shown as a person: $AO"; exit 1; }
+# The DM allowlist is guarded the same way: a top-level allowFrom that is not a list of strings (here the string "111 222", which the
+# plugin matches by substring) is warned of, a no-terminal call is refused, and it reads as a list nobody is on: dm=off and dm-222
+# are changes (an allowlist -> off), not "already so" (dm_allow read [] and said nothing changed), and the sentinel is no person.
+for nt_v in '"111 222"' '7' '{"length":1}'; do
+  nt_t=$(jq -r type <<<"$nt_v")
+  for nt_w in dm=off dm-222 dm+444 allow:900-222; do
+    [ "$nt_v" != 7 ] || case $nt_w in dm=off|dm-222) continue;; esac   # a number is no filter (anyone, "off" already): those change nothing
+    NF=$(jq -c --argjson l "$nt_v" '.allowFrom = $l' <<<"$NFA"); nt_reset; nt $nt_w
+    nt_refused "for $nt_w with a top-level allowFrom that is $nt_v" "^warning: DMs: allowFrom is not a list of ids ($nt_t): set it at a terminal\$"
+  done
+done
+NF=$(jq -c '.allowFrom = "111 222"' <<<"$NFA"); nt_reset; nt dm=off
+! grep -q 'already so' <<<"$AO" && grep -q '^    DMs: allowlist -> off$' <<<"$AO" || { echo "FAIL: dm=off on a top-level allowFrom \"111 222\" is a change, not already so: rc=$ARC $AO / $AE"; exit 1; }
+nt_reset; nt dm-222
+! grep -q 'already so' <<<"$AO" && ! grep -q 'not-an-id' <<<"$AO" || { echo "FAIL: dm-222 on a top-level allowFrom \"111 222\" is no 'already so' and shows no sentinel person: rc=$ARC $AO / $AE"; exit 1; }
+# The opposite: a canonical file (arrays of strings, absent keys, no top-level allowFrom) still writes a same-guild add with no terminal.
+NF='{"dmPolicy":"allowlist","groups":{"900":{"requireMention":true,"allowFrom":["111","222"]},"901":{"requireMention":true}}}'
+nt_reset; queue_line "200 $NCH"; queue_line '200 {"id":"1"}'; nt channel+902 allow:902+222
+[ "$ARC" = 0 ] && [ "$(jq -c '.groups["902"].allowFrom' "$ND/access.json")" = '["111","222"]' ] && ! grep -q 'allowFrom is not a list' <<<"$AO" ||
+  { echo "FAIL: a canonical file (absent keys, arrays of strings) still takes a same-guild add with no terminal: rc=$ARC $AO / $AE"; exit 1; }
 NF=$NFA
 # peers.json is shared: it lists this bot too (nt, 555). The dev-manager peer warning is about the peers that go onto the lists
 # (pb, 666), never the bot itself (nt, 555), so narrowing an open channel while entering dev-manager names no peer line for 555.
@@ -928,6 +970,15 @@ for nt_v in '"111"' '7' '{"a":1}'; do
   [ "$ARC" = 3 ] && ! grep -q 'not valid JSON' <<<"$AE" && grep -q '^    mode: none -> dev-manager' <<<"$AO" && [ "$(<"$ND/access.json")" = "$NF" ] ||
     { echo "FAIL: entering dev-manager with an allowFrom that is $nt_v must give a diff, not the JSON error: rc=$ARC $AO / $AE"; exit 1; }
 done
+# The bot is left out of the peers by its bot-id when it is kept (bot-id 555), else by name: a peer of the bot's own name and another id
+# (666) is a peer and goes onto the lists (new to this bot), while the peer with the bot's id (555, whatever its name) does not.
+printf '{"peers":[{"name":"nt","bot_id":"666"},{"name":"other","bot_id":"555"}]}\n' > "$NS/peers.json"
+NF=$NFA; printf '555\n' > "$ND/bot-id"; nt_reset; nt mode=dev-manager
+grep -q '^  ! nt (666): new to this bot: may write to it in #900$' <<<"$AO" && ! grep -q '555.*new to this bot' <<<"$AO" ||
+  { echo "FAIL: with bot-id 555, the peer named like the bot (666) goes onto the lists and the one with its id (555) does not: rc=$ARC $AO / $AE"; exit 1; }
+rm -f "$ND/bot-id"; nt_reset; nt mode=dev-manager
+! grep -q '666.*new to this bot' <<<"$AO" && grep -q '555.*new to this bot' <<<"$AO" ||
+  { echo "FAIL: with no bot-id the bot is left out by name (666 not added, 555 added): rc=$ARC $AO / $AE"; exit 1; }
 printf '{"peers":[]}\n' > "$NS/peers.json"
 NF=$NFA
 # The owner (111) can no longer write anywhere: a removal of the channels that listed them, when no channel left lets them

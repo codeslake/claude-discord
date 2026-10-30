@@ -493,10 +493,11 @@ terminal and answer `n` (nothing is written). A removal never empties a sender l
 `allow:<id>=any` to mean that. A sender list whose entries are none of them an id
 (`["abc"]`, or numbers: the plugin compares strings) is not "anyone": the plugin
 filters a non-empty list by exact element, so it is read as a list nobody is on,
-and a sender added to it is new to the bot. A number, a boolean, an object, `null`
-or `""` in place of the list is no filter in the plugin: anyone. A non-empty
-string is matched by substring there (`"111 222"` lets 111 and 222 in): it is
-warned about, and a change with no terminal is not written while one exists.
+and a sender added to it is new to the bot. A number, a boolean, `null`, `""` or an
+object without a `length` key in place of the list is no filter in the plugin:
+anyone; a non-empty string or an object with a `length` key reads as a list nobody is on.
+Any `allowFrom`, in a channel or for DMs, that is neither absent, `null` nor a list of strings
+is warned about ("set it at a terminal"), and a change with no terminal is not written while one exists.
 
 The write is by rename under a lock (`access.json.lock`), mode 600. The
 official plugin reads `access.json` at every message, so **a change applies at
