@@ -778,7 +778,7 @@ from the agent view gets no twin. Every other bot gets
 `claude-discord bot <bot> recover --yes`: its last session respawned with its
 conversation, or a fresh start when none is listed; two listed sessions are
 refused, as `recover` always does. One line per bot (`running (pid <n>),
-skipped`, `held (bot <bot> hold), skipped`, `no token, skipped`, `recovered`, or `failed (exit <n>): <recover's last line>`); exit 0,
+skipped`, `held (bot <bot> hold), skipped`, `stopped by a person (daemon.log, <time>), held, skipped` (1.19.7: the pinned job's last `daemon.log` line is `bg settled <job> (killed)`, as health reads it; `held` is written), `no token, skipped`, `recovered`, or `failed (exit <n>): <recover's last line>`); exit 0,
 or 1 when `claude agents` failed or a recover did. Run it from the machine's
 start (a container entrypoint, a login script, cron `@reboot`), never from a
 bot's own session: a session cannot recover its own bot.
@@ -940,7 +940,7 @@ acts for: every bot, or only some.
 | Event | Matcher | Script | Purpose (why, what, when) | Exact effect | Context cost (measured) | Who |
 |---|---|---|---|---|---|---|
 | SessionStart | `startup\|resume\|fork\|compact\|clear` | `turn/on-session-start` | Why: a respawn or an auto-update of the official plugin since the last start, a turn whose Stop never ran, a daemon that would retire an idle bot, a manager's backend killed by a restart. When: every source; the patch, the clean-up and the pin at startup, resume and fork only (fork since 1.19.4: a `--resume` the CLI starts as a fork ran none of them, and the bot was retired 8 h later unpinned). | Runs `claude-discord patch` (a failure goes to `health.log`); clears the per-turn files a turn whose Stop never ran left behind, keeping the primed key; pins a background session's job (`~/.claude/jobs/pins.json` and `pinned-job`, see Background sessions); starts a dev-manager's keeper when none runs and its owner did not stop it. No marker sweep and no `claude agents` here (the monitor's pass and update sweep). | 0 B | every bot; the keeper: dev-managers with a hosts ledger |
-| SessionEnd | | `turn/on-session-end` | Why: (1.19.4) a bot its person stopped (`claude stop`, `claude rm`, a delete in the agent view, `/exit` in a foreground bot) must stay down, and the monitor's automatic recover would bring it back. When: the bot's own session ends (the job of `CLAUDE_JOB_DIR` naming this session). | Writes `<bot dir>/held` (`session-end <reason> <time>`) for reason `prompt_input_exit` or `logout`, and for `other` only with this job's `bg settled <job> (killed)` line in `daemon.log` under a minute old (the daemon's own kill, which `claude stop` and `rm` do, logged about 2 s before the hook; a SIGTERM from a docker stop or a reboot, and an idle retire, log `(done)`, after it: recovered as before; so does the daemon's own shutdown, `claude daemon stop` or an update's `--force`, known by its `shutdown requested` line); `clear` writes nothing. A stop by `refresh`, `recover --fresh` or `rename` removes the hold once the old pid is gone: those stops are for a restart. health reads the bot `held`, the monitor posts one `[held]` line with no mention, boot skips it; its next session start removes the file. | 0 B | every background bot |
+| SessionEnd | | `turn/on-session-end` | Why: (1.19.4) a bot its person stopped (`claude stop`, `claude rm`, a delete in the agent view, `/exit` in a foreground bot) must stay down, and the monitor's automatic recover would bring it back. When: the bot's own session ends (the job of `CLAUDE_JOB_DIR` naming this session). | Writes `<bot dir>/held` (`session-end <reason> <time>`) for reason `prompt_input_exit` or `logout`; `other` (`claude stop`, `claude rm`, a SIGTERM, a retire) and `clear` write nothing (1.19.7: the hook cannot tell a person's stop from a SIGTERM; `health` and `boot` read `daemon.log` for it: `person_stopped` in `bin/lib/state.sh`). A stop by `refresh`, `recover --fresh` or `rename` removes the hold once the old pid is gone and is recorded in `own-stop`: those stops are for a restart. health reads the bot `held`, the monitor posts one `[held]` line with no mention, boot skips it; its next session start removes the file. | 0 B | every background bot |
 | UserPromptSubmit | | `turn/on-prompt` | Why: as above, a backend killed by a restart comes back with the first bot that wakes. When: every prompt. | Starts a dev-manager's keeper when none runs, for each line of `records/managers` (builtins only when all run: no fork on Linux). | 0 B | every bot (the keepers of this machine's managers) |
 
 Which plugin runs them:
@@ -1665,13 +1665,28 @@ bot taken down on purpose: `claude-discord bot <bot> hold` (1.19.1) leaves
 not `down` (no finding; a `[down]` already posted is closed by one
 `[held] <bot> ...: held down on purpose` line), and `boot` skips it; the
 bot's next session start (`recover` by hand, `--bg --name`) removes the file.
-A bot whose own session ended for a person's reason is held the same way by
-the SessionEnd hook (1.19.4): `claude stop`, `claude rm`, a delete in the
-agent view or `/exit` in a foreground bot (in a client attached to a background
-bot, Ctrl-C and `/exit` only detach it), known by the daemon's `bg settled <job>
-(killed)` line just before; never a reboot, a `docker stop` or the daemon's idle
-retire, which are recovered as before; the monitor says it once, `[held] <bot> on
-<host> (<project>): its session ended (SessionEnd other, no daemon retire
+A bot whose own session ended for a person's reason is held the same way
+(1.19.4): `/exit` in a foreground bot (in a client attached to a background
+bot, Ctrl-C and `/exit` only detach it) and a logout by the SessionEnd hook.
+`claude stop`, `claude rm` and a delete in the agent view (1.19.7) by `health`
+and `boot`, which read `daemon.log` when they decide (the SessionEnd hook cannot
+tell them from a SIGTERM: on Claude Code 2.1.314 `rm` deletes the job dir before
+the hook runs and the daemon's line comes after it starts). A bot with no server
+and no `held` whose pinned job (`pinned-job`) has `bg settled <job> (killed)` as
+the last line of its life in the last 20000 lines of `daemon.log` is held
+(`held` holds `session-end killed <time of the line>`), unless the daemon was
+shutting down in the minute before it (`shutdown requested`, `service recall`:
+`claude daemon stop`, an update), a later `claimed-spare`, `spawned` or `respawn`
+of the job follows, the line is older than the bot's newest `plugin-sessions/`
+marker, or the job is in `<bot dir>/own-stop` (the jobs `refresh`,
+`recover --fresh`, `rename` and a start's prune of dead sessions stopped
+themselves; the next session start clears it, so a restart whose start fails
+leaves the bot down and recovered, never held). Never a reboot, a `docker stop`
+or the daemon's idle retire, which end in `(done)` and are recovered as before.
+`boot` makes the same check before it starts a bot, for a host that went down
+before a health pass wrote `held`; a rotated `daemon.log` loses the evidence
+and the bot is then recovered, as before. The monitor says it once, `[held] <bot> on
+<host> (<project>): its session ended (SessionEnd killed, no daemon retire
 logged): ...`, with no mention, so a wrong call is seen. Both `[held]` lines
 wait until the bot has been held 5 minutes (a respawn holds it for the seconds
 between its old session's end and its new one's start) and come once.

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# SessionEnd hook (1.19.4): a bot taken down on purpose stays down. Reason "other" covers a person's `claude stop`,
-# `claude rm` or delete in the agent view, but also a SIGTERM to the worker (docker stop, a reboot, the daemon's idle
-# retire). Measured 2026-10-20 (2.1.304/305): only the daemon's own kill, which is what stop and rm do, logs
-# "bg settled <job> (killed)" in daemon.log, about 2 s BEFORE this hook runs; a SIGTERM from outside logs
-# "settled <job> (done)" 10 s AFTER it, and a retire "bg retire <job>" then "settled (done)". So "other" holds the bot
-# only with that killed line of this job under a minute old: a reboot or a docker stop never leaves every bot held.
-# /exit or Ctrl-C in a foreground bot is "prompt_input_exit" (a person's, held); in a client attached to a background
-# bot they only detach it (no SessionEnd), and a daemon restart for an upgrade respawns its workers with no SessionEnd.
-# A hold writes <state dir>/held, so health reads the bot held (not down) and neither the monitor's automatic recover
-# nor boot brings it back; the bot's next session start removes it (on-session-start), and the monitor posts one
+# SessionEnd hook (1.19.4): /exit or Ctrl-C in a foreground bot (reason "prompt_input_exit") and a logout are a person's
+# doing: the bot is held, so health reads it `held` (not down) and neither the monitor's automatic recover nor boot brings
+# it back. In a client attached to a background bot they only detach it (no SessionEnd), and a daemon restart for an
+# upgrade respawns its workers with no SessionEnd.
+# `claude stop`, `claude rm` and a delete in the agent view end with reason "other", like a SIGTERM from a docker stop, a
+# reboot or the daemon's idle retire, and this hook cannot tell them apart: it ran 2 s ahead of the daemon's "bg settled
+# <job> (killed)" line in 2.1.304 and 0.6 s behind it in 2.1.314, and `claude rm` deletes the job dir first, so the job's
+# identity is gone (1.19.7). So "other" holds nothing here: health and boot read daemon.log when they decide
+# (person_stopped, bin/lib/state.sh).
+# A hold writes <state dir>/held; the bot's next session start removes it (on-session-start), and the monitor posts one
 # [held] line, so a wrong call is seen. Only the bot's own session counts: the job of
 # CLAUDE_JOB_DIR whose state.json names this session (a `claude -p` started from the bot's shell inherits both
 # variables, not its session id). Must never block or fail: any failure is silent success.
@@ -16,32 +16,9 @@
 read -r session_id reason <<EOF2
 $(jq -r '"\(.session_id // "") \(.reason // "")"' 2>/dev/null)
 EOF2
-case $reason in prompt_input_exit|logout|other) ;; *) exit 0;; esac   # clear: the session goes on as another
+case $reason in prompt_input_exit|logout) ;; *) exit 0;; esac   # clear: the session goes on as another
 id=${CLAUDE_JOB_DIR:-}; id=${id##*/}
 [[ $id =~ ^[0-9a-f]{8}$ ]] && [ -n "$session_id" ] || exit 0
 jq -e --arg s "$session_id" '.sessionId == $s or .resumeSessionId == $s' "$CLAUDE_JOB_DIR/state.json" >/dev/null 2>&1 || exit 0
-if [ "$reason" = other ]; then
-  # The daemon's kill of this job (claude stop, rm) within the last minute, looked for twice half a second apart. None:
-  # a SIGTERM from outside or a retire, so no hold, and the bot is recovered as before. A line whose time cannot be
-  # read counts as none (GNU date -d, else BSD date -j). The daemon's own shutdown (`claude daemon stop`, an update's
-  # --force) kills every worker with the same line, and is no person's stop of this bot: "shutdown requested" or
-  # "service recall" within the minute before it means no hold either.
-  log=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/daemon.log now=$(date -u +%s) hit=""
-  epoch() { date -u -d "$1" +%s 2>/dev/null || date -j -u -f %Y-%m-%dT%H:%M:%S "${1%.*}" +%s 2>/dev/null; }
-  for _ in 1 2; do
-    tl=$(tail -n 200 "$log" 2>/dev/null) || tl=""
-    l=$(printf '%s\n' "$tl" | grep -aF "bg settled $id (killed)" | tail -n 1) || l=""
-    if [ -n "$l" ]; then
-      ts=${l#\[}; ts=${ts%%\]*}
-      if t=$(epoch "$ts") && [ $((now - t)) -le 60 ]; then
-        s=$(printf '%s\n' "$tl" | grep -aE "shutdown requested|service recall" | tail -n 1) || s=""
-        if [ -n "$s" ]; then ss=${s#\[}; ss=${ss%%\]*}; u=$(epoch "$ss") && [ $((t - u)) -ge 0 ] && [ $((t - u)) -le 60 ] && exit 0; fi
-        hit=1; break
-      fi
-    fi
-    sleep 0.5
-  done
-  [ -n "$hit" ] || exit 0
-fi
 printf 'session-end %s %s\n' "$reason" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DISCORD_STATE_DIR/held" 2>/dev/null || :
 exit 0

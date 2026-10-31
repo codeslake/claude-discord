@@ -448,24 +448,19 @@ pin bbbb0003 fork
 [ "$(<"$PINS")" = "$(cli_pins 11110001 22220002 bbbb0003)" ] && [ "$(<"$DSD/pinned-job")" = bbbb0003 ] &&
   jq -e '.hooks.SessionStart[0].matcher | split("|") | index("fork") != null' "$D/hooks/hooks.json" >/dev/null ||
   { echo "FAIL: a fork start pins as a resume does, and the SessionStart matcher names fork: $(<"$PINS")"; exit 1; }
-# on-session-end (1.19.4): a person's stop holds the bot (held, so no automatic recover); anything else does not.
-# send <reason> [job state]: the bot's job ee0000ff ends with that reason. "other" holds only with the daemon's
-# "settled <job> (killed)" line under a minute old (claude stop, rm): with none (a SIGTERM: docker stop, a reboot), with
-# a retire's "(done)", or with an old killed line, nothing. clear, and another session's end, write nothing.
+# on-session-end (1.19.4): /exit (prompt_input_exit) and a logout hold the bot (held, so no automatic recover); nothing else
+# does. 1.19.7: reason "other" (claude stop, rm, a SIGTERM, a retire) writes nothing even with the daemon's killed line
+# under a minute old: it cannot tell them apart, health and boot read daemon.log instead (test-install.sh). clear, and
+# another session's end, write nothing.
+# send <reason> [job state]: the bot's job ee0000ff ends with that reason.
 DLOG="$HOME/.claude/daemon.log"; mkdir -p "$J/ee0000ff"
 send() { rm -f "$DSD/held"; printf '%s' "${2:-{\"sessionId\":\"sEnd\"}}" > "$J/ee0000ff/state.json"
   CLAUDE_JOB_DIR="$J/ee0000ff" DISCORD_STATE_DIR="$DSD" bash "$H/on-session-end" <<<"{\"session_id\":\"sEnd\",\"reason\":\"$1\"}" >/dev/null 2>&1 || echo "rc"; [ ! -f "$DSD/held" ] || cut -d' ' -f1-2 "$DSD/held"; }
-: > "$DLOG"; A=$(send prompt_input_exit); B=$(send other); C=$(send clear)
-printf '[%s] [bg] bg settled ee0000ff (killed)\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; E=$(send other '{"sessionId":"sOther"}'); F=$(send other)
-printf '[%s] [bg] bg retire ee0000ff: idle-prompt, idle 60m\n[%s] [bg] bg settled ee0000ff (done)\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; G=$(send other)
-printf '[%s] [bg] bg settled ee0000ff (killed)\n' "$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; K=$(send other)
-# The daemon's own shutdown (claude daemon stop, an update's --force) kills every worker with the same line: no hold.
-printf '[%s] [supervisor] shutdown requested via control socket\n[%s] [bg] bg settled ee0000ff (killed)\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; L=$(send other)
-# A time no date can read counts as none (BSD date has no -d: the old fallback held on any killed line, however old).
-printf '[not-a-time] [bg] bg settled ee0000ff (killed)\n' > "$DLOG"; M=$(send other)
-[ "$A|$B|$C|$E|$F|$G|$K|$L|$M" = "session-end prompt_input_exit||||session-end other||||" ] &&
+: > "$DLOG"; A=$(send prompt_input_exit); B=$(send other); C=$(send clear); G=$(send logout)
+printf '[%s] [bg] bg settled ee0000ff (killed)\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$DLOG"; E=$(send prompt_input_exit '{"sessionId":"sOther"}'); F=$(send other)
+[ "$A|$B|$C|$G|$E|$F" = "session-end prompt_input_exit|||session-end logout||" ] &&
   jq -e '.hooks.SessionEnd[0].hooks[0].command | endswith("/hooks/turn/on-session-end\"")' "$D/hooks/hooks.json" >/dev/null ||
-  { echo "FAIL: on-session-end holds a bot its person stopped (the daemon's killed line under a minute old), not on a SIGTERM, a retire, an old kill, the daemon's shutdown, an unreadable time, clear or another session's end: $A|$B|$C|$E|$F|$G|$K|$L|$M"; exit 1; }
+  { echo "FAIL: on-session-end holds a bot on /exit and logout only: nothing for other (even after a fresh killed line), clear or another session's end: $A|$B|$C|$G|$E|$F"; exit 1; }
 rm -rf "$J/ee0000ff" "$DLOG" "$DSD/held"
 pin bbbb0002 resume
 # An id already in the file is someone else's pin: it stays, and this bot
@@ -4064,6 +4059,7 @@ bt - n acc recover; A=$BRC; [ -e "$HOME/claude.calls" ] || A="$A none"; bt - y a
 # 1.19.4: the stop is ours, for a restart, so the hold the old session's SessionEnd hook writes on it goes once the
 # pid is gone (a start that fails then leaves the bot down, recovered, never held). Planted here as the hook would.
 rm -f "$HOME/claude.calls"; : > "$AD/held"; bt - y acc recover --fresh; A="$BRC $BO"; kill -0 "$OLD" 2>/dev/null || A="$A gone1"; [ ! -e "$AD/held" ] || A="$A held-left"
+grep -qx acc11111 "$AD/own-stop" 2>/dev/null || A="$A no-own-stop"   # 1.19.7: person_stopped ignores a stop of ours
 [[ $A == 0*"    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc"*"stopping acc (acc11111, pid $OLD)"*"LAUNCHER "*" -n acc "*"ran claude-discord --bg --name acc (exit 0)"*" gone1" ]] &&
   [ "$(<"$HOME/claude.calls")" = "STOP acc11111" ] || { echo "FAIL: bot recover --fresh with one listed session stops it before the fresh start: $A / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
 sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; rm -f "$HOME/claude.calls"

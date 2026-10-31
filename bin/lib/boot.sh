@@ -26,6 +26,12 @@ if [ "${1:-}" = boot ]; then
       pid=$(printf '%s' "$bt_agents" | jq -r --arg n "$b" --arg pin "$pin" --arg cwd "$(cd -P "$p" && pwd)" \
         'first(.[] | objects | select((.name == $n or ($pin != "" and .id == $pin)) and .cwd == $cwd and .pid != null) | .pid) // ""' 2>/dev/null) || pid=""
       if [ -n "$pid" ]; then echo "boot: $p $b: running (pid $pid), skipped"; continue; fi
+      # A bot a person stopped just before the host went down has no held file yet (health writes it): the same check
+      # health makes, so it stays down. A rotated daemon.log loses the evidence, and the bot is then recovered, as before.
+      if hl=$(person_stopped "$bd"); then
+        printf 'session-end killed %s\n' "$hl" > "$bd/held" 2>/dev/null || :
+        echo "boot: $p $b: stopped by a person (daemon.log, $hl), held, skipped"; continue
+      fi
       rc=0; out=$("$self_path" bot --project "$p" "$b" recover --yes 2>&1 </dev/null) || rc=$?
       if [ "$rc" = 0 ]; then echo "boot: $p $b: recovered"
       else bt_rc=1; echo "boot: $p $b: failed (exit $rc): ${out##*$'\n'}"; fi

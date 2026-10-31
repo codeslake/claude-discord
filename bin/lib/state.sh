@@ -329,3 +329,33 @@ sweep_recorded() {
   done
   return 0
 }
+
+# person_stopped <bot dir> (1.19.7): 0, and the daemon.log time on stdout, when a person stopped this bot's job (claude
+# stop, claude rm, a delete in the agent view). The SessionEnd hook cannot tell (2.1.314: `rm` deletes the job dir before
+# it runs, and the daemon's "bg settled <job> (killed)" line comes 0.6 s AFTER it starts), so health and boot ask here.
+# True when the bot's pinned job (pinned-job) has as its LAST lifecycle line in daemon.log (settled, claimed-spare,
+# spawned, respawn, retire: a later start of the same id, or a retire or (done) after it, ends the case) a "(killed)",
+# with no shutdown in the 60 s before it (the daemon's own shutdown kills every worker with that line), the line no
+# older than the bot's newest plugin-sessions marker (that session started after it), and the id not in own-stop (what
+# stop_sessions and the start's prune stopped for a restart; cleared by the next session start). Bounded read of the last
+# 20000 lines: a rotated log loses the evidence and the bot is recovered, as before. GNU date -d, else BSD date -j.
+log_epoch() { date -u -d "$1" +%s 2>/dev/null || date -j -u -f %Y-%m-%dT%H:%M:%S "${1%.*}" +%s 2>/dev/null; }
+person_stopped() {
+  local d=$1 pin="" tl l n ts t s m mt
+  { IFS= read -r pin < "$d/pinned-job"; } 2>/dev/null || :
+  [[ $pin =~ ^[0-9a-f]{8}$ ]] || return 1
+  ! grep -qxF "$pin" "$d/own-stop" 2>/dev/null || return 1
+  tl=$(tail -n 20000 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/daemon.log" 2>/dev/null) || return 1
+  l=$(printf '%s\n' "$tl" | grep -anE "bg (settled|claimed-spare|spawned|respawn[a-z]*|retire) $pin[: ]" | tail -n 1) || return 1
+  [[ $l == *"bg settled $pin (killed)" ]] || return 1
+  n=${l%%:*} ts=${l#*:[}; ts=${ts%%]*}
+  t=$(log_epoch "$ts") || return 1
+  s=$(printf '%s\n' "$tl" | head -n "$n" | grep -aE "shutdown requested|service recall|shutting down \(" | tail -n 1) || s=""
+  if [ -n "$s" ]; then s=${s#[}; s=$(log_epoch "${s%%]*}") && [ $((t - s)) -ge 0 ] && [ $((t - s)) -le 60 ] && return 1; fi
+  m=$(ls -t "$d/plugin-sessions" 2>/dev/null | head -n 1) || m=""
+  if [ -n "$m" ]; then
+    mt=$(stat -c %Y "$d/plugin-sessions/$m" 2>/dev/null || stat -f %m "$d/plugin-sessions/$m" 2>/dev/null) || mt=""
+    [ "$t" -ge "${mt:-0}" ] || return 1
+  fi
+  printf '%s\n' "$ts"
+}

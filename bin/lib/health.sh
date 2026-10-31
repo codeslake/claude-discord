@@ -751,6 +751,12 @@ if [ "${1:-}" = health ]; then
       case $refresh_tail in *'not trusted'*) detail="$detail; its last refresh failed on workspace trust";; esac
       [ "$trusted" != false ] || detail="$detail; this project is not trusted, so a --bg start will refuse"
     fi
+    # A person's `claude stop` or `claude rm` (1.19.7): daemon.log says so (person_stopped), and the hold is written here,
+    # not by the SessionEnd hook, which cannot tell it from a SIGTERM. Then the verdict below is held. (No token: unknown, a bot
+    # that cannot run, and boot skips it too.)
+    if [ ! -f "$d/held" ] && [ "$servers" = 0 ] && [ "$verdict" != unknown ] && hl=$(person_stopped "$d"); then
+      printf 'session-end killed %s\n' "$hl" > "$d/held" 2>/dev/null || :
+    fi
     # Taken down on purpose (1.19.1, bot <bot> hold): with no server, held, whatever else was found (a message left
     # unanswered too). Not a finding: the monitor posts nothing for it and recovers nothing, nor does boot.
     if [ -f "$d/held" ] && [ "$servers" = 0 ]; then

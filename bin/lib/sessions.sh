@@ -20,8 +20,9 @@ live_sessions() {
 # go. Exit 1, the pids still running in `alive`, when one would not die: a start then would put two sessions on one token;
 # `stopped_ids` then names the ones that did stop (their job ids; `pid <n>` for a foreground one), in the order stopped,
 # so the caller can say what it leaves stopped (1.14.1). With the bot dir (1.19.4), its held is removed once every pid
-# is gone: claude stop makes the old session's SessionEnd hook hold the bot, and these stops are for a restart, so a
-# start that then fails must leave the bot down (recovered), never held.
+# is gone, and each job id is recorded in <bot dir>/own-stop (1.19.7: person_stopped ignores it, so health does not read
+# these stops as a person's; the next session start clears it): these stops are for a restart, so a start that then
+# fails must leave the bot down (recovered), never held.
 stop_sessions() {
   local id pid i
   pids=() ids=() stopped_ids=""
@@ -29,6 +30,7 @@ stop_sessions() {
     [ -n "$id" ] || continue
     echo "claude-discord: stopping $1 ($id, pid $pid)"
     if [ "$id" != - ]; then
+      [ -z "${3:-}" ] || printf '%s\n' "$id" 2>/dev/null >> "$3/own-stop"   # ours, for a restart: not a person's stop (person_stopped)
       claude stop "$id" || echo "claude-discord: stop $id failed (already gone?)" >&2
     else
       kill -TERM "$pid" 2>/dev/null || :

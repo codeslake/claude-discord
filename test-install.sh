@@ -604,6 +604,45 @@ stop_one_server "$SD"; : > "$SD/held"; queue "200 $NONE" '200 {"threads":[]}'
 out=$(cd "$SP" && bash "$S" health --json 2>/dev/null) || :
 [ "$(field_of sbot verdict "$out")" = held ] || { echo "FAIL: a bot held on purpose with no server reads held, not down: $out"; exit 1; }
 rm -f "$SD/held"
+# A bot its person stopped (1.19.7, person_stopped): the job in pinned-job has "bg settled <id> (killed)" as the LAST line of
+# its life in daemon.log (claude stop and claude rm; the SessionEnd hook cannot tell them from a SIGTERM), and health
+# writes held and reads it held, so the monitor never recovers it. Each case with its opposite: a (done) last, a later start of
+# the same id, the daemon's own shutdown just before, a line older than the newest session marker, an id in own-stop, no
+# pinned-job, another job's line, an unreadable time; a held file already there is kept as it is.
+DLOG="$HOME/.claude/daemon.log"; SDM="$SD/plugin-sessions"
+dts() { date -u -d "$1" +%Y-%m-%dT%H:%M:%S.000Z; }
+hv() {  # <log lines>: health's verdict for sbot, then the held file's first two words when health wrote one
+  printf '%s\n' "$1" > "$DLOG"; rm -f "$SD/held"; queue "200 $NONE" '200 {"threads":[]}'
+  out=$(cd "$SP" && bash "$S" health --json 2>/dev/null) || :
+  printf '%s' "$(field_of sbot verdict "$out")"; [ ! -f "$SD/held" ] || printf ' %s' "$(cut -d' ' -f1-2 "$SD/held")"
+}
+echo ee0000ff > "$SD/pinned-job"; rm -rf "$SDM" "$SD/own-stop"
+SP1="[$(dts '10 minutes ago')] [bg] bg spawned ee0000ff (spare)"; KL="[$(dts '1 minute ago')] [bg] bg settled ee0000ff (killed)"
+R1=$(hv "$SP1"$'\n'"$KL")
+R2=$(hv "$SP1"$'\n'"[$(dts '1 minute ago')] [bg] bg retire ee0000ff: idle-prompt, idle 60m"$'\n'"[$(dts '1 minute ago')] [bg] bg settled ee0000ff (done)")
+R3=$(hv "$KL"$'\n'"[$(dts '30 seconds ago')] [bg] bg claimed-spare ee0000ff (slash)")
+R4=$(hv "$KL"$'\n'"[$(dts '30 seconds ago')] [bg] bg spawned ee0000ff (fleet)")
+R5=$(hv "[$(dts '1 minute ago')] [supervisor] shutdown requested via control socket"$'\n'"[$(dts '59 seconds ago')] [bg] bg settled ee0000ff (killed)")
+R6=$(hv "[$(dts '5 minutes ago')] [supervisor] shutdown requested via control socket"$'\n'"$KL")
+R7=$(hv "[$(dts '1 minute ago')] [bg] bg settled ee0000ff (done)"$'\n'"[$(dts '30 seconds ago')] [bg] bg settled 99999999 (killed)")
+R8=$(hv "[not-a-time] [bg] bg settled ee0000ff (killed)")
+R14=$(hv "[$(dts '90 seconds ago')] [supervisor] shutting down (cause=signal, uptime=9s, leases=1, live_workers=1)"$'\n'"$KL")
+cp "$SD/.env" "$SD/.env.keep"; : > "$SD/.env"; R15=$(hv "$KL"); mv "$SD/.env.keep" "$SD/.env"   # no token: unknown, nothing to hold
+mkdir -p "$SDM"; : > "$SDM/s1"; touch -d '10 minutes ago' "$SDM/s1"
+R9=$(hv "$KL")
+touch "$SDM/s1"
+R10=$(hv "[$(dts '5 minutes ago')] [bg] bg settled ee0000ff (killed)")
+rm -rf "$SDM"; echo ee0000ff > "$SD/own-stop"
+R11=$(hv "$KL"); rm -f "$SD/own-stop"
+rm -f "$SD/pinned-job"; R12=$(hv "$KL"); echo ee0000ff > "$SD/pinned-job"
+printf '%s\n' "$KL" > "$DLOG"; echo "by hand" > "$SD/held"; queue "200 $NONE" '200 {"threads":[]}'; out=$(cd "$SP" && bash "$S" health --json 2>/dev/null) || :
+R13="$(field_of sbot verdict "$out") $(<"$SD/held")"
+K1="session-end killed"
+[ "$R1" = "held $K1" ] && [ "$R2" = down ] && [ "$R3" = down ] && [ "$R4" = down ] && [ "$R5" = down ] && [ "$R6" = "held $K1" ] && [ "$R7" = down ] &&
+  [ "$R8" = down ] && [ "$R9" = "held $K1" ] && [ "$R10" = down ] && [ "$R11" = down ] && [ "$R12" = down ] && [ "$R13" = "held by hand" ] && [ "$R14" = down ] && [ "$R15" = unknown ] ||
+  { echo "FAIL: health holds a bot whose pinned job's last daemon.log line is a (killed) and nothing else: $R1 | $R2 | $R3 | $R4 | $R5 | $R6 | $R7 | $R8 | $R9 | $R10 | $R11 | $R12 | $R13 | $R14 | $R15"; exit 1; }
+rm -f "$SD/held" "$SD/pinned-job" "$DLOG"
+rm -f "$SD/held"
 echo "ok: health --all lists stale sessions (a plugin server whose state dir is gone) with the job to stop, and leaves a server on a linked path alone"
 stop_servers
 
@@ -790,6 +829,10 @@ done
 # 1.19.1: a held bot (bot hold) and one with no token in its .env are skipped, nothing asked of them.
 kb="$BH/.claude-discord/projects/$(skey "$BH/pb")/bots"; mkdir -p "$kb/bh" "$kb/bn"; printf 'DISCORD_BOT_TOKEN=x\n' > "$kb/bh/.env"; : > "$kb/bh/held"
 printf 'DISCORD_CHANNEL_ID=1\n' > "$kb/bn/.env"
+# 1.19.7: bs was stopped by a person (its pinned job's last daemon.log line is a (killed), the job no longer listed) just
+# before the host went down: held is written and it is skipped; bb's last line is a (done): recovered as before.
+mkdir -p "$kb/bs" "$BH/.claude"; printf 'DISCORD_BOT_TOKEN=x\n' > "$kb/bs/.env"; echo b5000001 > "$kb/bs/pinned-job"
+printf '[2026-10-30T10:00:00.000Z] [bg] bg settled bb000001 (done)\n[2026-10-30T10:00:01.000Z] [bg] bg settled b5000001 (killed)\n' > "$BH/.claude/daemon.log"
 printf '#!/bin/bash\ncase $1 in agents) echo %s;; respawn) echo "RESPAWN $2" >> "$HOME/calls"; [ ! -e "$HOME/fail" ] || exit 7;; *) echo "PLAIN $*";; esac\n' \
   "'[{\"name\":\"ba\",\"id\":\"ba000001\",\"pid\":4242,\"cwd\":\"$(cd -P "$BH/pa" && pwd)\"},{\"name\":\"bb\",\"id\":\"bb000001\",\"cwd\":\"$(cd -P "$BH/pb" && pwd)\",\"state\":\"done\"}]'" > "$BH/bin/claude"
 chmod +x "$BH/bin/claude"
@@ -797,8 +840,9 @@ rc=0; out=$(cd "$BH" && HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc=$
 : > "$BH/fail"; rc2=0; out2=$(cd "$BH" && HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc2=$?
 [ "$rc $rc2" = "0 1" ] && grep -qE "^boot: .*/pa ba: running \(pid 4242\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bb: recovered$" <<<"$out" &&
   grep -qE "^boot: .*/pb bb: failed \(exit 1\): .*claude respawn bb000001 \(exit 7\)" <<<"$out2" && [ "$(<"$BH/calls")" = $'RESPAWN bb000001\nRESPAWN bb000001' ] &&
+  grep -qE "^boot: .*/pb bs: stopped by a person \(daemon.log, 2026-10-30T10:00:01.000Z\), held, skipped$" <<<"$out" && [ "$(cut -d' ' -f1-2 "$kb/bs/held")" = "session-end killed" ] &&
   grep -qE "^boot: .*/pb bh: held \(bot bh hold\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bn: no token, skipped$" <<<"$out" ||
-  { echo "FAIL: boot skips a bot listed with a pid, recovers one listed without, says a failure (exit 1): rc=$rc $rc2 / $out / $out2 / $(cat "$BH/calls" 2>&1)"; exit 1; }
+  { echo "FAIL: boot skips a bot listed with a pid or stopped by a person (held written), recovers one listed without, says a failure (exit 1): rc=$rc $rc2 / $out / $out2 / $(cat "$BH/calls" 2>&1)"; exit 1; }
 rm -rf "${BH:?}"
 echo "ok: boot recovers every bot of the machine that runs no session (bot recover --yes), skips one that does, and exits 1 when one failed"
 

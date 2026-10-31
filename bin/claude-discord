@@ -793,6 +793,7 @@ prune_dead_sessions() {
     # filter changes, so it is checked again here: a leading dash would read
     # as a flag, and a newline in it would otherwise arrive as two lines.
     [[ $id =~ ^[0-9a-fA-F]{8}$ ]] || continue
+    printf '%s\n' "$id" 2>/dev/null >> "$dir/own-stop"   # rm of a done row with a live worker logs "(killed)": not a person's stop
     "$bin" rm "$id" >/dev/null 2>&1 || failed=$((failed + 1))
   done <<<"$ids"
   [ "$failed" = 0 ] || echo "claude-discord: could not remove $failed dead session(s) of $name from the agent view" >&2
