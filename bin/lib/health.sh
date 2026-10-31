@@ -757,13 +757,21 @@ if [ "${1:-}" = health ]; then
     if [ ! -f "$d/held" ] && [ "$servers" = 0 ] && [ "$verdict" != unknown ] && hl=$(person_stopped "$d"); then
       printf 'session-end killed %s\n' "$hl" > "$d/held" 2>/dev/null || :
     fi
+    # An inferred hold (session-end killed <daemon.log time>) counts only while no session of the bot started after that line:
+    # a bot restarted while this pass ran (servers counted above, the hold written after on-session-start removed it) drops it.
+    if [ -f "$d/held" ] && [ "$servers" = 0 ]; then
+      hl=""; { read -r hl < "$d/held"; } 2>/dev/null || :
+      case $hl in "session-end killed "*) hl=$(log_epoch "${hl#session-end killed }") && marker_newer "$d" "$hl" && rm -f "$d/held" || :;; esac
+    fi
     # Taken down on purpose (1.19.1, bot <bot> hold): with no server, held, whatever else was found (a message left
     # unanswered too). Not a finding: the monitor posts nothing for it and recovers nothing, nor does boot.
     if [ -f "$d/held" ] && [ "$servers" = 0 ]; then
       verdict=held detail="held on purpose (claude-discord bot $bot hold): the monitor and boot leave it down until a session of it starts"
       # 1.19.4: written by the SessionEnd hook ("session-end <reason> <time>"): the monitor posts this detail once.
       hl=""; { read -r hl < "$d/held"; } 2>/dev/null || :
-      case $hl in "session-end "*) hl=${hl#session-end }
+      case $hl in "session-end killed "*)
+        detail="its session ended (SessionEnd killed): inferred from daemon.log as a person's stop (claude stop or rm), held, so the monitor and boot leave it down; a kill -9 or kill -TERM of its worker from outside logs the same, so if it was not a person, claude-discord bot $bot recover brings it back";;
+        "session-end "*) hl=${hl#session-end }
         detail="its session ended (SessionEnd ${hl%% *}, no daemon retire logged): held, so the monitor and boot leave it down; claude-discord bot $bot recover brings it back";;
       esac
     fi

@@ -21,7 +21,8 @@
 # skipped) adds its own job id at startup/resume, and removes the id it pinned
 # last time (recorded in <state dir>/pinned-job) when that differs. No other
 # entry is ever touched -- an id already in the file is another pinner's, so
-# it is left both in the file and out of pinned-job -- and a pins.json that is
+# it is left in the file, and pinned-job still names it (1.19.7: health and boot read it) but pin-foreign records it
+# as not ours to remove -- and a pins.json that is
 # not a JSON array of strings is left as it is. One holding nothing (0 bytes,
 # or only whitespace) is filled exactly like a missing file, since jq -rs
 # slurps it to a length-0 array either way and the "not an array of strings"

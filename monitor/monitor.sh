@@ -594,8 +594,11 @@ def qbot: .bot | if test("^[A-Za-z0-9._+-]+$") then . else "\u0027" + gsub("\u00
 def cd: if .host == "local" then "claude-discord" else "~/.local/bin/claude-discord" end;
 # A remote command goes in single quotes for the local shell that pastes it; the remote shell then reads what cdp quoted.
 def wrap($e): if $e.host == "local" then . else "ssh \($e.host) \u0027\(gsub("\u0027"; "\u0027\\\u0027\u0027"))\u0027" end;
+# A hold health inferred from daemon.log (1.19.7): `claude stop` and an outside kill -9 or -TERM of a bot started by --bg
+# from a terminal both log "(killed)", so the post mentions the owner and gives the way back.
+def inferred: (.detail // "") | startswith("its session ended (SessionEnd killed");
 def fix: . as $e
-  | if   .verdict == "down"        then ("cd \(cdp) && \(cd) bot \(qbot) recover" | wrap($e))
+  | if   .verdict == "down" or (.verdict == "held" and inferred) then ("cd \(cdp) && \(cd) bot \(qbot) recover" | wrap($e))
     elif .verdict == "stale-session" then ((if (.job // "") != "" then "claude stop \(.job)" else "kill \(.pid)" end) | wrap($e))
     elif .verdict == "stale"       then ("cd \(cdp) && \(cd) bot \(qbot) recover" | wrap($e))
     elif .verdict == "duplicate"   then (if .host == "local" then "" else "on \(.host): " end) + "claude agents, then claude stop <id> for the copy that is not the bot\u0027s"
@@ -622,7 +625,7 @@ def recovery_text: ((($now_s - (.posted_since_s // $now_s)) / 60) | floor) as $m
   | (if .verdict == "held" then "[held] \(subject): held down on purpose after \($m)m (was \(.posted))"
      elif .posted == "stale-session" then "[recovered] \(subject): the stale session is gone after \($m)m"
      else "[recovered] \(subject): answering again after \($m)m (was \(.posted))" end) | .[0:1900];
-def payload($kind): if $kind == "finding" and .verdict == "held"
+def payload($kind): if $kind == "finding" and .verdict == "held" and (inferred | not)
   then {content: ("[held] \(subject): \(.detail)" | .[0:1900]), allowed_mentions: {parse: []}}
   elif $kind == "finding"
   then {content: finding_text, allowed_mentions: (if owner != "" then {users: [owner]} else {parse: []} end)}

@@ -388,6 +388,8 @@ if [ "${1:-}" = bot ]; then
       b_rlog "$b_stops" 1
       echo "claude-discord: bot: $bn still runs after stop (pid ${alive[*]}): nothing was started${stopped_ids:+; stopped: $stopped_ids}. Stop it by hand (claude stop <id>), then claude-discord --bg --name $bn" >&2; exit 1
     fi
+    # --yes is what the monitor and boot run: the session can tell it was started by them (auto-start under 120 s old at its SessionStart).
+    [ -z "$b_yes" ] || touch "$d/auto-start" 2>/dev/null || :
     b_rc=0
     case $b_do in
       respawn) claude respawn "$b_id" || b_rc=$?;;

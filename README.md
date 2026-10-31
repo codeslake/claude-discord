@@ -1100,8 +1100,10 @@ nothing, and neither does a session that merely inherited `$CLAUDE_JOB_DIR`
 from a background session's shell: the job's `state.json` must name this
 session. To undo: `ctrl+t` on the bot in the agent view (`claude agents`), or
 delete its id from `pins.json`; the bot's next start pins it again. An id
-already in the file is left there and is not recorded as the bot's, so a pin
-a human added is never removed later.
+already in the file is left there, and `pinned-job` still names the bot's
+job (1.19.7: `boot`, `recover` and the hold check read it, and a person's `ctrl+t` pin used to
+leave it missing); `<bot dir>/pin-foreign` records that id as not the bot's, so a pin a
+human added is never removed later.
 
 Where the CLI stores pins in its v5 backend instead, they live under a
 storage key and the CLI may not read `pins.json` at all, so the pin does
@@ -1675,21 +1677,33 @@ the hook runs and the daemon's line comes after it starts). A bot with no server
 and no `held` whose pinned job (`pinned-job`) has `bg settled <job> (killed)` as
 the last line of its life in the last 20000 lines of `daemon.log` is held
 (`held` holds `session-end killed <time of the line>`), unless the daemon was
-shutting down in the minute before it (`shutdown requested`, `service recall`:
-`claude daemon stop`, an update), a later `claimed-spare`, `spawned` or `respawn`
-of the job follows, the line is older than the bot's newest `plugin-sessions/`
-marker, or the job is in `<bot dir>/own-stop` (the jobs `refresh`,
+shutting down in the minute before it and had not started again (`shutting down (`
+with no `daemon start` line between: `claude daemon stop`, an update; a kill after
+the new daemon started is a person's), any later `bg <word> <job>` line follows
+(`claimed-spare`, `spawned`, `retire`, a `(done)`), the line is older than the
+bot's newest `plugin-sessions/` marker (also checked on a hold already written:
+a bot restarted during the pass drops it), or the job is in `<bot dir>/own-stop` (the jobs `refresh`,
 `recover --fresh`, `rename` and a start's prune of dead sessions stopped
 themselves; the next session start clears it, so a restart whose start fails
 leaves the bot down and recovered, never held). Never a reboot, a `docker stop`
 or the daemon's idle retire, which end in `(done)` and are recovered as before.
 `boot` makes the same check before it starts a bot, for a host that went down
 before a health pass wrote `held`; a rotated `daemon.log` loses the evidence
-and the bot is then recovered, as before. The monitor says it once, `[held] <bot> on
-<host> (<project>): its session ended (SessionEnd killed, no daemon retire
-logged): ...`, with no mention, so a wrong call is seen. Both `[held]` lines
+and the bot is then recovered, as before. The monitor says it once. A hold from the hook (`/exit`, logout) is
+`[held] <bot> on <host> (<project>): its session ended (SessionEnd <reason>, no daemon retire logged): ...`
+with no mention. The inferred one (1.19.7) mentions the bot's owner like a `[down]`, says
+it was inferred from `daemon.log` as a person's stop, and gives the recover command: on
+Claude Code 2.1.314 a `kill -9` or `kill -TERM` of the worker of a job with
+`interactiveLineage` (a bot started by `--bg` from a terminal) logs the same
+`bg settled <job> (killed)` as `claude stop` and `rm`, which `daemon.log` cannot tell
+apart, so that post is the owner's cue to run `claude-discord bot <bot> recover` if it
+was not a person. Both `[held]` lines
 wait until the bot has been held 5 minutes (a respawn holds it for the seconds
 between its old session's end and its new one's start) and come once.
+`bot <bot> recover --yes` (what the monitor and `boot` run) touches `<bot dir>/auto-start`
+just before it starts or respawns the session, and claude-discord never deletes it: a
+session can tell it was started by the monitor or boot when `auto-start` is under 120 s old
+at its SessionStart (`DISCORD_STATE_DIR` is the bot dir). A `recover` without `--yes` does not touch it.
 `MONITOR_RECOVER=no` in the manager project's `config.env` turns it all off;
 the `[down]` and its fix line are posted as before.
 The TUI's Alerts tab shows each run as `↻ recover` (exit 0) or `↻ recover

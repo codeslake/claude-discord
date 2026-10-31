@@ -607,8 +607,9 @@ rm -f "$SD/held"
 # A bot its person stopped (1.19.7, person_stopped): the job in pinned-job has "bg settled <id> (killed)" as the LAST line of
 # its life in daemon.log (claude stop and claude rm; the SessionEnd hook cannot tell them from a SIGTERM), and health
 # writes held and reads it held, so the monitor never recovers it. Each case with its opposite: a (done) last, a later start of
-# the same id, the daemon's own shutdown just before, a line older than the newest session marker, an id in own-stop, no
-# pinned-job, another job's line, an unreadable time; a held file already there is kept as it is.
+# the same id, the daemon's own shutdown just before (and a kill after the new daemon started, a person's), a line older than the
+# newest session marker, an id in own-stop, no pinned-job, another job's line, an unreadable time; a held file already there
+# is kept as it is. A big log after the kill and many markers must not change a verdict (pipefail with head: SIGPIPE).
 DLOG="$HOME/.claude/daemon.log"; SDM="$SD/plugin-sessions"
 dts() { date -u -d "$1" +%Y-%m-%dT%H:%M:%S.000Z; }
 hv() {  # <log lines>: health's verdict for sbot, then the held file's first two words when health wrote one
@@ -621,28 +622,48 @@ SP1="[$(dts '10 minutes ago')] [bg] bg spawned ee0000ff (spare)"; KL="[$(dts '1 
 R1=$(hv "$SP1"$'\n'"$KL")
 R2=$(hv "$SP1"$'\n'"[$(dts '1 minute ago')] [bg] bg retire ee0000ff: idle-prompt, idle 60m"$'\n'"[$(dts '1 minute ago')] [bg] bg settled ee0000ff (done)")
 R3=$(hv "$KL"$'\n'"[$(dts '30 seconds ago')] [bg] bg claimed-spare ee0000ff (slash)")
-R4=$(hv "$KL"$'\n'"[$(dts '30 seconds ago')] [bg] bg spawned ee0000ff (fleet)")
-R5=$(hv "[$(dts '1 minute ago')] [supervisor] shutdown requested via control socket"$'\n'"[$(dts '59 seconds ago')] [bg] bg settled ee0000ff (killed)")
-R6=$(hv "[$(dts '5 minutes ago')] [supervisor] shutdown requested via control socket"$'\n'"$KL")
+SD1="[$(dts '5 minutes ago')] [supervisor] shutting down (cause=upgrade, uptime=9s, leases=1, live_workers=1)"
+R6=$(hv "$SD1"$'\n'"$KL")
 R7=$(hv "[$(dts '1 minute ago')] [bg] bg settled ee0000ff (done)"$'\n'"[$(dts '30 seconds ago')] [bg] bg settled 99999999 (killed)")
 R8=$(hv "[not-a-time] [bg] bg settled ee0000ff (killed)")
 R14=$(hv "[$(dts '90 seconds ago')] [supervisor] shutting down (cause=signal, uptime=9s, leases=1, live_workers=1)"$'\n'"$KL")
+DS="[$(dts '70 seconds ago')] [supervisor] shutting down (cause=upgrade, uptime=9s, leases=1, live_workers=1)"
+DN="[$(dts '69 seconds ago')] [supervisor] ─── daemon start ─── version=2.1.207 pid=1 origin=transient"
+R16=$(hv "$DS"$'\n'"$DN"$'\n'"$KL")   # the kill 10 s after a shutdown but after the next daemon start: a person's
+FILL=$(awk 'BEGIN { for (i = 0; i < 1500; i++) print "[2026-10-30T20:00:00.000Z] [bg] bg spare spawned host pid=" i " ................................" }')
+R17=$(hv "$DS"$'\n'"$KL"$'\n'"$FILL")   # 100 KB of log after the kill must not drop the shutdown line before it
 cp "$SD/.env" "$SD/.env.keep"; : > "$SD/.env"; R15=$(hv "$KL"); mv "$SD/.env.keep" "$SD/.env"   # no token: unknown, nothing to hold
 mkdir -p "$SDM"; : > "$SDM/s1"; touch -d '10 minutes ago' "$SDM/s1"
 R9=$(hv "$KL")
 touch "$SDM/s1"
 R10=$(hv "[$(dts '5 minutes ago')] [bg] bg settled ee0000ff (killed)")
+rm -rf "$SDM"; mkdir -p "$SDM"; LONG=$(printf 'm%.0s' {1..240}); for i in $(seq 1 3000); do : > "$SDM/$LONG$i"; done; touch -d '10 minutes ago' "$SDM"/*
+R18=$(hv "$KL")   # 3000 markers (720 KB of names), all older than the line: held
+: > "$SDM/new1"; R19=$(hv "[$(dts '5 minutes ago')] [bg] bg settled ee0000ff (killed)")   # one newer among them: not
 rm -rf "$SDM"; echo ee0000ff > "$SD/own-stop"
 R11=$(hv "$KL"); rm -f "$SD/own-stop"
 rm -f "$SD/pinned-job"; R12=$(hv "$KL"); echo ee0000ff > "$SD/pinned-job"
 printf '%s\n' "$KL" > "$DLOG"; echo "by hand" > "$SD/held"; queue "200 $NONE" '200 {"threads":[]}'; out=$(cd "$SP" && bash "$S" health --json 2>/dev/null) || :
 R13="$(field_of sbot verdict "$out") $(<"$SD/held")"
 K1="session-end killed"
-[ "$R1" = "held $K1" ] && [ "$R2" = down ] && [ "$R3" = down ] && [ "$R4" = down ] && [ "$R5" = down ] && [ "$R6" = "held $K1" ] && [ "$R7" = down ] &&
-  [ "$R8" = down ] && [ "$R9" = "held $K1" ] && [ "$R10" = down ] && [ "$R11" = down ] && [ "$R12" = down ] && [ "$R13" = "held by hand" ] && [ "$R14" = down ] && [ "$R15" = unknown ] ||
-  { echo "FAIL: health holds a bot whose pinned job's last daemon.log line is a (killed) and nothing else: $R1 | $R2 | $R3 | $R4 | $R5 | $R6 | $R7 | $R8 | $R9 | $R10 | $R11 | $R12 | $R13 | $R14 | $R15"; exit 1; }
+[ "$R1" = "held $K1" ] && [ "$R2" = down ] && [ "$R3" = down ] && [ "$R6" = "held $K1" ] && [ "$R7" = down ] &&
+  [ "$R8" = down ] && [ "$R9" = "held $K1" ] && [ "$R10" = down ] && [ "$R11" = down ] && [ "$R12" = down ] && [ "$R13" = "held by hand" ] && [ "$R14" = down ] && [ "$R15" = unknown ] &&
+  [ "$R16" = "held $K1" ] && [ "$R17" = down ] && [ "$R18" = "held $K1" ] && [ "$R19" = down ] ||
+  { echo "FAIL: health holds a bot whose pinned job's last daemon.log line is a (killed) and nothing else: $R1 | $R2 | $R3 | $R6 | $R7 | $R8 | $R9 | $R10 | $R11 | $R12 | $R13 | $R14 | $R15 | $R16 | $R17 | $R18 | $R19"; exit 1; }
+# An inferred hold (session-end killed <time>) counts only while no session marker is newer than <time> (health race 1.19.7:
+# a bot restarted during the pass, its hold written after on-session-start removed it): dropped, the bot reads down.
+: > "$DLOG"; mkdir -p "$SDM"; touch -d '10 minutes ago' "$SDM"; : > "$SDM/s1"; touch -d '10 minutes ago' "$SDM/s1"
+hh() {  # <held content>: health's verdict for sbot, then "kept" when the held file is still there
+  printf '%s\n' "$1" > "$SD/held"; queue "200 $NONE" '200 {"threads":[]}'
+  out=$(cd "$SP" && bash "$S" health --json 2>/dev/null) || :
+  printf '%s' "$(field_of sbot verdict "$out")"; [ ! -f "$SD/held" ] || printf ' kept'
+}
+H1=$(hh "session-end killed $(dts '5 minutes ago')")   # the marker is older than the line: kept
+touch "$SDM/s1"; H2=$(hh "session-end killed $(dts '5 minutes ago')")   # a session started after the line: dropped
+H3=$(hh "session-end prompt_input_exit $(dts '5 minutes ago')")   # the hook's own hold is not inferred: kept
+rm -rf "$SDM"
+[ "$H1" = "held kept" ] && [ "$H2" = down ] && [ "$H3" = "held kept" ] || { echo "FAIL: an inferred hold is dropped once a session marker is newer than its line, the hook's hold is not: $H1 | $H2 | $H3"; exit 1; }
 rm -f "$SD/held" "$SD/pinned-job" "$DLOG"
-rm -f "$SD/held"
 echo "ok: health --all lists stale sessions (a plugin server whose state dir is gone) with the job to stop, and leaves a server on a linked path alone"
 stop_servers
 
