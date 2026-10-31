@@ -388,15 +388,19 @@ if [ "${1:-}" = bot ]; then
       b_rlog "$b_stops" 1
       echo "claude-discord: bot: $bn still runs after stop (pid ${alive[*]}): nothing was started${stopped_ids:+; stopped: $stopped_ids}. Stop it by hand (claude stop <id>), then claude-discord --bg --name $bn" >&2; exit 1
     fi
-    # --yes is what the monitor and boot run: the session can tell it was started by them (auto-start under 120 s old at its SessionStart).
-    [ -z "$b_yes" ] || touch "$d/auto-start" 2>/dev/null || :
+    # --yes is what the monitor, boot and a script passing it run: the session can tell it was started by them (auto-start
+    # under 120 s old at its SessionStart). Touched once the start or respawn succeeded, so a failed one marks no later start.
+    # A respawn kills the old process, and the daemon logs "bg settled <id> (killed)" for it: own-stop first (1.19.7), or a pass
+    # that sees that line before the claim line reads it as a person's stop. (fresh and takeover stop through stop_sessions, and
+    # the start prunes through prune_dead_sessions: both record their ids themselves.)
     b_rc=0
     case $b_do in
-      respawn) claude respawn "$b_id" || b_rc=$?;;
+      respawn) printf '%s\n' "$b_id" 2>/dev/null >> "$d/own-stop"; claude respawn "$b_id" || b_rc=$?;;
       fresh) start_fresh "$self_path" "$bot" "$d" "Catch up on the channel." || b_rc=$?;;
       takeover) start_fresh "$self_path" "$bot" "$d" --resume "$b_now" || b_rc=$?;;
       *) start_fresh "$self_path" "$bot" "$d" || b_rc=$?;;
     esac
+    [ -n "$b_yes" ] && [ "$b_rc" = 0 ] && { touch "$d/auto-start" 2>/dev/null || :; }
     b_rlog "$b_cmd" "$b_rc"
     echo "claude-discord: bot: ran $b_cmd (exit $b_rc)${put_back:+; its handoff was put back}; the monitor's next pass says whether $bn answers"
     [ "$b_rc" = 0 ] || exit 1

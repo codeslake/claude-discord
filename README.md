@@ -1103,7 +1103,9 @@ delete its id from `pins.json`; the bot's next start pins it again. An id
 already in the file is left there, and `pinned-job` still names the bot's
 job (1.19.7: `boot`, `recover` and the hold check read it, and a person's `ctrl+t` pin used to
 leave it missing); `<bot dir>/pin-foreign` records that id as not the bot's, so a pin a
-human added is never removed later.
+human added is never removed while its job runs. Once the bot's job has changed and that job no longer runs,
+the monitor's `health --all --patch` takes the id out of `pins.json` and `pin-foreign` (a pin of a dead job is useless);
+a repair of an empty `pinned-job` for the bot's own job (by its state dir) records nothing there.
 
 Where the CLI stores pins in its v5 backend instead, they live under a
 storage key and the CLI may not read `pins.json` at all, so the pin does
@@ -1700,9 +1702,9 @@ apart, so that post is the owner's cue to run `claude-discord bot <bot> recover`
 was not a person. Both `[held]` lines
 wait until the bot has been held 5 minutes (a respawn holds it for the seconds
 between its old session's end and its new one's start) and come once.
-`bot <bot> recover --yes` (what the monitor and `boot` run) touches `<bot dir>/auto-start`
-just before it starts or respawns the session, and claude-discord never deletes it: a
-session can tell it was started by the monitor or boot when `auto-start` is under 120 s old
+`bot <bot> recover --yes` (the monitor, `boot`, or a script passing `--yes`) touches `<bot dir>/auto-start`
+once the start or respawn command succeeded (a failed one marks nothing), and claude-discord never deletes it: a
+session can tell it was started by a `recover --yes` when `auto-start` is under 120 s old
 at its SessionStart (`DISCORD_STATE_DIR` is the bot dir). A `recover` without `--yes` does not touch it.
 `MONITOR_RECOVER=no` in the manager project's `config.env` turns it all off;
 the `[down]` and its fix line are posted as before.

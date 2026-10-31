@@ -5,7 +5,7 @@
 # upgrade respawns its workers with no SessionEnd.
 # `claude stop`, `claude rm` and a delete in the agent view end with reason "other", like a SIGTERM from a docker stop, a
 # reboot or the daemon's idle retire, and this hook cannot tell them apart: it ran 2 s ahead of the daemon's "bg settled
-# <job> (killed)" line in 2.1.304 and 0.6 s behind it in 2.1.314, and `claude rm` deletes the job dir first, so the job's
+# <job> (killed)" line in 2.1.304 and about 0.6 s ahead of it in 2.1.314, and `claude rm` deletes the job dir first, so the job's
 # identity is gone (1.19.7). So "other" holds nothing here: health and boot read daemon.log when they decide
 # (person_stopped, bin/lib/state.sh).
 # A hold writes <state dir>/held; the bot's next session start removes it (on-session-start), and the monitor posts one

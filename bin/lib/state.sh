@@ -348,6 +348,14 @@ marker_newer() {
   mt=$({ stat -c %Y "$1"/plugin-sessions/* 2>/dev/null || stat -f %m "$1"/plugin-sessions/* 2>/dev/null; } | grep -E '^[0-9]+$' | sort -n | tail -n 1) || mt=""
   [ -n "$mt" ] && [ "$mt" -gt "$2" ]
 }
+# drop_stale_inferred_hold <bot dir> (1.19.7): an inferred hold (held reads "session-end killed <daemon.log time>") counts only
+# while no session of the bot started after that line: removed when a plugin-sessions marker is newer (health and boot).
+drop_stale_inferred_hold() {
+  local hl=""
+  { read -r hl < "$1/held"; } 2>/dev/null || :
+  case $hl in "session-end killed "*) hl=$(log_epoch "${hl#session-end killed }") && marker_newer "$1" "$hl" && rm -f "$1/held" || :;; esac
+  return 0
+}
 person_stopped() {
   local d=$1 pin="" tl l n ts t s
   { IFS= read -r pin < "$d/pinned-job"; } 2>/dev/null || :

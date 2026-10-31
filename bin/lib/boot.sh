@@ -20,6 +20,7 @@ if [ "${1:-}" = boot ]; then
     for bd in "$pd_root"/*/; do
       bd=${bd%/}; b=${bd##*/}
       [ -f "$bd/.env" ] || continue
+      drop_stale_inferred_hold "$bd"   # an inferred hold of a bot that has started a session since is stale: dropped, as health does
       if [ -f "$bd/held" ]; then echo "boot: $p $b: held (bot $b hold), skipped"; continue; fi
       grep -q '^DISCORD_BOT_TOKEN=.' "$bd/.env" 2>/dev/null || { echo "boot: $p $b: no token, skipped"; continue; }
       pin=""; { read -r pin < "$bd/pinned-job"; } 2>/dev/null || :

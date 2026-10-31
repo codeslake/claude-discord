@@ -479,8 +479,8 @@ for src in startup resume fork; do
   [ "$(<"$DSD/pinned-job")" = eeee0005 ] || { echo "FAIL: a $src of a job a person pinned must write pinned-job: $(cat "$DSD/pinned-job" 2>&1)"; exit 1; }
 done
 pin eeee0005 resume; pin cccc0003 resume
-[ "$(<"$PINS")" = "$(cli_pins eeee0005 11110001 cccc0003)" ] && [ "$(<"$DSD/pinned-job")" = cccc0003 ] && [ ! -e "$DSD/pin-foreign" ] ||
-  { echo "FAIL: the next job's start must not remove a pin a person added, and then owns its own: $(<"$PINS") $(cat "$DSD/pinned-job" 2>&1)"; exit 1; }
+[ "$(<"$PINS")" = "$(cli_pins eeee0005 11110001 cccc0003)" ] && [ "$(<"$DSD/pinned-job")" = cccc0003 ] && [ "$(<"$DSD/pin-foreign")" = eeee0005 ] ||
+  { echo "FAIL: the next job's start must not remove a pin a person added, and keeps it in pin-foreign for health to drop once the job is gone (pin_drop): $(<"$PINS") $(cat "$DSD/pinned-job" 2>&1)"; exit 1; }
 pin bbbb0002 resume
 # A pinned-job that is not a job id (a trailing space, garbage) names nothing
 # this bot pinned, so nothing is removed for it; a well-formed one still is.
@@ -4052,7 +4052,9 @@ rc=0; out=$(bash "$S" bot acc recover --yes </dev/null 2>&1) || rc=$?; BRC=0; ba
 [ "$rc $BRC" = "0 2" ] && grep -q '^    run: claude respawn acc11111' <<<"$out" && [[ $out != *"$MK"* ]] && [ "$(<"$HOME/claude.calls")" = "RESPAWN acc11111" ] &&
   [ "$(cut -d' ' -f4- "$AD/recover.log")" = "recover --yes: claude respawn acc11111 (exit 0)" ] ||
   { echo "FAIL: bot recover --yes runs its plan with no terminal and no question, logged as recover --yes: rc=$rc $BRC $out / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
-[ -e "$AD/auto-start" ] && [ "$(find "$AD/auto-start" -mmin -2 | wc -l | tr -d ' ')" = 1 ] || { echo "FAIL: bot recover --yes (what the monitor and boot run) touches <bot dir>/auto-start before it starts the session"; exit 1; }
+[ -e "$AD/auto-start" ] && [ "$(find "$AD/auto-start" -mmin -2 | wc -l | tr -d ' ')" = 1 ] || { echo "FAIL: bot recover --yes (what the monitor and boot run) touches <bot dir>/auto-start once the session is started"; exit 1; }
+grep -qxF acc11111 "$AD/own-stop" || { echo "FAIL: recover records the job it respawns in own-stop (the respawn kills the old process: not a person's stop): $(cat "$AD/own-stop" 2>&1)"; exit 1; }
+rm -f "$AD/own-stop"
 rm -f "$HOME/claude.calls" "$AD/recover.log" "$AD/auto-start"
 # hold (1.19.1): the marker, no question, nothing run; a word after it is usage (exit 2).
 rc=0; out=$(bash "$S" bot acc hold </dev/null 2>&1) || rc=$?; BRC=0; bash "$S" bot acc hold x </dev/null >/dev/null 2>&1 || BRC=$?
@@ -5164,22 +5166,27 @@ rs=$(jq -c --arg mp "$MPP" '[.bots["h1|/home/u/ws/p|rv"].recover_rc, .bots["loca
 # by its SessionEnd just now (a respawn's seconds between SessionEnd and SessionStart), is not said.
 # hk is held by health reading daemon.log (1.19.7, SessionEnd killed): a kill -9 of a --bg bot looks the same there as
 # claude stop, so its [held] mentions the owner, says it was inferred, and gives the recover command.
-echo "MONITOR_RECOVER=no" >> "$MCFG"; RX=(hd:held he:held hx:held hk:held)
-rdoc '.projects[0].bots |= map(if .bot == "he" or .bot == "hx" then .detail = "its session ended (SessionEnd other, no daemon retire logged): held" elif .bot == "hk" then .detail = "its session ended (SessionEnd killed): inferred from daemon.log as a person\u0027s stop (claude stop or rm), held" else . end)'
+echo "MONITOR_RECOVER=no" >> "$MCFG"; RX=(hd:held he:held hx:held hk:held hq:held)
+rdoc '.projects[0].bots |= map(if .bot == "he" or .bot == "hx" then .detail = "its session ended (SessionEnd other, no daemon retire logged): held" elif .bot == "hk" or .bot == "hq" then .detail = "its session ended (SessionEnd killed): inferred from daemon.log as a person\u0027s stop (claude stop or rm), held" else . end)'
 rm -f "$HOME/ssh.log" "$HOME/local.calls"
 mstate --argjson n "$(date +%s)" --arg mp "$MPP" '.bots["h1|/home/u/ws/p|rv"].recover_s = ($n - 1801) | .bots["local|" + $mp + "|lb"].recover_s = ($n - 1801)
   | .bots["h1|/home/u/ws/p|hd"] = {host: "h1", bot: "hd", verdict: "held", since: ($n - 900 | todate), since_s: ($n - 900), posted: "down", posted_since_s: ($n - 900)}
   | .bots["h1|/home/u/ws/p|he"] = {host: "h1", bot: "he", verdict: "held", since: ($n - 900 | todate), since_s: ($n - 900)}
-  | .bots["h1|/home/u/ws/p|hk"] = {host: "h1", bot: "hk", verdict: "held", since: ($n - 900 | todate), since_s: ($n - 900)}'
+  | .bots["h1|/home/u/ws/p|hk"] = {host: "h1", bot: "hk", verdict: "held", since: ($n - 900 | todate), since_s: ($n - 900)}
+  | .bots["h1|/home/u/ws/p|hq"] = {host: "h1", bot: "hq", verdict: "held", since: ($n - 900 | todate), since_s: ($n - 900), posted: "down", posted_since_s: ($n - 900)}'
 for _ in 1 2 3 4 5; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
-mstart; mstop; R2=$(posts | jq -r 'select(.content | startswith("[held] hk") or contains("[held] hk on") | not) | .content' | sort)
+mstart; mstop; R2=$(posts | jq -r 'select(.content | startswith("[held] hk") or contains("[held] hk on") or contains("[held] hq on") | not) | .content' | sort)
 HK=$(posts | jq -r 'select(.content | contains("[held] hk on")) | .content')
+# hq: an inferred hold that closes a posted [down] (1.19.7) carries the same owner mention and recover command as hk's post.
+HQ=$(posts | jq -r 'select(.content | contains("[held] hq on")) | .content')
 [ "$R2" = "$(printf '%s\n' "[held] hd on h1 (~/ws/p): held down on purpose after 15m (was down)" "[held] he on h1 (~/ws/p): its session ended (SessionEnd other, no daemon retire logged): held" "[recovered] h1 (/gone/x): the stale session is gone after 0m" | sort)" ] &&
   [ "$(posts | jq -c 'select(.content | startswith("[held] he")) | .allowed_mentions')" = '{"parse":[]}' ] &&
   [ "$(posts | jq -c 'select(.content | contains("[held] hk on")) | .allowed_mentions')" = '{"users":["222"]}' ] &&
+  [ "$(posts | jq -c 'select(.content | contains("[held] hq on")) | .allowed_mentions')" = '{"users":["222"]}' ] &&
+  [ "$HQ" = "$(printf '%s\n' "<@222> [held] hq on h1 (~/ws/p): held down on purpose after 15m (was down)" "fix: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord bot hq recover'")" ] &&
   [ "$HK" = "$(printf '%s\n' "<@222> [held] hk on h1 (~/ws/p)" "reason: its session ended (SessionEnd killed): inferred from daemon.log as a person's stop (claude stop or rm), held" "fix: ssh h1 'cd ~/ws/p && ~/.local/bin/claude-discord bot hk recover'")" ] &&
   ! grep -q ' recover --yes' "$HOME/ssh.log" && ! grep -q '^bot ' "$HOME/local.calls" &&
-  jq -e '.bots["h1|/home/u/ws/p|hd"].posted == "held" and .bots["h1|/home/u/ws/p|he"].posted == "held" and .bots["h1|/home/u/ws/p|hx"].posted == null' "$MB/state.json" >/dev/null ||
+  jq -e '.bots["h1|/home/u/ws/p|hq"].posted == "held" and .bots["h1|/home/u/ws/p|hd"].posted == "held" and .bots["h1|/home/u/ws/p|he"].posted == "held" and .bots["h1|/home/u/ws/p|hx"].posted == null' "$MB/state.json" >/dev/null ||
   { echo "FAIL: MONITOR_RECOVER=no recovers nothing, a held bot closes its [down] with a [held] line, and a stale session that left the answer posts its recovery: $R2 / $HK / $(posts | jq -c "select(.content | contains(\"[held] hk on\")) | .allowed_mentions") / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }
 cp "$HOME/mcfg.keep" "$MCFG"; RX=(); rdoc .; rm -f "$HOME/ssh.log"; for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
 mstart; mstop

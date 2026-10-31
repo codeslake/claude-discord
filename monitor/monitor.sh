@@ -622,14 +622,15 @@ def finding_text: labels as $l
      + "[\(.verdict)] \(subject)\n\($l.reason): \(.detail)\n\($l.fix): \(.fix)") | .[0:1900];
 # The recovery line has no label, so it reads the same in both languages.
 def recovery_text: ((($now_s - (.posted_since_s // $now_s)) / 60) | floor) as $m
-  | (if .verdict == "held" then "[held] \(subject): held down on purpose after \($m)m (was \(.posted))"
+  | (if .verdict == "held" then (if inferred and owner != "" then "<@\(owner)> " else "" end) + "[held] \(subject): held down on purpose after \($m)m (was \(.posted))"
+       + (if inferred then "\n\(labels.fix): \(.fix)" else "" end)
      elif .posted == "stale-session" then "[recovered] \(subject): the stale session is gone after \($m)m"
      else "[recovered] \(subject): answering again after \($m)m (was \(.posted))" end) | .[0:1900];
 def payload($kind): if $kind == "finding" and .verdict == "held" and (inferred | not)
   then {content: ("[held] \(subject): \(.detail)" | .[0:1900]), allowed_mentions: {parse: []}}
   elif $kind == "finding"
   then {content: finding_text, allowed_mentions: (if owner != "" then {users: [owner]} else {parse: []} end)}
-  else {content: recovery_text, allowed_mentions: {parse: []}} end;
+  else {content: recovery_text, allowed_mentions: (if .verdict == "held" and inferred and owner != "" then {users: [owner]} else {parse: []} end)} end;
 # group_payload: one message for several bots of one host (an array of entries), each distinct owner mentioned once.
 # Whole entries only, as many as fit in 1900 characters; the bots past that are named in one last line, so none is dropped
 # unseen (their `posted` is set with the rest).
@@ -658,7 +659,8 @@ def observe($v; $d; $meta): (. // {}) as $o
 def warn_only: .verdict != "unknown" and (hold[.verdict] == null or hold[.verdict] >= 1800 or (.verdict == "hostdown" and .laptop == true));
 def due:
   # held (1.19.1, bot <bot> hold): what was posted is closed, as by a recovery, with a line of its own; a hold the
-  # SessionEnd hook inferred (1.19.4: its detail starts "its session ended") is said once, with no mention. Either only
+  # SessionEnd hook inferred (1.19.4: its detail starts "its session ended") is said once, with no mention (but one health inferred
+  # from daemon.log, 1.19.7, closes the [down] with the owner mention and the recover command, as its own [held] post). Either only
   # once it has held a whole hold (5 min): the SessionEnd of a respawn holds the bot for the seconds until its SessionStart,
   # and a pass in between would post [held] and then [recovered]. Once said, `posted` is "held" (apply), so neither
   # line comes twice.

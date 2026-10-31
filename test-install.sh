@@ -617,9 +617,9 @@ HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all >/dev/null 2>&1 || :
 [ ! -e "$BH/bm/pinned-job" ] && [ ! -s "$BH/be/pinned-job" ] && [ "$(<"$BH/bd/pinned-job")" = dead0007 ] ||
   { echo "FAIL: health --all without --patch changes no pinned-job"; exit 1; }
 HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all --patch >/dev/null 2>&1 || :
-[ "$(<"$BH/bm/pinned-job")" = a1000001 ] && [ "$(<"$BH/bm/pin-foreign")" = a1000001 ] ||
-  { echo "FAIL: --patch writes a missing pinned-job for a job already in pins.json (and records it as not this bot's pin): $(cat "$BH/bm/pinned-job" 2>&1)"; exit 1; }
-[ "$(<"$BH/be/pinned-job")" = e2000002 ] || { echo "FAIL: --patch writes an empty pinned-job: $(cat "$BH/be/pinned-job")"; exit 1; }
+[ "$(<"$BH/bm/pinned-job")" = a1000001 ] && [ ! -e "$BH/bm/pin-foreign" ] ||
+  { echo "FAIL: --patch writes a missing pinned-job for a job already in pins.json, and the bot's own job (by its state dir) is not recorded in pin-foreign: $(cat "$BH/bm/pinned-job" "$BH/bm/pin-foreign" 2>&1)"; exit 1; }
+[ "$(<"$BH/be/pinned-job")" = e2000002 ] && [ ! -e "$BH/be/pin-foreign" ] || { echo "FAIL: --patch writes an empty pinned-job: $(cat "$BH/be/pinned-job")"; exit 1; }
 [ "$(<"$BH/bk/pinned-job")" = c3000003 ] && [ ! -e "$BH/bk/health.log" ] && [ ! -e "$BH/bk/pin-foreign" ] ||
   { echo "FAIL: --patch leaves a pinned-job that is already right alone"; exit 1; }
 [ "$(<"$BH/bl/pinned-job")" = f5000005 ] && [ ! -e "$BH/bl/health.log" ] ||
@@ -627,8 +627,18 @@ HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all --patch >/dev/null 2>&1 || :
 [ "$(<"$BH/bd/pinned-job")" = d6000006 ] && grep -q 'pinned-job set to d6000006 (it was dead0007)' "$BH/bd/health.log" &&
   [ "$(jq -c . "$BH/.claude/jobs/pins.json")" = '["a1000001","e2000002","c3000003","b4000004","f5000005","d6000006"]' ] ||
   { echo "FAIL: --patch replaces a pinned-job naming a job that is not running (the old id leaves pins.json): $(cat "$BH/bd/pinned-job" "$BH/.claude/jobs/pins.json" 2>&1)"; exit 1; }
+# A job in pin-foreign that the bot has moved on from (pinned-job names another) and that no longer runs leaves pins.json and
+# pin-foreign under --patch; one that still runs (a person's pin of a live job), and the bot's current job, stay.
+jq -c '. + ["dead0009","dead000a"]' "$BH/.claude/jobs/pins.json" > "$BH/pins.new" && mv "$BH/pins.new" "$BH/.claude/jobs/pins.json"
+# bq is a bot of a recorded project (the sweep walks those): its job is c3000003, and it has recorded four foreign ids.
+mkdir -p "$BH/pq"; kq="$BH/.claude-discord/projects/$(skey "$BH/pq")"; mkdir -p "$kq/bots/bq"
+printf '%s\n' "$(cd -P "$BH/pq" && pwd)" > "$kq/project"; printf 'DISCORD_BOT_TOKEN=x\n' > "$kq/bots/bq/.env"; echo c3000003 > "$kq/bots/bq/pinned-job"
+printf 'dead0009\ne2000002\ndead000a\nc3000003\n' > "$kq/bots/bq/pin-foreign"
+HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all --patch >/dev/null 2>&1 || :
+[ "$(jq -c . "$BH/.claude/jobs/pins.json")" = '["a1000001","e2000002","c3000003","b4000004","f5000005","d6000006"]' ] && [ "$(<"$kq/bots/bq/pin-foreign")" = $'e2000002\nc3000003' ] ||
+  { echo "FAIL: --patch drops a pin-foreign job that no longer runs from pins.json and pin-foreign, never a running one or the bot's own: $(cat "$BH/.claude/jobs/pins.json" "$kq/bots/bq/pin-foreign" 2>&1)"; exit 1; }
 rm -rf "${BH:?}"
-echo "ok: health --all --patch sets a missing, empty or dead pinned-job for a job already in pins.json and leaves a running or right one"
+echo "ok: health --all --patch sets a missing, empty or dead pinned-job for a job already in pins.json (not as pin-foreign when it is the bot's own), leaves a running or right one, and drops a dead pin-foreign job"
 # held (1.19.1): sbot's own server is the last one up; with it stopped and bot sbot hold, health reads held, not down.
 stop_one_server "$SD"; : > "$SD/held"; queue "200 $NONE" '200 {"threads":[]}'
 out=$(cd "$SP" && bash "$S" health --json 2>/dev/null) || :
@@ -881,21 +891,33 @@ done
 # 1.19.1: a held bot (bot hold) and one with no token in its .env are skipped, nothing asked of them.
 kb="$BH/.claude-discord/projects/$(skey "$BH/pb")/bots"; mkdir -p "$kb/bh" "$kb/bn"; printf 'DISCORD_BOT_TOKEN=x\n' > "$kb/bh/.env"; : > "$kb/bh/held"
 printf 'DISCORD_CHANNEL_ID=1\n' > "$kb/bn/.env"
+# 1.19.7: bx holds an inferred hold (session-end killed <time>) older than its newest session marker: stale (it has run since,
+# then crashed), dropped, and bx is recovered; by holds the same with the marker older than the line: kept, skipped.
+for x in bx by; do mkdir -p "$kb/$x/plugin-sessions"; printf 'DISCORD_BOT_TOKEN=x\n' > "$kb/$x/.env"; printf 'session-end killed %s\n' "$(dts '1 hour ago')" > "$kb/$x/held"; done
+echo bx000001 > "$kb/bx/pinned-job"; : > "$kb/bx/plugin-sessions/s1"; : > "$kb/by/plugin-sessions/s1"; touch -d '2 hours ago' "$kb/by/plugin-sessions/s1" "$kb/by/plugin-sessions"
 # 1.19.7: bs was stopped by a person (its pinned job's last daemon.log line is a (killed), the job no longer listed) just
 # before the host went down: held is written and it is skipped; bb's last line is a (done): recovered as before.
 mkdir -p "$kb/bs" "$BH/.claude"; printf 'DISCORD_BOT_TOKEN=x\n' > "$kb/bs/.env"; echo b5000001 > "$kb/bs/pinned-job"
 printf '[2026-10-30T10:00:00.000Z] [bg] bg settled bb000001 (done)\n[2026-10-30T10:00:01.000Z] [bg] bg settled b5000001 (killed)\n' > "$BH/.claude/daemon.log"
 printf '#!/bin/bash\ncase $1 in agents) echo %s;; respawn) echo "RESPAWN $2" >> "$HOME/calls"; [ ! -e "$HOME/fail" ] || exit 7;; *) echo "PLAIN $*";; esac\n' \
-  "'[{\"name\":\"ba\",\"id\":\"ba000001\",\"pid\":4242,\"cwd\":\"$(cd -P "$BH/pa" && pwd)\"},{\"name\":\"bb\",\"id\":\"bb000001\",\"cwd\":\"$(cd -P "$BH/pb" && pwd)\",\"state\":\"done\"}]'" > "$BH/bin/claude"
+  "'[{\"name\":\"ba\",\"id\":\"ba000001\",\"pid\":4242,\"cwd\":\"$(cd -P "$BH/pa" && pwd)\"},{\"name\":\"bb\",\"id\":\"bb000001\",\"cwd\":\"$(cd -P "$BH/pb" && pwd)\",\"state\":\"done\"},{\"name\":\"bx\",\"id\":\"bx000001\",\"cwd\":\"$(cd -P "$BH/pb" && pwd)\",\"state\":\"done\"}]'" > "$BH/bin/claude"
 chmod +x "$BH/bin/claude"
 rc=0; out=$(cd "$BH" && HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc=$?
+# recover --yes: the respawn's job is in own-stop before the respawn, and auto-start is touched only once the respawn succeeded.
+[ "$(<"$kb/bb/own-stop")" = bb000001 ] && [ -e "$kb/bb/auto-start" ] || { echo "FAIL: recover --yes records the respawned job in own-stop and touches auto-start after a successful respawn: $(cat "$kb/bb/own-stop" 2>&1) $(ls "$kb/bb" 2>&1)"; exit 1; }
+rm -f "$kb/bb/auto-start"
 : > "$BH/fail"; rc2=0; out2=$(cd "$BH" && HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc2=$?
 [ "$rc $rc2" = "0 1" ] && grep -qE "^boot: .*/pa ba: running \(pid 4242\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bb: recovered$" <<<"$out" &&
-  grep -qE "^boot: .*/pb bb: failed \(exit 1\): .*claude respawn bb000001 \(exit 7\)" <<<"$out2" && [ "$(<"$BH/calls")" = $'RESPAWN bb000001\nRESPAWN bb000001' ] &&
+  grep -qE "^boot: .*/pb bb: failed \(exit 1\): .*claude respawn bb000001 \(exit 7\)" <<<"$out2" && [ "$(<"$BH/calls")" = $'RESPAWN bb000001\nRESPAWN bx000001\nRESPAWN bb000001\nRESPAWN bx000001' ] && [ ! -e "$kb/bb/auto-start" ] && [ ! -e "$kb/bx/held" ] &&
+  grep -qE "^boot: .*/pb bx: recovered$" <<<"$out" && grep -qE "^boot: .*/pb by: held \(bot by hold\), skipped$" <<<"$out" && [ -f "$kb/by/held" ] &&
   grep -qE "^boot: .*/pb bs: stopped by a person \(daemon.log, 2026-10-30T10:00:01.000Z\), held, skipped$" <<<"$out" && [ "$(cut -d' ' -f1-2 "$kb/bs/held")" = "session-end killed" ] &&
   grep -qE "^boot: .*/pb bh: held \(bot bh hold\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bn: no token, skipped$" <<<"$out" ||
   { echo "FAIL: boot skips a bot listed with a pid or stopped by a person (held written), recovers one listed without, says a failure (exit 1): rc=$rc $rc2 / $out / $out2 / $(cat "$BH/calls" 2>&1)"; exit 1; }
 rm -rf "${BH:?}"
+# The SessionEnd hook and person_stopped describe one order of the daemon's killed line and the hook (measured, 2.1.314: the
+# line comes about 0.6 s AFTER the hook starts): neither says the hook runs behind it.
+grep -q 'AFTER it starts' "$D/bin/lib/state.sh" && grep -q '0\.6 s ahead' "$D/hooks/turn/on-session-end" && ! grep -q '0\.6 s behind' "$D/hooks/turn/on-session-end" ||
+  { echo "FAIL: on-session-end and state.sh agree on the order of the hook and the killed line (0.6 s ahead, not behind)"; exit 1; }
 echo "ok: boot recovers every bot of the machine that runs no session (bot recover --yes), skips one that does, and exits 1 when one failed"
 
 # access set with no terminal writes with no question when nothing in it widens who can drive the bot: no W, N or E

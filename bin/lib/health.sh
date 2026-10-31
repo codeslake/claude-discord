@@ -104,9 +104,12 @@ if [ "${1:-}" = health ]; then
         case $'\n'$pinned$'\n' in *$'\n'"$job"$'\n'*)
           # Listed already (a person's ctrl+t, or a pin from before 1.19.7): pinned-job still has to name it, or a person's
           # stop of this bot is never held. Set when missing, empty or naming a job that is not running; a running one stays.
+          # An empty pinned-job means the bot never recorded this job, and the job is its own by its state dir: not a person's
+          # pin, so not recorded in pin-foreign (a name that is not running is a bot that moved on to a job someone pinned).
           cur=""; { read -r cur < "$v/pinned-job"; } 2>/dev/null || :
+          own=""; [ -n "$cur" ] || own=own
           if [ "$do_patch" = yes ] && { [ -z "$cur" ] || ! case $'\n'$live$'\n' in *$'\n'"$cur"$'\n'*) true;; *) false;; esac; } &&
-            . "$self_root/hooks/lib/pin.sh" 2>/dev/null && pin_job "$job" "$v" "$cdir/jobs"; then
+            . "$self_root/hooks/lib/pin.sh" 2>/dev/null && pin_job "$job" "$v" "$cdir/jobs" "$own"; then
             printf '%s health: pinned-job set to %s (it was %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$job" "${cur:-empty}" >> "$v/health.log" 2>/dev/null || :
           fi
           continue;;
@@ -118,6 +121,14 @@ if [ "${1:-}" = health ]; then
         fi
         unp="$unp$job"$'\t'"$v"$'\t'"$fixed"$'\n'
       done <<<"$live"
+      # A job recorded in a bot's pin-foreign that the bot has moved on from and that no longer runs is out of pins.json.
+      if [ "$do_patch" = yes ] && . "$self_root/hooks/lib/pin.sh" 2>/dev/null; then
+        proj_arr
+        for p in ${pl[@]+"${pl[@]}"}; do
+          proj_dirs "$p"
+          for v in "$pd_root"/*/; do pin_drop "${v%/}" "$cdir/jobs" "$live" || :; done
+        done
+      fi
     fi
     if [ "$as_json" != yes ]; then
       while IFS=$'\t' read -r job v fixed; do
@@ -769,10 +780,7 @@ if [ "${1:-}" = health ]; then
     fi
     # An inferred hold (session-end killed <daemon.log time>) counts only while no session of the bot started after that line:
     # a bot restarted while this pass ran (servers counted above, the hold written after on-session-start removed it) drops it.
-    if [ -f "$d/held" ] && [ "$servers" = 0 ]; then
-      hl=""; { read -r hl < "$d/held"; } 2>/dev/null || :
-      case $hl in "session-end killed "*) hl=$(log_epoch "${hl#session-end killed }") && marker_newer "$d" "$hl" && rm -f "$d/held" || :;; esac
-    fi
+    if [ -f "$d/held" ] && [ "$servers" = 0 ]; then drop_stale_inferred_hold "$d"; fi
     # Taken down on purpose (1.19.1, bot <bot> hold): with no server, held, whatever else was found (a message left
     # unanswered too). Not a finding: the monitor posts nothing for it and recovers nothing, nor does boot.
     if [ -f "$d/held" ] && [ "$servers" = 0 ]; then
