@@ -400,14 +400,8 @@ if [ "${1:-}" = bot ]; then
     [ -z "$b_yes" ] || { touch "$d/auto-start" 2>/dev/null || :; }
     case $b_do in
       respawn)
-        # Added once (a repeated recover does not stack lines), and taken back out when the respawn failed with the old process
-        # still alive: its later kill is then a person's, not ours.
-        b_own=""; grep -qxF "$b_id" "$d/own-stop" 2>/dev/null || { printf '%s\n' "$b_id" 2>/dev/null >> "$d/own-stop" && b_own=1; }
-        claude respawn "$b_id" || b_rc=$?
-        if [ "$b_rc" != 0 ] && [ -n "$b_own" ] && [[ $b_pid =~ ^[0-9]+$ ]] && kill -0 "$b_pid" 2>/dev/null; then
-          { grep -vxF "$b_id" "$d/own-stop" > "$d/own-stop.tmp.$$" || :; } 2>/dev/null
-          mv -f "$d/own-stop.tmp.$$" "$d/own-stop" 2>/dev/null || rm -f "$d/own-stop.tmp.$$" 2>/dev/null || :
-        fi;;
+        own_stop_add "$d" "$b_id"   # a kill later than 120 s after this line is a person's
+        claude respawn "$b_id" || b_rc=$?;;
       fresh) start_fresh "$self_path" "$bot" "$d" "Catch up on the channel." || b_rc=$?;;
       takeover) start_fresh "$self_path" "$bot" "$d" --resume "$b_now" || b_rc=$?;;
       *) start_fresh "$self_path" "$bot" "$d" || b_rc=$?;;

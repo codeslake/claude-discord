@@ -642,13 +642,12 @@ HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all --patch >/dev/null 2>&1 || :
 [ "$(jq -c . "$BH/.claude/jobs/pins.json")" = '["a1000001","e2000002","c3000003","b4000004","f5000005","d6000006","ab00000b","dead00bb"]' ] &&
   [ "$(<"$kq/bots/bq/pin-foreign")" = $'e2000002\nc3000003\nab00000b' ] && [ "$(<"$kq/bots/br/pin-foreign")" = dead00bb ] ||
   { echo "FAIL: --patch drops a pin-foreign job whose dir is gone from pins.json and pin-foreign, never a job that only finished (dir kept) or the bot's own: $(cat "$BH/.claude/jobs/pins.json" "$kq/bots/bq/pin-foreign" "$kq/bots/br/pin-foreign" 2>&1)"; exit 1; }
-# claude agents answering something that is not JSON says nothing about what is gone: the sweep does not run.
+# pin_drop decides by the job dir alone, so a claude agents answer that is not JSON changes nothing about it: a gone job still goes.
 jq -c '. + ["dead00cc"]' "$BH/.claude/jobs/pins.json" > "$BH/pins.new" && mv "$BH/pins.new" "$BH/.claude/jobs/pins.json"; echo dead00cc >> "$kq/bots/br/pin-foreign"
-p1=$(<"$BH/.claude/jobs/pins.json"); f1=$(<"$kq/bots/br/pin-foreign")
 printf '#!/bin/bash\n[ "$1" = agents ] && echo "not json"\n' > "$BH/bin/claude"
 HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all --patch >/dev/null 2>&1 || :
-[ "$(<"$BH/.claude/jobs/pins.json")" = "$p1" ] && [ "$(<"$kq/bots/br/pin-foreign")" = "$f1" ] && grep -q dead00cc "$BH/.claude/jobs/pins.json" ||
-  { echo "FAIL: --patch with a claude agents answer that is not JSON leaves pins.json and pin-foreign as they are: $(cat "$BH/.claude/jobs/pins.json" "$kq/bots/br/pin-foreign" 2>&1)"; exit 1; }
+{ ! grep -q dead00cc "$BH/.claude/jobs/pins.json" && [ "$(<"$kq/bots/br/pin-foreign")" = dead00bb ]; } ||
+  { echo "FAIL: --patch with a claude agents answer that is not JSON still drops a pin-foreign job whose dir is gone (pin_drop reads no live list): $(cat "$BH/.claude/jobs/pins.json" "$kq/bots/br/pin-foreign" 2>&1)"; exit 1; }
 rm -rf "${BH:?}"
 echo "ok: health --all --patch sets a missing, empty or dead pinned-job for a job already in pins.json (not as pin-foreign when it is the bot's own), leaves a running or right one, and drops a dead pin-foreign job"
 # held (1.19.1): sbot's own server is the last one up; with it stopped and bot sbot hold, health reads held, not down.
@@ -670,7 +669,7 @@ hv() {  # <log lines>: health's verdict for sbot, then the held file's first two
   printf '%s' "$(field_of sbot verdict "$out")"; [ ! -f "$SD/held" ] || printf ' %s' "$(cut -d' ' -f1-2 "$SD/held")"
 }
 echo ee0000ff > "$SD/pinned-job"; rm -rf "$SDM" "$SD/own-stop"
-SP1="[$(dts '10 minutes ago')] [bg] bg spawned ee0000ff (spare)"; KL="[$(dts '1 minute ago')] [bg] bg settled ee0000ff (killed)"
+SP1="[$(dts '10 minutes ago')] [bg] bg spawned ee0000ff (spare)"; KL="[$(dts '1 minute ago')] [bg] bg settled ee0000ff (killed)"; KE=$(date -u -d '1 minute ago' +%s)
 R1=$(hv "$SP1"$'\n'"$KL")
 R2=$(hv "$SP1"$'\n'"[$(dts '1 minute ago')] [bg] bg retire ee0000ff: idle-prompt, idle 60m"$'\n'"[$(dts '1 minute ago')] [bg] bg settled ee0000ff (done)")
 R3=$(hv "$KL"$'\n'"[$(dts '30 seconds ago')] [bg] bg claimed-spare ee0000ff (slash)")
@@ -693,16 +692,20 @@ R10=$(hv "[$(dts '5 minutes ago')] [bg] bg settled ee0000ff (killed)")
 rm -rf "$SDM"; mkdir -p "$SDM"; LONG=$(printf 'm%.0s' {1..240}); for i in $(seq 1 3000); do : > "$SDM/$LONG$i"; done; touch -d '10 minutes ago' "$SDM"/*
 R18=$(hv "$KL")   # 3000 markers (720 KB of names), all older than the line: held
 : > "$SDM/new1"; R19=$(hv "[$(dts '5 minutes ago')] [bg] bg settled ee0000ff (killed)")   # one newer among them: not
-rm -rf "$SDM"; echo ee0000ff > "$SD/own-stop"
-R11=$(hv "$KL"); rm -f "$SD/own-stop"
+rm -rf "$SDM"; echo "ee0000ff $((KE - 30))" > "$SD/own-stop"
+R11=$(hv "$KL")   # our own stop 30 s before the kill line
+echo "ee0000ff $((KE - 600))" > "$SD/own-stop"
+R21=$(hv "$KL")   # an old line of ours, the kill 10 minutes after it: a person's stop
+echo "99999999 $((KE - 30))" > "$SD/own-stop"
+R22=$(hv "$KL"); rm -f "$SD/own-stop"   # a recent line for another job
 rm -f "$SD/pinned-job"; R12=$(hv "$KL"); echo ee0000ff > "$SD/pinned-job"
 printf '%s\n' "$KL" > "$DLOG"; echo "by hand" > "$SD/held"; queue "200 $NONE" '200 {"threads":[]}'; out=$(cd "$SP" && bash "$S" health --json 2>/dev/null) || :
 R13="$(field_of sbot verdict "$out") $(<"$SD/held")"
 K1="session-end killed"
 [ "$R1" = "held $K1" ] && [ "$R2" = down ] && [ "$R3" = down ] && [ "$R6" = "held $K1" ] && [ "$R7" = down ] &&
-  [ "$R8" = down ] && [ "$R9" = "held $K1" ] && [ "$R10" = down ] && [ "$R11" = down ] && [ "$R12" = down ] && [ "$R13" = "held by hand" ] && [ "$R14" = down ] && [ "$R15" = unknown ] &&
+  [ "$R8" = down ] && [ "$R9" = "held $K1" ] && [ "$R10" = down ] && [ "$R11" = down ] && [ "$R21" = "held $K1" ] && [ "$R22" = "held $K1" ] && [ "$R12" = down ] && [ "$R13" = "held by hand" ] && [ "$R14" = down ] && [ "$R15" = unknown ] &&
   [ "$R16" = "held $K1" ] && [ "$R17" = down ] && [ "$R18" = "held $K1" ] && [ "$R19" = down ] && [ "$R20" = down ] ||
-  { echo "FAIL: health holds a bot whose pinned job's last daemon.log line is a (killed) and nothing else: $R1 | $R2 | $R3 | $R6 | $R7 | $R8 | $R9 | $R10 | $R11 | $R12 | $R13 | $R14 | $R15 | $R16 | $R17 | $R18 | $R19 | $R20"; exit 1; }
+  { echo "FAIL: health holds a bot whose pinned job's last daemon.log line is a (killed) and nothing else: $R1 | $R2 | $R3 | $R6 | $R7 | $R8 | $R9 | $R10 | $R11 | $R12 | $R13 | $R14 | $R15 | $R16 | $R17 | $R18 | $R19 | $R20 | $R21 | $R22"; exit 1; }
 # An inferred hold (session-end killed <time>) counts only while no session marker is newer than <time> (health race 1.19.7:
 # a bot restarted during the pass, its hold written after on-session-start removed it): dropped, the bot reads down.
 : > "$DLOG"; mkdir -p "$SDM"; touch -d '10 minutes ago' "$SDM"; : > "$SDM/s1"; touch -d '10 minutes ago' "$SDM/s1"
@@ -917,7 +920,7 @@ chmod +x "$BH/bin/claude"
 rc=0; out=$(cd "$BH" && KBDIR=$kb HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc=$?
 # recover --yes: the respawn's job is in own-stop before the respawn; auto-start is there while the respawn runs (its SessionStart
 # can come before the command returns) and stays after a successful one.
-[ "$(<"$kb/bb/own-stop")" = bb000001 ] && [ -e "$kb/bb/auto-start" ] && grep -qx 'PRE bb000001' "$BH/pre" || { echo "FAIL: recover --yes records the respawned job in own-stop and touches auto-start before a respawn that succeeds: $(cat "$kb/bb/own-stop" "$BH/pre" 2>&1) $(ls "$kb/bb" 2>&1)"; exit 1; }
+grep -qE "^bb000001 [0-9]+$" "$kb/bb/own-stop" && [ -e "$kb/bb/auto-start" ] && grep -qx 'PRE bb000001' "$BH/pre" || { echo "FAIL: recover --yes records the respawned job in own-stop and touches auto-start before a respawn that succeeds: $(cat "$kb/bb/own-stop" "$BH/pre" 2>&1) $(ls "$kb/bb" 2>&1)"; exit 1; }
 rm -f "$kb/bb/auto-start"
 : > "$BH/fail"; rc2=0; out2=$(cd "$BH" && KBDIR=$kb HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc2=$?
 [ "$rc $rc2" = "0 1" ] && grep -qE "^boot: .*/pa ba: running \(pid 4242\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bb: recovered$" <<<"$out" &&
@@ -926,19 +929,26 @@ rm -f "$kb/bb/auto-start"
   grep -qE "^boot: .*/pb bs: stopped by a person \(daemon.log, 2026-10-30T10:00:01.000Z\), held, skipped$" <<<"$out" && [ "$(cut -d' ' -f1-2 "$kb/bs/held")" = "session-end killed" ] &&
   grep -qE "^boot: .*/pb bh: held \(bot bh hold\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bn: no token, skipped$" <<<"$out" ||
   { echo "FAIL: boot skips a bot listed with a pid or stopped by a person (held written), recovers one listed without, says a failure (exit 1): rc=$rc $rc2 / $out / $out2 / $(cat "$BH/calls" 2>&1)"; exit 1; }
-# Two recovers (boot ran bb twice, the second failing with no process) leave one own-stop line, not two.
-[ "$(grep -cxF bb000001 "$kb/bb/own-stop")" = 1 ] ||
-  { echo "FAIL: a repeated recover must not stack the same id in own-stop: $(cat "$kb/bb/own-stop")"; exit 1; }
-# A respawn that fails while the old process is still alive (pid $$ here) takes its own-stop line back out: that process's
-# later kill is a person's. The same respawn succeeding keeps it.
-printf '#!/bin/bash\ncase $1 in agents) echo %s;; respawn) [ ! -e "$HOME/fail" ] || exit 7;; esac\n' \
-  "'[{\"name\":\"bb\",\"id\":\"bb000001\",\"pid\":$$,\"cwd\":\"$(cd -P "$BH/pb" && pwd)\",\"state\":\"done\"}]'" > "$BH/bin/claude"
-rm -f "$kb/bb/own-stop"; rc=0; HOME=$BH PATH=$BH/bin:$PATH bash "$S" bot --project "$BH/pb" bb recover --yes >/dev/null 2>&1 </dev/null || rc=$?
-{ [ "$rc" = 1 ] && ! grep -qxF bb000001 "$kb/bb/own-stop" 2>/dev/null; } ||
-  { echo "FAIL: a failed respawn with the old process alive takes the id back out of own-stop: rc=$rc $(cat "$kb/bb/own-stop" 2>&1)"; exit 1; }
-rm -f "$BH/fail"; rc=0; HOME=$BH PATH=$BH/bin:$PATH bash "$S" bot --project "$BH/pb" bb recover --yes >/dev/null 2>&1 </dev/null || rc=$?
-{ [ "$rc" = 0 ] && [ "$(<"$kb/bb/own-stop")" = bb000001 ]; } ||
-  { echo "FAIL: a respawn that succeeds keeps the id in own-stop: rc=$rc $(cat "$kb/bb/own-stop" 2>&1)"; exit 1; }
+# own-stop lines (1.19.7) are "<id> <epoch>", append only, each taken immediately before that job's own call: stop_sessions
+# stopping two jobs in turn (the fake stop takes 2 s) writes two lines, each epoch inside its own call's window; two writers
+# in a loop keep every line; the recover above wrote one for bb000001.
+grep -qE '^bb000001 [0-9]+$' "$kb/bb/own-stop" ||
+  { echo "FAIL: recover writes '<id> <epoch>' to own-stop: $(cat "$kb/bb/own-stop" 2>&1)"; exit 1; }
+OT=$BH/ot; mkdir -p "$OT"; : > "$OT/own-stop"
+OTR=$( ( helpers=$BH/h; . "$D/bin/lib/state.sh" && . "$D/bin/lib/sessions.sh" || exit 1
+  claude() { echo "$(date +%s) $1 $2" >> "$OT/calls"; [ "$1" != stop ] || sleep 2; }
+  t0=$(date +%s); stop_sessions n $'aaaa0001 -\nbbbb0002 -' "$OT" >/dev/null 2>&1; t1=$(date +%s)
+  echo "$t0 $t1"
+  for w in 1 2; do ( for i in $(seq 1 100); do own_stop_add "$OT" "cccc000$w"; done ) & done; wait ) 2>&1 )
+read -r t0 t1 <<<"$(head -n 1 <<<"$OTR")"
+l1=$(grep '^aaaa0001 ' "$OT/own-stop"); l2=$(grep '^bbbb0002 ' "$OT/own-stop")
+e1=${l1#* }; e2=${l2#* }; c1=$(sed -n 1p "$OT/calls" | cut -d' ' -f1); c2=$(sed -n 2p "$OT/calls" | cut -d' ' -f1)
+{ [[ $e1 =~ ^[0-9]+$ ]] && [[ $e2 =~ ^[0-9]+$ ]] && [ "$e1" -ge "$t0" ] && [ "$e1" -le "$c1" ] && [ "$e2" -gt "$e1" ] && [ "$e2" -le "$c2" ] && [ "$c2" -le "$t1" ] &&
+  [ "$((e2 - e1))" -ge 2 ] && [ "$(grep -cE '^cccc000[12] [0-9]+$' "$OT/own-stop")" = 200 ] && [ "$(wc -l < "$OT/own-stop" | tr -d ' ')" = 202 ]; } ||
+  { echo "FAIL: stop_sessions writes '<id> <epoch>' just before each job's claude stop (two jobs, 2 s apart), and concurrent appends keep every line: t0=$t0 t1=$t1 e1=$e1 c1=$c1 e2=$e2 c2=$c2 / $OTR / $(wc -l < "$OT/own-stop")"; exit 1; }
+# prune_dead_sessions writes the same format (its rm of a done row with a live worker logs "(killed)").
+grep -q 'own_stop_add "\$dir" "\$id"' "$D/bin/claude-discord" && grep -q 'own_stop_add "\$3" "\$id"' "$D/bin/lib/sessions.sh" && grep -q 'own_stop_add "\$d" "\$b_id"' "$D/bin/lib/bot.sh" ||
+  { echo "FAIL: every own-stop writer goes through own_stop_add"; exit 1; }
 rm -rf "${BH:?}"
 # The SessionEnd hook and person_stopped describe one order of the daemon's killed line and the hook (measured, 2.1.314: the
 # line comes about 0.6 s AFTER the hook starts): neither says the hook runs behind it.

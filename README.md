@@ -1684,9 +1684,9 @@ shutting down or starting in the minute before it (a `shutting down (` or
 clean-up of the old jobs a new daemon does 1 to 25 s after its start), any later `bg <word> <job>` line follows
 (`claimed-spare`, `spawned`, `retire`, a `(done)`), the line is older than the
 bot's newest `plugin-sessions/` marker (also checked on a hold already written:
-a bot restarted during the pass drops it), or the job is in `<bot dir>/own-stop` (the jobs `refresh`,
-`recover --fresh`, `rename` and a start's prune of dead sessions stopped
-themselves; the next session start clears it, so a restart whose start fails
+a bot restarted during the pass drops it), or `<bot dir>/own-stop` has a line `<job> <epoch seconds>` for it with the epoch 0 to 120 s before the kill line (written
+immediately before the stop, `rm` or `respawn` of `refresh`,
+`recover`, `rename` and a start's prune of dead sessions; old lines expire by themselves, and the next session start clears the file, so a restart whose start fails
 leaves the bot down and recovered, never held). Never a reboot, a `docker stop`
 or the daemon's idle retire, which end in `(done)` and are recovered as before.
 `boot` makes the same check before it starts a bot, for a host that went down

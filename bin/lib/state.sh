@@ -337,8 +337,8 @@ sweep_recorded() {
 # "bg <word> <job>" line, a start, a retire, a (done), ends the case), with no daemon shutdown ("shutting down (") or
 # daemon start line in the 60 s before it (the daemon's own shutdown kills every worker, and a new daemon cleans up
 # the old one's jobs 1 to 25 s after its start line, measured in the real daemon.log), no plugin-sessions marker newer than the line (that session
-# started after it), and the id not in own-stop (what stop_sessions and the start's prune stopped for a restart; cleared
-# by the next session start). Bounded read of the last 20000 lines: a rotated log loses the evidence and the bot is
+# started after it), and no own-stop line for the id (own_stop_add) with an epoch 0 to 120 s before the kill line (our own
+# stop for a restart; old lines expire by themselves, and the next session start clears the file). Bounded read of the last 20000 lines: a rotated log loses the evidence and the bot is
 # recovered, as before. GNU date -d, else BSD date -j. No `head` after a big writer: under pipefail it is a SIGPIPE.
 log_epoch() { date -u -d "$1" +%s 2>/dev/null || date -j -u -f %Y-%m-%dT%H:%M:%S "${1%.*}" +%s 2>/dev/null; }
 # marker_newer <bot dir> <epoch>: 0 when a plugin-sessions marker of the bot is newer than that second (a session started
@@ -356,11 +356,14 @@ drop_stale_inferred_hold() {
   case $hl in "session-end killed "*) hl=$(log_epoch "${hl#session-end killed }") && marker_newer "$1" "$hl" && rm -f "$1/held" || :;; esac
   return 0
 }
+# own_stop_add <bot dir> <job id> (1.19.7): "<id> <epoch>" appended to own-stop, called immediately before the job's own
+# `claude stop`, `rm` or `respawn`, so the daemon's "(killed)" line for it comes within 120 s after the epoch. Append only
+# (one small write), never rewritten: concurrent writers keep both lines.
+own_stop_add() { printf '%s %s\n' "$2" "$(date +%s)" 2>/dev/null >> "$1/own-stop" || :; }
 person_stopped() {
-  local d=$1 pin="" tl l n ts t s
+  local d=$1 pin="" tl l n ts t s oid oe
   { IFS= read -r pin < "$d/pinned-job"; } 2>/dev/null || :
   [[ $pin =~ ^[0-9a-f]{8}$ ]] || return 1
-  ! grep -qxF "$pin" "$d/own-stop" 2>/dev/null || return 1
   tl=$(tail -n 20000 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/daemon.log" 2>/dev/null) || return 1
   l=$(grep -anE "bg [a-z-]+ $pin[: ]" <<<"$tl" | tail -n 1) || return 1
   [[ $l == *"bg settled $pin (killed)" ]] || return 1
@@ -369,5 +372,8 @@ person_stopped() {
   s=$(LC_ALL=C awk -v n="$n" 'NR >= n { exit } /shutting down \(|daemon start/ { s = $0 } END { print s }' <<<"$tl")
   if [ -n "$s" ]; then s=${s#[}; s=$(log_epoch "${s%%]*}") && [ $((t - s)) -ge 0 ] && [ $((t - s)) -le 60 ] && return 1; fi
   ! marker_newer "$d" "$t" || return 1
+  while read -r oid oe || [ -n "$oid" ]; do
+    [ "$oid" = "$pin" ] && [[ $oe =~ ^[0-9]+$ ]] && [ $((t - oe)) -ge 0 ] && [ $((t - oe)) -le 120 ] && return 1
+  done 2>/dev/null < "$d/own-stop" || :
   printf '%s\n' "$ts"
 }

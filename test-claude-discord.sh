@@ -1401,6 +1401,7 @@ cp "$HOME/agents.full.json" "$HOME/agents.json"
 start_dead
 grep -q "^LAUNCHER .*--channels plugin:discord@claude-plugins-official" <<<"$out" && grep -q -- "-n dead" <<<"$out" || { echo "FAIL: the start must reach the exec with its usual arguments: $out"; exit 1; }
 [ "$(sort "$HOME/rm.log" | tr '\n' ' ')" = "8705916e d0000002 f96ea453 " ] || { echo "FAIL: exactly this bot's dead sessions must be removed, by job id, and no implausible id: $(sort "$HOME/rm.log" | tr '\n' ' ')"; exit 1; }
+[ "$(grep -cE '^(8705916e|d0000002|f96ea453) [0-9]+$' "$(bdir "$PD" dead)/own-stop" 2>/dev/null)" = 3 ] || { echo "FAIL: the start's prune records each removed job in own-stop as '<id> <epoch>' (1.19.7): $(cat "$(bdir "$PD" dead)/own-stop" 2>&1)"; exit 1; }
 ! grep -qF "ed0dd12f" "$HOME/rm.log" && ! grep -qF "60568320" "$HOME/rm.log" && ! grep -qx "dead-0002" "$HOME/rm.log" || { echo "FAIL: the sessionId must never reach rm, only the job id: $(<"$HOME/rm.log")"; exit 1; }
 grep -qx -- "agents --json --all" "$HOME/agents.calls" || { echo "FAIL: the listing must ask for --all, or a retired session is not even listed: $(<"$HOME/agents.calls")"; exit 1; }
 [ "$(grep -cF 'could not remove 3 dead session(s) of dead' <<<"$out")" -eq 1 ] || { echo "FAIL: failed removals must be reported in exactly one line: $out"; exit 1; }
@@ -4053,7 +4054,7 @@ rc=0; out=$(bash "$S" bot acc recover --yes </dev/null 2>&1) || rc=$?; BRC=0; ba
   [ "$(cut -d' ' -f4- "$AD/recover.log")" = "recover --yes: claude respawn acc11111 (exit 0)" ] ||
   { echo "FAIL: bot recover --yes runs its plan with no terminal and no question, logged as recover --yes: rc=$rc $BRC $out / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
 [ -e "$AD/auto-start" ] && [ "$(find "$AD/auto-start" -mmin -2 | wc -l | tr -d ' ')" = 1 ] || { echo "FAIL: bot recover --yes (what the monitor and boot run) touches <bot dir>/auto-start once the session is started"; exit 1; }
-grep -qxF acc11111 "$AD/own-stop" || { echo "FAIL: recover records the job it respawns in own-stop (the respawn kills the old process: not a person's stop): $(cat "$AD/own-stop" 2>&1)"; exit 1; }
+grep -qE "^acc11111 [0-9]+$" "$AD/own-stop" || { echo "FAIL: recover records the job it respawns in own-stop (the respawn kills the old process: not a person's stop): $(cat "$AD/own-stop" 2>&1)"; exit 1; }
 rm -f "$AD/own-stop"
 rm -f "$HOME/claude.calls" "$AD/recover.log" "$AD/auto-start"
 # hold (1.19.1): the marker, no question, nothing run; a word after it is usage (exit 2).
@@ -4075,7 +4076,7 @@ bt - n acc recover; A=$BRC; [ -e "$HOME/claude.calls" ] || A="$A none"; bt - y a
 # 1.19.4: the stop is ours, for a restart, so the hold the old session's SessionEnd hook writes on it goes once the
 # pid is gone (a start that fails then leaves the bot down, recovered, never held). Planted here as the hook would.
 rm -f "$HOME/claude.calls"; : > "$AD/held"; bt - y acc recover --fresh; A="$BRC $BO"; kill -0 "$OLD" 2>/dev/null || A="$A gone1"; [ ! -e "$AD/held" ] || A="$A held-left"
-grep -qx acc11111 "$AD/own-stop" 2>/dev/null || A="$A no-own-stop"   # 1.19.7: person_stopped ignores a stop of ours
+grep -qE "^acc11111 [0-9]+$" "$AD/own-stop" 2>/dev/null || A="$A no-own-stop"   # 1.19.7: person_stopped ignores a stop of ours
 [[ $A == 0*"    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc"*"stopping acc (acc11111, pid $OLD)"*"LAUNCHER "*" -n acc "*"ran claude-discord --bg --name acc (exit 0)"*" gone1" ]] &&
   [ "$(<"$HOME/claude.calls")" = "STOP acc11111" ] || { echo "FAIL: bot recover --fresh with one listed session stops it before the fresh start: $A / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
 sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; rm -f "$HOME/claude.calls"
