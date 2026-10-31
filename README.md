@@ -1703,7 +1703,8 @@ was not a person. Both `[held]` lines
 wait until the bot has been held 5 minutes (a respawn holds it for the seconds
 between its old session's end and its new one's start) and come once.
 `bot <bot> recover --yes` (the monitor, `boot`, or a script passing `--yes`) touches `<bot dir>/auto-start`
-once the start or respawn command succeeded (a failed one marks nothing), and claude-discord never deletes it: a
+just before the start or respawn (the session's SessionStart can run before the command returns) and removes it
+when that command fails, so a failed one marks no later start; a successful one's stays: a
 session can tell it was started by a `recover --yes` when `auto-start` is under 120 s old
 at its SessionStart (`DISCORD_STATE_DIR` is the bot dir). A `recover` without `--yes` does not touch it.
 `MONITOR_RECOVER=no` in the manager project's `config.env` turns it all off;

@@ -899,14 +899,15 @@ echo bx000001 > "$kb/bx/pinned-job"; : > "$kb/bx/plugin-sessions/s1"; : > "$kb/b
 # before the host went down: held is written and it is skipped; bb's last line is a (done): recovered as before.
 mkdir -p "$kb/bs" "$BH/.claude"; printf 'DISCORD_BOT_TOKEN=x\n' > "$kb/bs/.env"; echo b5000001 > "$kb/bs/pinned-job"
 printf '[2026-10-30T10:00:00.000Z] [bg] bg settled bb000001 (done)\n[2026-10-30T10:00:01.000Z] [bg] bg settled b5000001 (killed)\n' > "$BH/.claude/daemon.log"
-printf '#!/bin/bash\ncase $1 in agents) echo %s;; respawn) echo "RESPAWN $2" >> "$HOME/calls"; [ ! -e "$HOME/fail" ] || exit 7;; *) echo "PLAIN $*";; esac\n' \
+printf '#!/bin/bash\ncase $1 in agents) echo %s;; respawn) echo "RESPAWN $2" >> "$HOME/calls"; [ ! -e "$KBDIR/bb/auto-start" ] || echo "PRE $2" >> "$HOME/pre"; [ ! -e "$HOME/fail" ] || exit 7;; *) echo "PLAIN $*";; esac\n' \
   "'[{\"name\":\"ba\",\"id\":\"ba000001\",\"pid\":4242,\"cwd\":\"$(cd -P "$BH/pa" && pwd)\"},{\"name\":\"bb\",\"id\":\"bb000001\",\"cwd\":\"$(cd -P "$BH/pb" && pwd)\",\"state\":\"done\"},{\"name\":\"bx\",\"id\":\"bx000001\",\"cwd\":\"$(cd -P "$BH/pb" && pwd)\",\"state\":\"done\"}]'" > "$BH/bin/claude"
 chmod +x "$BH/bin/claude"
-rc=0; out=$(cd "$BH" && HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc=$?
-# recover --yes: the respawn's job is in own-stop before the respawn, and auto-start is touched only once the respawn succeeded.
-[ "$(<"$kb/bb/own-stop")" = bb000001 ] && [ -e "$kb/bb/auto-start" ] || { echo "FAIL: recover --yes records the respawned job in own-stop and touches auto-start after a successful respawn: $(cat "$kb/bb/own-stop" 2>&1) $(ls "$kb/bb" 2>&1)"; exit 1; }
+rc=0; out=$(cd "$BH" && KBDIR=$kb HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc=$?
+# recover --yes: the respawn's job is in own-stop before the respawn; auto-start is there while the respawn runs (its SessionStart
+# can come before the command returns) and stays after a successful one.
+[ "$(<"$kb/bb/own-stop")" = bb000001 ] && [ -e "$kb/bb/auto-start" ] && grep -qx 'PRE bb000001' "$BH/pre" || { echo "FAIL: recover --yes records the respawned job in own-stop and touches auto-start before a respawn that succeeds: $(cat "$kb/bb/own-stop" "$BH/pre" 2>&1) $(ls "$kb/bb" 2>&1)"; exit 1; }
 rm -f "$kb/bb/auto-start"
-: > "$BH/fail"; rc2=0; out2=$(cd "$BH" && HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc2=$?
+: > "$BH/fail"; rc2=0; out2=$(cd "$BH" && KBDIR=$kb HOME=$BH PATH=$BH/bin:$PATH bash "$S" boot 2>&1) || rc2=$?
 [ "$rc $rc2" = "0 1" ] && grep -qE "^boot: .*/pa ba: running \(pid 4242\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bb: recovered$" <<<"$out" &&
   grep -qE "^boot: .*/pb bb: failed \(exit 1\): .*claude respawn bb000001 \(exit 7\)" <<<"$out2" && [ "$(<"$BH/calls")" = $'RESPAWN bb000001\nRESPAWN bx000001\nRESPAWN bb000001\nRESPAWN bx000001' ] && [ ! -e "$kb/bb/auto-start" ] && [ ! -e "$kb/bx/held" ] &&
   grep -qE "^boot: .*/pb bx: recovered$" <<<"$out" && grep -qE "^boot: .*/pb by: held \(bot by hold\), skipped$" <<<"$out" && [ -f "$kb/by/held" ] &&
