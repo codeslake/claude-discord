@@ -96,18 +96,28 @@ if [ "${1:-}" = health ]; then
     unp="" cdir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
     if agents=$(claude agents --json 2>/dev/null) && [ -n "$agents" ]; then
       pinned=$(jq -r 'if type == "array" then .[] | strings else empty end' "$cdir/jobs/pins.json" 2>/dev/null) || pinned=""
+      live=$(printf '%s' "$agents" | jq -r '.[]? | objects | select(.pid != null and ((.id // "") | test("^[0-9a-f]{8}$"))) | .id' 2>/dev/null) || live=""
       while IFS=$'\t' read -r job; do
-        case $'\n'$pinned$'\n' in *$'\n'"$job"$'\n'*) continue;; esac
         v=$(jq -r '(.respawnFlags // []) as $f | ($f | index("--settings")) as $i | if $i == null then "" else ($f[$i + 1] | fromjson? | .env.DISCORD_STATE_DIR // "") end' \
           "$cdir/jobs/$job/state.json" 2>/dev/null) || v=""
         [ -n "$v" ] && [ -f "$v/.env" ] || continue
+        case $'\n'$pinned$'\n' in *$'\n'"$job"$'\n'*)
+          # Listed already (a person's ctrl+t, or a pin from before 1.19.7): pinned-job still has to name it, or a person's
+          # stop of this bot is never held. Set when missing, empty or naming a job that is not running; a running one stays.
+          cur=""; { read -r cur < "$v/pinned-job"; } 2>/dev/null || :
+          if [ "$do_patch" = yes ] && { [ -z "$cur" ] || ! case $'\n'$live$'\n' in *$'\n'"$cur"$'\n'*) true;; *) false;; esac; } &&
+            . "$self_root/hooks/lib/pin.sh" 2>/dev/null && pin_job "$job" "$v" "$cdir/jobs"; then
+            printf '%s health: pinned-job set to %s (it was %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$job" "${cur:-empty}" >> "$v/health.log" 2>/dev/null || :
+          fi
+          continue;;
+        esac
         fixed=false
         if [ "$do_patch" = yes ] && . "$self_root/hooks/lib/pin.sh" 2>/dev/null && pin_job "$job" "$v" "$cdir/jobs"; then
           fixed=true
           printf '%s health: pinned job %s (it was not in pins.json, so the daemon would retire it after 8 h idle)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$job" >> "$v/health.log" 2>/dev/null || :
         fi
         unp="$unp$job"$'\t'"$v"$'\t'"$fixed"$'\n'
-      done < <(printf '%s' "$agents" | jq -r '.[]? | objects | select(.pid != null and ((.id // "") | test("^[0-9a-f]{8}$"))) | .id' 2>/dev/null)
+      done <<<"$live"
     fi
     if [ "$as_json" != yes ]; then
       while IFS=$'\t' read -r job v fixed; do

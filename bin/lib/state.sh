@@ -334,9 +334,9 @@ sweep_recorded() {
 # stop, claude rm, a delete in the agent view). The SessionEnd hook cannot tell (2.1.314: `rm` deletes the job dir before
 # it runs, and the daemon's "bg settled <job> (killed)" line comes 0.6 s AFTER it starts), so health and boot ask here.
 # True when the last line naming the bot's pinned job (pinned-job) is its "bg settled <job> (killed)" (any later
-# "bg <word> <job>" line, a start, a retire, a (done), ends the case), with no daemon shutdown ("shutting down (") in
-# the 60 s before it and before the next daemon start line (the daemon's own shutdown kills every worker with that
-# line; a kill after the new daemon started is a person's), no plugin-sessions marker newer than the line (that session
+# "bg <word> <job>" line, a start, a retire, a (done), ends the case), with no daemon shutdown ("shutting down (") or
+# daemon start line in the 60 s before it (the daemon's own shutdown kills every worker, and a new daemon cleans up
+# the old one's jobs 1 to 25 s after its start line, measured in the real daemon.log), no plugin-sessions marker newer than the line (that session
 # started after it), and the id not in own-stop (what stop_sessions and the start's prune stopped for a restart; cleared
 # by the next session start). Bounded read of the last 20000 lines: a rotated log loses the evidence and the bot is
 # recovered, as before. GNU date -d, else BSD date -j. No `head` after a big writer: under pipefail it is a SIGPIPE.
@@ -358,7 +358,7 @@ person_stopped() {
   [[ $l == *"bg settled $pin (killed)" ]] || return 1
   n=${l%%:*} ts=${l#*:[}; ts=${ts%%]*}
   t=$(log_epoch "$ts") || return 1
-  s=$(LC_ALL=C awk -v n="$n" 'NR >= n { exit } /shutting down \(/ { s = $0 } /daemon start/ { s = "" } END { print s }' <<<"$tl")
+  s=$(LC_ALL=C awk -v n="$n" 'NR >= n { exit } /shutting down \(|daemon start/ { s = $0 } END { print s }' <<<"$tl")
   if [ -n "$s" ]; then s=${s#[}; s=$(log_epoch "${s%%]*}") && [ $((t - s)) -ge 0 ] && [ $((t - s)) -le 60 ] && return 1; fi
   ! marker_newer "$d" "$t" || return 1
   printf '%s\n' "$ts"

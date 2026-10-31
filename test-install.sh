@@ -599,6 +599,36 @@ grep -qF "not pinned: job a1000001 of $BH/bd is not in pins.json" <<<"$txt" && [
   { echo "FAIL: health --all says a live unpinned bot job and --patch pins it (health.log line), leaving a job of no bot and a pinned one alone: $txt / $p1 / $(jq -c .unpinned <<<"$out") / $(cat "$BH/.claude/jobs/pins.json" "$BH/bd/health.log" 2>&1)"; exit 1; }
 rm -rf "${BH:?}"
 echo "ok: health --all pins a live bot job missing from pins.json under --patch (the monitor's run) and only says so without it"
+# 1.19.7: a bot whose live job is ALREADY in pins.json is not pinned again, but its pinned-job (what person_stopped, boot and
+# recover read) is set under --patch when it is missing, empty, or names a job that is not running (that old id leaves
+# pins.json, as pin_job does); one naming a running job, and the case without --patch, are left alone.
+BH=$HOME/pinbox2; mkdir -p "$BH/bin" "$BH/.claude/jobs"
+for x in m e k l d; do
+  mkdir -p "$BH/b$x"; printf 'DISCORD_BOT_TOKEN=x\n' > "$BH/b$x/.env"
+done
+for j in a1000001:m e2000002:e c3000003:k b4000004:l f5000005:l d6000006:d; do
+  mkdir -p "$BH/.claude/jobs/${j%%:*}"
+  jq -n --arg s "{\"env\": {\"DISCORD_STATE_DIR\": \"$BH/b${j##*:}\"}}" '{respawnFlags: ["--settings", $s]}' > "$BH/.claude/jobs/${j%%:*}/state.json"
+done
+: > "$BH/be/pinned-job"; echo c3000003 > "$BH/bk/pinned-job"; echo f5000005 > "$BH/bl/pinned-job"; echo dead0007 > "$BH/bd/pinned-job"
+printf '["a1000001","e2000002","c3000003","b4000004","f5000005","d6000006","dead0007"]' > "$BH/.claude/jobs/pins.json"
+printf '#!/bin/bash\n[ "$1" = agents ] && echo %s\n' "'[{\"id\":\"a1000001\",\"pid\":1},{\"id\":\"e2000002\",\"pid\":2},{\"id\":\"c3000003\",\"pid\":3},{\"id\":\"b4000004\",\"pid\":4},{\"id\":\"f5000005\",\"pid\":5},{\"id\":\"d6000006\",\"pid\":6}]'" > "$BH/bin/claude"; chmod +x "$BH/bin/claude"
+HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all >/dev/null 2>&1 || :
+[ ! -e "$BH/bm/pinned-job" ] && [ ! -s "$BH/be/pinned-job" ] && [ "$(<"$BH/bd/pinned-job")" = dead0007 ] ||
+  { echo "FAIL: health --all without --patch changes no pinned-job"; exit 1; }
+HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all --patch >/dev/null 2>&1 || :
+[ "$(<"$BH/bm/pinned-job")" = a1000001 ] && [ "$(<"$BH/bm/pin-foreign")" = a1000001 ] ||
+  { echo "FAIL: --patch writes a missing pinned-job for a job already in pins.json (and records it as not this bot's pin): $(cat "$BH/bm/pinned-job" 2>&1)"; exit 1; }
+[ "$(<"$BH/be/pinned-job")" = e2000002 ] || { echo "FAIL: --patch writes an empty pinned-job: $(cat "$BH/be/pinned-job")"; exit 1; }
+[ "$(<"$BH/bk/pinned-job")" = c3000003 ] && [ ! -e "$BH/bk/health.log" ] && [ ! -e "$BH/bk/pin-foreign" ] ||
+  { echo "FAIL: --patch leaves a pinned-job that is already right alone"; exit 1; }
+[ "$(<"$BH/bl/pinned-job")" = f5000005 ] && [ ! -e "$BH/bl/health.log" ] ||
+  { echo "FAIL: --patch never overwrites a pinned-job that names a running job: $(cat "$BH/bl/pinned-job")"; exit 1; }
+[ "$(<"$BH/bd/pinned-job")" = d6000006 ] && grep -q 'pinned-job set to d6000006 (it was dead0007)' "$BH/bd/health.log" &&
+  [ "$(jq -c . "$BH/.claude/jobs/pins.json")" = '["a1000001","e2000002","c3000003","b4000004","f5000005","d6000006"]' ] ||
+  { echo "FAIL: --patch replaces a pinned-job naming a job that is not running (the old id leaves pins.json): $(cat "$BH/bd/pinned-job" "$BH/.claude/jobs/pins.json" 2>&1)"; exit 1; }
+rm -rf "${BH:?}"
+echo "ok: health --all --patch sets a missing, empty or dead pinned-job for a job already in pins.json and leaves a running or right one"
 # held (1.19.1): sbot's own server is the last one up; with it stopped and bot sbot hold, health reads held, not down.
 stop_one_server "$SD"; : > "$SD/held"; queue "200 $NONE" '200 {"threads":[]}'
 out=$(cd "$SP" && bash "$S" health --json 2>/dev/null) || :
@@ -607,7 +637,7 @@ rm -f "$SD/held"
 # A bot its person stopped (1.19.7, person_stopped): the job in pinned-job has "bg settled <id> (killed)" as the LAST line of
 # its life in daemon.log (claude stop and claude rm; the SessionEnd hook cannot tell them from a SIGTERM), and health
 # writes held and reads it held, so the monitor never recovers it. Each case with its opposite: a (done) last, a later start of
-# the same id, the daemon's own shutdown just before (and a kill after the new daemon started, a person's), a line older than the
+# the same id, the daemon's own shutdown or start just before (a kill 90 s after a start is a person's), a line older than the
 # newest session marker, an id in own-stop, no pinned-job, another job's line, an unreadable time; a held file already there
 # is kept as it is. A big log after the kill and many markers must not change a verdict (pipefail with head: SIGPIPE).
 DLOG="$HOME/.claude/daemon.log"; SDM="$SD/plugin-sessions"
@@ -628,8 +658,9 @@ R7=$(hv "[$(dts '1 minute ago')] [bg] bg settled ee0000ff (done)"$'\n'"[$(dts '3
 R8=$(hv "[not-a-time] [bg] bg settled ee0000ff (killed)")
 R14=$(hv "[$(dts '90 seconds ago')] [supervisor] shutting down (cause=signal, uptime=9s, leases=1, live_workers=1)"$'\n'"$KL")
 DS="[$(dts '70 seconds ago')] [supervisor] shutting down (cause=upgrade, uptime=9s, leases=1, live_workers=1)"
-DN="[$(dts '69 seconds ago')] [supervisor] ─── daemon start ─── version=2.1.207 pid=1 origin=transient"
-R16=$(hv "$DS"$'\n'"$DN"$'\n'"$KL")   # the kill 10 s after a shutdown but after the next daemon start: a person's
+DN="[$(dts '150 seconds ago')] [supervisor] ─── daemon start ─── version=2.1.207 pid=1 origin=transient"
+R16=$(hv "$DN"$'\n'"$KL")   # the kill 90 s after a daemon start, no shutdown: a person's
+R20=$(hv "[$(dts '80 seconds ago')] [supervisor] ─── daemon start ─── version=2.1.207 pid=1 origin=transient"$'\n'"$KL")   # 20 s after a start: the new daemon's clean-up
 FILL=$(awk 'BEGIN { for (i = 0; i < 1500; i++) print "[2026-10-30T20:00:00.000Z] [bg] bg spare spawned host pid=" i " ................................" }')
 R17=$(hv "$DS"$'\n'"$KL"$'\n'"$FILL")   # 100 KB of log after the kill must not drop the shutdown line before it
 cp "$SD/.env" "$SD/.env.keep"; : > "$SD/.env"; R15=$(hv "$KL"); mv "$SD/.env.keep" "$SD/.env"   # no token: unknown, nothing to hold
@@ -648,8 +679,8 @@ R13="$(field_of sbot verdict "$out") $(<"$SD/held")"
 K1="session-end killed"
 [ "$R1" = "held $K1" ] && [ "$R2" = down ] && [ "$R3" = down ] && [ "$R6" = "held $K1" ] && [ "$R7" = down ] &&
   [ "$R8" = down ] && [ "$R9" = "held $K1" ] && [ "$R10" = down ] && [ "$R11" = down ] && [ "$R12" = down ] && [ "$R13" = "held by hand" ] && [ "$R14" = down ] && [ "$R15" = unknown ] &&
-  [ "$R16" = "held $K1" ] && [ "$R17" = down ] && [ "$R18" = "held $K1" ] && [ "$R19" = down ] ||
-  { echo "FAIL: health holds a bot whose pinned job's last daemon.log line is a (killed) and nothing else: $R1 | $R2 | $R3 | $R6 | $R7 | $R8 | $R9 | $R10 | $R11 | $R12 | $R13 | $R14 | $R15 | $R16 | $R17 | $R18 | $R19"; exit 1; }
+  [ "$R16" = "held $K1" ] && [ "$R17" = down ] && [ "$R18" = "held $K1" ] && [ "$R19" = down ] && [ "$R20" = down ] ||
+  { echo "FAIL: health holds a bot whose pinned job's last daemon.log line is a (killed) and nothing else: $R1 | $R2 | $R3 | $R6 | $R7 | $R8 | $R9 | $R10 | $R11 | $R12 | $R13 | $R14 | $R15 | $R16 | $R17 | $R18 | $R19 | $R20"; exit 1; }
 # An inferred hold (session-end killed <time>) counts only while no session marker is newer than <time> (health race 1.19.7:
 # a bot restarted during the pass, its hold written after on-session-start removed it): dropped, the bot reads down.
 : > "$DLOG"; mkdir -p "$SDM"; touch -d '10 minutes ago' "$SDM"; : > "$SDM/s1"; touch -d '10 minutes ago' "$SDM/s1"

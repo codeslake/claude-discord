@@ -1677,9 +1677,9 @@ the hook runs and the daemon's line comes after it starts). A bot with no server
 and no `held` whose pinned job (`pinned-job`) has `bg settled <job> (killed)` as
 the last line of its life in the last 20000 lines of `daemon.log` is held
 (`held` holds `session-end killed <time of the line>`), unless the daemon was
-shutting down in the minute before it and had not started again (`shutting down (`
-with no `daemon start` line between: `claude daemon stop`, an update; a kill after
-the new daemon started is a person's), any later `bg <word> <job>` line follows
+shutting down or starting in the minute before it (a `shutting down (` or
+`daemon start` line within 60 s before: `claude daemon stop`, an update, and the
+clean-up of the old jobs a new daemon does 1 to 25 s after its start), any later `bg <word> <job>` line follows
 (`claimed-spare`, `spawned`, `retire`, a `(done)`), the line is older than the
 bot's newest `plugin-sessions/` marker (also checked on a hold already written:
 a bot restarted during the pass drops it), or the job is in `<bot dir>/own-stop` (the jobs `refresh`,
