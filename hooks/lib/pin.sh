@@ -44,17 +44,17 @@ pin_foreign_forget() {
   grep -vxF "$2" "$1/pin-foreign" 2>/dev/null > "$1/pin-foreign.tmp.$$" || :
   if [ -s "$1/pin-foreign.tmp.$$" ]; then mv -f "$1/pin-foreign.tmp.$$" "$1/pin-foreign" 2>/dev/null; else rm -f "$1/pin-foreign.tmp.$$" "$1/pin-foreign" 2>/dev/null; fi
 }
-# pin_drop <bot state dir> <jobs dir> <running job ids, one a line> (1.19.7): the ids in pin-foreign that are not the bot's
-# current pinned-job and no longer run leave pins.json and pin-foreign (a pin of a dead job is useless); a running one, a
-# person's pin of a live job, is never removed. The CLI's lock and a rename, as pin_job; a pins.json that is not a JSON
+# pin_drop <bot state dir> <jobs dir> (1.19.7): the ids in pin-foreign that are not the bot's current pinned-job and whose
+# job is gone (<jobs dir>/<id> no longer exists: claude rm) leave pins.json and pin-foreign (a pin of a removed job is useless);
+# a job that only finished keeps its dir, and a person's ctrl+t pin of it stays. The CLI's lock and a rename, as pin_job; a pins.json that is not a JSON
 # array of strings is left alone, and so is pin-foreign then.
 pin_drop() {
-  local sd=$1 pins=$2/pins.json run=$3 cur="" f drop="" n=0 new
+  local sd=$1 pins=$2/pins.json cur="" f drop="" n=0 new
   [ -s "$sd/pin-foreign" ] && [ -e "$pins" ] || return 0
   { read -r cur < "$sd/pinned-job"; } 2>/dev/null || cur=""
   while IFS= read -r f || [ -n "$f" ]; do
     [[ $f =~ ^[0-9a-f]{8}$ ]] && [ "$f" != "$cur" ] || continue
-    case $'\n'$run$'\n' in *$'\n'"$f"$'\n'*) continue;; esac
+    [ ! -d "$2/$f" ] || continue
     drop="$drop$f"$'\n'
   done < "$sd/pin-foreign"
   [ -n "$drop" ] || return 0

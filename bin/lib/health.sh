@@ -96,7 +96,8 @@ if [ "${1:-}" = health ]; then
     unp="" cdir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
     if agents=$(claude agents --json 2>/dev/null) && [ -n "$agents" ]; then
       pinned=$(jq -r 'if type == "array" then .[] | strings else empty end' "$cdir/jobs/pins.json" 2>/dev/null) || pinned=""
-      live=$(printf '%s' "$agents" | jq -r '.[]? | objects | select(.pid != null and ((.id // "") | test("^[0-9a-f]{8}$"))) | .id' 2>/dev/null) || live=""
+      live_ok=yes   # empty live from a failed extraction is not "nothing runs": the pin sweep below runs only when it worked
+      live=$(printf '%s' "$agents" | jq -r '.[]? | objects | select(.pid != null and ((.id // "") | test("^[0-9a-f]{8}$"))) | .id' 2>/dev/null) || { live=""; live_ok=""; }
       while IFS=$'\t' read -r job; do
         v=$(jq -r '(.respawnFlags // []) as $f | ($f | index("--settings")) as $i | if $i == null then "" else ($f[$i + 1] | fromjson? | .env.DISCORD_STATE_DIR // "") end' \
           "$cdir/jobs/$job/state.json" 2>/dev/null) || v=""
@@ -121,12 +122,12 @@ if [ "${1:-}" = health ]; then
         fi
         unp="$unp$job"$'\t'"$v"$'\t'"$fixed"$'\n'
       done <<<"$live"
-      # A job recorded in a bot's pin-foreign that the bot has moved on from and that no longer runs is out of pins.json.
-      if [ "$do_patch" = yes ] && . "$self_root/hooks/lib/pin.sh" 2>/dev/null; then
+      # A job recorded in a bot's pin-foreign that the bot has moved on from and that is gone (claude rm) is out of pins.json.
+      if [ "$do_patch" = yes ] && [ -n "$live_ok" ] && . "$self_root/hooks/lib/pin.sh" 2>/dev/null; then
         proj_arr
         for p in ${pl[@]+"${pl[@]}"}; do
           proj_dirs "$p"
-          for v in "$pd_root"/*/; do pin_drop "${v%/}" "$cdir/jobs" "$live" || :; done
+          for v in "$pd_root"/*/; do pin_drop "${v%/}" "$cdir/jobs" || :; done
         done
       fi
     fi

@@ -390,14 +390,24 @@ if [ "${1:-}" = bot ]; then
     fi
     # --yes is what the monitor, boot and a script passing it run: the session can tell it was started by them (auto-start
     # under 120 s old at its SessionStart). Touched before the start or respawn, whose SessionStart can run before the command
-    # returns, and removed when it fails, so a failed one marks no later start.
+    # returns, and removed when it fails, so a failed one marks no later start. A signal that kills recover between the touch and
+    # the start leaves auto-start for up to 120 s (a person's start in that window reads as the monitor's): no trap, since a
+    # trap cannot run for SIGKILL and the file ages out by itself.
     # A respawn kills the old process, and the daemon logs "bg settled <id> (killed)" for it: own-stop first (1.19.7), or a pass
     # that sees that line before the claim line reads it as a person's stop. (fresh and takeover stop through stop_sessions, and
     # the start prunes through prune_dead_sessions: both record their ids themselves.)
     b_rc=0
     [ -z "$b_yes" ] || { touch "$d/auto-start" 2>/dev/null || :; }
     case $b_do in
-      respawn) printf '%s\n' "$b_id" 2>/dev/null >> "$d/own-stop"; claude respawn "$b_id" || b_rc=$?;;
+      respawn)
+        # Added once (a repeated recover does not stack lines), and taken back out when the respawn failed with the old process
+        # still alive: its later kill is then a person's, not ours.
+        b_own=""; grep -qxF "$b_id" "$d/own-stop" 2>/dev/null || { printf '%s\n' "$b_id" 2>/dev/null >> "$d/own-stop" && b_own=1; }
+        claude respawn "$b_id" || b_rc=$?
+        if [ "$b_rc" != 0 ] && [ -n "$b_own" ] && [[ $b_pid =~ ^[0-9]+$ ]] && kill -0 "$b_pid" 2>/dev/null; then
+          { grep -vxF "$b_id" "$d/own-stop" > "$d/own-stop.tmp.$$" || :; } 2>/dev/null
+          mv -f "$d/own-stop.tmp.$$" "$d/own-stop" 2>/dev/null || rm -f "$d/own-stop.tmp.$$" 2>/dev/null || :
+        fi;;
       fresh) start_fresh "$self_path" "$bot" "$d" "Catch up on the channel." || b_rc=$?;;
       takeover) start_fresh "$self_path" "$bot" "$d" --resume "$b_now" || b_rc=$?;;
       *) start_fresh "$self_path" "$bot" "$d" || b_rc=$?;;

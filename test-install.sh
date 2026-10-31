@@ -629,14 +629,26 @@ HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all --patch >/dev/null 2>&1 || :
   { echo "FAIL: --patch replaces a pinned-job naming a job that is not running (the old id leaves pins.json): $(cat "$BH/bd/pinned-job" "$BH/.claude/jobs/pins.json" 2>&1)"; exit 1; }
 # A job in pin-foreign that the bot has moved on from (pinned-job names another) and that no longer runs leaves pins.json and
 # pin-foreign under --patch; one that still runs (a person's pin of a live job), and the bot's current job, stay.
-jq -c '. + ["dead0009","dead000a"]' "$BH/.claude/jobs/pins.json" > "$BH/pins.new" && mv "$BH/pins.new" "$BH/.claude/jobs/pins.json"
+# ab00000b is a job that finished (its dir stays, as the CLI keeps it until claude rm): a person's ctrl+t pin of it stays.
+mkdir -p "$BH/.claude/jobs/ab00000b"
+jq -c '. + ["dead0009","dead000a","ab00000b","dead00bb","dead00bc"]' "$BH/.claude/jobs/pins.json" > "$BH/pins.new" && mv "$BH/pins.new" "$BH/.claude/jobs/pins.json"
 # bq is a bot of a recorded project (the sweep walks those): its job is c3000003, and it has recorded four foreign ids.
 mkdir -p "$BH/pq"; kq="$BH/.claude-discord/projects/$(skey "$BH/pq")"; mkdir -p "$kq/bots/bq"
 printf '%s\n' "$(cd -P "$BH/pq" && pwd)" > "$kq/project"; printf 'DISCORD_BOT_TOKEN=x\n' > "$kq/bots/bq/.env"; echo c3000003 > "$kq/bots/bq/pinned-job"
-printf 'dead0009\ne2000002\ndead000a\nc3000003\n' > "$kq/bots/bq/pin-foreign"
+printf 'dead0009\ne2000002\ndead000a\nc3000003\nab00000b\n' > "$kq/bots/bq/pin-foreign"
+# br's current job (pinned-job) has no dir here, and is in pin-foreign all the same: never dropped; its other id is gone: dropped.
+mkdir -p "$kq/bots/br"; printf 'DISCORD_BOT_TOKEN=x\n' > "$kq/bots/br/.env"; echo dead00bb > "$kq/bots/br/pinned-job"; printf 'dead00bb\ndead00bc\n' > "$kq/bots/br/pin-foreign"
 HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all --patch >/dev/null 2>&1 || :
-[ "$(jq -c . "$BH/.claude/jobs/pins.json")" = '["a1000001","e2000002","c3000003","b4000004","f5000005","d6000006"]' ] && [ "$(<"$kq/bots/bq/pin-foreign")" = $'e2000002\nc3000003' ] ||
-  { echo "FAIL: --patch drops a pin-foreign job that no longer runs from pins.json and pin-foreign, never a running one or the bot's own: $(cat "$BH/.claude/jobs/pins.json" "$kq/bots/bq/pin-foreign" 2>&1)"; exit 1; }
+[ "$(jq -c . "$BH/.claude/jobs/pins.json")" = '["a1000001","e2000002","c3000003","b4000004","f5000005","d6000006","ab00000b","dead00bb"]' ] &&
+  [ "$(<"$kq/bots/bq/pin-foreign")" = $'e2000002\nc3000003\nab00000b' ] && [ "$(<"$kq/bots/br/pin-foreign")" = dead00bb ] ||
+  { echo "FAIL: --patch drops a pin-foreign job whose dir is gone from pins.json and pin-foreign, never a job that only finished (dir kept) or the bot's own: $(cat "$BH/.claude/jobs/pins.json" "$kq/bots/bq/pin-foreign" "$kq/bots/br/pin-foreign" 2>&1)"; exit 1; }
+# claude agents answering something that is not JSON says nothing about what is gone: the sweep does not run.
+jq -c '. + ["dead00cc"]' "$BH/.claude/jobs/pins.json" > "$BH/pins.new" && mv "$BH/pins.new" "$BH/.claude/jobs/pins.json"; echo dead00cc >> "$kq/bots/br/pin-foreign"
+p1=$(<"$BH/.claude/jobs/pins.json"); f1=$(<"$kq/bots/br/pin-foreign")
+printf '#!/bin/bash\n[ "$1" = agents ] && echo "not json"\n' > "$BH/bin/claude"
+HOME=$BH PATH=$BH/bin:$PATH bash "$S" health --all --patch >/dev/null 2>&1 || :
+[ "$(<"$BH/.claude/jobs/pins.json")" = "$p1" ] && [ "$(<"$kq/bots/br/pin-foreign")" = "$f1" ] && grep -q dead00cc "$BH/.claude/jobs/pins.json" ||
+  { echo "FAIL: --patch with a claude agents answer that is not JSON leaves pins.json and pin-foreign as they are: $(cat "$BH/.claude/jobs/pins.json" "$kq/bots/br/pin-foreign" 2>&1)"; exit 1; }
 rm -rf "${BH:?}"
 echo "ok: health --all --patch sets a missing, empty or dead pinned-job for a job already in pins.json (not as pin-foreign when it is the bot's own), leaves a running or right one, and drops a dead pin-foreign job"
 # held (1.19.1): sbot's own server is the last one up; with it stopped and bot sbot hold, health reads held, not down.
@@ -914,6 +926,19 @@ rm -f "$kb/bb/auto-start"
   grep -qE "^boot: .*/pb bs: stopped by a person \(daemon.log, 2026-10-30T10:00:01.000Z\), held, skipped$" <<<"$out" && [ "$(cut -d' ' -f1-2 "$kb/bs/held")" = "session-end killed" ] &&
   grep -qE "^boot: .*/pb bh: held \(bot bh hold\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bn: no token, skipped$" <<<"$out" ||
   { echo "FAIL: boot skips a bot listed with a pid or stopped by a person (held written), recovers one listed without, says a failure (exit 1): rc=$rc $rc2 / $out / $out2 / $(cat "$BH/calls" 2>&1)"; exit 1; }
+# Two recovers (boot ran bb twice, the second failing with no process) leave one own-stop line, not two.
+[ "$(grep -cxF bb000001 "$kb/bb/own-stop")" = 1 ] ||
+  { echo "FAIL: a repeated recover must not stack the same id in own-stop: $(cat "$kb/bb/own-stop")"; exit 1; }
+# A respawn that fails while the old process is still alive (pid $$ here) takes its own-stop line back out: that process's
+# later kill is a person's. The same respawn succeeding keeps it.
+printf '#!/bin/bash\ncase $1 in agents) echo %s;; respawn) [ ! -e "$HOME/fail" ] || exit 7;; esac\n' \
+  "'[{\"name\":\"bb\",\"id\":\"bb000001\",\"pid\":$$,\"cwd\":\"$(cd -P "$BH/pb" && pwd)\",\"state\":\"done\"}]'" > "$BH/bin/claude"
+rm -f "$kb/bb/own-stop"; rc=0; HOME=$BH PATH=$BH/bin:$PATH bash "$S" bot --project "$BH/pb" bb recover --yes >/dev/null 2>&1 </dev/null || rc=$?
+{ [ "$rc" = 1 ] && ! grep -qxF bb000001 "$kb/bb/own-stop" 2>/dev/null; } ||
+  { echo "FAIL: a failed respawn with the old process alive takes the id back out of own-stop: rc=$rc $(cat "$kb/bb/own-stop" 2>&1)"; exit 1; }
+rm -f "$BH/fail"; rc=0; HOME=$BH PATH=$BH/bin:$PATH bash "$S" bot --project "$BH/pb" bb recover --yes >/dev/null 2>&1 </dev/null || rc=$?
+{ [ "$rc" = 0 ] && [ "$(<"$kb/bb/own-stop")" = bb000001 ]; } ||
+  { echo "FAIL: a respawn that succeeds keeps the id in own-stop: rc=$rc $(cat "$kb/bb/own-stop" 2>&1)"; exit 1; }
 rm -rf "${BH:?}"
 # The SessionEnd hook and person_stopped describe one order of the daemon's killed line and the hook (measured, 2.1.314: the
 # line comes about 0.6 s AFTER the hook starts): neither says the hook runs behind it.
