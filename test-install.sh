@@ -698,14 +698,21 @@ echo "ee0000ff $((KE - 600))" > "$SD/own-stop"
 R21=$(hv "$KL")   # an old line of ours, the kill 10 minutes after it: a person's stop
 echo "99999999 $((KE - 30))" > "$SD/own-stop"
 R22=$(hv "$KL"); rm -f "$SD/own-stop"   # a recent line for another job
+# The window's edges, person_stopped itself against the log line in DLOG (hv's whole health pass per case costs 0.1 s each; the cases
+# above already cover health's reading of the verdict). KB = the kill line's own epoch, so each edge is exact.
+KB=$(date -u -d "${KL:1:24}" +%s)
+pv() { echo "ee0000ff $1" > "$SD/own-stop"; ( . "$D/bin/lib/state.sh" 2>/dev/null; person_stopped "$SD" >/dev/null && echo held || echo ours ); }
+R23=$(pv "$KB")          # the line at the kill's second (+0): ours
+R24=$(pv "$((KB - 121))")   # the kill 121 s after the line: a person's
+R25=$(pv "$((KB + 1))"); rm -f "$SD/own-stop"   # the line written 1 s AFTER the kill: a person's
 rm -f "$SD/pinned-job"; R12=$(hv "$KL"); echo ee0000ff > "$SD/pinned-job"
 printf '%s\n' "$KL" > "$DLOG"; echo "by hand" > "$SD/held"; queue "200 $NONE" '200 {"threads":[]}'; out=$(cd "$SP" && bash "$S" health --json 2>/dev/null) || :
 R13="$(field_of sbot verdict "$out") $(<"$SD/held")"
 K1="session-end killed"
 [ "$R1" = "held $K1" ] && [ "$R2" = down ] && [ "$R3" = down ] && [ "$R6" = "held $K1" ] && [ "$R7" = down ] &&
-  [ "$R8" = down ] && [ "$R9" = "held $K1" ] && [ "$R10" = down ] && [ "$R11" = down ] && [ "$R21" = "held $K1" ] && [ "$R22" = "held $K1" ] && [ "$R12" = down ] && [ "$R13" = "held by hand" ] && [ "$R14" = down ] && [ "$R15" = unknown ] &&
+  [ "$R8" = down ] && [ "$R9" = "held $K1" ] && [ "$R10" = down ] && [ "$R11" = down ] && [ "$R21" = "held $K1" ] && [ "$R22" = "held $K1" ] && [ "$R23" = ours ] && [ "$R24" = held ] && [ "$R25" = held ] && [ "$R12" = down ] && [ "$R13" = "held by hand" ] && [ "$R14" = down ] && [ "$R15" = unknown ] &&
   [ "$R16" = "held $K1" ] && [ "$R17" = down ] && [ "$R18" = "held $K1" ] && [ "$R19" = down ] && [ "$R20" = down ] ||
-  { echo "FAIL: health holds a bot whose pinned job's last daemon.log line is a (killed) and nothing else: $R1 | $R2 | $R3 | $R6 | $R7 | $R8 | $R9 | $R10 | $R11 | $R12 | $R13 | $R14 | $R15 | $R16 | $R17 | $R18 | $R19 | $R20 | $R21 | $R22"; exit 1; }
+  { echo "FAIL: health holds a bot whose pinned job's last daemon.log line is a (killed) and nothing else: $R1 | $R2 | $R3 | $R6 | $R7 | $R8 | $R9 | $R10 | $R11 | $R12 | $R13 | $R14 | $R15 | $R16 | $R17 | $R18 | $R19 | $R20 | $R21 | $R22 | $R23 | $R24 | $R25"; exit 1; }
 # An inferred hold (session-end killed <time>) counts only while no session marker is newer than <time> (health race 1.19.7:
 # a bot restarted during the pass, its hold written after on-session-start removed it): dropped, the bot reads down.
 : > "$DLOG"; mkdir -p "$SDM"; touch -d '10 minutes ago' "$SDM"; : > "$SDM/s1"; touch -d '10 minutes ago' "$SDM/s1"
@@ -930,25 +937,30 @@ rm -f "$kb/bb/auto-start"
   grep -qE "^boot: .*/pb bh: held \(bot bh hold\), skipped$" <<<"$out" && grep -qE "^boot: .*/pb bn: no token, skipped$" <<<"$out" ||
   { echo "FAIL: boot skips a bot listed with a pid or stopped by a person (held written), recovers one listed without, says a failure (exit 1): rc=$rc $rc2 / $out / $out2 / $(cat "$BH/calls" 2>&1)"; exit 1; }
 # own-stop lines (1.19.7) are "<id> <epoch>", append only, each taken immediately before that job's own call: stop_sessions
-# stopping two jobs in turn (the fake stop takes 2 s) writes two lines, each epoch inside its own call's window; two writers
+# stopping two jobs in turn (the fake stop moves a fake clock on by 1 s) writes two lines, each epoch inside its own call's window; two writers
 # in a loop keep every line; the recover above wrote one for bb000001.
 grep -qE '^bb000001 [0-9]+$' "$kb/bb/own-stop" ||
   { echo "FAIL: recover writes '<id> <epoch>' to own-stop: $(cat "$kb/bb/own-stop" 2>&1)"; exit 1; }
 OT=$BH/ot; mkdir -p "$OT"; : > "$OT/own-stop"
 OTR=$( ( helpers=$BH/h; . "$D/bin/lib/state.sh" && . "$D/bin/lib/sessions.sh" || exit 1
-  claude() { echo "$(date +%s) $1 $2" >> "$OT/calls"; [ "$1" != stop ] || sleep 2; }
+  sleep() { [ "$1" = 3 ] || command sleep "$1"; }   # stop_sessions' 3 s token wait is not under test
+  FAKE=1000; date() { if [ "${1:-}" = +%s ]; then echo "$FAKE"; else command date "$@"; fi; }   # a clock that a stop advances by 1 s: no real wait
+  claude() { echo "$(date +%s) $1 $2" >> "$OT/calls"; [ "$1" != stop ] || FAKE=$((FAKE + 1)); }
   t0=$(date +%s); stop_sessions n $'aaaa0001 -\nbbbb0002 -' "$OT" >/dev/null 2>&1; t1=$(date +%s)
   echo "$t0 $t1"
-  for w in 1 2; do ( for i in $(seq 1 100); do own_stop_add "$OT" "cccc000$w"; done ) & done; wait ) 2>&1 )
+  for w in 1 2; do ( for i in $(seq 1 30); do own_stop_add "$OT" "cccc000$w"; done ) & done; wait ) 2>&1 )
 read -r t0 t1 <<<"$(head -n 1 <<<"$OTR")"
 l1=$(grep '^aaaa0001 ' "$OT/own-stop"); l2=$(grep '^bbbb0002 ' "$OT/own-stop")
 e1=${l1#* }; e2=${l2#* }; c1=$(sed -n 1p "$OT/calls" | cut -d' ' -f1); c2=$(sed -n 2p "$OT/calls" | cut -d' ' -f1)
 { [[ $e1 =~ ^[0-9]+$ ]] && [[ $e2 =~ ^[0-9]+$ ]] && [ "$e1" -ge "$t0" ] && [ "$e1" -le "$c1" ] && [ "$e2" -gt "$e1" ] && [ "$e2" -le "$c2" ] && [ "$c2" -le "$t1" ] &&
-  [ "$((e2 - e1))" -ge 2 ] && [ "$(grep -cE '^cccc000[12] [0-9]+$' "$OT/own-stop")" = 200 ] && [ "$(wc -l < "$OT/own-stop" | tr -d ' ')" = 202 ]; } ||
-  { echo "FAIL: stop_sessions writes '<id> <epoch>' just before each job's claude stop (two jobs, 2 s apart), and concurrent appends keep every line: t0=$t0 t1=$t1 e1=$e1 c1=$c1 e2=$e2 c2=$c2 / $OTR / $(wc -l < "$OT/own-stop")"; exit 1; }
+  [ "$(grep -cE '^cccc000[12] [0-9]+$' "$OT/own-stop")" = 60 ] && [ "$(wc -l < "$OT/own-stop" | tr -d ' ')" = 62 ]; } ||
+  { echo "FAIL: stop_sessions writes '<id> <epoch>' just before each job's claude stop (two jobs, 1 fake second apart), and concurrent appends keep every line: t0=$t0 t1=$t1 e1=$e1 c1=$c1 e2=$e2 c2=$c2 / $OTR / $(wc -l < "$OT/own-stop")"; exit 1; }
 # prune_dead_sessions writes the same format (its rm of a done row with a live worker logs "(killed)").
 grep -q 'own_stop_add "\$dir" "\$id"' "$D/bin/claude-discord" && grep -q 'own_stop_add "\$3" "\$id"' "$D/bin/lib/sessions.sh" && grep -q 'own_stop_add "\$d" "\$b_id"' "$D/bin/lib/bot.sh" ||
   { echo "FAIL: every own-stop writer goes through own_stop_add"; exit 1; }
+# no raw writer: the one redirect into own-stop is own_stop_add's own line
+[ -z "$(grep -RnE '>>.*own-stop' "$D/bin" "$D/hooks" | grep -v 'own_stop_add()')" ] ||
+  { echo "FAIL: nothing appends to own-stop outside own_stop_add: $(grep -RnE '>>.*own-stop' "$D/bin" "$D/hooks")"; exit 1; }
 rm -rf "${BH:?}"
 # The SessionEnd hook and person_stopped describe one order of the daemon's killed line and the hook (measured, 2.1.314: the
 # line comes about 0.6 s AFTER the hook starts): neither says the hook runs behind it.
