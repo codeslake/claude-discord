@@ -17,11 +17,13 @@
 #                             `down`, and neither the monitor nor boot brings it back; its next session start clears it.
 #   bot <name> recover [--fresh] [--yes]   (1.16.0, the TUI's f and F) a down bot brought back: `claude respawn <id>` of its last
 #                             session when claude agents still lists it as started in this project (pinned-job, then
-#                             the newest plugin-sessions marker, then live_sessions), else `claude-discord --bg --name`;
+#                             the newest plugin-sessions marker, then live_sessions; 1.19.8: a pinned job only --all
+#                             lists, settled done), else `claude-discord --bg --name`;
 #                             two or more listed: refused. --fresh (a stale bot): every listed session stopped, then
 #                             --bg --name, as refresh --force. The plan is printed with its `run:` line, then the one
-#                             question; the command's status is passed on. recover.log gets a line per run. --yes
-#                             (1.19.0, what boot and the monitor run): no terminal needed, no question asked.
+#                             question; the command's status is passed on. recover.log gets a line per run and per
+#                             refusal. --yes (1.19.0, what boot and the monitor run): no terminal needed, no question
+#                             asked; 1.19.8: refused when a person stopped the bot (person_stopped).
 # Each asks one question at the terminal, after the marker line access set prints (U+2060), and refuses without a
 # terminal on stdin and stdout (exit 3): token and add before they read anything, rename and recover after printing what
 # they would do. The token is never printed, never in an argument list, the environment or a log: read from the terminal
@@ -29,7 +31,7 @@
 # --host <alias> [--manager <bot>] --project <dir>: as access --host; the host needs claude-discord 1.14.0 (recover: 1.16.0).
 # Exit status: 0 done, or nothing to change; 1 it could not (Discord refused or did not answer, a token of another bot,
 # no such bot, a name taken, a failed write or start; recover: what runs is unknown, two sessions listed, an untrusted
-# workspace, a stop that failed, or the command it ran exited non-zero: what was done and what was not is said); 2 usage,
+# workspace, a person's stop under --yes, a stop that failed, or the command it ran exited non-zero: what was done and what was not is said); 2 usage,
 # a name that is none, what was typed is no token, or a session renaming or recovering its own bot; 3 no terminal: nothing
 # read, changed or run; 4 answered no; 5 --host: no answer from the host, or its claude-discord is too old for the act.
 if [ "${1:-}" = bot ]; then
@@ -305,9 +307,17 @@ if [ "${1:-}" = bot ]; then
     # is never the bot's own). The plan is printed with its `run:` line, the one question asked after the marker, the
     # command run in the foreground and its status passed on; nothing runs on `n` or without a terminal. Not waited
     # for: whether the bot answers is the monitor's next pass's to say (a respawned worker may sit idle until a message).
+    # b_rlog <command or refused: reason> <exit>: a line in the bot's recover.log, in the shape of access.log's.
+    b_rlog() { (umask 077; printf '%s %s %s recover%s: %s (exit %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$b_host_name" "${b_fresh:+ --fresh}${b_yes:+ --yes}" "$1" "$2" >> "$d/recover.log") 2>/dev/null || :; }
     [ -z "${DISCORD_STATE_DIR:-}" ] || ! [ "$DISCORD_STATE_DIR" -ef "$d" ] ||
       { echo "claude-discord: bot: a session cannot recover its own bot: it is stopped or restarted on the way. Run it in a terminal outside $bn's session" >&2; exit 2; }
-    b_unknown() { echo "claude-discord: bot: 'claude agents --json' failed, so what is running is unknown; nothing was run" >&2; exit 1; }
+    # The second guard behind health's hold (1.19.8): the monitor and boot never bring back a bot a person stopped. Asked
+    # without --yes, the person decides.
+    if [ -n "$b_yes" ] && b_when=$(person_stopped "$d"); then
+      b_rlog "refused: stopped by a person (daemon.log, $b_when)" 1
+      echo "claude-discord: bot: a person stopped $bn (daemon.log, $b_when), so --yes does not bring it back: claude-discord bot $bn recover asks you; nothing was run" >&2; exit 1
+    fi
+    b_unknown() { b_rlog "refused: claude agents failed, what runs is unknown" 1; echo "claude-discord: bot: 'claude agents --json' failed, so what is running is unknown; nothing was run" >&2; exit 1; }
     # The bot's last session: <bot dir>/pinned-job (the job id of the last background session this bot pinned, written at
     # every startup and resume), else the newest marker of <bot dir>/plugin-sessions/ (one per session, named by its
     # session id, touched by every hook event; a resumed job keeps its id and changes its sessionId, so the first 8
@@ -328,6 +338,14 @@ if [ "${1:-}" = bot ]; then
         | "\(.id) \(.how) \(.state // "-") \(.pid // "-")" end' 2>/dev/null) || b_unknown
     live=$(live_sessions "$bot" "$d") || b_unknown
     b_id="" b_how="" b_state="" b_pid=""; [ -z "$b_last" ] || read -r b_id b_how b_state b_pid <<<"$b_last"
+    # Nothing found, and the pinned job settled (1.19.8; 2026-10-30: a daemon restart settled 5 bots done, and a fresh start
+    # would have lost their conversations): only --all lists it, and only that id counts, in this cwd, state done. A failed
+    # --all listing is the fresh start it was. --fresh stops what is listed, and this row is not.
+    if [ -z "$b_id$live$b_fresh" ] && [ -n "$b_pin" ]; then
+      b_row=$(claude agents --json --all 2>/dev/null | jq -r --arg pin "$b_pin" --arg cwd "$(pwd -P)" '
+        arrays | first(.[] | objects | select(.id == $pin and .cwd == $cwd and .state == "done")) | "\(.id) \(.pid // "-")"' 2>/dev/null) || b_row=""
+      [ -z "$b_row" ] || { read -r b_id b_pid <<<"$b_row"; b_how="pinned-job (done)" b_state=done; }
+    fi
     # Every listed session of the bot started here: live_sessions' rows, and the last session when it is not among them
     # (renamed with /rename and no job record of this bot). Two on one token both answer: the count decides.
     b_rows=$live
@@ -348,13 +366,16 @@ if [ "${1:-}" = bot ]; then
     # --fresh discards the conversation, so a session whose transcript moved in the last 15 minutes (working: a long turn,
     # or on something that is not Discord) is not taken for a wedged one (1.17.1; cswap lost 7 h of work on 2026-10-17).
     if [ -n "$b_fresh" ] && transcript_moved "$d" 15; then
+      b_rlog "refused: a transcript changed within 15 minutes" 1
       echo "claude-discord: bot: a transcript of $bn's session changed within the last 15 minutes: it is working (a long turn, or on something other than Discord), which --fresh would discard. recover without --fresh keeps the conversation; to discard it anyway, stop the session by hand first (${b_stops:-claude stop <id>}), then recover; nothing was run" >&2; exit 1
     fi
     if [ -n "$b_fresh" ]; then b_do=fresh b_cmd="claude-discord --bg --name $bn"
     elif [ "$b_n" -ge 2 ]; then
+      b_rlog "refused: $b_n sessions listed ($b_names)" 1
       echo "claude-discord: bot: $b_n sessions of $bn are listed ($b_names): two on one token both answer. Stop the copy by hand (claude stop <id>), or recover --fresh stops every one and starts one; nothing was run" >&2; exit 1
     elif [ "$b_n" = 1 ] && [ "$b_id" = - ]; then
       # A foreground session (no job record: started at a terminal, or /bg'd) is not the daemon's to respawn.
+      b_rlog "refused: a foreground session (pid $b_pid)" 1
       echo "claude-discord: bot: the one listed session of $bn is a foreground one (pid $b_pid, no job id), which claude respawn cannot restart: stop it by hand, or recover --fresh stops it and starts a background one; nothing was run" >&2; exit 1
     elif [ "$b_n" = 1 ]; then
       # The session the process runs NOW (~/.claude/sessions/<pid>.json, kept current through /clear and a takeover)
@@ -368,7 +389,7 @@ if [ "${1:-}" = bot ]; then
       else b_do=respawn b_cmd="claude respawn $b_id"; fi
     else b_do=start b_cmd="claude-discord --bg --name $bn"; fi
     # Trust before anything is stopped: a `claude --bg` start refuses an untrusted workspace (fail-open, as refresh).
-    [ "$b_do" = respawn ] || ! untrusted || { echo "claude-discord: bot: $PWD is not a trusted workspace, so a --bg start would refuse: run 'claude' here once and accept the trust prompt; nothing was run" >&2; exit 1; }
+    [ "$b_do" = respawn ] || ! untrusted || { b_rlog "refused: an untrusted workspace ($PWD)" 1; echo "claude-discord: bot: $PWD is not a trusted workspace, so a --bg start would refuse: run 'claude' here once and accept the trust prompt; nothing was run" >&2; exit 1; }
     printf '%s\n' "claude-discord: bot: recover${b_fresh:+ --fresh} $bn on $b_host_name, $d" "    $b_found"
     case $b_do in
       respawn) echo "    run: $b_cmd    (the session comes back under the same id with a new process; its conversation is kept, and its hooks run again)";;
@@ -381,8 +402,6 @@ if [ "${1:-}" = bot ]; then
       [ -t 0 ] && [ -t 1 ] || { echo "claude-discord: bot: not a terminal (stdin and stdout), so nothing was run: run it in a terminal to answer (or --yes)" >&2; exit 3; }
       b_ask "Recover $bn?"
     fi
-    # b_rlog <command> <exit>: a line in the bot's recover.log, in the shape of access.log's.
-    b_rlog() { (umask 077; printf '%s %s %s recover%s: %s (exit %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$b_host_name" "${b_fresh:+ --fresh}${b_yes:+ --yes}" "$1" "$2" >> "$d/recover.log") 2>/dev/null || :; }
     if { [ "$b_do" = fresh ] || [ "$b_do" = takeover ]; } && [ -n "$b_rows" ] && ! stop_sessions "$bn" "$b_rows" "$d"; then
       # Nothing is started: a start beside a session that still runs puts two sessions on one token.
       b_rlog "$b_stops" 1

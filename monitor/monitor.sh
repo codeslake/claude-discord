@@ -970,6 +970,7 @@ state=$(printf '%s' "$state" | jq -c --argjson pid "$$" --arg now "$(now)" --arg
   '.monitor = ((.monitor // {}) + {pid: $pid, started: $now, holders: $holders}) | del(.monitor.stopped_at, .monitor.stopped_by_user)')
 write_state
 log start
+command -v claude >/dev/null 2>&1 || log "warning: claude is not on PATH ($PATH): the automatic recover cannot run"
 n=$pass_n   # the first pass right after start
 while :; do
   [ -f "$dir/hosts" ] || finish no-ledger

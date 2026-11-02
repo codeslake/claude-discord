@@ -968,6 +968,63 @@ grep -q 'AFTER it starts' "$D/bin/lib/state.sh" && grep -q '0\.6 s ahead' "$D/ho
   { echo "FAIL: on-session-end and state.sh agree on the order of the hook and the killed line (0.6 s ahead, not behind)"; exit 1; }
 echo "ok: boot recovers every bot of the machine that runs no session (bot recover --yes), skips one that does, and exits 1 when one failed"
 
+# recover (1.19.8), its own HOME. The stub answers `agents --json` from plain and `agents --json --all` from all (a file
+# that is not there: the call fails); any other call goes to claude.calls. rt <answer> runs it at a terminal.
+RH=$HOME/rcbox; mkdir -p "$RH/p" "$RH/bin" "$RH/.claude"; RP=$(cd -P "$RH/p" && pwd); RK="$RH/.claude-discord/projects/$(skey "$RP")"; RD=$RK/bots/rb
+mkdir -p "$RD"; printf '%s\n' "$RP" > "$RK/project"; printf 'DISCORD_BOT_TOKEN=x\n' > "$RD/.env"; echo aa000001 > "$RD/pinned-job"
+printf '#!/bin/bash\ncase $1 in agents) f=$HOME/plain; [ "${3:-}" != --all ] || f=$HOME/all; [ -e "$f" ] || exit 1; echo "$(<"$f")";; *) echo "$*" >> "$HOME/claude.calls";; esac\n' > "$RH/bin/claude"; chmod +x "$RH/bin/claude"
+rr() { rc=0; out=$(cd "$RP" && HOME=$RH PATH=$RH/bin:$PATH bash "$S" bot rb recover "$@" </dev/null 2>&1) || rc=$?; }
+rt() { rc=0; out=$(printf '%s\n' "$1" | HOME=$RH PATH=$RH/bin:$PATH python3 -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' bash -c 'cd "$1" && exec bash "$2" bot rb recover' x "$RP" "$S" 2>&1) || rc=$?; }
+rlast() { { tail -n 1 "$RD/recover.log" 2>/dev/null || :; } | cut -d' ' -f4-; }
+# (a) The pinned job settled: only --all lists it, done, in this cwd. It is the last session: respawned, its conversation kept.
+echo '[]' > "$RH/plain"; printf '[{"id":"aa000001","cwd":"%s","state":"done"},{"id":"bb000002","cwd":"%s","state":"done"}]\n' "$RP" "$RP" > "$RH/all"
+rt y; A="$rc $out"; A2=$(rlast); A3=$(cat "$RH/claude.calls" 2>&1) || :; rm -f "$RH/claude.calls"; rr --yes
+[[ $A == 0*"its last session aa000001 (pinned-job (done))"*"run: claude respawn aa000001"* ]] && [ "$A3" = "respawn aa000001" ] && [ "$A2" = "recover: claude respawn aa000001 (exit 0)" ] &&
+  [ "$rc" = 0 ] && [ "$(<"$RH/claude.calls")" = "respawn aa000001" ] && [ "$(rlast)" = "recover --yes: claude respawn aa000001 (exit 0)" ] ||
+  { echo "FAIL: recover respawns a settled pinned job only --all lists, at a terminal and with --yes: $A / $A2 / $A3 / rc=$rc $out"; exit 1; }
+# (b) Not that row: the pin's in another cwd, the pin's not done, a done row (by the bot's name, with a plugin-sessions
+# marker) that is not the pin: a fresh start. So does a failed --all listing, as before it was asked. --fresh stops nothing
+# that only --all lists. A session the plain listing has (by name) is the one session, the settled pin no second one.
+mkdir -p "$RD/plugin-sessions"; : > "$RD/plugin-sessions/cc000003-1111-2222-3333-444444444444"; rm -f "$RH/claude.calls"
+printf '[{"id":"aa000001","cwd":"/elsewhere","state":"done"},{"id":"aa000001","cwd":"%s","state":"working"},{"id":"cc000003","name":"rb","sessionId":"cc000003-1111-2222-3333-444444444444","cwd":"%s","state":"done"}]\n' "$RP" "$RP" > "$RH/all"
+rr; A="$rc $out"; rm -rf "$RD/plugin-sessions"
+mv "$RH/all" "$RH/all.keep"; rr; B="$rc $out"; mv "$RH/all.keep" "$RH/all"
+printf '[{"id":"aa000001","cwd":"%s","state":"done"}]\n' "$RP" > "$RH/all"; rr --fresh; C="$rc $out"
+printf '[{"id":"dd000004","name":"rb","cwd":"%s","state":"working","pid":77}]\n' "$RP" > "$RH/plain"; rr; E="$rc $out"; echo '[]' > "$RH/plain"
+[[ $A == 3*"run: cd $RP && claude-discord --bg --name rb"* ]] && [[ $A != *"claude respawn"* ]] && [[ $B == 3*"run: cd $RP && claude-discord --bg --name rb"* ]] && [[ $B != *refused* ]] &&
+  [[ $C == 3*"run: cd $RP && claude-discord --bg --name rb    (no session of rb is listed, so nothing is stopped"* ]] && [[ $E == 3*"run: claude respawn dd000004"* ]] && [ ! -e "$RH/claude.calls" ] ||
+  { echo "FAIL: only the pin's own row, this cwd, state done counts, and only when nothing else was found; a failed --all listing is a fresh start: $A / $B / $C / $E"; exit 1; }
+# (c) A person stopped the pinned job: --yes refuses, logged, nothing run; without --yes the person is asked, as before.
+printf '[2026-10-30T10:00:01.000Z] [bg] bg settled aa000001 (killed)\n' > "$RH/.claude/daemon.log"; rm -f "$RD/own-stop" "$RD/auto-start"
+rr --yes; A="$rc $out"; A2=$(rlast); rt n
+[[ $A == 1*"a person stopped rb"* ]] && [ "$A2" = "recover --yes: refused: stopped by a person (daemon.log, 2026-10-30T10:00:01.000Z) (exit 1)" ] &&
+  [ "$rc" = 4 ] && grep -q 'Recover rb? \[y/N\]' <<<"$out" && [ ! -e "$RH/claude.calls" ] && [ ! -e "$RD/auto-start" ] && [ ! -e "$RD/own-stop" ] ||
+  { echo "FAIL: recover --yes refuses a bot a person stopped, logged, and recover without --yes reaches its question: $A / $A2 / rc=$rc $out"; exit 1; }
+rm -f "$RH/.claude/daemon.log"
+# (d) Every refusal is in recover.log, so the monitor's "its recover.log says why" is true.
+rrf() { local why=$1; shift; rr "$@"; [ "$rc" = 1 ] && [[ $(rlast) == "recover${*:+ $*}: refused: $why"*" (exit 1)" ]] && [ ! -e "$RH/claude.calls" ] || { echo "FAIL: this refusal writes recover.log ($why): rc=$rc $out / $(rlast)"; exit 1; }; }
+mv "$RH/plain" "$RH/plain.keep"; rrf 'claude agents failed' --yes; mv "$RH/plain.keep" "$RH/plain"
+printf '[{"id":"dd000004","name":"rb","cwd":"%s"},{"id":"ee000005","name":"rb","cwd":"%s"}]\n' "$RP" "$RP" > "$RH/plain"; rrf '2 sessions listed'
+printf '[{"pid":4242,"name":"rb","cwd":"%s"}]\n' "$RP" > "$RH/plain"; rrf 'a foreground session (pid 4242)'; echo '[]' > "$RH/plain"; rm -f "$RH/all"
+jq -n --arg p "$RP" '.projects[$p].hasTrustDialogAccepted = false' > "$RH/.claude.json"; rrf 'an untrusted workspace'; rm -f "$RH/.claude.json"
+RT=$RH/.claude/projects/$(skey "$RP"); mkdir -p "$RT" "$RD/plugin-sessions"; : > "$RD/plugin-sessions/ff000006-1111-2222-3333-444444444444"; : > "$RT/ff000006-1111-2222-3333-444444444444.jsonl"; rrf 'a transcript changed within 15 minutes' --fresh
+# (e) The monitor says at its start that it cannot recover. An empty ledger: its first pass asks nothing of anyone, and TERM ends it.
+# A short tick: a TERM between the main loop's `sleep &` and its `tp=$!` leaves that sleep behind, so it must be short.
+RM=$RH/.claude-discord/records/monitor/$(skey "$RP")/rb; : > "$RD/hosts"
+NOCL=""; IFS=: read -ra RPA <<<"$PATH"; for p in "${RPA[@]}"; do [ -x "$p/claude" ] || NOCL=$NOCL${NOCL:+:}$p; done
+rmon() {
+  local rp n=0
+  (cd "$RP" && export HOME=$RH PATH=$1 CLAUDE_DISCORD_MONITOR_TICK=0.2 && exec bash "$D/monitor/monitor.sh" "$S" --locked rb </dev/null >/dev/null 2>&1) & rp=$!
+  until grep -q ' pass hosts=' "$RM/monitor.log" 2>/dev/null || [ "$n" -ge 7500 ]; do nap 0.002; n=$((n + 1)); done
+  kill "$rp"; wait "$rp" || :
+}
+rmon "$NOCL"; A=$(<"$RM/monitor.log"); rm -f "$RM/monitor.log"
+rmon "$RH/bin:$PATH"; B=$(<"$RM/monitor.log")
+[ "$(grep -cF "warning: claude is not on PATH ($NOCL): the automatic recover cannot run" <<<"$A")" = 1 ] && grep -q 'Z start$' <<<"$B" && [[ $B != *warning* ]] ||
+  { echo "FAIL: the monitor logs one warning at its start when claude is not on PATH, and none when it is: $A / $B"; exit 1; }
+rm -rf "${RH:?}"
+echo "ok: recover (1.19.8) respawns a settled pinned job (only its own row of --all, only when nothing else is found), recover --yes refuses a bot a person stopped, every refusal is in recover.log, and the monitor warns when claude is not on PATH"
+
 # access set with no terminal writes with no question when nothing in it widens who can drive the bot: no W, N or E
 # line, no mode change, and every channel it adds is in the bot's own server (its main channel's, as Discord says). Else it
 # prints the changes and exits 3 as before. The bot: 900 (the main channel) and 901 (open to anyone) listed; 111 (the owner)

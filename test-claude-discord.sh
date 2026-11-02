@@ -4115,8 +4115,8 @@ cp "$HOME/.claude.json" "$HOME/cj.keep"; jq --arg p "$(pwd -P)" '.projects[$p].h
 rc=0; out=$(bash "$S" bot acc recover </dev/null 2>&1) || rc=$?; cp "$HOME/cj.keep" "$HOME/.claude.json"
 rm -f "$AD/pinned-job"; cp "$HOME/claude.live" "$HOME/bin/claude"; BRC=0; BO=$(bash "$S" bot acc recover </dev/null 2>&1) || BRC=$?
 [[ $A == 0*"its last session 0e1a2222 (pinned-job) is not listed by claude agents"*"    run: cd $MP && claude-discord --bg --name acc"*$'\n'"$MK"$'\n'"Recover acc? [y/N] y"*"LAUNCHER "*" -n acc "*"claude-discord: bot: ran claude-discord --bg --name acc (exit 0)"* ]] &&
-  [[ $A != *RESPAWN* ]] && [ ! -e "$HOME/claude.calls" ] && [ "$(tail -n 1 "$AD/recover.log" | cut -d' ' -f4-)" = "recover: claude-discord --bg --name acc (exit 0)" ] &&
-  [ "$rc" = 1 ] && grep -q "$MP is not a trusted workspace, so a --bg start would refuse" <<<"$out" && [[ $out != *"$MK"* ]] && [[ $out != *"run: "* ]] && [ "$(wc -l < "$AD/recover.log" | tr -d ' ')" = 5 ] &&
+  [[ $A != *RESPAWN* ]] && [ ! -e "$HOME/claude.calls" ] && [ "$(tail -n 2 "$AD/recover.log" | head -n 1 | cut -d' ' -f4-)" = "recover: claude-discord --bg --name acc (exit 0)" ] &&
+  [ "$rc" = 1 ] && grep -q "$MP is not a trusted workspace, so a --bg start would refuse" <<<"$out" && [[ $out != *"$MK"* ]] && [[ $out != *"run: "* ]] && [ "$(wc -l < "$AD/recover.log" | tr -d ' ')" = 7 ] &&
   [ "$BRC" = 3 ] && grep -q 'its last session acc11111 (plugin-sessions) is listed by claude agents' <<<"$BO" && grep -q '^    run: claude respawn acc11111' <<<"$BO" ||
   { echo "FAIL: bot recover starts a fresh --bg session when no last session is listed, refuses an untrusted workspace before asking, and finds the session by its plugin-sessions marker: $A / rc=$rc $out / rc=$BRC $BO / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
 # Two listed sessions: refused before the question, both named (exit 1), nothing run; --fresh stops every one, then

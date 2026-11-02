@@ -646,7 +646,13 @@ claude-discord bot <bot> recover [--fresh] [--yes]   # a down or stuck bot broug
   session back under the same id and sessionId with a new process, its
   conversation kept and its hooks run again (on-session-start starts the
   keeper and primes it; a respawned worker may sit idle until the next
-  message). When the session's current id (`~/.claude/sessions/<pid>.json`,
+  message). None of them listed, but the job in `pinned-job` settled (1.19.8:
+  a daemon restart settles adopted workers `done`, and the plain listing drops
+  them): `claude agents --json --all` is asked for that one id, and its row, in
+  this project and `state done`, is the last session (`pinned-job (done)`), so
+  the act is the respawn and the conversation is kept. Nothing else is looked
+  up in `--all`, and a failed `--all` listing is the fresh start below. When
+  the session's current id (`~/.claude/sessions/<pid>.json`,
   which follows a `/clear` and a handover-and-takeover) is not the one its
   job record holds, a respawn would bring the old conversation back (cswap,
   2026-10-17), so the plan is `claude stop <id>, then cd <project> &&
@@ -673,9 +679,12 @@ claude-discord bot <bot> recover [--fresh] [--yes]   # a down or stuck bot broug
   terminal, and it does not wait for the plugin server: the monitor's next
   pass says whether the bot answers. `--yes` (1.19.0) runs the plan with no
   terminal and no question: what `boot` and the monitor's automatic recovery
-  run; every refusal above still holds. `<bot dir>/recover.log` gets `<time>
-  <user> <host> recover[ --fresh][ --yes]: <command> (exit <n>)` per run. A session
-  cannot recover its own bot.
+  run; every refusal above still holds, and (1.19.8) it refuses a bot a person
+  stopped (`person_stopped`, as `health` reads it from `daemon.log`), which
+  `recover` without `--yes` asks about as usual. `<bot dir>/recover.log` gets
+  `<time> <user> <host> recover[ --fresh][ --yes]: <command> (exit <n>)` per
+  run, and (1.19.8) `...: refused: <reason> (exit 1)` per refusal above. A
+  session cannot recover its own bot (exit 2, not logged).
 - `--host <alias> [--manager <bot>] --project <dir>` runs any of them on a
   host of a manager's ledger, under `ssh -t`, as `access --host` does: the
   token is typed into that terminal and read there, never put in a command
@@ -701,7 +710,7 @@ monitor's next pass confirms it within about a minute.
 | exit | means |
 |---|---|
 | 0 | done, or nothing to change |
-| 1 | it could not: Discord refused the token or the name, another bot's token, a name taken, a failed write; one of several sessions would not stop: the others are stopped and named; or a step after the rename failed (said, with its command). `recover`: the listing failed (what runs is unknown), two or more sessions listed, an untrusted workspace, a stop that failed, or the command it ran exited non-zero (said with its status) |
+| 1 | it could not: Discord refused the token or the name, another bot's token, a name taken, a failed write; one of several sessions would not stop: the others are stopped and named; or a step after the rename failed (said, with its command). `recover`: the listing failed (what runs is unknown), two or more sessions listed, an untrusted workspace, a person's stop under `--yes`, a stop that failed, or the command it ran exited non-zero (said with its status) |
 | 2 | usage, a name that is no name, a session renaming or recovering its own bot |
 | 3 | no terminal: nothing was read, changed or run (`rename` and `recover` print their plan first) |
 | 4 | answered no: nothing was changed |
@@ -1593,7 +1602,7 @@ Everything it keeps is in `~/.claude-discord/records/monitor/<key>/<manager>/`:
 |---|---|
 | `lock` | the single-instance lock (`flock` through perl); holds the running monitor's pid, and a monitor whose lock file was removed or replaced exits at its next tick |
 | `state.json` | what the TUI shows; kept after exit, and what keeps a restart from repeating a finding. Its `alerts` holds the last 100 records: every post with its reason and text, and every finding the channel was not told when it appeared (`not_posted`) |
-| `monitor.log`, `monitor.log.1` | one line per event, 256 KiB each at most |
+| `monitor.log`, `monitor.log.1` | one line per event, 256 KiB each at most. At its start (1.19.8), one `warning: claude is not on PATH (<PATH>): the automatic recover cannot run` when that is so |
 | `holders/<kind>-<pid>` | one record per keeper (`keeper`) or open TUI (`tui`): `<pid> <start time> <kind>` (a `session` record from 1.10.2 is read until its session ends) |
 | `stopped` | `monitor --stop` was run: nothing starts the backend until `monitor --start` |
 | `pass-now` | `monitor --check` was run: the monitor removes it at a tick and runs a pass, a minute after its last pass began at the earliest (one pass, however many requests). One it cannot remove is logged once and no request is served until the monitor is started again |
@@ -1658,7 +1667,10 @@ no mention:
 ```
 
 `recover` itself decides respawn, takeover or a fresh start and refuses two
-listed sessions, as at a terminal; the bot's `recover.log` gets the line. Never
+listed sessions, as at a terminal; the bot's `recover.log` gets the line, a
+refusal's reason too (1.19.8). A monitor with no `claude` on its PATH cannot
+recover a bot of `local`, and says so once at its start in `monitor.log`
+(1.19.8; 2026-10-30: all four recovers exited 1 that way). Never
 run: for a `duplicate` (which copy to stop is a person's call), for a bot of a
 host that is `noreach`, `hostdown` or `blind` this pass (nothing is said about
 it, see above), and for the manager itself on `local` (a session cannot
