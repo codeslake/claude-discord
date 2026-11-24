@@ -23,7 +23,11 @@
 #                             --bg --name, as refresh --force. The plan is printed with its `run:` line, then the one
 #                             question; the command's status is passed on. recover.log gets a line per run and per
 #                             refusal. --yes (1.19.0, what boot and the monitor run): no terminal needed, no question
-#                             asked; 1.19.8: refused when a person stopped the bot (person_stopped).
+#                             asked; 1.19.8: refused when a person stopped the bot (person_stopped); 1.19.9: a respawn or takeover
+#                             refused while a transcript changed within 15 minutes, and recover.log names the caller
+#                             (CLAUDE_DISCORD_RECOVER_BY, set by boot and the monitor). A session whose job record has
+#                             resumeSessionId is respawned; takeover only when the record lags the process.
+# Exit status 6 (1.19.9, deferred): --yes did not interrupt a working session; the monitor posts nothing and retries.
 # Each asks one question at the terminal, after the marker line access set prints (U+2060), and refuses without a
 # terminal on stdin and stdout (exit 3): token and add before they read anything, rename and recover after printing what
 # they would do. The token is never printed, never in an argument list, the environment or a log: read from the terminal
@@ -308,7 +312,9 @@ if [ "${1:-}" = bot ]; then
     # command run in the foreground and its status passed on; nothing runs on `n` or without a terminal. Not waited
     # for: whether the bot answers is the monitor's next pass's to say (a respawned worker may sit idle until a message).
     # b_rlog <command or refused: reason> <exit>: a line in the bot's recover.log, in the shape of access.log's.
-    b_rlog() { (umask 077; printf '%s %s %s recover%s: %s (exit %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$b_host_name" "${b_fresh:+ --fresh}${b_yes:+ --yes}" "$1" "$2" >> "$d/recover.log") 2>/dev/null || :; }
+    # 1.19.9: a --yes run names its caller (boot, monitor) when CLAUDE_DISCORD_RECOVER_BY says so, so a log line says who acted.
+    b_by=${CLAUDE_DISCORD_RECOVER_BY:-}; c_match "$b_by" '^[a-z-]{1,20}$' || b_by=""
+    b_rlog() { (umask 077; printf '%s %s %s recover%s: %s (exit %s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(id -un 2>/dev/null || echo unknown)" "$b_host_name" "${b_fresh:+ --fresh}${b_yes:+ --yes}${b_yes:+${b_by:+ by $b_by}}" "$1" "$2" >> "$d/recover.log") 2>/dev/null || :; }
     [ -z "${DISCORD_STATE_DIR:-}" ] || ! [ "$DISCORD_STATE_DIR" -ef "$d" ] ||
       { echo "claude-discord: bot: a session cannot recover its own bot: it is stopped or restarted on the way. Run it in a terminal outside $bn's session" >&2; exit 2; }
     # The second guard behind health's hold (1.19.8): the monitor and boot never bring back a bot a person stopped. Asked
@@ -379,22 +385,32 @@ if [ "${1:-}" = bot ]; then
       echo "claude-discord: bot: the one listed session of $bn is a foreground one (pid $b_pid, no job id), which claude respawn cannot restart: stop it by hand, or recover --fresh stops it and starts a background one; nothing was run" >&2; exit 1
     elif [ "$b_n" = 1 ]; then
       # The session the process runs NOW (~/.claude/sessions/<pid>.json, kept current through /clear and a takeover)
-      # against the one its job record started with: when they differ, claude respawn would bring the old one back
-      # (cswap, 2026-10-17: 8f1ba77e respawned while the conversation lived in 3df5c3fb), so the job is stopped and
-      # the current id resumed under a new job instead. Either unreadable: the respawn, as before.
+      # against the one its job record resumes: resumeSessionId, where CC (2.1.331) records the live id after a /clear and
+      # which claude respawn resumes, else sessionId (the birth id, all an older CC has). Only when they differ would a
+      # respawn bring the old conversation back (cswap, 2026-10-17: 8f1ba77e respawned while the conversation lived in
+      # 3df5c3fb), so then the job is stopped and the current id resumed under a new job. Since 1.19.9 that is a record
+      # that lags the process, or a CC without resumeSessionId: reading sessionId alone sent every bot that had ever
+      # /cleared down this branch, which forks the conversation and breaks views attached to the old job id.
+      # Either unreadable: the respawn, as before.
       b_now=$(jq -r '.sessionId // empty' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$b_pid.json" 2>/dev/null) || b_now=""
-      b_was=$(jq -r '.sessionId // empty' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/jobs/$b_id/state.json" 2>/dev/null) || b_was=""
+      b_was=$(jq -r '.resumeSessionId // .sessionId // empty' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/jobs/$b_id/state.json" 2>/dev/null) || b_was=""
       c_match "$b_now" '^[0-9a-f-]{8,64}$' || b_now=""
       if [ -n "$b_now" ] && [ -n "$b_was" ] && [ "$b_now" != "$b_was" ]; then b_do=takeover b_cmd="claude-discord --bg --name $bn --resume $b_now"
       else b_do=respawn b_cmd="claude respawn $b_id"; fi
     else b_do=start b_cmd="claude-discord --bg --name $bn"; fi
+    # --yes never interrupts a working session (1.19.9): a respawn or takeover stops the live process, so with no person to ask,
+    # a transcript that moved in the last 15 minutes refuses; the monitor tries again on a later pass.
+    if [ -n "$b_yes" ] && { [ "$b_do" = respawn ] || [ "$b_do" = takeover ]; } && transcript_moved "$d" 15; then
+      b_rlog "refused: a transcript changed within 15 minutes" 6
+      echo "claude-discord: bot: a transcript of $bn's session changed within the last 15 minutes: it is working, and --yes does not interrupt it (the monitor tries again on a later pass; run without --yes to decide); nothing was run" >&2; exit 6
+    fi
     # Trust before anything is stopped: a `claude --bg` start refuses an untrusted workspace (fail-open, as refresh).
     [ "$b_do" = respawn ] || ! untrusted || { b_rlog "refused: an untrusted workspace ($PWD)" 1; echo "claude-discord: bot: $PWD is not a trusted workspace, so a --bg start would refuse: run 'claude' here once and accept the trust prompt; nothing was run" >&2; exit 1; }
     printf '%s\n' "claude-discord: bot: recover${b_fresh:+ --fresh} $bn on $b_host_name, $d" "    $b_found"
     case $b_do in
       respawn) echo "    run: $b_cmd    (the session comes back under the same id with a new process; its conversation is kept, and its hooks run again)";;
       start) echo "    run: cd $PWD && $b_cmd    (a fresh session; handoff.md is folded in when there is one)";;
-      takeover) echo "    run: $b_stops, then cd $PWD && $b_cmd    (its conversation moved on to session $b_now since its job record's $b_was: a /clear or a takeover; claude respawn would bring the old one back, so the current one is resumed under a new job)";;
+      takeover) echo "    run: $b_stops, then cd $PWD && $b_cmd    (its conversation moved on to session $b_now, which its job record's $b_was does not name, so claude respawn would bring an older one back; the current conversation is continued under a NEW job id, as --bg --resume makes a copy on CC 2.1.331, and a tmux view attached to the old job id will not follow)";;
       *) if [ -n "$b_stops" ]; then echo "    run: $b_stops, then cd $PWD && $b_cmd    (every listed session stopped first; a fresh session, its conversation lost unless handoff.md is there)"
          else echo "    run: cd $PWD && $b_cmd    (no session of $bn is listed, so nothing is stopped; a fresh session)"; fi;;
     esac

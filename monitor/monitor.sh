@@ -537,7 +537,7 @@ run_host() {  # uses $host $remote, the envs array, and run_pass's step counter 
 run_cmd() {
   local k0 e="" l
   if [ "$1" = local ]; then
-    perl -e "$pg" env ${local_env[@]+"${local_env[@]}"} bash -c 'cd -- "$1" && exec "$2" bot "$3" recover --yes' _ "$3" "$HOME/.local/bin/claude-discord" "$4" \
+    perl -e "$pg" env CLAUDE_DISCORD_RECOVER_BY=monitor ${local_env[@]+"${local_env[@]}"} bash -c 'cd -- "$1" && exec "$2" bot "$3" recover --yes' _ "$3" "$HOME/.local/bin/claude-discord" "$4" \
       >/dev/null 2>&1 < /dev/null 9>&- &
   else
     # This host's env words, no here-string (bash 3.2 writes those to TMPDIR): the first line naming it.
@@ -809,7 +809,7 @@ def host_step($r):
                    and (($s.hosts[.e.host].version // "") | split(" ")[0] | split(".") | map(tonumber? // 0)) >= [1, 19, 0]
                    and ($now_s - (.e.recover_s // 0)) >= 1800
                    and ((.e.host == "local" and .e.bot == $manager and .e.project == $mproj) | not))
-   | "R" + ([.key, .e.host, (.e | subject), "cd \(.e | cdp) && ~/.local/bin/claude-discord bot \(.e | qbot) recover --yes", .e.project, .e.bot] | join("\u001f")))
+   | "R" + ([.key, .e.host, (.e | subject), "cd \(.e | cdp) && CLAUDE_DISCORD_RECOVER_BY=monitor ~/.local/bin/claude-discord bot \(.e | qbot) recover --yes", .e.project, .e.bot] | join("\u001f")))
 '
 # apply: the POST results back into the state. A sent finding sets `posted`
 # (what makes a restart, and the next pass, quiet); a sent recovery clears it;
@@ -928,6 +928,8 @@ run_pass() {
     lock_check; [ ! -e "$M/stopped" ] || finish stopped
     run_cmd "$rhost" "$rcmd" "$rproj" "$rbot"
     log "recover $key rc=$c_rc"
+    # rc 6 (1.19.9): the recover deferred, a working session left alone. Nothing posted and no recover_s recorded, so the next pass may retry.
+    if [ "$c_rc" = 6 ]; then log "recover-deferred $rsubj"; continue; fi
     if [ "$c_rc" = 0 ]; then txt="[recover] $rsubj: ran bot recover --yes (exit 0); the next pass says whether it answers"
     elif [ "$c_rc" = 124 ]; then txt="[recover failed] $rsubj: bot recover --yes did not finish within ${rcap}s"
     else txt="[recover failed] $rsubj: bot recover --yes exited $c_rc (its recover.log on that host says why)"; fi

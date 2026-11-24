@@ -4100,9 +4100,18 @@ mkdir -p "$HOME/.claude/jobs/acc11111" "$HOME/.claude/sessions"
 echo '{"sessionId":"0123abcd-1111-2222-3333-444444444444"}' > "$HOME/.claude/jobs/acc11111/state.json"
 echo "{\"sessionId\":\"3df5c3fb-1111-2222-3333-444444444444\",\"jobId\":\"acc11111\",\"pid\":$OLD}" > "$HOME/.claude/sessions/$OLD.json"
 bt - y acc recover; A="$BRC $BO"; kill -0 "$OLD" 2>/dev/null || A="$A gone1"
-[[ $A == 0*"its last session acc11111 (pinned-job) is listed by claude agents"*"    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc --resume 3df5c3fb-1111-2222-3333-444444444444    (its conversation moved on to session 3df5c3fb-1111-2222-3333-444444444444 since its job record's 0123abcd-1111-2222-3333-444444444444"*"stopping acc (acc11111, pid $OLD)"*"LAUNCHER "*" -n acc "*"--resume 3df5c3fb-1111-2222-3333-444444444444"*"ran claude-discord --bg --name acc --resume 3df5c3fb-1111-2222-3333-444444444444 (exit 0)"*" gone1" ]] &&
+[[ $A == 0*"its last session acc11111 (pinned-job) is listed by claude agents"*"    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc --resume 3df5c3fb-1111-2222-3333-444444444444    (its conversation moved on to session 3df5c3fb-1111-2222-3333-444444444444, which its job record's 0123abcd-1111-2222-3333-444444444444 does not name"*"stopping acc (acc11111, pid $OLD)"*"LAUNCHER "*" -n acc "*"--resume 3df5c3fb-1111-2222-3333-444444444444"*"ran claude-discord --bg --name acc --resume 3df5c3fb-1111-2222-3333-444444444444 (exit 0)"*" gone1" ]] &&
   [ "$(<"$HOME/claude.calls")" = "STOP acc11111" ] && [[ $A != *RESPAWN* ]] ||
   { echo "FAIL: a session whose current id (sessions/<pid>.json) differs from its job record's is stopped and resumed under its current id, not respawned: $A / $(cat "$HOME/claude.calls" 2>&1)"; exit 1; }
+# 1.19.9: CC 2.1.331 keeps sessionId as the job's birth id and records the live one in resumeSessionId, which respawn resumes:
+# equal to the process's id, the plan is a respawn (no stop, no new job); a resumeSessionId that also differs is still a takeover.
+echo '{"sessionId":"0123abcd-1111-2222-3333-444444444444","resumeSessionId":"3df5c3fb-1111-2222-3333-444444444444"}' > "$HOME/.claude/jobs/acc11111/state.json"
+rm -f "$HOME/claude.calls"; bt - y acc recover; A="$BRC $BO"; A2=$(<"$HOME/claude.calls"); rm -f "$HOME/claude.calls"
+echo '{"sessionId":"0123abcd-1111-2222-3333-444444444444","resumeSessionId":"99999999-1111-2222-3333-444444444444"}' > "$HOME/.claude/jobs/acc11111/state.json"
+bt - n acc recover; B="$BRC $BO"
+[[ $A == 0*"    run: claude respawn acc11111"* ]] && [ "$A2" = "RESPAWN acc11111" ] && [[ $A != *LAUNCHER* && $A != *"--resume"* ]] &&
+  [[ $B == *"    run: claude stop acc11111, then cd $MP && claude-discord --bg --name acc --resume 3df5c3fb-1111-2222-3333-444444444444"*"NEW job id"* ]] && [ ! -e "$HOME/claude.calls" ] ||
+  { echo "FAIL: a job record whose resumeSessionId is the live id is respawned, one whose resumeSessionId differs is still taken over: $A / $A2 / $B"; exit 1; }
 rm -rf "$HOME/.claude/jobs/acc11111" "$HOME/.claude/sessions/$OLD.json"; sleep 300 & OLD=$!; echo "$OLD" > "$HOME/old.pid"; rm -f "$HOME/claude.calls"
 # Its last session is not listed as started here (its pinned job runs in another project, and the newest plugin-sessions
 # marker names a session that is not listed): a fresh --bg start, after the question. An untrusted workspace is refused
@@ -4116,7 +4125,7 @@ rc=0; out=$(bash "$S" bot acc recover </dev/null 2>&1) || rc=$?; cp "$HOME/cj.ke
 rm -f "$AD/pinned-job"; cp "$HOME/claude.live" "$HOME/bin/claude"; BRC=0; BO=$(bash "$S" bot acc recover </dev/null 2>&1) || BRC=$?
 [[ $A == 0*"its last session 0e1a2222 (pinned-job) is not listed by claude agents"*"    run: cd $MP && claude-discord --bg --name acc"*$'\n'"$MK"$'\n'"Recover acc? [y/N] y"*"LAUNCHER "*" -n acc "*"claude-discord: bot: ran claude-discord --bg --name acc (exit 0)"* ]] &&
   [[ $A != *RESPAWN* ]] && [ ! -e "$HOME/claude.calls" ] && [ "$(tail -n 2 "$AD/recover.log" | head -n 1 | cut -d' ' -f4-)" = "recover: claude-discord --bg --name acc (exit 0)" ] &&
-  [ "$rc" = 1 ] && grep -q "$MP is not a trusted workspace, so a --bg start would refuse" <<<"$out" && [[ $out != *"$MK"* ]] && [[ $out != *"run: "* ]] && [ "$(wc -l < "$AD/recover.log" | tr -d ' ')" = 7 ] &&
+  [ "$rc" = 1 ] && grep -q "$MP is not a trusted workspace, so a --bg start would refuse" <<<"$out" && [[ $out != *"$MK"* ]] && [[ $out != *"run: "* ]] && [ "$(wc -l < "$AD/recover.log" | tr -d ' ')" = 8 ] &&
   [ "$BRC" = 3 ] && grep -q 'its last session acc11111 (plugin-sessions) is listed by claude agents' <<<"$BO" && grep -q '^    run: claude respawn acc11111' <<<"$BO" ||
   { echo "FAIL: bot recover starts a fresh --bg session when no last session is listed, refuses an untrusted workspace before asking, and finds the session by its plugin-sessions marker: $A / rc=$rc $out / rc=$BRC $BO / $(cat "$HOME/claude.calls" "$AD/recover.log" 2>&1)"; exit 1; }
 # Two listed sessions: refused before the question, both named (exit 1), nothing run; --fresh stops every one, then
@@ -5158,7 +5167,7 @@ rs=$(jq -c --arg mp "$MPP" '[.bots["h1|/home/u/ws/p|rv"].recover_rc, .bots["loca
 [ "$(posts | grep -c .)" = 3 ] && grep -qxF "[recover] rv on h1 (~/ws/p): ran bot recover --yes (exit 0); the next pass says whether it answers" <<<"$R1" &&
   grep -qF "[recover] lb on lambda (" <<<"$R1" && grep -qxF "<@111> [stale-session] h1 (/gone/x)" <<<"$R1" &&
   grep -qxF "fix: ssh h1 'claude stop old00001'" <<<"$R1" && grep -qF "plugin server pid 4242 of job old00001 runs for /gone/x" <<<"$R1" &&
-  [ "$(grep -c ' recover --yes' "$HOME/ssh.log")" = 1 ] && ! grep -q 'h7 .*recover' "$HOME/ssh.log" && grep -qF "h1 cd ~/ws/p && ~/.local/bin/claude-discord bot rv recover --yes" "$HOME/ssh.log" &&
+  [ "$(grep -c ' recover --yes' "$HOME/ssh.log")" = 1 ] && ! grep -q 'h7 .*recover' "$HOME/ssh.log" && grep -qF "h1 cd ~/ws/p && CLAUDE_DISCORD_RECOVER_BY=monitor ~/.local/bin/claude-discord bot rv recover --yes" "$HOME/ssh.log" &&
   [ "$(grep -c '^bot ' "$HOME/local.calls")" = 1 ] && grep -q '^bot lb recover --yes|' "$HOME/local.calls" &&
   [ "$rs" = '[0,0,true,"stale-session",["exit 0","exit 0"]]' ] ||
   { echo "FAIL: a posted down is recovered next pass (ssh and local), a duplicate, one recovered within 30 minutes, a frozen host and the manager itself are not, and a stale session is posted with its job: $R1 / $rs / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }
@@ -5191,7 +5200,7 @@ HQ=$(posts | jq -r 'select(.content | contains("[held] hq on")) | .content')
   { echo "FAIL: MONITOR_RECOVER=no recovers nothing, a held bot closes its [down] with a [held] line, and a stale session that left the answer posts its recovery: $R2 / $HK / $(posts | jq -c "select(.content | contains(\"[held] hk on\")) | .allowed_mentions") / $(cat "$HOME/ssh.log" "$HOME/local.calls" 2>&1)"; exit 1; }
 cp "$HOME/mcfg.keep" "$MCFG"; RX=(); rdoc .; rm -f "$HOME/ssh.log"; for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
 mstart; mstop
-grep -qF "h1 cd ~/ws/p && ~/.local/bin/claude-discord bot rv recover --yes" "$HOME/ssh.log" || { echo "FAIL: with the line gone and 30 minutes up, rv is recovered again: $(posts)"; exit 1; }
+grep -qF "h1 cd ~/ws/p && CLAUDE_DISCORD_RECOVER_BY=monitor ~/.local/bin/claude-discord bot rv recover --yes" "$HOME/ssh.log" || { echo "FAIL: with the line gone and 30 minutes up, rv is recovered again: $(posts)"; exit 1; }
 rm -f "$HOME/mcfg.keep" "$HOME/local.calls" "$MON"/h6.* "$MON"/h7.* "$MON"/local.*
 echo "ok: monitor (1.19.0): a bot still down a pass after its [down] is recovered (bot recover --yes, ssh or local) and said, once in 30 minutes, never a duplicate, a frozen host's bot, the manager itself or with MONITOR_RECOVER=no; a stale session is posted with claude stop <job> and its recovery when it is gone"
 

@@ -33,7 +33,7 @@ if [ "${1:-}" = boot ]; then
         printf 'session-end killed %s\n' "$hl" > "$bd/held" 2>/dev/null || :
         echo "boot: $p $b: stopped by a person (daemon.log, $hl), held, skipped"; continue
       fi
-      rc=0; out=$("$self_path" bot --project "$p" "$b" recover --yes 2>&1 </dev/null) || rc=$?
+      rc=0; out=$(CLAUDE_DISCORD_RECOVER_BY=boot "$self_path" bot --project "$p" "$b" recover --yes 2>&1 </dev/null) || rc=$?
       if [ "$rc" = 0 ]; then echo "boot: $p $b: recovered"
       else bt_rc=1; echo "boot: $p $b: failed (exit $rc): ${out##*$'\n'}"; fi
     done

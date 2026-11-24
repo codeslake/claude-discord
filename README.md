@@ -681,7 +681,16 @@ claude-discord bot <bot> recover [--fresh] [--yes]   # a down or stuck bot broug
   terminal and no question: what `boot` and the monitor's automatic recovery
   run; every refusal above still holds, and (1.19.8) it refuses a bot a person
   stopped (`person_stopped`, as `health` reads it from `daemon.log`), which
-  `recover` without `--yes` asks about as usual. `<bot dir>/recover.log` gets
+  `recover` without `--yes` asks about as usual. Since 1.19.9 the session's
+  id is compared with the job record's `resumeSessionId` (where CC 2.1.331
+  records the live id after a `/clear`, and which `claude respawn` resumes)
+  before `sessionId`, so such a bot is respawned, not taken over under a new
+  job; and `--yes` refuses a respawn or takeover with exit 6 (deferred) while
+  a transcript of the session changed within 15 minutes: the monitor logs
+  `recover-deferred`, posts nothing and tries again on a later pass (run
+  without `--yes` to decide). A `--yes` line in `recover.log` ends
+  `recover --yes by <boot|monitor>` when `CLAUDE_DISCORD_RECOVER_BY` names the
+  caller. `<bot dir>/recover.log` gets
   `<time> <user> <host> recover[ --fresh][ --yes]: <command> (exit <n>)` per
   run, and (1.19.8) `...: refused: <reason> (exit 1)` per refusal above. A
   session cannot recover its own bot (exit 2, not logged).

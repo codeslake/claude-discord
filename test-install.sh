@@ -1008,6 +1008,21 @@ printf '[{"id":"dd000004","name":"rb","cwd":"%s"},{"id":"ee000005","name":"rb","
 printf '[{"pid":4242,"name":"rb","cwd":"%s"}]\n' "$RP" > "$RH/plain"; rrf 'a foreground session (pid 4242)'; echo '[]' > "$RH/plain"; rm -f "$RH/all"
 jq -n --arg p "$RP" '.projects[$p].hasTrustDialogAccepted = false' > "$RH/.claude.json"; rrf 'an untrusted workspace'; rm -f "$RH/.claude.json"
 RT=$RH/.claude/projects/$(skey "$RP"); mkdir -p "$RT" "$RD/plugin-sessions"; : > "$RD/plugin-sessions/ff000006-1111-2222-3333-444444444444"; : > "$RT/ff000006-1111-2222-3333-444444444444.jsonl"; rrf 'a transcript changed within 15 minutes' --fresh
+# (f) 1.19.9: --yes never interrupts a working session: a respawn plan with a transcript touched now is deferred (exit 6,
+# logged, nothing run); without --yes the same state reaches the question. An old transcript runs the respawn.
+printf '[{"id":"aa000001","cwd":"%s","state":"working","pid":88}]\n' "$RP" > "$RH/plain"; echo aa000001 > "$RD/pinned-job"; rm -f "$RH/claude.calls"
+RT=$RH/.claude/projects/$(skey "$RP"); mkdir -p "$RT" "$RD/plugin-sessions"; rm -f "$RD/plugin-sessions"/* "$RT"/*.jsonl; : > "$RD/plugin-sessions/fa000006-1111-2222-3333-444444444444"; : > "$RT/fa000006-1111-2222-3333-444444444444.jsonl"
+rr --yes; A="$rc $out"; A2=$(rlast); rt n; B="$rc $out"
+touch -d '20 minutes ago' "$RT/fa000006-1111-2222-3333-444444444444.jsonl"; rr --yes; C="$rc"
+[[ $A == 6*"--yes does not interrupt it"* ]] && [ "$A2" = "recover --yes: refused: a transcript changed within 15 minutes (exit 6)" ] && [ "$(wc -l < "$RH/claude.calls" | tr -d ' ')" = 1 ] &&
+  [ "$(<"$RH/claude.calls")" = "respawn aa000001" ] && [ "$C" = 0 ] && [[ $B == 4*"Recover rb? [y/N]"* ]] ||
+  { echo "FAIL: recover --yes defers (exit 6, logged, nothing run) while a transcript moves, asks without --yes, runs once it is old: $A / $A2 / $B / $C / $(cat "$RH/claude.calls" 2>&1)"; exit 1; }
+# (g) CLAUDE_DISCORD_RECOVER_BY names the caller in a --yes line; a value outside ^[a-z-]{1,20}$ is ignored.
+rm -f "$RH/claude.calls"; rc=0; out=$(cd "$RP" && CLAUDE_DISCORD_RECOVER_BY=monitor HOME=$RH PATH=$RH/bin:$PATH bash "$S" bot rb recover --yes </dev/null 2>&1) || rc=$?; A=$(rlast)
+rc=0; out=$(cd "$RP" && CLAUDE_DISCORD_RECOVER_BY='Bad;x' HOME=$RH PATH=$RH/bin:$PATH bash "$S" bot rb recover --yes </dev/null 2>&1) || rc=$?; B=$(rlast)
+[ "$A" = "recover --yes by monitor: claude respawn aa000001 (exit 0)" ] && [ "$B" = "recover --yes: claude respawn aa000001 (exit 0)" ] ||
+  { echo "FAIL: recover.log names CLAUDE_DISCORD_RECOVER_BY when valid and ignores an invalid one: $A / $B"; exit 1; }
+rm -f "$RH/claude.calls" "$RD/plugin-sessions"/* "$RT"/*.jsonl; echo '[]' > "$RH/plain"
 # (e) The monitor says at its start that it cannot recover. An empty ledger: its first pass asks nothing of anyone, and TERM ends it.
 # A short tick: a TERM between the main loop's `sleep &` and its `tp=$!` leaves that sleep behind, so it must be short.
 RM=$RH/.claude-discord/records/monitor/$(skey "$RP")/rb; : > "$RD/hosts"
@@ -1023,7 +1038,7 @@ rmon "$RH/bin:$PATH"; B=$(<"$RM/monitor.log")
 [ "$(grep -cF "warning: claude is not on PATH ($NOCL): the automatic recover cannot run" <<<"$A")" = 1 ] && grep -q 'Z start$' <<<"$B" && [[ $B != *warning* ]] ||
   { echo "FAIL: the monitor logs one warning at its start when claude is not on PATH, and none when it is: $A / $B"; exit 1; }
 rm -rf "${RH:?}"
-echo "ok: recover (1.19.8) respawns a settled pinned job (only its own row of --all, only when nothing else is found), recover --yes refuses a bot a person stopped, every refusal is in recover.log, and the monitor warns when claude is not on PATH"
+echo "ok: recover (1.19.8, 1.19.9) respawns a settled pinned job (only its own row of --all, only when nothing else is found), recover --yes refuses a bot a person stopped, every refusal is in recover.log, and the monitor warns when claude is not on PATH"
 
 # access set with no terminal writes with no question when nothing in it widens who can drive the bot: no W, N or E
 # line, no mode change, and every channel it adds is in the bot's own server (its main channel's, as Discord says). Else it
