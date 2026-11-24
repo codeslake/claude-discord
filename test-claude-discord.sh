@@ -5201,7 +5201,22 @@ HQ=$(posts | jq -r 'select(.content | contains("[held] hq on")) | .content')
 cp "$HOME/mcfg.keep" "$MCFG"; RX=(); rdoc .; rm -f "$HOME/ssh.log"; for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
 mstart; mstop
 grep -qF "h1 cd ~/ws/p && CLAUDE_DISCORD_RECOVER_BY=monitor ~/.local/bin/claude-discord bot rv recover --yes" "$HOME/ssh.log" || { echo "FAIL: with the line gone and 30 minutes up, rv is recovered again: $(posts)"; exit 1; }
-rm -f "$HOME/mcfg.keep" "$HOME/local.calls" "$MON"/h6.* "$MON"/h7.* "$MON"/local.*
+# rc 6 (1.19.9): lb's local recover defers (a working session). The shim exits 6 for `bot ...` and records the call: the
+# monitor logs recover-deferred, posts nothing for it and records no recover_s, so the next pass (shim restored, exit 0)
+# runs it again and says [recover].
+cp "$HOME/.local/bin/claude-discord" "$HOME/shim.keep"; rm -f "$HOME/local.calls"
+printf '#!/bin/bash\n[ "$1" != bot ] || { printf "%%s\\n" "$*" >> "$HOME/rc6.calls"; exit 6; }\nexec "$HOME/shim.keep" "$@"\n' > "$HOME/.local/bin/claude-discord"
+mstate --arg mp "$MPP" 'del(.bots["local|" + $mp + "|lb"].recover_s)'; for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
+mstart; mstop
+D6=$(jq -c --arg mp "$MPP" '.bots["local|" + $mp + "|lb"].recover_s' "$MB/state.json")
+[ "$(grep -c '^bot lb recover --yes' "$HOME/rc6.calls")" = 1 ] && grep -qF "recover local|$MPP|lb rc=6" "$MB/monitor.log" && grep -qF "recover-deferred lb on lambda" "$MB/monitor.log" &&
+  ! posts | grep -q 'recover' && [ "$D6" = null ] ||
+  { echo "FAIL: a recover that exits 6 is logged as deferred, posts nothing and records no recover_s: $D6 / $(posts) / $(tail -8 "$MB/monitor.log")"; exit 1; }
+cp "$HOME/shim.keep" "$HOME/.local/bin/claude-discord"; for _ in 1 2 3; do printf '200 {}\n'; done > "$CURL_REPLIES"; : > "$CURL_LOG"
+mstart; mstop
+[ "$(posts | jq -r .content | grep -c '^\[recover\] lb on lambda (')" = 1 ] && [ "$(jq -c --arg mp "$MPP" '.bots["local|" + $mp + "|lb"].recover_s != null' "$MB/state.json")" = true ] ||
+  { echo "FAIL: after a deferred recover the next pass runs it again (exit 0) and says [recover]: $(posts)"; exit 1; }
+rm -f "$HOME/mcfg.keep" "$HOME/local.calls" "$HOME/rc6.calls" "$HOME/shim.keep" "$MON"/h6.* "$MON"/h7.* "$MON"/local.*
 echo "ok: monitor (1.19.0): a bot still down a pass after its [down] is recovered (bot recover --yes, ssh or local) and said, once in 30 minutes, never a duplicate, a frozen host's bot, the manager itself or with MONITOR_RECOVER=no; a stale session is posted with claude stop <job> and its recovery when it is gone"
 
 # A group too long for one post (about 1900 characters) keeps whole entries and names the rest on a last line: no bot is dropped
