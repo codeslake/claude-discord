@@ -248,7 +248,9 @@ reap_sandbox() {
     kill -$sig $pids 2>/dev/null || :; nap 0.02
   done
 }
-trap 'kill $KILL_AT_EXIT 2>/dev/null || :; reap_sandbox; rm -rf "$SBX"' EXIT
+# unset IFS: a TERM that lands in nap's `IFS= read` runs the traps with that empty IFS (bash), so `$(seq 125)` and `kill
+# $pids` would not split and the reaping would do nothing.
+trap 'unset IFS; kill $KILL_AT_EXIT 2>/dev/null || :; reap_sandbox; rm -rf "$SBX"' EXIT
 # Watchdog: a hang fails the suite, saying where, instead of blocking its caller. After $1 s it lists every process under
 # the shell that armed it (a hung command, a nap too: it is /bin/sleep) and kills that shell and all of them at once: a
 # grandchild in a $(...) holds the capture pipe open, so killing the children alone left the shell blocked. The shell's
@@ -263,7 +265,7 @@ arm_watchdog() {
             for (q in d) if (q != p) print a[q] }') || :
     echo "FAIL: still running after $1 s (budget 40 s), in the block after the last ok: line${kids:+; the processes under it:$'\n'$kids}"
     kill "$target" $(printf '%s\n' "$kids" | awk '{print $1}') 2>/dev/null ) & KILL_AT_EXIT="$KILL_AT_EXIT $!"; disown $!   # disowned: a bare `wait` below must not wait for it
-  trap 'echo "FAIL: stopped by SIGTERM (the watchdog, or a kill from outside) in the block after \"${LAST_OK:-the start}\"${FUNCNAME[0]+, in ${FUNCNAME[*]}, called from line(s) ${BASH_LINENO[*]}}"; exit 1' TERM
+  trap 'unset IFS; echo "FAIL: stopped by SIGTERM (the watchdog, or a kill from outside) in the block after \"${LAST_OK:-the start}\"${FUNCNAME[0]+, in ${FUNCNAME[*]}, called from line(s) ${BASH_LINENO[*]}}"; exit 1' TERM
 }
 arm_watchdog 60
 # The watchdog itself, armed at 0.1 s in a subshell over a hung grandchild inside a $(...) (the shape of a hook hung under
