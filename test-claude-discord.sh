@@ -4251,20 +4251,22 @@ mdoc() {
 }
 mstate() { jq -c "$@" "$MB/state.json" > "$MB/state.json.t" && mv "$MB/state.json.t" "$MB/state.json"; }
 # The monitor's pid in state.json, read as monitor_alive reads it (no jq start: ~20 calls).
-# WCAP: the bounded waits on the backend below poll every 2 ms up to this many times (15 s). A wait returns at the first
-# poll that sees its condition, so a pass costs nothing extra; 1500 (3 s) was outrun once on lmd42 under load 10 with
-# jq 1.6 (the keeper's re-exec after a monitor.sh change, 2026-10-18), and main carried the same cap.
-WCAP=7500
+# WSECS: the bounded waits on the backend below poll every 2 ms for up to this many seconds of wall time. A wait returns at
+# the first poll that sees its condition, so a pass costs nothing extra; 3 s was outrun once on lmd42 under load 10 with
+# jq 1.6 (the keeper's re-exec after a monitor.sh change, 2026-10-18). A deadline, not a count of polls: a poll forks
+# (a grep, a pgrep), and under load 7500 of them took 37 s and more, so a missed event met the 60 s watchdog before
+# its own FAIL could say which wait it was (1.19.10).
+WSECS=15
 mpid() { local s="" re='"monitor":\{([^{}]*,)?"pid":([0-9]+)'; { IFS= read -r s < "$MB/state.json"; } 2>/dev/null || :; [[ ! $s =~ $re ]] || echo "${BASH_REMATCH[2]}"; }
-# wait_log <n> <regex>: until monitor.log holds n lines matching it (WCAP polls at most).
+# wait_log <n> <regex>: until monitor.log holds n lines matching it (WSECS at most).
 wait_log() {
-  local n=0 c=0
-  while [ "$n" -lt "$WCAP" ]; do
+  local end=$((SECONDS + WSECS)) c=0
+  while [ "$SECONDS" -lt "$end" ]; do
     c=$(command grep -cE -- "$2" "$MB/monitor.log" 2>/dev/null) || :
     [ "${c:-0}" -lt "$1" ] || return 0
-    nap 0.002; n=$((n + 1))
+    nap 0.002
   done
-  echo "FAIL: the monitor never logged '$2' $1 time(s): $(tail -5 "$MB/monitor.log" 2>&1)"; exit 1
+  echo "FAIL: the monitor never logged '$2' $1 time(s) within $WSECS s: $(tail -5 "$MB/monitor.log" 2>&1)"; exit 1
 }
 passes() { local c; c=$(command grep -c ' pass hosts=' "$MB/monitor.log" 2>/dev/null) || :; echo "${c:-0}"; }
 starts() { local c; c=$(command grep -c 'Z start$' "$MB/monitor.log" 2>/dev/null) || :; echo "${c:-0}"; }
@@ -4275,10 +4277,10 @@ running() { local st=""; { read -r st < "/proc/$1/stat"; } 2>/dev/null || return
 # wait_tick: a holder check of the running monitor that began after this call is over: it drops a record whose pid
 # cannot live (past pid_max). Proof that a tick ran, where the case is that the tick did nothing else.
 wait_tick() {
-  local f="$MB/holders/tui-4194999" n=0
+  local f="$MB/holders/tui-4194999" end=$((SECONDS + WSECS))
   echo "4194999 - tui" > "$f"
-  while [ -e "$f" ] && [ "$n" -lt "$WCAP" ]; do nap 0.002; n=$((n + 1)); done
-  [ ! -e "$f" ] || { echo "FAIL: the monitor ran no holder check within 15 s: $(tail -3 "$MB/monitor.log")"; exit 1; }
+  while [ -e "$f" ] && [ "$SECONDS" -lt "$end" ]; do nap 0.002; done
+  [ ! -e "$f" ] || { echo "FAIL: the monitor ran no holder check within $WSECS s: $(tail -3 "$MB/monitor.log")"; exit 1; }
 }
 # mstop: the holder goes and the monitor is TERMed (it does not end for want of a holder). A monitor mid-pass takes the
 # TERM only once its foreground command (a jq, a curl) is done (bash defers a trapped signal), which under load 32 on
@@ -4320,11 +4322,13 @@ echo "ok: mstop waits up to 10 s for a TERMed monitor and, past that, says wheth
 # the keeper and the monitor it can name; a monitor the keeper's last --ensure was still starting (the lock waiter, or
 # one that has not written its pid yet) leaves on the marker by itself a moment later, and stays for good when the
 # marker goes first (it then starts keepers on its own clock under the cases that follow). All of them carry the
-# installed monitor.sh's path in argv, the waiter too. 3 s at most.
+# installed monitor.sh's path in argv, the waiter too. WSECS at most.
 backend_gone() {
-  local n=0
-  while pgrep -f "$PC/monitor/monitor\.sh .* mgr( |\$)" >/dev/null && [ "$n" -lt "$WCAP" ]; do nap 0.002; n=$((n + 1)); done
-  [ "$n" -lt "$WCAP" ] || { echo "FAIL: a keeper, monitor or lock waiter of mgr is still there 15 s after --stop: $(pgrep -af "$PC/monitor/monitor\.sh")"; exit 1; }
+  local end=$((SECONDS + WSECS))
+  while pgrep -f "$PC/monitor/monitor\.sh .* mgr( |\$)" >/dev/null; do
+    [ "$SECONDS" -lt "$end" ] || { echo "FAIL: a keeper, monitor or lock waiter of mgr is still there $WSECS s after --stop: $(pgrep -af "$PC/monitor/monitor\.sh")"; exit 1; }
+    nap 0.002
+  done
 }
 mstart() {  # a holder, then --ensure; returns after the first pass of this start
   local want=$(( $(passes) + 1 ))
@@ -4842,7 +4846,6 @@ rc=0; out=$(cd "$HOME" && bash "$S" monitor --start mgr 2>&1) || rc=$?
 [ "$rc" = 0 ] || { all_projects; echo "FAIL: monitor --start from outside the project must find the project with a state dir that has it (rc=$rc): $out"; exit 1; }
 KP=""; n=0; while [ -z "$KP" ] && [ "$n" -lt 1000 ]; do for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || KP=${f##*-}; done; nap 0.002; n=$((n + 1)); done
 wait_log "$want" 'Z start$'
-all_projects   # after the keeper's first --ensure read the key dir (the parking's restore is two renames)
 [ "$out" = "claude-discord: started the backend of mgr (a keeper and the monitor, detached); stop it with: claude-discord monitor --stop mgr" ] &&
   [ -n "$KP" ] && [ ! -e "$MB/stopped" ] && jq -e '.monitor | has("stopped_by_user") | not' "$MB/state.json" >/dev/null ||
   { echo "FAIL: --start clears the marker and starts the keeper, saying so in one line: '$out' '$KP' $(jq -c .monitor "$MB/state.json")"; exit 1; }
@@ -4865,6 +4868,9 @@ mv "$MR/mgr/hosts" "$MR/mgr/hosts.off"
 n=0; while running "$KP" && [ "$n" -lt 1000 ]; do nap 0.002; n=$((n + 1)); done
 mv "$MR/mgr/hosts.off" "$MR/mgr/hosts"
 ! running "$KP" && [ ! -e "$MB/holders/keeper-$KP" ] || { echo "FAIL: a keeper whose ledger is gone must leave, its record with it"; exit 1; }
+# The parking undone only now, the keeper gone: its restore is two renames (rm, mv), and a keeper that looks for its ledger
+# between them (it does every round) leaves for good, so every wait on it above ran to its cap (the 1-in-5 lmd42 flake).
+all_projects
 # A keeper that finds the stopped marker (a start that passed its own check while --stop ran) leaves too.
 (cd "$MP" && exec bash "$S" monitor --keep mgr) >> "$HOME/keep.out" 2>&1 & KP=$!; KILL_AT_EXIT="$KILL_AT_EXIT $KP"
 wait_for_file "$MB/holders/keeper-$KP"; : > "$MB/stopped"; rc=0; wait "$KP" || rc=$?; rm -f "$MB/stopped"
@@ -5009,8 +5015,8 @@ echo "ok: a dev-manager's SessionStart returns at once with only its context on 
 # the suite's NO_AUTOSTART. kp: the keeper record's pid (one at most); wait_backend: a keeper record other than $1 and a
 # running monitor that holds the lock.
 kp() { local f; for f in "$MB"/holders/keeper-*; do [ ! -f "$f" ] || { echo "${f##*-}"; return 0; }; done; }
-wait_keeper() { local n=0; K=$(kp); while { [ -z "$K" ] || [ "$K" = "${1:-}" ] || ! running "$K"; } && [ "$n" -lt "$WCAP" ]; do nap 0.002; n=$((n + 1)); K=$(kp); done; [ -n "$K" ] && [ "$K" != "${1:-}" ] && running "$K"; }
-wait_monitor() { local n=0; Mp=$(mpid); while { [ -z "$Mp" ] || [ "$Mp" = "${1:-}" ] || [ "$(cat "$MB/lock" 2>/dev/null)" != "$Mp" ] || ! running "$Mp"; } && [ "$n" -lt "$WCAP" ]; do nap 0.002; n=$((n + 1)); Mp=$(mpid); done; [ -n "$Mp" ] && [ "$Mp" != "${1:-}" ] && running "$Mp"; }
+wait_keeper() { local end=$((SECONDS + WSECS)); K=$(kp); while { [ -z "$K" ] || [ "$K" = "${1:-}" ] || ! running "$K"; } && [ "$SECONDS" -lt "$end" ]; do nap 0.002; K=$(kp); done; [ -n "$K" ] && [ "$K" != "${1:-}" ] && running "$K"; }
+wait_monitor() { local end=$((SECONDS + WSECS)); Mp=$(mpid); while { [ -z "$Mp" ] || [ "$Mp" = "${1:-}" ] || [ "$(cat "$MB/lock" 2>/dev/null)" != "$Mp" ] || ! running "$Mp"; } && [ "$SECONDS" -lt "$end" ]; do nap 0.002; Mp=$(mpid); done; [ -n "$Mp" ] && [ "$Mp" != "${1:-}" ] && running "$Mp"; }
 (cd "$MP" && bash "$S" monitor --stop mgr >/dev/null 2>&1; backend_gone; env -u CLAUDE_DISCORD_NO_AUTOSTART CLAUDE_DISCORD_KEEP_INTERVAL=0.05 bash "$S" monitor --start mgr >/dev/null 2>&1)
 wait_keeper && wait_monitor || { echo "FAIL: monitor --start must bring up a keeper and a monitor: $(ls "$MB/holders") $(tail -3 "$MB/monitor.log")"; exit 1; }
 k1=$K m1=$Mp
