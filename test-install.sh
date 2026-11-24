@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The install half of the acceptance suite: patch, setup on an old install, compat, setup --mode and scopes, install and
-# update. Same sandbox, stubs and first setup as test-claude-discord.sh (tests/suite-lib.sh). Usage: test-install.sh <script>
+# The install half of the acceptance suite: the manager's CLI (hosts, access, bot; 1.19.10), patch, setup on an old
+# install, compat, setup --mode and scopes, install and update. Same sandbox, stubs and first setup as test-claude-discord.sh (tests/suite-lib.sh). Usage: test-install.sh <script>
 . "$(dirname "$0")/tests/suite-lib.sh"
 
 # --- the manager's CLI: hosts, access, bot (moved here from the core file, 1.19.10) ----------------------------------

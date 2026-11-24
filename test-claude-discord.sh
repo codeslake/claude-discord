@@ -2,7 +2,7 @@
 # Acceptance test for dotfiles/scripts/claude-discord. Runs entirely in a
 # throwaway HOME; touches nothing real. Usage: test-claude-discord.sh <script>
 # The preamble (sandbox, stubs, the first setup) is tests/suite-lib.sh, shared with test-install.sh, which holds the
-# setup, install, update, compat and patch blocks.
+# hosts, access and bot blocks and the setup, install, update, compat and patch blocks.
 . "$(dirname "$0")/tests/suite-lib.sh"
 
 # 1.15.0: bin/claude-discord is a top plus bin/lib/*.sh sourced on demand. A lib is found through every path shape the
